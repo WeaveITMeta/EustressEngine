@@ -152,13 +152,13 @@ impl Default for TransportConfig {
 /// Replication and AOI (Area of Interest) settings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Reflect, Resource)]
 pub struct ReplicationConfig {
-    /// AOI radius in studs (entities beyond this aren't replicated)
+    /// AOI radius in meters (entities beyond this aren't replicated)
     pub aoi_radius: f32,
 
     /// AOI hysteresis (extra radius before removing from interest)
     pub aoi_hysteresis: f32,
 
-    /// Grid cell size for spatial hashing (studs)
+    /// Grid cell size for spatial hashing (meters)
     pub grid_cell_size: f32,
 
     /// Maximum entities per player (bandwidth limit)
@@ -174,11 +174,11 @@ pub struct ReplicationConfig {
 impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
-            aoi_radius: 200.0,           // 200 studs = 56m
-            aoi_hysteresis: 20.0,        // 20 stud buffer
-            grid_cell_size: 32.0,        // 32x32 stud cells
+            aoi_radius: 200.0,           // 200 m
+            aoi_hysteresis: 20.0,        // 20 m buffer
+            grid_cell_size: 32.0,        // 32x32 m cells
             max_entities_per_player: 500,
-            delta_threshold: 0.01,       // 0.01 stud minimum change
+            delta_threshold: 0.01,       // 1 cm minimum change
             full_sync_interval: 600,     // Every 5 seconds at 120Hz
         }
     }
@@ -197,7 +197,7 @@ pub struct OwnershipConfig {
     /// Minimum time between ownership transfers (ms)
     pub transfer_cooldown_ms: u32,
 
-    /// Maximum distance to request ownership (studs)
+    /// Maximum distance to request ownership (meters)
     pub max_request_distance: f32,
 
     /// Prefer lower-ping clients for ownership
@@ -230,13 +230,13 @@ impl Default for OwnershipConfig {
 /// Anti-exploit and validation settings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Reflect, Resource)]
 pub struct AntiExploitConfig {
-    /// Maximum speed before flagging (studs/s)
+    /// Maximum speed before flagging (m/s)
     pub max_speed: f32,
 
-    /// Maximum acceleration before flagging (studs/s²)
+    /// Maximum acceleration before flagging (m/s²)
     pub max_acceleration: f32,
 
-    /// Maximum teleport distance per tick (studs)
+    /// Maximum teleport distance per tick (meters)
     pub max_teleport_distance: f32,
 
     /// Input queue size limit (prevent spam)
@@ -255,9 +255,9 @@ pub struct AntiExploitConfig {
 impl Default for AntiExploitConfig {
     fn default() -> Self {
         Self {
-            max_speed: 100.0,            // 100 studs/s (28 m/s)
-            max_acceleration: 200.0,     // 200 studs/s²
-            max_teleport_distance: 5.0,  // 5 studs per tick max
+            max_speed: 100.0,            // 100 m/s
+            max_acceleration: 200.0,     // 200 m/s²
+            max_teleport_distance: 5.0,  // 5 m per tick max
             max_input_queue: 256,
             violation_threshold: 10,
             violation_decay: 1.0,        // 1 violation/second decay

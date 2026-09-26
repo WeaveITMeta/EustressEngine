@@ -24,6 +24,8 @@ pub mod korah;
 pub mod telemetry;
 /// Hosting a multiplayer session from Studio (Start Server, F9).
 pub mod multiplayer;
+/// Server authority: what the host's Play session does, sent to every player.
+pub mod net_replicate;
 pub mod hot_reload;
 pub mod pbr_materials;
 pub mod particles;
@@ -54,6 +56,8 @@ pub mod ui;
 pub mod seats;
 pub mod keybindings;
 pub mod editor_settings;
+// Settings > General, Graphics and Audio: the Preferences global and its appliers.
+pub mod preferences;
 pub mod studio_theme;
 pub mod studio_modes;
 pub mod tool_metadata;
@@ -134,6 +138,17 @@ pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
+/// The terrain tools' cursor (ring, strength disc, Draw volume, locked
+/// plane, grid, contours, mirror ghosts) and the readout beside it.
+pub mod terrain_cursor;
+/// The terrain tools' Slint surfaces: the `TerrainToolsUi` global, the
+/// saved brush settings and presets, and the material thumbnails.
+pub mod terrain_tools_ui;
+/// The Sea Level tool: its rectangle, level drag, and Fill and Evaporate.
+pub mod terrain_sea_level;
+/// The Region tool: a box of terrain to copy, cut, paste, duplicate,
+/// delete, move, turn and fill.
+pub mod terrain_region;
 /// Engine side of the terrain layer classes: spawning their components from
 /// TOML, hot reload, undo replay, spline-point adoption and Insert placement.
 pub mod terrain_layers;
@@ -141,6 +156,11 @@ pub mod terrain_layers;
 // (worldgen export + heightmap import R16/toml format) on Space open.
 // UNGATED sibling of the world-db voxel loader below.
 pub mod terrain_disk_load;
+/// Terrain edits as commands against the live world (fills, voxel writes and
+/// reads, sculpt, paint, clear): the entry point the MCP tools, Luau and Rune
+/// share, its undo entries, and the snapshot a Play session's edits are
+/// rolled back from at Stop.
+pub mod terrain_commands;
 // Wave 9.C — imported-terrain voxel loader. `terrain_plugin` (compiled into
 // BOTH this lib and the bin) calls `crate::terrain_voxel_load::register`, so
 // the module must exist in the lib crate root too, not just `main.rs`.
@@ -162,6 +182,10 @@ pub mod road_tool;
 /// Phase 2 of the Studio plugin system — Luau (`.lua`) script-authored
 /// plugins, no Rust recompile. See its module docs for the architecture.
 pub mod script_plugin_host;
+/// UI Builder, a built-in Studio plugin: a whole game UI (HUD, menus,
+/// screens) from one line, previewed live and inserted as ScreenGuis with
+/// the scripts that run them. Registered by `studio_plugins::StudioPluginSystem`.
+pub mod ui_builder;
 pub mod grid_snapping;
 pub mod collision_snapping;
 pub mod mesh_optimizer;
@@ -226,6 +250,7 @@ pub mod frame_diagnostics;
 pub mod profiler;
 pub mod io_manager;
 pub mod window_focus;
+pub mod window_placement;
 
 // ── Promoted from the bin (dual-compile untangling, 2026-07-02) ──────
 // These five modules were declared ONLY in main.rs, which forced the
@@ -281,9 +306,9 @@ pub use plugins::{
     AllServicesPlugin,
 };
 
-/// The directory this crate's `assets/` lives in: the executable's own
-/// directory when an `assets/` folder sits beside it (the installed layout),
-/// otherwise the crate's source directory (`cargo run`).
+/// The directory this crate's `assets/` lives in: beside the executable (the
+/// Windows and Linux installs), a macOS bundle's `Contents/Resources`, or the
+/// crate's source directory (`cargo run`).
 ///
 /// Join `"assets/..."` onto it. `env!("CARGO_MANIFEST_DIR")` alone is the
 /// BUILD machine's source path, baked in at compile time, so an installed
@@ -293,11 +318,18 @@ pub use plugins::{
 /// Decided once per process.
 pub fn resource_root() -> &'static std::path::Path {
     static ROOT: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-            .filter(|dir| dir.join("assets").is_dir())
-            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        // The one rule (`eustress_common::locate_shipped`): beside the
+        // executable, a macOS bundle's Resources, else the source tree.
+        // `shaders` marks a real copy of this crate's assets.
+        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let assets = eustress_common::locate_shipped("assets", "shaders", source.join("assets"));
+        assets.parent().map(std::path::Path::to_path_buf).unwrap_or(source)
     });
     &ROOT
+}
+
+/// This crate's `assets/` folder, by [`resource_root`]: the default asset
+/// source's first root.
+pub fn engine_assets_dir() -> std::path::PathBuf {
+    resource_root().join("assets")
 }

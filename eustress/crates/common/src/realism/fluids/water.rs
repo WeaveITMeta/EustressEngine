@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::realism::constants;
 use crate::realism::laws::thermodynamics;
+use crate::units::STANDARD_GRAVITY_F32;
 
 // ============================================================================
 // Water Body Component
@@ -192,9 +193,9 @@ impl GerstnerWave {
         std::f32::consts::TAU / self.wavelength
     }
     
-    /// Calculate angular frequency: ω = √(gk) (deep water)
+    /// Calculate angular frequency: ω = √(gk) (deep water, standard gravity)
     pub fn angular_frequency(&self) -> f32 {
-        (9.81 * self.wave_number()).sqrt()
+        (STANDARD_GRAVITY_F32 * self.wave_number()).sqrt()
     }
     
     /// Calculate phase speed: c = ω/k
@@ -266,9 +267,9 @@ pub fn speed_of_sound_water(temperature: f32, salinity: f32, depth: f32) -> f32 
         + 0.016 * d
 }
 
-/// Pressure at depth (Pa)
+/// Pressure at depth (Pa), under standard gravity
 pub fn pressure_at_depth(depth: f32, surface_pressure: f32, density: f32) -> f32 {
-    surface_pressure + density * 9.81 * depth
+    surface_pressure + density * STANDARD_GRAVITY_F32 * depth
 }
 
 /// Light attenuation in water (Beer-Lambert)

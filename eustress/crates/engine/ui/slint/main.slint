@@ -8,7 +8,9 @@ import { Ribbon, SavedIdentityData, InsertClassData, RecentSpaceEntry, PluginSec
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
-import { OutputConsole } from "output.slint";
+import { OutputConsole, OutputRow } from "output.slint";
+// The Output panel's rows, built in Rust (ui/output_rows.rs).
+export { OutputRow }
 import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
@@ -23,11 +25,16 @@ import { ViewSelector } from "view_selector.slint";
 import { AIGeneration } from "ai_generation.slint";
 import { PublishDialog } from "publish.slint";
 import { LoginDialog } from "login.slint";
-import { HistoryPanel, HistoryEntry } from "history_panel.slint";
+import { HistoryPanel, HistoryEntry, RestorePointRow, RevertConfirmDialog } from "history_panel.slint";
+import { ListingReason } from "listing_status.slint";
+// Gallery review reasons, built in Rust (the Jev session's [review] loader).
+export { ListingReason }
+// History's restore points, built in Rust (MCP's snapshot layer).
+export { RestorePointRow }
 import { PublishTreeNode } from "publish.slint";
 import { ContextMenu, MenuItem } from "context_menu.slint";
 import { RadialMenu, RadialOption } from "radial_menu.slint";
-import { Theme, ThemeData } from "theme.slint";
+import { Theme, ThemeData, FloatingPanelHeader } from "theme.slint";
 // Re-export so `slint::include_modules!()` generates Rust bindings for the
 // Theme global + the ThemeData struct (a plain `import` only makes them usable
 // within .slint files). Rust builds a ThemeData and pushes it via set_data().
@@ -41,6 +48,10 @@ import { ToolOptionsBar, ToolOptionControlData } from "tool_options_bar.slint";
 import { ToolPanel } from "tool_panel.slint";
 import { FloatingNumericInput } from "floating_numeric_input.slint";
 import { SketchCanvasPanel, SketchEntityRow, SketchConstraintRow } from "sketch_canvas.slint";
+// UI Builder (built-in plugin): its state lives in the UiBuilderUi global,
+// exported with its row structs so Rust gets bindings for them.
+import { UiBuilderPanel } from "ui_builder.slint";
+export { UiBuilderUi, UbChip, UbExample, UbKV, UbSection, UbRecent, UbKit, UbPalette, UbRow, UbField, UbExportRow, UbCheck } from "ui_builder.slint";
 import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
@@ -52,7 +63,14 @@ import { TerrainEditor, TerrainMaterialSlotData } from "terrain_editor.slint";
 // Rust builds the terrain material picker rows, so the struct needs bindings
 // (same re-export requirement as Theme/ThemeData above).
 export { TerrainMaterialSlotData }
+// Terrain tools: the tool bar and cursor readout over the viewport, driven
+// from Rust through the `TerrainToolsUi` global (`terrain_tools_ui.rs`).
+import { TerrainToolsOverlay, TerrainToolsUi, TerrainMaterialTile } from "terrain_tool_bar.slint";
+export { TerrainToolsUi, TerrainMaterialTile }
 import { SettingsDialog, ThemeEntry } from "settings.slint";
+// Graphics, Audio and Auto-save: Rust pushes the values and answers the
+// callbacks (engine/src/preferences.rs).
+export { Preferences } from "settings.slint";
 import { NetworkPanel } from "network_panel.slint";
 import { FindDialog, SearchResultData } from "find_dialog.slint";
 import { ServiceProperties } from "service_properties.slint";
@@ -73,8 +91,10 @@ import { AddParameterDialog } from "add_parameter_dialog.slint";
 import { RenameTagDialog } from "rename_tag_dialog.slint";
 import { EditLabelDialog } from "edit_label_dialog.slint";
 import { FeedbackDialog } from "feedback_dialog.slint";
+import { PurchasePromptDialog } from "purchase_prompt.slint";
 import { ApiKeyDialog } from "api_key_dialog.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
+import { UnsavedChangesDialog } from "unsaved_changes_dialog.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData, WorkshopModelEntry } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
@@ -116,7 +136,10 @@ export struct GuiElementData {
     text-b: float,
     text-a: float,
     font-size: float,
+    // CSS weight: 700 for fonts named Bold/Black/Heavy, else 400.
+    font-weight: int,
     text-align: string, // "left", "center", "right"
+    text-y-align: string, // "top", "center", "bottom"
     // Image (empty = no image)
     image-source: image,
     has-image: bool,
@@ -158,6 +181,41 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-history: false;
     in property <[HistoryEntry]> history-entries: [];
     in-out property <int> history-current-index: 0;
+    // History's view: "edits" or "restore". Kept here so it survives the
+    // panel being rebuilt on a right-tab switch.
+    in-out property <string> history-view: "edits";
+    // Restore points (MCP's snapshot layer): the rows, newest first; why Save
+    // and Revert are refused ("" when not); whether a revert waits for the
+    // Space to reopen; what is running; and the last result or error.
+    in property <[RestorePointRow]> restore-points: [];
+    in property <string> restore-points-blocker: "";
+    in property <bool> restore-points-pending: false;
+    in property <string> restore-points-busy: "";
+    in property <string> restore-points-status: "";
+    in property <bool> restore-points-status-error: false;
+    callback restore-points-shown();
+    callback restore-point-save(string);   // label ("" for none)
+    callback restore-point-revert(string); // id, only after the confirm
+    callback restore-point-cancel-pending();
+    // The published Universe's gallery review (<universe>/.eustress/
+    // review.toml, set by moderation_dossier.rs), shown in Publish and in
+    // History. Author-safe text, shown verbatim; status "" means no review yet.
+    in property <string> listing-status: "";
+    in property <string> listing-headline: "";
+    in property <string> listing-rating: "";
+    in property <string> listing-updated: "";
+    in property <[ListingReason]> listing-reasons: [];
+    in property <string> listing-suggested-edit: "";
+    in property <bool> listing-can-appeal: false;
+    in property <bool> listing-appeal-busy: false;
+    in property <string> listing-appeal-error: "";
+    callback listing-appeal(string);   // 10 to 2000 characters
+    callback listing-open-review();
+    // The revert confirm: open, and which point it asks about.
+    in-out property <bool> show-revert-confirm: false;
+    in-out property <string> revert-confirm-id: "";
+    in-out property <string> revert-confirm-label: "";
+    in-out property <string> revert-confirm-time: "";
     in-out property <bool> show-ai-generation: false;
     in-out property <bool> show-workshop-panel: false;
     in-out property <bool> show-universe-browser: false;
@@ -172,6 +230,11 @@ export component StudioWindow inherits Window {
 
     // HUD visibility (toggle all Eustress Engine UI, keep Bevy UI)
     in-out property <bool> show-hud: true;
+    // The Ribbon's tool rows are folded away (the chevron at the right end of
+    // the tab bar, or the restore button at the right end of the menu bar).
+    // Rust owns it and persists it in EditorSettings.
+    in property <bool> ribbon-collapsed: false;
+    callback set-ribbon-collapsed(bool);
     
     // Tab context menu state
     in-out property <bool> show-tab-context-menu: false;
@@ -232,6 +295,9 @@ export component StudioWindow inherits Window {
     callback insert-search-changed(string);
     callback insert-into(int, string);   // Explorer row plus button (node-id, node-type)
     callback insert-object-request();    // ribbon "Insert Object..."
+    // The menu bar's Insert dropdown is opening: Rust rebuilds the catalog
+    // from disk and pushes `insert-context` and `insert-target-name`.
+    callback insert-menu-opened();
     in-out property <string> shortcut-insert-object: "";
     in-out property <string> shortcut-paste-into: "";
 
@@ -333,6 +399,14 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
     in-out property <bool> show-new-space-dialog: false;
+    // A script's purchase prompt during Play (engine/src/ui/purchase_prompt.rs).
+    in-out property <bool> show-purchase-prompt: false;
+    in-out property <string> purchase-prompt-product: "";
+    in-out property <string> purchase-prompt-kind: "";
+    in-out property <string> purchase-prompt-description: "";
+    in-out property <string> purchase-prompt-price: "";
+    in-out property <bool> purchase-prompt-test-mode: true;
+    callback purchase-prompt-answered(bool);
     // Help > Send Feedback (usage-telemetry comments)
     in-out property <bool> show-feedback-dialog: false;
     in-out property <string> feedback-about-tool: "";
@@ -435,6 +509,26 @@ export component StudioWindow inherits Window {
     in-out property <int> stress-total-messages: 0;
     in-out property <float> stress-avg-latency: 0;
     in-out property <int> stress-errors: 0;
+    // Results of the real-client harness (network_benchmark.rs), per run.
+    in-out property <int> stress-joined: 0;
+    in-out property <int> stress-join-failures: 0;
+    in-out property <int> stress-disconnects: 0;
+    in-out property <float> stress-join-p95-ms: 0;
+    in-out property <float> stress-relay-p50-ms: 0;
+    in-out property <float> stress-relay-p95-ms: 0;
+    in-out property <float> stress-relay-loss: 0; // 0..1
+    in-out property <float> stress-invoke-p95-ms: 0; // RemoteFunction round trip
+    in-out property <float> stress-rtt-ms: 0; // QUIC round trip
+    in-out property <float> stress-host-frame-p95-ms: 0;
+    in-out property <float> stress-host-net-ms: 0; // network work per frame
+    in-out property <float> stress-host-budget: 0; // 0..1 of the 16.7 ms frame
+    in-out property <float> stress-down-kbps: 0; // per bot
+    in-out property <float> stress-up-kbps: 0; // per bot
+    in-out property <string> stress-report: ""; // end-of-run summary
+    in-out property <float> stress-bot-cores: 0; // CPU the bots kept busy, in cores
+    // The dialog's "Download the world" switch. Rust reads it when Start
+    // fires, so the Start callback keeps its signature.
+    in-out property <bool> stress-download-world: true;
     callback start-stress-test(int, int, int, bool, bool); // clients, rate, duration, movement, interactions
     callback stop-stress-test();
     // ScreenGui elements — pushed from Rust, rendered by Slint overlay
@@ -514,10 +608,14 @@ export component StudioWindow inherits Window {
     in property <int> problem-warning-count: 0;
     in property <bool> problems-can-fix-with-workshop: false;
 
-    // Data-driven Insert menu — every creatable registered class, grouped
-    // by category. Fed from Rust via `set_insert_classes` off the live
-    // ClassRegistry; bound down into the Ribbon's Insert dropdown.
+    // Data-driven Insert menu: every class with a creatable template,
+    // grouped by category. Rebuilt from disk in Rust each time the menu or
+    // the Insert Object dialog opens (`set_insert_classes`); bound down into
+    // the Ribbon's Insert dropdown and read back for the dialog's results.
     in property <[InsertClassData]> insert-classes: [];
+    // Suggested-for-the-selection and Recent rows above the catalog, pushed
+    // with the catalog; also the dialog's first rows when its search is empty.
+    in property <[InsertClassData]> insert-context: [];
 
     // Plugins ribbon tab — fed from Rust via `set_plugin_sections`/
     // `set_plugin_buttons` off `TabRegistry`; bound down into the Ribbon's
@@ -575,19 +673,13 @@ export component StudioWindow inherits Window {
     // Scene name for exit confirmation
     in-out property <string> scene-name: "Untitled";
     
-    // Terrain state
+    // Terrain state. `terrain-edit-mode` is true while the terrain tools are
+    // the current tool, `terrain-brush` the active tool's id ("draw",
+    // "sculpt", ...); the tools' settings live in `TerrainToolsUi`.
     in-out property <bool> has-terrain: false;
     in-out property <bool> terrain-edit-mode: false;
-    in-out property <string> terrain-brush: "raise";
-    // Live terrain brush, read back from `TerrainBrush` (radius, strength,
-    // and the nearest falloff preset: "linear" | "smooth" | "sharp").
-    in-out property <float> terrain-brush-size: 8.0;
-    in-out property <float> terrain-brush-strength: 0.2;
-    in-out property <string> terrain-brush-falloff: "smooth";
-    callback brush-size-changed(float);
-    callback brush-strength-changed(float);
-    callback brush-falloff-changed(string);
-    
+    in-out property <string> terrain-brush: "sculpt";
+
     // Terrain config properties (from _terrain.toml, synced from TerrainConfig)
     in-out property <string> terrain-size: "512";
     in-out property <string> terrain-chunk-size: "64";
@@ -850,8 +942,18 @@ export component StudioWindow inherits Window {
     // Unsaved changes tracking
     in-out property <bool> has-unsaved-changes: false;
     
-    // Output console log data (pushed from Bevy each frame)
-    in-out property <string> output-all-text: "";
+    // The Output panel's rows after its filters (ui/output_rows.rs), the
+    // level counts before them, and a revision that moves with each rebuild
+    // (the panel follows the new tail).
+    in-out property <[OutputRow]> output-rows: [];
+    in property <int> output-count-info: 0;
+    in property <int> output-count-warnings: 0;
+    in property <int> output-count-errors: 0;
+    in property <int> output-count-debug: 0;
+    in property <int> output-total-lines: 0;
+    in property <int> output-rows-revision: 0;
+    // The Output search, applied with the level and source filters.
+    in-out property <string> output-filter-text: "";
     in-out property <string> output-source-filter: "all";
     in-out property <bool> output-show-info: true;
     in-out property <bool> output-show-warnings: true;
@@ -984,6 +1086,18 @@ export component StudioWindow inherits Window {
     // Input focus tracking — when true, Rust sync systems should NOT push property updates
     // to avoid overwriting user input while they're typing. Set by callbacks from input fields.
     in-out property <bool> any-input-has-focus: false;
+    // Clicking the 3D viewport leaves any text field: Rust calls this on a
+    // viewport press, and the content area's shortcut scope takes the focus,
+    // so the field's own focus-out runs.
+    public function release-keyboard-focus() {
+        tab-keys.focus();
+    }
+    // Switching the right panel's tab destroys the field (Properties row,
+    // Workshop chat) that set `any-input-has-focus`, so its focus-out never
+    // runs: clear the flag with the switch.
+    changed right-tab-index => {
+        root.any-input-has-focus = false;
+    }
     out property <bool> command-bar-has-focus: cmd-bar.input-has-focus;
 
     // Properties-panel filter. Kept apart from `any-input-has-focus` on
@@ -1087,14 +1201,17 @@ export component StudioWindow inherits Window {
     in-out property <float> commit-flash-progress: 0.0;
 
     // ──────────────────────────────────────────────────────────────────────
-    // Sketch canvas — floating inspector for the selected CadPart's first
-    // sketch. Rust fills entity/constraint rows + solve status; Slint
-    // fires constraint-add + solve/close callbacks.
+    // Sketch panel: the selected CadPart's first sketch. Rust fills the
+    // entity and constraint rows and the solve state; Slint fires the
+    // constraint, solve and close callbacks.
     // ──────────────────────────────────────────────────────────────────────
     in-out property <bool>   sketch-canvas-visible: false;
     in-out property <string> sketch-canvas-part-name: "";
     in-out property <string> sketch-canvas-sketch-name: "";
-    in-out property <string> sketch-canvas-solve-status: "";
+    // full | under | over | failed; empty before the first solve.
+    in-out property <string> sketch-canvas-solve-state: "";
+    in-out property <int>    sketch-canvas-free-dof: 0;
+    in-out property <string> sketch-canvas-status-detail: "";
     in-out property <[SketchEntityRow]> sketch-canvas-entities: [];
     in-out property <[SketchConstraintRow]> sketch-canvas-constraints: [];
     in-out property <int> sketch-canvas-selected-a: -1;
@@ -1186,6 +1303,13 @@ export component StudioWindow inherits Window {
     // Empty when no file is open or language is unsupported.
     in property <[HighlightLine]> script-highlight-lines: [];
     in property <[TokenSpan]> script-token-spans: [];
+    /// True while the open script is highlighted. The engine pushes only the
+    /// spans near the visible lines, so an empty window can still mean a
+    /// highlighted file; this flag, not the span count, switches the overlay.
+    in property <bool> script-highlight-active: false;
+    /// The script editor's visible lines, read by the engine each frame.
+    in-out property <int> script-visible-first-line: 0;
+    in-out property <int> script-visible-line-count: 80;
     in property <[DiagnosticSpan]> script-diagnostic-spans: [];
 
     // ── Code completion ──────────────────────────────────────────────────
@@ -1196,6 +1320,33 @@ export component StudioWindow inherits Window {
     in property <int> script-completion-line: 1;
     in property <int> script-completion-col: 1;
     in-out property <int> script-caret-to-offset: -1;
+    /// Edits the engine makes in the script editor: bumping the revision
+    /// hands the editor `script-editor-content` and this selection together.
+    in property <int> script-external-revision: 0;
+    in property <int> script-edit-anchor: -1;
+    in property <int> script-edit-cursor: -1;
+    /// The bracket pair around the caret: 0-based line and column, or -1.
+    in property <int> script-bracket-a-line: -1;
+    in property <int> script-bracket-a-col: 0;
+    in property <int> script-bracket-b-line: -1;
+    in property <int> script-bracket-b-col: 0;
+    /// Find status in the editor's find bar ("3 of 12", "No results").
+    in property <string> script-find-status: "";
+    /// Hover in the script editor (Ctrl+I): text, and the caret line and
+    /// column it belongs to. Empty text hides it.
+    in property <string> script-hover-text: "";
+    in property <int> script-hover-line: 1;
+    in property <int> script-hover-col: 1;
+    /// The open script's longest line in characters (a tab counts as eight),
+    /// so long lines scroll sideways.
+    in property <int> script-max-line-chars: 0;
+    callback script-editor-key(string, int, int);
+    callback script-find(string, bool);
+    callback script-find-step(bool);
+    callback script-replace(string);
+    callback script-replace-all(string);
+    callback script-find-close();
+    callback script-go-to-line(int);
     in property <string> script-signature-label: "";
     in property <string> script-signature-active-param: "";
 
@@ -1204,6 +1355,20 @@ export component StudioWindow inherits Window {
     callback script-completion-dismiss();
     callback script-completion-request();
     callback script-caret-moved(int, int);
+    /// Save the active script tab: the editor's Save button, or Ctrl+S.
+    callback script-save();
+    /// True while the script editor's text field has keyboard focus. The
+    /// engine keyboard gate reads it so typing never reaches the scene.
+    in-out property <bool> script-editor-has-focus: false;
+    /// The unsaved-changes prompt, shown while a tab close or an exit waits
+    /// on it. The engine owns the flag: it shows the prompt and hides it
+    /// once an answer is handled.
+    in-out property <bool> show-unsaved-changes-dialog: false;
+    in-out property <string> unsaved-changes-names: "";
+    in-out property <int> unsaved-changes-count: 0;
+    callback unsaved-changes-save();
+    callback unsaved-changes-discard();
+    callback unsaved-changes-cancel();
     // Set by Rust when go-to-definition / problem-jump wants the editor to
     // scroll to a specific line. One-shot: Slint resets to 0 after applying.
     in-out property <int> script-scroll-to-line: 0;
@@ -1371,6 +1536,11 @@ export component StudioWindow inherits Window {
     callback execute-command(string);
     callback execute-script(/* language */ string, /* script */ string);
     callback clear-script-output();
+    // Output: copy one line (by entry id), copy every visible line, and show
+    // or hide a line's stack.
+    callback copy-output-line(int);
+    callback copy-output-visible();
+    callback toggle-output-stack(int);
     
     // Toolbox part insertion
     callback insert-part(string);
@@ -1554,19 +1724,14 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            collapsed: root.ribbon-collapsed;
+            set-collapsed(c) => { root.set-ribbon-collapsed(c); }
             telemetry-enabled: root.usage-telemetry-enabled;
-            // Terrain active-state: which brush is armed and whether sculpt
-            // mode is on, so the Terrain tab's buttons light up like every
-            // other tool button does.
+            // Terrain active-state: which tool is active and whether the
+            // terrain tools are on, so the Terrain tab's buttons light up
+            // like every other tool button does.
             current-terrain-brush: root.terrain-brush;
             terrain-edit-mode: root.terrain-edit-mode;
-            // Paint brush settings show the material picker too.
-            terrain-materials: root.terrain-materials;
-            terrain-paint-material: root.terrain-paint-material;
-            terrain-paint-material-name: root.terrain-paint-material-name;
-            brush-size <=> root.terrain-brush-size;
-            brush-strength <=> root.terrain-brush-strength;
-            brush-falloff <=> root.terrain-brush-falloff;
             // Eustress Modes — mode list + active id/icon + data-driven
             // ribbon-tab subset, all pushed from Rust's ModeRegistry.
             available-modes: root.available-modes;
@@ -1582,8 +1747,10 @@ export component StudioWindow inherits Window {
             select-submode(mode-id, submode-id) => { root.select-submode(mode-id, submode-id); }
             custom-tab-sections: root.custom-tab-sections;
             custom-tab-tools: root.custom-tab-tools;
-            // Data-driven Insert-menu catalog (ClassRegistry → grouped list).
+            // Data-driven Insert menu: catalog, context rows and target.
             insert-classes: root.insert-classes;
+            insert-context: root.insert-context;
+            insert-target: root.insert-target-name;
             // Plugins tab content (TabRegistry → grouped section/button list).
             plugin-sections: root.plugin-sections;
             plugin-buttons: root.plugin-buttons;
@@ -1692,12 +1859,14 @@ export component StudioWindow inherits Window {
             on-publish-universe => { root.publish-universe(); }
             on-publish-space => { root.publish-space(); }
             on-show-insert-object => { root.insert-object-request(); }
+            on-insert-menu-opened => { root.insert-menu-opened(); }
             on-open-recent(path) => { root.open-recent(path); }
             on-close-space => {
                 // Snapshot in Rust, then the Universe browser takes over the
                 // left dock so another Space can be picked.
                 root.close-space();
                 root.show-universe-browser = true;
+                root.show-explorer = true;
                 root.left-tab-index = 2;
             }
             on-toggle-snap => { root.toggle-snap(); }
@@ -1770,10 +1939,6 @@ export component StudioWindow inherits Window {
             on-spawn-terrain(size) => { root.generate-terrain(size); }
             on-toggle-terrain-edit => { root.toggle-terrain-edit-mode(); }
             on-set-terrain-brush(brush) => { root.set-terrain-brush(brush); }
-            on-set-terrain-paint-material(slot) => { root.set-terrain-paint-material(slot); }
-            on-brush-size-changed(v) => { root.brush-size-changed(v); }
-            on-brush-strength-changed(v) => { root.brush-strength-changed(v); }
-            on-brush-falloff-changed(v) => { root.brush-falloff-changed(v); }
             on-import-heightmap => { root.import-heightmap(); }
             on-export-heightmap => { root.export-heightmap(); }
             
@@ -1816,7 +1981,11 @@ export component StudioWindow inherits Window {
             // ================================================================
             // Left Panel (Explorer, Toolbox, Assets, etc.)
             // ================================================================
-            if root.show-explorer || root.show-toolbox || root.show-assets || root.show-terrain-editor || root.show-universe-browser: Rectangle {
+            // Shown by the toggles a user or the Terrain editor sets: View >
+            // Explorer (Ctrl+1), View > Assets (Ctrl+4), and the Terrain
+            // editor. Its tabs are always present, so the Toolbox and
+            // Universes flags do not keep it open.
+            if root.show-explorer || root.show-assets || root.show-terrain-editor: Rectangle {
                 width: root.left-panel-width;
                 background: Theme.panel-background;
                 border-width: 0px;
@@ -2222,9 +2391,46 @@ export component StudioWindow inherits Window {
                         }
                     }
                     
+                    // === Ribbon fold (far right) ===
+                    // Folds the Ribbon's tool rows away, or brings them back.
+                    // The chevron points the way the rows will go: up to hide
+                    // them, down to show them again.
+                    Rectangle {
+                        x: parent.width - 28px;
+                        y: 0px;
+                        width: 28px;
+                        height: 35px;
+                        background: ribbon-fold-touch.has-hover ? Theme.button-hover : transparent;
+
+                        ribbon-fold-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.set-ribbon-collapsed(!root.ribbon-collapsed); }
+                        }
+
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: root.ribbon-collapsed
+                                ? @image-url("../../assets/icons/ui/chevron-down.svg")
+                                : @image-url("../../assets/icons/ui/chevron-up.svg");
+                            image-fit: contain;
+                            colorize: root.ribbon-collapsed ? Theme.accent-blue : Theme.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        // Left separator
+                        Rectangle {
+                            x: 0px;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.border-color;
+                        }
+                    }
+
                     // === UI Toggle button (right-aligned) ===
                     Rectangle {
-                        x: parent.width - 36px;
+                        x: parent.width - 64px;
                         y: 0px;
                         width: 36px;
                         height: 35px;
@@ -2261,7 +2467,7 @@ export component StudioWindow inherits Window {
                     // part; only while the Space tab shows, since it drives
                     // the 3D camera.
                     if root.active-tab-type == "scene": ViewSelector {
-                        x: parent.width - 36px - root.view-selector-width;
+                        x: parent.width - 64px - root.view-selector-width;
                         y: 0px;
                         width: root.view-selector-width;
                         dimension: root.view-dimension;
@@ -2280,19 +2486,78 @@ export component StudioWindow inherits Window {
                     tab-strip := Rectangle {
                         x: 36px;
                         y: 0px;
-                        width: parent.width - 72px - root.view-selector-width;
+                        width: parent.width - 100px - root.view-selector-width;
                         height: 35px;
                         clip: true;
                         // Tabs shrink evenly to share the strip, like browser
-                        // tabs, down to `min-tab-width` (icon, a few letters,
-                        // close button). Past that they overflow, and the
-                        // chevron at the right end lists every tab.
-                        property <length> min-tab-width: 96px;
+                        // tabs, down to `min-tab-width` (icon, a readable name,
+                        // close button). Past that the run scrolls sideways, and
+                        // the chevron at the right end lists every tab.
+                        property <length> min-tab-width: 132px;
                         property <length> overflow-button-width: 28px;
                         property <length> tab-room: self.width - space1-tab.width;
                         property <length> tab-fit: root.center-tabs.length > 0
                             ? self.tab-room / root.center-tabs.length : 200px;
                         property <bool> tabs-overflow: self.tab-fit < self.min-tab-width;
+                        // The tab run scrolls sideways once the tabs overflow:
+                        // the wheel, Shift+wheel, a touchpad, or the thin bar
+                        // along the strip's bottom edge. `tab-scroll.viewport-x`
+                        // runs from 0 (the start) down to `scroll-min`.
+                        property <length> scroll-min: min(0px, tab-scroll.width - tab-scroll.viewport-width);
+                        // The drag pointer in the tab run's own (content)
+                        // space. `root.tab-drag-x` is strip space; the tabs
+                        // and `tabs-filler` are laid out in content space.
+                        property <length> drag-content-x: root.tab-drag-x - tab-wheel.x - tab-scroll.viewport-x;
+                        // Near either end of the visible run while dragging,
+                        // the run scrolls, so an off-screen slot can be reached.
+                        property <length> edge-zone: 24px;
+
+                        // Scroll the least needed to show [left, right] (content space).
+                        function reveal(left: length, right: length) {
+                            if left + tab-scroll.viewport-x < 0px {
+                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, 0px - left));
+                            } else if right + tab-scroll.viewport-x > tab-scroll.width {
+                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, tab-scroll.width - right));
+                            }
+                        }
+                        // Show the active tab, however it became active: a
+                        // click, the overflow list, Ctrl+Tab,
+                        // Ctrl+Shift+PageUp/Down, or Rust opening a tab. The run
+                        // only scrolls once the tabs overflow, and then every
+                        // tab is exactly min-tab-width wide, so the active one
+                        // spans [(n - 1) w, n w].
+                        function reveal-active() {
+                            if root.center-active-tab >= 1 && self.tabs-overflow {
+                                self.reveal((root.center-active-tab - 1) * self.min-tab-width,
+                                    root.center-active-tab * self.min-tab-width);
+                            }
+                        }
+                        property <int> active-index: root.center-active-tab;
+                        changed active-index => { self.reveal-active(); }
+                        property <int> tab-count: root.center-tabs.length;
+                        changed tab-count => { self.reveal-active(); }
+                        changed tabs-overflow => { self.reveal-active(); }
+
+                        // A tab closed or the window widened: no blank gap at the end.
+                        changed scroll-min => {
+                            if tab-scroll.viewport-x < self.scroll-min {
+                                tab-scroll.viewport-x = self.scroll-min;
+                            }
+                        }
+
+                        Timer {
+                            interval: 16ms;
+                            running: root.tab-dragging && root.tab-drag-inside && tab-strip.scroll-min < 0px
+                                && (root.tab-drag-x < tab-wheel.x + tab-strip.edge-zone
+                                    || root.tab-drag-x > tab-wheel.x + tab-wheel.width - tab-strip.edge-zone);
+                            triggered => {
+                                if root.tab-drag-x < tab-wheel.x + tab-strip.edge-zone {
+                                    tab-scroll.viewport-x = min(0px, tab-scroll.viewport-x + 12px);
+                                } else {
+                                    tab-scroll.viewport-x = max(tab-strip.scroll-min, tab-scroll.viewport-x - 12px);
+                                }
+                            }
+                        }
                         // Opaque tab-bar background. Without this the strip is
                         // transparent, so the empty area to the right of the
                         // tabs (and the gaps around the pinned tab / new-tab /
@@ -2307,7 +2572,6 @@ export component StudioWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         spacing: 0px;
-                        alignment: start;
                         
                         // Pinned Space1 tab (always first, never closable)
                         space1-tab := Rectangle {
@@ -2358,264 +2622,332 @@ export component StudioWindow inherits Window {
                             }
                         }
                         
-                        // Dynamic tabs (script + web) with drag-and-drop reorder
-                        for tab[index] in root.center-tabs: Rectangle {
-                            width: min(tab.tab-type == "web" ? 200px : 180px, max(tab-strip.min-tab-width, tab-strip.tab-fit));
-                            height: 35px;
-                            background: root.center-active-tab == index + 1
-                                ? Theme.panel-background
-                                : (tab-hover.has-hover ? Theme.tab-hover : Theme.background-secondary);
-                            // The tab being dragged stays in place as a faded
-                            // placeholder, so the gap it leaves is visible.
-                            opacity: root.tab-dragging && root.tab-drag-source == index ? 0.4 : 1.0;
+                        // The scrolling tab run. The TouchArea turns a plain
+                        // vertical wheel into sideways scroll (the Flickable
+                        // handles Shift+wheel and a touchpad's sideways swipe
+                        // itself). `interactive: false` keeps the Flickable
+                        // from taking the press-and-drag that reorders tabs.
+                        tab-wheel := TouchArea {
+                            horizontal-stretch: 1;
+                            scroll-event(event) => {
+                                if tab-strip.scroll-min >= 0px || event.delta-y == 0px {
+                                    return reject;
+                                }
+                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, tab-scroll.viewport-x + event.delta-y));
+                                return accept;
+                            }
 
-                            // Drop slot while the pointer is over THIS tab,
-                            // from its real laid-out geometry: the left half
-                            // is the gap before it, the right half the gap
-                            // after it. Tabs differ in width (web 200px, the
-                            // rest 180px), so no fixed-pitch division can
-                            // find the tab under the pointer.
-                            property <int> drag-slot: !root.tab-dragging ? -1
-                                : (root.tab-drag-x < self.x || root.tab-drag-x >= self.x + self.width) ? -1
-                                : (root.tab-drag-x < self.x + self.width / 2 ? index : index + 1);
-                            changed drag-slot => {
-                                if self.drag-slot >= 0 {
-                                    root.tab-drag-target = self.drag-slot;
-                                }
-                            }
-                            
-                            // Active tab indicator (blue top border — VS Code style)
-                            if root.center-active-tab == index + 1: Rectangle {
-                                y: 0px;
-                                height: 2px;
-                                background: Theme.accent-blue;
-                            }
-                            
-                            // Drop caret on the left edge. Hidden for the two
-                            // gaps beside the dragged tab: dropping there is
-                            // a no-op, and a caret would promise a move.
-                            if root.tab-dragging && root.tab-drag-inside
-                                && root.tab-drag-target == index
-                                && index != root.tab-drag-source
-                                && index != root.tab-drag-source + 1: Rectangle {
-                                x: -1px;
-                                width: 3px;
-                                height: parent.height;
-                                background: Theme.accent-blue;
-                            }
-                            
-                            // Right separator
-                            Rectangle {
-                                x: parent.width - 1px;
-                                width: 1px;
-                                height: parent.height;
-                                background: Theme.border-color;
-                            }
-                            
-                            tab-hover := TouchArea {
-                                mouse-cursor: root.tab-dragging ? move : pointer;
-                                property <bool> left-down: false;
-                                property <length> press-x: 0px;
+                            tab-scroll := Flickable {
+                                width: 100%;
+                                height: 100%;
+                                interactive: false;
+                                viewport-width: max(self.width, tab-run.preferred-width);
+                                viewport-height: self.height;
 
-                                clicked => {
-                                    if !root.tab-dragging {
-                                        root.center-active-tab = index + 1;
-                                        root.select-center-tab(index + 1);
-                                    }
-                                }
-                                // This TouchArea holds the pointer grab from
-                                // press to release, so it keeps receiving
-                                // moved() even when the pointer is over other
-                                // tabs or off the strip. It therefore drives
-                                // the whole drag; a separate overlay appearing
-                                // mid-drag never receives a single event.
-                                moved => {
-                                    // Start drag after 5px horizontal movement
-                                    if self.left-down && !root.tab-dragging && abs(self.mouse-x - self.press-x) > 5px {
-                                        root.tab-drag-source = index;
-                                        root.tab-drag-target = -1;
-                                        root.tab-dragging = true;
-                                    }
-                                    if root.tab-dragging {
-                                        let px = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
-                                        let py = self.absolute-position.y + self.mouse-y - tab-strip.absolute-position.y;
-                                        root.tab-drag-x = px;
-                                        root.tab-drag-inside = py > -40px && py < tab-strip.height + 40px;
-                                        // Past either end of the tab run, the
-                                        // first or last gap. Over a tab, the
-                                        // tab's own drag-slot binding decides.
-                                        if px < space1-tab.x + space1-tab.width {
-                                            root.tab-drag-target = 0;
-                                        } else if px >= tabs-filler.x {
-                                            root.tab-drag-target = root.center-tabs.length;
-                                        }
-                                    }
-                                }
-                                pointer-event(event) => {
-                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
-                                        self.left-down = true;
-                                        self.press-x = self.mouse-x;
-                                    }
-                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
-                                        self.left-down = false;
-                                        if root.tab-dragging {
-                                            if root.tab-drag-inside
-                                                && root.tab-drag-target >= 0
-                                                && root.tab-drag-target != index
-                                                && root.tab-drag-target != index + 1 {
-                                                root.reorder-center-tab(index, root.tab-drag-target);
+                                tab-run := HorizontalLayout {
+                                    width: tab-scroll.viewport-width;
+                                    height: tab-scroll.height;
+                                    spacing: 0px;
+
+                                    // Dynamic tabs (script + web) with drag-and-drop reorder
+                                    for tab[index] in root.center-tabs: Rectangle {
+                                        width: min(tab.tab-type == "web" ? 200px : 180px, max(tab-strip.min-tab-width, tab-strip.tab-fit));
+                                        height: 35px;
+                                        background: root.center-active-tab == index + 1
+                                            ? Theme.panel-background
+                                            : (tab-hover.has-hover ? Theme.tab-hover : Theme.background-secondary);
+                                        // The tab being dragged stays in place as a faded
+                                        // placeholder, so the gap it leaves is visible.
+                                        opacity: root.tab-dragging && root.tab-drag-source == index ? 0.4 : 1.0;
+
+                                        // Drop slot while the pointer is over THIS tab,
+                                        // from its real laid-out geometry: the left half
+                                        // is the gap before it, the right half the gap
+                                        // after it. Tabs differ in width (web 200px, the
+                                        // rest 180px), so no fixed-pitch division can
+                                        // find the tab under the pointer.
+                                        // `drag-content-x`: the pointer in the run's own
+                                        // space, as `self.x` is (the run scrolls).
+                                        property <int> drag-slot: !root.tab-dragging ? -1
+                                            : (tab-strip.drag-content-x < self.x || tab-strip.drag-content-x >= self.x + self.width) ? -1
+                                            : (tab-strip.drag-content-x < self.x + self.width / 2 ? index : index + 1);
+                                        changed drag-slot => {
+                                            if self.drag-slot >= 0 {
+                                                root.tab-drag-target = self.drag-slot;
                                             }
-                                            root.tab-dragging = false;
-                                            root.tab-drag-source = -1;
-                                            root.tab-drag-target = -1;
-                                            root.tab-drag-inside = true;
+                                        }
+                                        
+                                        // Active tab indicator (blue top border — VS Code style)
+                                        if root.center-active-tab == index + 1: Rectangle {
+                                            y: 0px;
+                                            height: 2px;
+                                            background: Theme.accent-blue;
+                                        }
+                                        
+                                        // Drop caret on the left edge. Hidden for the two
+                                        // gaps beside the dragged tab: dropping there is
+                                        // a no-op, and a caret would promise a move.
+                                        if root.tab-dragging && root.tab-drag-inside
+                                            && root.tab-drag-target == index
+                                            && index != root.tab-drag-source
+                                            && index != root.tab-drag-source + 1: Rectangle {
+                                            x: -1px;
+                                            width: 3px;
+                                            height: parent.height;
+                                            background: Theme.accent-blue;
+                                        }
+                                        
+                                        // Right separator
+                                        Rectangle {
+                                            x: parent.width - 1px;
+                                            width: 1px;
+                                            height: parent.height;
+                                            background: Theme.border-color;
+                                        }
+                                        
+                                        tab-hover := TouchArea {
+                                            mouse-cursor: root.tab-dragging ? move : pointer;
+                                            property <bool> left-down: false;
+                                            property <length> press-x: 0px;
+
+                                            clicked => {
+                                                if !root.tab-dragging {
+                                                    root.center-active-tab = index + 1;
+                                                    root.select-center-tab(index + 1);
+                                                }
+                                            }
+                                            // This TouchArea holds the pointer grab from
+                                            // press to release, so it keeps receiving
+                                            // moved() even when the pointer is over other
+                                            // tabs or off the strip. It therefore drives
+                                            // the whole drag; a separate overlay appearing
+                                            // mid-drag never receives a single event.
+                                            moved => {
+                                                // Start drag after 5px horizontal movement
+                                                if self.left-down && !root.tab-dragging && abs(self.mouse-x - self.press-x) > 5px {
+                                                    root.tab-drag-source = index;
+                                                    root.tab-drag-target = -1;
+                                                    root.tab-dragging = true;
+                                                }
+                                                if root.tab-dragging {
+                                                    let px = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
+                                                    let py = self.absolute-position.y + self.mouse-y - tab-strip.absolute-position.y;
+                                                    root.tab-drag-x = px;
+                                                    root.tab-drag-inside = py > -40px && py < tab-strip.height + 40px;
+                                                    // Past either end of the tab run, the
+                                                    // first or last gap. Over a tab, the
+                                                    // tab's own drag-slot binding decides.
+                                                    if px < space1-tab.x + space1-tab.width {
+                                                        root.tab-drag-target = 0;
+                                                    } else if px - tab-wheel.x - tab-scroll.viewport-x >= tabs-filler.x {
+                                                        root.tab-drag-target = root.center-tabs.length;
+                                                    }
+                                                }
+                                            }
+                                            pointer-event(event) => {
+                                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                                    self.left-down = true;
+                                                    self.press-x = self.mouse-x;
+                                                }
+                                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                                    self.left-down = false;
+                                                    if root.tab-dragging {
+                                                        if root.tab-drag-inside
+                                                            && root.tab-drag-target >= 0
+                                                            && root.tab-drag-target != index
+                                                            && root.tab-drag-target != index + 1 {
+                                                            root.reorder-center-tab(index, root.tab-drag-target);
+                                                        }
+                                                        root.tab-dragging = false;
+                                                        root.tab-drag-source = -1;
+                                                        root.tab-drag-target = -1;
+                                                        root.tab-drag-inside = true;
+                                                    }
+                                                }
+                                                if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                                                    root.tab-context-menu-index = index;
+                                                    root.tab-context-menu-x = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
+                                                    root.tab-context-menu-y = 35px;
+                                                    tab-ctx-menu.show();
+                                                }
+                                            }
+                                        }
+                                        
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 4px;
+                                            spacing: 6px;
+                                            // No alignment: center here — it fights horizontal-stretch on the
+                                            // tab name text. Each child uses vertical-alignment: center instead.
+
+                                            // Tab icon (type-dependent) — vertically centered via VerticalLayout
+                                            if tab.tab-type == "web" && tab.favicon.width > 0: VerticalLayout {
+                                                alignment: center;
+                                                width: 14px;
+                                                Image {
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    source: tab.favicon;
+                                                    image-fit: contain;
+                                                }
+                                            }
+                                            if tab.tab-type == "web" && tab.favicon.width == 0: VerticalLayout {
+                                                alignment: center;
+                                                width: 14px;
+                                                Image {
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    source: @image-url("../../assets/icons/ui/globe.svg");
+                                                    image-fit: contain;
+                                                    colorize: Theme.text-secondary;
+                                                }
+                                            }
+                                            if tab.tab-type == "script": VerticalLayout {
+                                                alignment: center;
+                                                width: 14px;
+                                                Image {
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    source: @image-url("../../assets/icons/script.svg");
+                                                    image-fit: contain;
+                                                }
+                                            }
+                                            if tab.tab-type == "code": VerticalLayout {
+                                                alignment: center;
+                                                width: 14px;
+                                                Image {
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    source: @image-url("../../assets/icons/ui/new-file.svg");
+                                                    image-fit: contain;
+                                                    colorize: Theme.text-secondary;
+                                                }
+                                            }
+                                            if tab.tab-type == "chart": VerticalLayout {
+                                                alignment: center;
+                                                width: 14px;
+                                                Image {
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    source: @image-url("../../assets/icons/ui/viewport.svg");
+                                                    image-fit: contain;
+                                                    colorize: Theme.text-secondary;
+                                                }
+                                            }
+
+                                            // Tab name — stretches to fill space, pushing close button right
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: tab.name;
+                                                color: root.center-active-tab == index + 1 ? Theme.text-primary : Theme.text-secondary;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+
+                                            // Loading spinner
+                                            if tab.loading: Text {
+                                                text: "◌";
+                                                color: Theme.accent-blue;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Dirty indicator (unsaved dot)
+                                            if tab.dirty && !tab.loading: VerticalLayout {
+                                                alignment: center;
+                                                width: 8px;
+                                                Rectangle {
+                                                    width: 8px;
+                                                    height: 8px;
+                                                    border-radius: 4px;
+                                                    background: Theme.text-primary;
+                                                }
+                                            }
+
+                                            // Spacer for close button area
+                                            Rectangle { width: 22px; }
+                                        }
+
+                                        // Close button (X) — absolutely positioned on top so it intercepts clicks above tab-hover
+                                        Rectangle {
+                                            x: parent.width - 26px;
+                                            y: (parent.height - 22px) / 2;
+                                            width: 22px;
+                                            height: 22px;
+                                            background: close-area.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
+                                            border-radius: 4px;
+
+                                            close-area := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.close-center-tab(index); }
+                                            }
+
+                                            Image {
+                                                width: 12px;
+                                                height: 12px;
+                                                source: @image-url("../../assets/icons/ui/close.svg");
+                                                image-fit: contain;
+                                                colorize: close-area.has-hover ? Theme.accent-red : Theme.text-secondary;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                     }
-                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                                        root.tab-context-menu-index = index;
-                                        root.tab-context-menu-x = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
-                                        root.tab-context-menu-y = 35px;
-                                        tab-ctx-menu.show();
+                                    
+                                    // Drop caret after the last tab. Hidden when the
+                                    // last tab is the one being dragged (a no-op drop).
+                                    if root.tab-dragging && root.tab-drag-inside
+                                        && root.tab-drag-target >= root.center-tabs.length
+                                        && root.tab-drag-source != root.center-tabs.length - 1: Rectangle {
+                                        width: 3px;
+                                        height: 35px;
+                                        background: Theme.accent-blue;
                                     }
-                                }
-                            }
-                            
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 4px;
-                                spacing: 6px;
-                                // No alignment: center here — it fights horizontal-stretch on the
-                                // tab name text. Each child uses vertical-alignment: center instead.
 
-                                // Tab icon (type-dependent) — vertically centered via VerticalLayout
-                                if tab.tab-type == "web" && tab.favicon.width > 0: VerticalLayout {
-                                    alignment: center;
-                                    width: 14px;
-                                    Image {
-                                        width: 14px;
-                                        height: 14px;
-                                        source: tab.favicon;
-                                        image-fit: contain;
-                                    }
-                                }
-                                if tab.tab-type == "web" && tab.favicon.width == 0: VerticalLayout {
-                                    alignment: center;
-                                    width: 14px;
-                                    Image {
-                                        width: 14px;
-                                        height: 14px;
-                                        source: @image-url("../../assets/icons/ui/globe.svg");
-                                        image-fit: contain;
-                                        colorize: Theme.text-secondary;
-                                    }
-                                }
-                                if tab.tab-type == "script": VerticalLayout {
-                                    alignment: center;
-                                    width: 14px;
-                                    Image {
-                                        width: 14px;
-                                        height: 14px;
-                                        source: @image-url("../../assets/icons/script.svg");
-                                        image-fit: contain;
-                                    }
-                                }
-                                if tab.tab-type == "code": VerticalLayout {
-                                    alignment: center;
-                                    width: 14px;
-                                    Image {
-                                        width: 14px;
-                                        height: 14px;
-                                        source: @image-url("../../assets/icons/ui/new-file.svg");
-                                        image-fit: contain;
-                                        colorize: Theme.text-secondary;
-                                    }
-                                }
-                                if tab.tab-type == "chart": VerticalLayout {
-                                    alignment: center;
-                                    width: 14px;
-                                    Image {
-                                        width: 14px;
-                                        height: 14px;
-                                        source: @image-url("../../assets/icons/ui/viewport.svg");
-                                        image-fit: contain;
-                                        colorize: Theme.text-secondary;
-                                    }
-                                }
-
-                                // Tab name — stretches to fill space, pushing close button right
-                                Text {
-                                    horizontal-stretch: 1;
-                                    text: tab.name;
-                                    color: root.center-active-tab == index + 1 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-
-                                // Loading spinner
-                                if tab.loading: Text {
-                                    text: "◌";
-                                    color: Theme.accent-blue;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                }
-
-                                // Dirty indicator (unsaved dot)
-                                if tab.dirty && !tab.loading: VerticalLayout {
-                                    alignment: center;
-                                    width: 8px;
-                                    Rectangle {
-                                        width: 8px;
-                                        height: 8px;
-                                        border-radius: 4px;
-                                        background: Theme.text-primary;
-                                    }
-                                }
-
-                                // Spacer for close button area
-                                Rectangle { width: 22px; }
-                            }
-
-                            // Close button (X) — absolutely positioned on top so it intercepts clicks above tab-hover
-                            Rectangle {
-                                x: parent.width - 26px;
-                                y: (parent.height - 22px) / 2;
-                                width: 22px;
-                                height: 22px;
-                                background: close-area.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
-                                border-radius: 4px;
-
-                                close-area := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.close-center-tab(index); }
-                                }
-
-                                Image {
-                                    width: 12px;
-                                    height: 12px;
-                                    source: @image-url("../../assets/icons/ui/close.svg");
-                                    image-fit: contain;
-                                    colorize: close-area.has-hover ? Theme.accent-red : Theme.text-secondary;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                                    // Fill remaining space. Its x is where the tab run
+                                    // ends, which the drag uses for the last gap.
+                                    tabs-filler := Rectangle { horizontal-stretch: 1; }
+                                } // end tab-run
                             }
                         }
-                        
-                        // Drop caret after the last tab. Hidden when the
-                        // last tab is the one being dragged (a no-op drop).
-                        if root.tab-dragging && root.tab-drag-inside
-                            && root.tab-drag-target >= root.center-tabs.length
-                            && root.tab-drag-source != root.center-tabs.length - 1: Rectangle {
-                            width: 3px;
-                            height: 35px;
-                            background: Theme.accent-blue;
-                        }
 
-                        // Fill remaining space. Its x is where the tab run
-                        // ends, which the drag uses for the last gap.
-                        tabs-filler := Rectangle { horizontal-stretch: 1; }
+                        // Room for the overflow button, so the last tab scrolls
+                        // clear of it.
+                        if tab-strip.tabs-overflow: Rectangle {
+                            width: tab-strip.overflow-button-width;
+                        }
                     } // end HorizontalLayout
+
+                    // ── Scroll bar ───────────────────────────────────────────
+                    // A thin bar under the tab run while the tabs overflow.
+                    // Its thumb shows where the view is and drags it.
+                    if tab-strip.scroll-min < 0px: tab-scrollbar := Rectangle {
+                        x: tab-wheel.x;
+                        y: parent.height - self.height;
+                        width: tab-wheel.width;
+                        height: 4px;
+                        property <length> thumb-width: max(28px, self.width * tab-scroll.width / tab-scroll.viewport-width);
+                        property <length> travel: self.width - self.thumb-width;
+
+                        tab-thumb := Rectangle {
+                            x: parent.travel * (tab-scroll.viewport-x / tab-strip.scroll-min);
+                            width: parent.thumb-width;
+                            height: 100%;
+                            border-radius: 2px;
+                            background: thumb-touch.pressed || thumb-touch.has-hover ? Theme.text-secondary : Theme.text-disabled;
+
+                            thumb-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                moved => {
+                                    if self.pressed && tab-scrollbar.travel > 0px {
+                                        tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min,
+                                            tab-strip.scroll-min * ((tab-thumb.x + self.mouse-x - self.pressed-x) / tab-scrollbar.travel)));
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // ── Overflow button ──────────────────────────────────────
                     // Only when the tabs no longer fit: opaque, so it covers
@@ -2660,7 +2992,10 @@ export component StudioWindow inherits Window {
                     if root.tab-dragging
                         && root.tab-drag-source >= 0
                         && root.tab-drag-source < root.center-tabs.length: Rectangle {
-                        width: root.center-tabs[root.tab-drag-source].tab-type == "web" ? 200px : 180px;
+                        // The dragged tab's own width (tabs shrink to share
+                        // the strip, down to min-tab-width).
+                        width: min(root.center-tabs[root.tab-drag-source].tab-type == "web" ? 200px : 180px,
+                            max(tab-strip.min-tab-width, tab-strip.tab-fit));
                         height: 35px;
                         y: 0px;
                         // Centre under the cursor, clamped inside the strip so
@@ -3033,9 +3368,12 @@ export component StudioWindow inherits Window {
                             text: elem.text;
                             color: rgba(elem.text-r * 255, elem.text-g * 255, elem.text-b * 255, elem.text-a);
                             font-size: max(elem.font-size * 1px, 8px);
+                            font-weight: elem.font-weight > 0 ? elem.font-weight : 400;
+                            // Rust lowercases both alignments.
                             horizontal-alignment: elem.text-align == "left" ? left :
                                                   elem.text-align == "right" ? right : center;
-                            vertical-alignment: center;
+                            vertical-alignment: elem.text-y-align == "top" ? top :
+                                                elem.text-y-align == "bottom" ? bottom : center;
                             // A box tall enough for two lines wraps its text;
                             // a one-line box keeps it on one line.
                             wrap: elem.height > elem.font-size * 1.9 ? word-wrap : no-wrap;
@@ -3150,6 +3488,18 @@ export component StudioWindow inherits Window {
                             cancel => { root.tool-options-cancel(); }
                         }
 
+                        // Terrain tools: the tool bar where the tool options
+                        // bar sits (never both) and the readout at the
+                        // cursor. Rust clears `TerrainToolsUi.active` in Play
+                        // and while the UI Builder panel is open over this
+                        // corner.
+                        if TerrainToolsUi.active && !root.tool-options-visible: TerrainToolsOverlay {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+
                         // Floating Numeric Input — visible only while a
                         // gizmo drag is capturing numeric keystrokes. All
                         // interaction is Rust-side; this is read-only.
@@ -3161,15 +3511,20 @@ export component StudioWindow inherits Window {
                             unit:       root.numeric-input-unit;
                         }
 
-                        // Sketch canvas — bottom-left of viewport when a
-                        // CadPart with sketches is selected (or forced open).
+                        // Sketch panel: bottom-left of the viewport while a
+                        // CadPart with a sketch is selected (or forced open).
+                        // Capped to the viewport so a short window shrinks
+                        // its lists instead of pushing it off the bottom.
                         SketchCanvasPanel {
                             x: 12px;
                             y: parent.height - self.height - 12px;
+                            height-limit: parent.height - 24px;
                             visible-when: root.sketch-canvas-visible;
                             part-name: root.sketch-canvas-part-name;
                             sketch-name: root.sketch-canvas-sketch-name;
-                            solve-status: root.sketch-canvas-solve-status;
+                            solve-state: root.sketch-canvas-solve-state;
+                            free-dof: root.sketch-canvas-free-dof;
+                            status-detail: root.sketch-canvas-status-detail;
                             entities: root.sketch-canvas-entities;
                             constraints: root.sketch-canvas-constraints;
                             selected-a: root.sketch-canvas-selected-a;
@@ -3181,6 +3536,16 @@ export component StudioWindow inherits Window {
                             add-coincident => { root.sketch-canvas-add-coincident(); }
                             select-entity(idx) => { root.sketch-canvas-select-entity(idx); }
                             close => { root.sketch-canvas-close(); }
+                        }
+
+                        // UI Builder: left of the viewport, under the layout
+                        // preset selector. Editor chrome, so hidden in Play.
+                        // Rust keeps viewport clicks off this rect
+                        // (`UI_BUILDER_PANEL_*` in slint_ui.rs).
+                        if root.play-state == "stopped": UiBuilderPanel {
+                            x: 12px;
+                            y: 52px;
+                            height-limit: parent.height - 64px;
                         }
 
                         // Toast Undo — top-center commit confirmation
@@ -3316,13 +3681,26 @@ export component StudioWindow inherits Window {
                         tabs: root.center-tabs;
                         active-tab: root.center-active-tab - 1;
                         current-content: root.script-editor-content;
+                        pushed-content: root.script-editor-content;
+                        content-revision: root.script-external-revision;
+                        edit-anchor: root.script-edit-anchor;
+                        edit-cursor: root.script-edit-cursor;
+                        bracket-a-line: root.script-bracket-a-line;
+                        bracket-a-col: root.script-bracket-a-col;
+                        bracket-b-line: root.script-bracket-b-line;
+                        bracket-b-col: root.script-bracket-b-col;
+                        find-status: root.script-find-status;
+                        hover-text: root.script-hover-text;
+                        hover-line: root.script-hover-line;
+                        hover-col: root.script-hover-col;
+                        max-line-chars: root.script-max-line-chars;
                         line-numbers-text: root.script-line-numbers;
                         line-numbers-array: root.script-line-numbers-array;
                         scroll-to-top-trigger <=> root.script-scroll-to-top;
                         highlight-lines: root.script-highlight-lines;
                         has-highlights: root.script-highlight-lines.length > 0;
                         token-spans: root.script-token-spans;
-                        has-token-spans: root.script-token-spans.length > 0;
+                        has-token-spans: root.script-highlight-active;
                         diagnostic-spans: root.script-diagnostic-spans;
                         completion-items: root.script-completion-items;
                         completion-selected: root.script-completion-selected;
@@ -3355,7 +3733,23 @@ export component StudioWindow inherits Window {
                         }
                         on-go-to-definition(line, col) => { root.script-go-to-definition(line, col); }
                         on-find-references(line, col) => { root.script-find-references(line, col); }
-                        on-save => { }
+                        on-save => { root.script-save(); }
+                        on-editor-key(key, anchor, cursor) => { root.script-editor-key(key, anchor, cursor); }
+                        on-find(query, match-case) => { root.script-find(query, match-case); }
+                        on-find-step(forward) => { root.script-find-step(forward); }
+                        on-replace(text) => { root.script-replace(text); }
+                        on-replace-all(text) => { root.script-replace-all(text); }
+                        on-find-close => { root.script-find-close(); }
+                        on-go-to-line(line) => { root.script-go-to-line(line); }
+                        changed editor-has-focus => { root.script-editor-has-focus = self.editor-has-focus || self.bar-has-focus; }
+                        changed bar-has-focus => { root.script-editor-has-focus = self.editor-has-focus || self.bar-has-focus; }
+                        changed visible-first-line => { root.script-visible-first-line = self.visible-first-line; }
+                        changed visible-line-count => { root.script-visible-line-count = self.visible-line-count; }
+                        init => {
+                            root.script-editor-has-focus = self.editor-has-focus || self.bar-has-focus;
+                            root.script-visible-first-line = self.visible-first-line;
+                            root.script-visible-line-count = self.visible-line-count;
+                        }
                         on-build => {
                             if root.center-active-tab > 0 && root.center-active-tab <= root.center-tabs.length {
                                 root.build-script(root.center-tabs[root.center-active-tab - 1].entity-id);
@@ -3909,6 +4303,27 @@ export component StudioWindow inherits Window {
                         if root.right-tab-index == 1: HistoryPanel {
                             history: root.history-entries;
                             current-index: root.history-current-index;
+                            view <=> root.history-view;
+                            restore-points: root.restore-points;
+                            restore-blocker: root.restore-points-blocker;
+                            restore-pending: root.restore-points-pending;
+                            restore-busy: root.restore-points-busy;
+                            restore-status: root.restore-points-status;
+                            restore-status-error: root.restore-points-status-error;
+                            listing-status: root.listing-status;
+                            listing-headline: root.listing-headline;
+                            listing-rating: root.listing-rating;
+                            on-listing-open-review => { root.listing-open-review(); }
+                            on-restore-shown => { root.restore-points-shown(); }
+                            on-restore-save(label) => { root.restore-point-save(label); }
+                            on-restore-cancel-pending => { root.restore-point-cancel-pending(); }
+                            // Revert asks first (RevertConfirmDialog, below).
+                            on-restore-revert-requested(id, label, time) => {
+                                root.revert-confirm-id = id;
+                                root.revert-confirm-label = label;
+                                root.revert-confirm-time = time;
+                                root.show-revert-confirm = true;
+                            }
                             on-undo => { root.undo(); }
                             on-redo => { root.redo(); }
                             on-jump-to(id) => { root.history-jump-to(id); }
@@ -4131,7 +4546,14 @@ export component StudioWindow inherits Window {
                 height: parent.height;
                 panel-mode <=> root.bottom-panel-mode;
                 set-panel-mode(mode) => { root.set-bottom-panel(mode); }
-                all-text: root.output-all-text;
+                rows: root.output-rows;
+                count-info: root.output-count-info;
+                count-warnings: root.output-count-warnings;
+                count-errors: root.output-count-errors;
+                count-debug: root.output-count-debug;
+                total-lines: root.output-total-lines;
+                rows-revision: root.output-rows-revision;
+                filter-text <=> root.output-filter-text;
                 source-filter <=> root.output-source-filter;
                 show-info <=> root.output-show-info;
                 show-warnings <=> root.output-show-warnings;
@@ -4143,11 +4565,17 @@ export component StudioWindow inherits Window {
                 // Without the latter, the next sync push re-floods the
                 // panel with every entry we "cleared" a moment earlier.
                 on-clear => {
-                    root.output-all-text = "";
+                    root.output-rows = [];
                     root.clear-script-output();
                 }
                 on-close => { root.show-output = false; }
                 on-open-path(msg) => { root.open-path-from-log(msg); }
+                // An error, a warning or a script link: open the script at
+                // the line (the Problems panel's jump).
+                on-jump(file, line) => { root.problems-jump-to(file, line, 0); }
+                on-copy-log(id) => { root.copy-output-line(id); }
+                on-copy-all => { root.copy-output-visible(); }
+                on-toggle-stack(id) => { root.toggle-output-stack(id); }
             }
 
             // Timeline — data-agnostic marker panel fed by the
@@ -4362,6 +4790,17 @@ export component StudioWindow inherits Window {
         is-public <=> root.publish-is-public;
         open_source <=> root.publish_open_source;
         studio-editable <=> root.publish-studio-editable;
+        listing-status: root.listing-status;
+        listing-headline: root.listing-headline;
+        listing-rating: root.listing-rating;
+        listing-updated: root.listing-updated;
+        listing-reasons: root.listing-reasons;
+        listing-suggested-edit: root.listing-suggested-edit;
+        listing-can-appeal: root.listing-can-appeal;
+        listing-appeal-busy: root.listing-appeal-busy;
+        listing-appeal-error: root.listing-appeal-error;
+        on-listing-appeal(text) => { root.listing-appeal(text); }
+        on-listing-open-review => { root.listing-open-review(); }
         spaces: root.publish-spaces;
         tree-nodes: root.publish-tree-nodes;
         pak-size-estimate: root.publish-pak-size;
@@ -4392,6 +4831,15 @@ export component StudioWindow inherits Window {
         }
     }
     
+    // Unsaved script edits, before a tab close or an exit
+    if root.show-unsaved-changes-dialog: UnsavedChangesDialog {
+        names: root.unsaved-changes-names;
+        count: root.unsaved-changes-count;
+        on-save => { root.unsaved-changes-save(); }
+        on-discard => { root.unsaved-changes-discard(); }
+        on-cancel => { root.unsaved-changes-cancel(); }
+    }
+
     // Exit confirmation
     if root.show-exit-confirmation: ExitConfirmationDialog {
         scene-name: root.scene-name;
@@ -4440,6 +4888,10 @@ export component StudioWindow inherits Window {
         on-help-icons-changed(val) => { root.help-icons-changed(val); }
         on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
         on-notifications-changed => { root.notification-settings-changed(); }
+        open-keybindings => {
+            root.show-settings-dialog = false;
+            root.show-keybindings-dialog = true;
+        }
         on-save => {
             // Commit the typed Anthropic, xAI and OpenAI keys to Bevy
             // so Soul/Workshop panels stop showing the Configure banner.
@@ -4454,30 +4906,38 @@ export component StudioWindow inherits Window {
     
     // Theme Editor panel (floating overlay — draggable)
     if root.show-theme-editor: theme-panel := Rectangle {
-        property <length> drag-x: parent.width - 280px;
-        property <length> drag-y: parent.height - 320px;
-        
+        property <length> drag-x: parent.width - 300px;
+        property <length> drag-y: parent.height - 400px;
+
         x: self.drag-x;
         y: self.drag-y;
-        width: 260px;
-        height: 300px;
-        background: Theme.panel-background;
-        border-radius: 8px;
+        width: 280px;
+        height: 370px;
+        background: Theme.panel-glass;
+        border-radius: Theme.radius-lg;
         border-width: 1px;
         border-color: Theme.border-color;
-        drop-shadow-blur: 12px;
+        drop-shadow-blur: 24px;
         drop-shadow-color: Theme.shadow-float;
-        
-        VerticalBox {
+        clip: true;
+
+        // The 1px top hairline every floating panel carries.
+        Rectangle {
+            y: 0;
+            width: 100%;
+            height: 1px;
+            background: Theme.border-highlight;
+        }
+
+        VerticalLayout {
             padding: 0px;
-            
-            // Draggable header with close button
+            spacing: 0px;
+
+            // Header: drag it to move the panel; the close button sits on
+            // top of the drag area, so a click on it still closes.
             Rectangle {
-                height: 32px;
-                background: Theme.header-background;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                
+                height: 44px;
+
                 theme-drag := TouchArea {
                     mouse-cursor: move;
                     moved => {
@@ -4487,40 +4947,19 @@ export component StudioWindow inherits Window {
                         }
                     }
                 }
-                
-                HorizontalBox {
-                    padding: 8px;
-                    
-                    Image {
-                        width: 16px;
-                        height: 16px;
-                        source: @image-url("../../assets/icons/ui/palette.svg");
-                        image-fit: contain;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: " Theme Settings";
-                        color: Theme.text-primary;
-                        font-weight: 600;
-                        horizontal-stretch: 1;
-                    }
-                    
-                    TouchArea {
-                        width: 20px;
-                        clicked => { root.show-theme-editor = false; }
-                        
-                        Image {
-                            width: 12px;
-                            height: 12px;
-                            source: @image-url("../../assets/icons/ui/close.svg");
-                            image-fit: contain;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+
+                FloatingPanelHeader {
+                    icon: @image-url("../../assets/icons/ui/palette.svg");
+                    title: "Theme";
+                    subtitle: "Dark mode, contrast and scale";
+                    close => { root.show-theme-editor = false; }
                 }
             }
-            
+            Rectangle {
+                height: 1px;
+                background: Theme.ribbon-separator;
+            }
+
             ThemeEditor {
                 dark-mode: root.dark-theme;
                 high-contrast: root.high-contrast-mode;
@@ -4582,6 +5021,24 @@ export component StudioWindow inherits Window {
         total-messages: root.stress-total-messages;
         avg-latency: root.stress-avg-latency;
         errors: root.stress-errors;
+        max-clients: root.stress-max-clients;
+        joined: root.stress-joined;
+        join-failures: root.stress-join-failures;
+        disconnects: root.stress-disconnects;
+        join-p95-ms: root.stress-join-p95-ms;
+        relay-p50-ms: root.stress-relay-p50-ms;
+        relay-p95-ms: root.stress-relay-p95-ms;
+        relay-loss: root.stress-relay-loss;
+        invoke-p95-ms: root.stress-invoke-p95-ms;
+        rtt-ms: root.stress-rtt-ms;
+        host-frame-p95-ms: root.stress-host-frame-p95-ms;
+        host-net-ms: root.stress-host-net-ms;
+        host-budget: root.stress-host-budget;
+        down-kbps: root.stress-down-kbps;
+        up-kbps: root.stress-up-kbps;
+        report: root.stress-report;
+        bot-cores: root.stress-bot-cores;
+        download-world <=> root.stress-download-world;
         on-start => {
             root.start-stress-test(
                 self.client-count,
@@ -4770,6 +5227,22 @@ export component StudioWindow inherits Window {
         }
     }
 
+    if root.show-purchase-prompt: PurchasePromptDialog {
+        product-name: root.purchase-prompt-product;
+        kind-text: root.purchase-prompt-kind;
+        description: root.purchase-prompt-description;
+        price-text: root.purchase-prompt-price;
+        test-mode: root.purchase-prompt-test-mode;
+        buy => {
+            root.show-purchase-prompt = false;
+            root.purchase-prompt-answered(true);
+        }
+        cancel => {
+            root.show-purchase-prompt = false;
+            root.purchase-prompt-answered(false);
+        }
+    }
+
     if root.show-new-space-dialog: NewSpaceDialog {
         universe-name: root.new-universe-name;
         space-name <=> root.new-space-name;
@@ -4795,6 +5268,22 @@ export component StudioWindow inherits Window {
     }
 
     // Rename Tag dialog (window-root modal — safe; never mutates the chip subtree)
+    // Revert the Space to a restore point: says what happens, then only
+    // its Revert button reaches Rust.
+    if root.show-revert-confirm: RevertConfirmDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        label: root.revert-confirm-label;
+        time: root.revert-confirm-time;
+        on-cancel => { root.show-revert-confirm = false; }
+        on-revert => {
+            root.show-revert-confirm = false;
+            root.restore-point-revert(root.revert-confirm-id);
+        }
+    }
+
     if root.show-rename-tag-dialog: RenameTagDialog {
         old-name: root.rename-tag-old;
         new-name <=> root.rename-tag-new;

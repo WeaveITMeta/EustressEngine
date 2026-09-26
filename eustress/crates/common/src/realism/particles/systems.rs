@@ -20,6 +20,7 @@ use crate::realism::laws::{thermodynamics, mechanics};
 use crate::realism::lod::SimLodTier;
 use crate::realism::{PhysicsDomain, RealismConfig};
 use crate::services::physics::PhysicsService;
+use crate::services::workspace::{live_gravity, Workspace};
 
 /// Whether a physics domain is switched on in PhysicsService.
 ///
@@ -216,17 +217,21 @@ pub fn update_kinematics(
 // ============================================================================
 
 /// Apply standard forces to particles (gravity, drag, buoyancy)
+///
+/// Gravity is the Workspace's, the same the parts around them fall with, so a
+/// Space on the Moon lets smoke and dust drift down slowly too.
 pub fn apply_particle_forces(
     mut query: Query<(&Particle, &mut KineticState, &Transform, Option<&ThermodynamicState>, Option<&FluidProperties>)>,
     physics: Option<Res<PhysicsService>>,
+    workspace: Option<Res<Workspace>>,
 ) {
     if !domain_on(&physics, PhysicsDomain::Thermodynamics)
         && !domain_on(&physics, PhysicsDomain::Fluids)
     {
         return;
     }
-    
-    let gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    let gravity = live_gravity(workspace.as_deref());
     let air_density = constants::AIR_DENSITY_SEA_LEVEL;
     
     for (particle, mut kinetic, transform, thermo, fluid) in query.iter_mut() {
@@ -261,11 +266,16 @@ pub fn apply_particle_forces(
         if let Some(thermo) = thermo {
             match particle.particle_type {
                 ParticleType::Gas | ParticleType::Smoke | ParticleType::Fire => {
-                    // Hot gas rises: buoyancy = (ρ_air - ρ_gas) * V * g
+                    // Hot gas rises. Archimedes: the parcel displaces its own
+                    // volume of air, pushed against gravity. That volume is
+                    // its mass over its density at its temperature, not the
+                    // sphere its radius draws, so a parcel lighter than the
+                    // air it displaces rises; its weight is the gravity above.
                     let particle_density = thermo.density(0.029); // Assuming air-like gas
-                    let volume = (4.0 / 3.0) * std::f32::consts::PI * particle.radius.powi(3);
-                    let buoyancy = (air_density - particle_density) * volume * 9.81;
-                    kinetic.apply_force(Vec3::new(0.0, buoyancy, 0.0));
+                    if particle_density > 0.0 {
+                        let displaced = particle.mass / particle_density;
+                        kinetic.apply_force(-air_density * displaced * gravity);
+                    }
                 }
                 _ => {}
             }
@@ -347,5 +357,46 @@ fn temperature_to_color(temperature: f32) -> Color {
     } else {
         let t2 = (t - 0.5) * 2.0;
         Color::srgb(1.0, 1.0 - t2, 1.0 - t2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::STANDARD_GRAVITY_F32;
+    use bevy::ecs::system::RunSystemOnce;
+
+    const EARTH: Vec3 = Vec3::new(0.0, -STANDARD_GRAVITY_F32, 0.0);
+
+    /// Net force on a still 1 kg air parcel at `temperature` K under `gravity`.
+    fn net_force(temperature: f32, gravity: Vec3) -> Vec3 {
+        let mut world = World::new();
+        world.insert_resource(Workspace { gravity, ..Default::default() });
+        let parcel = world
+            .spawn(ThermodynamicParticleBundle::gas(Vec3::ZERO, 1.0, temperature))
+            .id();
+        world.run_system_once(apply_particle_forces).expect("the force system runs");
+        world.get::<KineticState>(parcel).unwrap().accumulated_force
+    }
+
+    /// Air as dense as the air around it (1.225 kg/m³ at 288.5 K) floats,
+    /// hotter air rises and colder air sinks.
+    #[test]
+    fn a_parcel_rises_or_sinks_by_its_density_against_the_air() {
+        let neutral = net_force(288.5, EARTH);
+        assert!(neutral.length() < 0.01 * STANDARD_GRAVITY_F32, "ambient air is pushed {neutral:?}");
+        let hot = net_force(600.0, EARTH);
+        assert!(hot.y > 0.5 * STANDARD_GRAVITY_F32, "600 K air does not rise: {hot:?}");
+        let cold = net_force(200.0, EARTH);
+        assert!(cold.y < 0.0, "200 K air does not sink: {cold:?}");
+    }
+
+    /// Weight and buoyancy both come from the Workspace gravity.
+    #[test]
+    fn particle_forces_follow_the_workspace_gravity() {
+        let moon = Vec3::new(0.0, -1.62, 0.0);
+        let ratio = net_force(600.0, moon).y / net_force(600.0, EARTH).y;
+        assert!((ratio - 1.62 / STANDARD_GRAVITY_F32).abs() < 1e-4, "Moon/Earth force ratio {ratio}");
+        assert_eq!(net_force(600.0, Vec3::ZERO), Vec3::ZERO, "weightless air is still pushed");
     }
 }

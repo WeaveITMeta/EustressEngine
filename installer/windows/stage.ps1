@@ -5,8 +5,8 @@ Stages the Windows install layout that the release zip and the installer both sh
 .DESCRIPTION
     <stage>\eustress-engine.exe            the editor
     <stage>\eustress-lsp.exe               the Rune language server the editor starts
-    <stage>\assets\                        crates/engine/assets: icons, parts, lighting templates, shaders
-    <stage>\common\assets\                 crates/common/assets: materials, characters, class schemas, service templates
+    <stage>\assets\                        crates/engine/assets: icons, lighting templates, shaders
+    <stage>\common\assets\                 crates/common/assets: materials, characters, class schemas, service templates, the part meshes
     <stage>\docs\eustress_constitution.pdf opened by Help > Constitution
 
 The engine looks for each of these beside its executable first:
@@ -72,7 +72,7 @@ Copy-Item (Join-Path $repo 'docs\documents\eustress_constitution.pdf') (Join-Pat
 
 # The engine only treats these as its install layout when they are present,
 # so a stage missing one would quietly fall back to the build machine's paths.
-foreach ($must in 'assets\icons', 'assets\parts', 'assets\lighting_templates',
+foreach ($must in 'assets\icons', 'common\assets\parts', 'assets\lighting_templates', 'assets\shaders',
                   'common\assets\class_schema', 'common\assets\characters\y_bot.glb') {
     if (-not (Test-Path (Join-Path $OutDir $must))) { throw "stage is missing $must" }
 }

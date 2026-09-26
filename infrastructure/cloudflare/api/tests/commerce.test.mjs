@@ -795,6 +795,68 @@ test('a step added while a purchase is still finishing outlives that finish', as
   assert.equal((await events(env, 'creator-1')).filter((e) => e.type === 'purchase.fulfilled').length, 1);
 });
 
+// ── Receipts by purchase id (how a host settles a player's purchase) ────────
+
+test('a purchase id alone lets a host read that purchase, and nothing more', async () => {
+  const env = world();
+  const product = await activate(env, (await createProduct(env)).id);
+  const { purchase } = (await buy(env, product)).body;
+
+  const read = await api(env, 'GET', `/api/commerce/receipts/${SIM}/${purchase.id}`);
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.deepEqual(
+    [read.body.buyer_id, read.body.status, read.body.fulfilled, read.body.product.number, read.body.product.type],
+    ['buyer-1', 'succeeded', false, product.number, 'consumable'],
+  );
+  assert.equal(read.body.idempotency_key, undefined);
+  assert.equal((await api(env, 'GET', `/api/commerce/receipts/${SIM_OTHER}/${purchase.id}`)).status, 404, 'another simulation');
+  assert.equal((await api(env, 'GET', `/api/commerce/receipts/${SIM}/pur_${'x'.repeat(24)}`)).status, 404, 'an unknown id');
+
+  // The id cannot mark the purchase granted: only the buyer or the creator can.
+  const nobody = await api(env, 'POST', `/api/commerce/receipts/${SIM}/${purchase.id}/fulfill`);
+  assert.notEqual(nobody.status, 200);
+  const stranger = await api(env, 'POST', `/api/commerce/purchases/${purchase.id}/fulfill`, { who: 'buyer-2', body: { sim_id: SIM } });
+  assert.equal(stranger.status, 404);
+  const creator = await api(env, 'POST', `/api/commerce/purchases/${purchase.id}/fulfill`, { who: 'creator-1', body: { sim_id: SIM } });
+  assert.equal(creator.status, 200, 'the creator hosting the session may');
+  assert.equal((await api(env, 'GET', `/api/commerce/receipts/${SIM}/${purchase.id}`)).body.fulfilled, true);
+
+  const other = (await buy(env, product)).body.purchase;
+  await api(env, 'POST', `/api/commerce/purchases/${other.id}/refund`, { who: 'creator-1' });
+  assert.equal((await api(env, 'GET', `/api/commerce/receipts/${SIM}/${other.id}`)).body.status, 'refunded');
+});
+
+test('the creator\'s host reads a joined player\'s passes and ungranted purchases, and nobody else can', async () => {
+  const env = world();
+  const coins = await activate(env, (await createProduct(env)).id);
+  const vip = await activate(env, (await createProduct(env, { name: 'VIP', type: 'pass', price: 100 })).id);
+  const bought = (await buy(env, coins)).body.purchase;
+  await buy(env, vip);
+
+  const read = await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`, { who: 'creator-1' });
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.equal(read.body.livemode, true);
+  assert.deepEqual(read.body.pending.map((r) => [r.purchase_id, r.buyer_id, r.product.number]), [[bought.id, 'buyer-1', coins.number]]);
+  assert.deepEqual(read.body.entitlements.map((e) => e.number), [vip.number]);
+
+  // Modes stay apart: the creator's test mode sees none of the live purchases.
+  const test = await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`, { who: 'creator-1', mode: 'test' });
+  assert.deepEqual([test.body.pending.length, test.body.entitlements.length], [0, 0]);
+
+  // Granting clears the purchase from what the next session reads.
+  await api(env, 'POST', `/api/commerce/purchases/${bought.id}/fulfill`, { who: 'creator-1', body: { sim_id: SIM } });
+  const after = await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`, { who: 'creator-1' });
+  assert.equal(after.body.pending.length, 0);
+
+  assert.equal((await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`, { who: 'creator-2' })).status, 403, 'another creator');
+  assert.equal((await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`, { who: 'buyer-2' })).status, 403, 'another player');
+  assert.equal((await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM}`)).status, 401, 'signed out');
+  assert.equal((await api(env, 'GET', `/api/commerce/players/buyer-1?sim_id=${SIM_OTHER}`, { who: 'creator-1' })).status, 403, 'not its simulation');
+  assert.equal((await api(env, 'GET', '/api/commerce/players/buyer-1', { who: 'creator-1' })).status, 404, 'no simulation named');
+  assert.equal((await api(env, 'GET', `/api/commerce/players/nobody-9?sim_id=${SIM}`, { who: 'creator-1' })).status, 404);
+  assert.equal(walletOf(env, 'nobody-9'), undefined, 'asking about an unknown account opens no wallet');
+});
+
 // ── Test mode ───────────────────────────────────────────────────────────────
 
 test('a session that sends no Eustress-Mode is in test mode and cannot spend Tickets', async () => {

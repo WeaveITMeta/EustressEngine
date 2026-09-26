@@ -21,6 +21,7 @@ pub mod careers;
 pub mod community;
 pub mod contact;
 pub mod cookies;
+pub mod creator;
 pub mod dashboard;
 pub mod dmca;
 pub mod docs_audio;

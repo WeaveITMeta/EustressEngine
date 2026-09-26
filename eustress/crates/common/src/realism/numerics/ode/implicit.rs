@@ -5,16 +5,16 @@
 //! BDF-1: y_{n+1} - y_n = h·f(t_{n+1}, y_{n+1})
 //! BDF-2: (3/2)·y_{n+1} - 2·y_n + (1/2)·y_{n-1} = h·f(t_{n+1}, y_{n+1})
 //!
-//! # Stiffness context (ARC-1 nuclear kinetics)
+//! # Stiffness
 //!
-//! The point-kinetics equations that govern ARC-1's neutron population have
-//! a stiff eigenvalue spectrum: prompt-neutron decay runs at λ/Λ ≈ 3 200 s⁻¹
-//! while the slowest delayed-neutron group decays at ≈ 0.08 s⁻¹ — a ratio of
-//! ~40 000.  An explicit (forward-Euler / RK4) integrator would need step sizes
-//! of Δt < 1/3 200 s ≈ 0.3 ms just to remain stable, forcing ~3 000 steps per
-//! simulated second.  BDF-1 is A-stable: all eigenvalues with Re(λ) < 0 are
-//! damped regardless of step size, so the nuclear plugin can safely step at
-//! Δt = 1/60 s (the game-physics tick) without numerical blow-up.
+//! Reactor point kinetics is the classic stiff system: below prompt critical
+//! the prompt-neutron eigenvalue (ρ − β)/Λ is near −260 s⁻¹ for a thermal
+//! core, while the delayed-neutron precursors decay at about 0.08 s⁻¹, a
+//! ratio above 3 000. Forward Euler diverges there at any step longer than
+//! about 7.7 ms. BDF-1 is A-stable: every eigenvalue with Re(λ) < 0 is
+//! damped whatever the step, so a 1/60 s frame is safe.
+//! `realism::nuclear::kinetics::step_implicit` solves that system's
+//! backward-Euler step in closed form.
 
 /// BDF-1 (= Backward Euler) via Newton iteration.
 ///
@@ -35,10 +35,9 @@
 /// Returns y_{n+1}.
 ///
 /// # Notes
-/// ARC-1 nuclear kinetics uses this form because the single dominant stiff
-/// eigenvalue (prompt-neutron decay, λ/Λ ≈ 3 200 s⁻¹) means the Jacobian
-/// is cheap to evaluate analytically and Newton converges in 2–3 iterations
-/// per step.
+/// Suits systems with one dominant stiff eigenvalue, such as prompt-neutron
+/// decay in point kinetics: the Jacobian is cheap to evaluate analytically
+/// and Newton converges in 2–3 iterations per step.
 pub fn bdf1_newton<F, J>(
     y: f32,
     dt: f32,

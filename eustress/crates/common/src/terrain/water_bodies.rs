@@ -134,17 +134,17 @@ pub struct WaterBodyDesc {
 /// times `size - 1`, so a cell's centre is exactly where
 /// `TerrainData::sample_height` reads it unblended.
 #[derive(Clone, Copy, Debug)]
-struct CellGrid {
-    origin: Vec2,
-    step: Vec2,
-    width: usize,
-    height: usize,
+pub(crate) struct CellGrid {
+    pub(crate) origin: Vec2,
+    pub(crate) step: Vec2,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
 }
 
 impl CellGrid {
     /// The grid of `data` over `config`'s chunk grid; `None` without a whole
     /// raster of at least two cells a side.
-    fn of(config: &TerrainConfig, data: &TerrainData) -> Option<Self> {
+    pub(crate) fn of(config: &TerrainConfig, data: &TerrainData) -> Option<Self> {
         let (width, height) = (data.cache_width as usize, data.cache_height as usize);
         if width < 2 || height < 2 || data.height_cache.len() != width * height {
             return None;
@@ -154,7 +154,7 @@ impl CellGrid {
         (step.is_finite() && step.x > 0.0 && step.y > 0.0).then_some(Self { origin: min, step, width, height })
     }
 
-    fn world(&self, x: usize, z: usize) -> Vec2 {
+    pub(crate) fn world(&self, x: usize, z: usize) -> Vec2 {
         self.origin + Vec2::new(x as f32, z as f32) * self.step
     }
 
@@ -167,7 +167,7 @@ impl CellGrid {
 
     /// The inclusive cell box `(x0, z0, x1, z1)` whose centres lie in world
     /// box `lo..hi`, `None` when none do.
-    fn cells_in(&self, lo: Vec2, hi: Vec2) -> Option<(usize, usize, usize, usize)> {
+    pub(crate) fn cells_in(&self, lo: Vec2, hi: Vec2) -> Option<(usize, usize, usize, usize)> {
         if !(lo.is_finite() && hi.is_finite()) {
             return None;
         }

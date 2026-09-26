@@ -28,7 +28,7 @@ thread_local! {
     /// Physics state snapshot (populated before script execution)
     pub static PHYSICS_STATE: RefCell<HashMap<String, PhysicsSnapshot>> = RefCell::new(HashMap::new());
     /// Workspace gravity (m/s²)
-    pub static WORKSPACE_GRAVITY: RefCell<f64> = RefCell::new(9.80665);
+    pub static WORKSPACE_GRAVITY: RefCell<f64> = RefCell::new(crate::units::STANDARD_GRAVITY);
 }
 
 pub fn push_physics_command(cmd: PhysicsCommand) {

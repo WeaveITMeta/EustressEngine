@@ -98,6 +98,10 @@ pub struct PartClickExtras<'w, 's> {
 /// The query every viewport pick walks: anything that can be clicked in
 /// edit mode. Shared by the click (`part_selection_system`) and the hover
 /// preview (`hover_highlight_system`) so both resolve the same entity.
+/// A light that is not inside a part (`LightPickable`) is picked by a small
+/// box at its position, the size `light_sync::pick_box_size` gives for the
+/// distance: it has no geometry, and an `Aabb` on it would make Bevy cull
+/// the light itself by that box.
 pub type PickQuery<'w, 's> = Query<
     'w,
     's,
@@ -110,12 +114,14 @@ pub type PickQuery<'w, 's> = Query<
         Option<&'static Mesh3d>,
         Option<&'static BasePart>,
         Option<&'static ChildOf>,
+        Has<crate::light_sync::LightPickable>,
     ),
     Or<(
         With<PartEntityMarker>,
         With<PartEntity>,
         (With<BasePart>, With<Instance>),
         (With<Instance>, With<bevy::camera::primitives::Aabb>, Without<Mesh3d>),
+        (With<Instance>, With<crate::light_sync::LightPickable>),
     )>,
 >;
 
@@ -159,7 +165,7 @@ pub fn pick_under_cursor(
     // entity -> the Model a plain click resolves it to
     let mut candidates: std::collections::HashMap<Entity, Option<Entity>> =
         std::collections::HashMap::new();
-    for (entity, part_entity, part_entity_marker, instance, _transform, _mesh, basepart, child_of) in parts.iter() {
+    for (entity, part_entity, part_entity_marker, instance, _transform, _mesh, basepart, child_of, _light) in parts.iter() {
         if let Some(inst) = instance {
             match inst.class_name {
                 crate::classes::ClassName::Folder
@@ -212,13 +218,17 @@ pub fn pick_under_cursor(
     }
 
     if fallback == ObbFallback::Always || closest.is_none() {
-        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in parts.iter() {
+        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of, light) in parts.iter() {
             if !candidates.contains_key(&entity) {
                 continue;
             }
             let t = transform.compute_transform();
             let (obb_center, size) = if let Some(bp) = basepart {
                 (t.translation, bp.size)
+            } else if light {
+                // A free light: a box around it that keeps its size on screen.
+                let s = crate::light_sync::pick_box_size(t.translation.distance(ray.origin));
+                (t.translation, Vec3::splat(s))
             } else if let Ok(aabb) = aabb_q.get(entity) {
                 let world_center = t.translation + t.rotation * (Vec3::from(aabb.center) * t.scale);
                 (world_center, Vec3::from(aabb.half_extents) * 2.0 * t.scale)
@@ -405,6 +415,13 @@ pub fn part_selection_system(
     // body below needs no further edits. Each field is already the
     // exact `Option<Res<_>>` the body expects.
     let PartSelectionToolStates { move_state, scale_state, rotate_state, studio_state } = tool_states;
+    // The terrain tools own the left button while they are the current
+    // tool: a sculpting click must not select (or deselect) the part under
+    // the brush. Drag, marquee and the handles already stand down on the
+    // tool (`select_tool`, `move_tool`).
+    if studio_state.as_ref().is_some_and(|s| s.current_tool == crate::ui::Tool::Terrain) {
+        return;
+    }
     // Transform mode governs whether the Move gizmo is axis-aligned to
     // world (IDENTITY) or rotated to match the active entity. Hit test
     // must use the same rotation or clicking the rotated handle fails.
@@ -843,7 +860,7 @@ pub fn part_selection_system(
                 let mut total_scale = 0.0;
                 let mut count = 0;
                 
-                for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
+                for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of, _light) in part_entities_query.iter() {
                     // Same canonical id as everywhere else. The comment here used
                     // to claim `"indexVgeneration"` while the code preferred the
                     // components' stored `part_id`, which for disk-loaded parts is

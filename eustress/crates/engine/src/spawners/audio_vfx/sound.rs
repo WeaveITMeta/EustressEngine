@@ -1,72 +1,38 @@
-//! `SoundSpawner` — Wave 3.F audio class spawner.
+//! `SoundSpawner`: the Sound class's spawner, and the Sound component a
+//! loaded Sound file gets.
 //!
 //! Per `docs/architecture/CLASS_REGISTRY.md` §8.7 (Camera & Audio) the
-//! `Sound` class is one of two members of the audio group. This spawner
-//! wires the Eustress `Sound` component to Bevy's native
-//! `bevy::audio::AudioPlayer` + `PlaybackSettings` rig so the engine's
-//! built-in `AudioPlugin` (already added through
-//! `bevy::DefaultPlugins`) drives playback. The spawner is responsible
-//! ONLY for building the entity — the existing `SoundService` resource
-//! and the per-frame audio pipeline are untouched.
+//! `Sound` class is one of two members of the audio group. This module
+//! builds the entity and its Eustress `Sound` component (the canonical data
+//! model round-tripped through TOML and Fjall persistence). It does not play
+//! anything: the shared player (`eustress_play_runtime::sound_player`) plays
+//! a Sound component on its own entity, a Properties preview in Edit and a
+//! Play session's Sounds in Play, with Roblox's roll-off.
 //!
-//! ## What this spawner does
+//! A Sound file's `[sound]` section is read and written by
+//! `eustress_common::services::sound` (`sound_from_section`,
+//! `write_sound_section`), which every reader shares, so Studio and the
+//! Player cannot disagree on a file. [`attach_sound_component`] is how a
+//! Sound loaded from a file gets its component.
 //!
-//! - Attaches the Eustress `Sound` component (the canonical data model
-//!   round-tripped through TOML + Fjall persistence).
-//! - Attaches `bevy::audio::AudioPlayer<AudioSource>` carrying a
-//!   `Handle<AudioSource>` resolved via `asset_server.load(sound_id)`.
-//!   Empty `sound_id` skips the load (the audio pipeline will treat
-//!   the entity as a configured-but-silent sound until a script
-//!   assigns a path).
-//! - Attaches `bevy::audio::PlaybackSettings` derived from the
-//!   Eustress fields (volume / pitch / spatial / start_paused /
-//!   looped). The spatial scale is derived from `roll_off_min_distance`
-//!   per the `RollOffMode → SpatialScale` mapping spelled out below.
-//! - Attaches `Transform` + `Visibility` so the entity participates in
-//!   the standard ECS hierarchy. Sounds in Eustress are first-class
-//!   spatial entities — they sit in the scene tree under their parent
-//!   Part or Attachment exactly like any other instance.
-//!
-//! ## Listener wiring
-//!
-//! `bevy::audio::SpatialListener` is attached to the active studio /
-//! play camera elsewhere (the engine's camera plugin sets it on the
-//! main camera entity at startup). This spawner does NOT attach a
-//! listener — sounds are sources, the listener is the ear. The Bevy
-//! audio pipeline pairs them automatically through the spatial scale +
-//! transforms.
-//!
-//! ## RollOffMode → SpatialScale conversion
-//!
-//! Bevy 0.18 spatial audio is a thin stereo-panning model — it has no
-//! per-source falloff curve. We approximate Eustress's
-//! `SoundRolloffMode` by scaling the spatial coordinates so the
-//! perceived loudness curve matches the requested mode at the
-//! `roll_off_min_distance` boundary:
-//!
-//! | Eustress `SoundRolloffMode` | `SpatialScale` factor | Rationale |
-//! |---|---|---|
-//! | `Inverse` (default)         | `1.0 / roll_off_min`  | Bevy's natural 1/r panning matches Roblox's default. |
-//! | `InverseSquared`            | `1.0 / roll_off_min²` | Tighter falloff; doubling distance quarters loudness. |
-//! | `Linear`                    | `1.0 / (roll_off_min * 2)` | Gentler than Bevy's natural curve. |
-//! | `Logarithmic`               | `1.0 / roll_off_min`  | Approximated as Inverse — Bevy can't do true log without a custom mixer. |
-//! | `None`                      | `0.0`                 | Distance disabled — listener-relative volume only. |
-//! | `Custom`                    | `1.0 / roll_off_min`  | Treated as Inverse; the custom `roll_off_curve` is a TODO for a future per-sample volume system. |
-//!
-//! These are coarse — the engine's own audio system will eventually own
-//! a real falloff mixer (FEATURE_PARITY.md §15 audio polish). The
-//! conversion lives here because the spawner is the boundary that
-//! translates the Eustress source-of-truth into Bevy components.
+//! The entity gets `Transform` + `Visibility` so it participates in the
+//! standard ECS hierarchy: a Sound sits in the scene tree under its parent
+//! Part or Attachment like any other instance, and is heard from there.
 
 use std::any::TypeId;
+use std::collections::HashMap;
 
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackMode, PlaybackSettings, SpatialScale, Volume};
+use bevy::audio::{AudioPlayer, AudioSource};
 use bevy::prelude::*;
 
 use eustress_common::class_registry::{
     ClassSpawner, ComponentBundle, DynamicComponent, LodTier, PropertyBag, RobloxInstance, SpawnCtx,
 };
-use eustress_common::classes::{ClassName, Instance, Sound, SoundGroup, SoundRolloffMode};
+use eustress_common::classes::{ClassName, Instance, Sound};
+use eustress_common::services::sound::{
+    parse_rolloff_mode, parse_sound_group, rolloff_mode_name, sound_from_section, sound_group_name,
+    write_sound_section,
+};
 
 /// Wire-format tag for the Wave-3.F rkyv archives. Follows Appendix A of
 /// `CLASS_REGISTRY.md`: high nibble = schema_version (1), low nibble =
@@ -74,6 +40,30 @@ use eustress_common::classes::{ClassName, Instance, Sound, SoundGroup, SoundRoll
 /// carries only Eustress-side data — no engine-only material/handle
 /// fields that would need a dedicated group.
 const SOUND_TAG: u8 = 0x10;
+
+/// Give a Sound loaded from its instance file its `Sound` component, read
+/// from the file's `[sound]` section (the class defaults when it has none).
+/// Every other class is left alone. `extra` is the file's sections beyond
+/// the ones the loader reads itself.
+pub fn attach_sound_component(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: ClassName,
+    extra: &HashMap<String, toml::Value>,
+) {
+    if class_name != ClassName::Sound {
+        return;
+    }
+    ec.insert(sound_from_extra(extra));
+}
+
+fn sound_from_extra(extra: &HashMap<String, toml::Value>) -> Sound {
+    extra
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("sound"))
+        .and_then(|(_, v)| v.as_table())
+        .map(sound_from_section)
+        .unwrap_or_default()
+}
 
 /// Wave 3.F spawner for `ClassName::Sound`.
 ///
@@ -96,20 +86,8 @@ impl ClassSpawner for SoundSpawner {
         // Build the Eustress Sound component from the bag, falling back
         // to `Default` for keys the bag omits — preserves the "spawner
         // is the only schema authority" contract of CLASS_REGISTRY.md §4.
+        // Playback is the shared player's: nothing here starts a clip.
         let sound = sound_from_bag(props);
-
-        // Resolve the audio asset. Empty paths skip the load so a
-        // silent-but-configured Sound entity is a valid intermediate
-        // state (the AudioPlayer can be hot-swapped later via the
-        // Properties panel without respawning).
-        let audio_player = if sound.sound_id.is_empty() {
-            None
-        } else {
-            let handle: Handle<AudioSource> = ctx.asset_server.load(&sound.sound_id);
-            Some(AudioPlayer::<AudioSource>(handle))
-        };
-
-        let playback = playback_settings_from_sound(&sound);
 
         // Build Transform from the bag; default to identity. Sounds are
         // ECS entities like any other instance, so they need
@@ -129,18 +107,9 @@ impl ClassSpawner for SoundSpawner {
             ai: false,
         };
 
-        let mut entity_commands = ctx.commands.spawn((
-            instance,
-            sound,
-            transform,
-            Visibility::default(),
-            Name::new(name),
-            playback,
-        ));
-        if let Some(player) = audio_player {
-            entity_commands.insert(player);
-        }
-        entity_commands.id()
+        ctx.commands
+            .spawn((instance, sound, transform, Visibility::default(), Name::new(name)))
+            .id()
     }
 
     fn serialize(&self, world: &World, entity: Entity) -> Vec<u8> {
@@ -182,23 +151,12 @@ impl ClassSpawner for SoundSpawner {
     }
 
     fn apply_edit(&self, world: &mut World, entity: Entity, props: &PropertyBag) -> bool {
-        // All Sound mutations are cheap — volume, pitch, spatial knobs
-        // are read each tick by the audio system. Replacing `sound_id`
-        // requires re-loading the AudioSource handle, which we DO
-        // handle inline (no respawn) by overwriting the AudioPlayer
-        // component. Returning `false` keeps the Properties panel
-        // off the despawn-respawn dance.
+        // Every Sound field is live: the shared player reads the component
+        // each frame (and restarts a clip itself when SoundId or Looped
+        // changes). Returning `false` keeps the Properties panel off the
+        // despawn-respawn dance.
         if let Some(mut sound) = world.entity_mut(entity).get_mut::<Sound>() {
             apply_bag_to_sound(props, &mut sound);
-        }
-        // Update PlaybackSettings if present so spatial / volume edits
-        // take effect on the next audio tick.
-        let mut updated_playback: Option<PlaybackSettings> = None;
-        if let Some(sound_ref) = world.entity(entity).get::<Sound>() {
-            updated_playback = Some(playback_settings_from_sound(sound_ref));
-        }
-        if let Some(pb) = updated_playback {
-            world.entity_mut(entity).insert(pb);
         }
         false
     }
@@ -260,12 +218,15 @@ impl ClassSpawner for SoundSpawner {
     }
 
     fn import_from_toml(&self, toml_value: &toml::Value) -> PropertyBag {
-        // Mirror the `_instance.toml` layout the existing instance
-        // loader writes for a Sound: `[metadata]`, `[sound]`,
-        // `[transform]`. Keys are snake_case — pre-normalised by
-        // `class_schema::normalise_keys` upstream per the trait
-        // contract.
-        let mut bag = PropertyBag::new();
+        // The `_instance.toml` layout: `[metadata]`, `[sound]`,
+        // `[transform]`. `[sound]` is read by the shared reader, which
+        // takes every spelling its writers have used.
+        let sound = toml_value
+            .get("sound")
+            .and_then(|v| v.as_table())
+            .map(sound_from_section)
+            .unwrap_or_default();
+        let mut bag = bag_from_sound(&sound);
         if let Some(meta) = toml_value.get("metadata") {
             if let Some(n) = meta.get("name").and_then(|v| v.as_str()) {
                 bag.set(
@@ -277,74 +238,6 @@ impl ClassSpawner for SoundSpawner {
                 bag.set(
                     "metadata.uuid",
                     eustress_common::classes::PropertyValue::String(u.into()),
-                );
-            }
-        }
-        if let Some(sound) = toml_value.get("sound") {
-            if let Some(s) = sound.get("sound_id").and_then(|v| v.as_str()) {
-                bag.set(
-                    "sound.id",
-                    eustress_common::classes::PropertyValue::String(s.into()),
-                );
-            }
-            if let Some(v) = sound.get("volume").and_then(|v| v.as_float()) {
-                bag.set(
-                    "sound.volume",
-                    eustress_common::classes::PropertyValue::Float(v as f32),
-                );
-            }
-            if let Some(v) = sound.get("pitch").and_then(|v| v.as_float()) {
-                bag.set(
-                    "sound.pitch",
-                    eustress_common::classes::PropertyValue::Float(v as f32),
-                );
-            }
-            if let Some(v) = sound.get("playing").and_then(|v| v.as_bool()) {
-                bag.set(
-                    "sound.playing",
-                    eustress_common::classes::PropertyValue::Bool(v),
-                );
-            }
-            if let Some(v) = sound.get("looped").and_then(|v| v.as_bool()) {
-                bag.set(
-                    "sound.looped",
-                    eustress_common::classes::PropertyValue::Bool(v),
-                );
-            }
-            if let Some(v) = sound.get("spatial").and_then(|v| v.as_bool()) {
-                bag.set(
-                    "sound.spatial",
-                    eustress_common::classes::PropertyValue::Bool(v),
-                );
-            }
-            if let Some(v) = sound
-                .get("roll_off_min_distance")
-                .and_then(|v| v.as_float())
-            {
-                bag.set(
-                    "sound.roll_off_min_distance",
-                    eustress_common::classes::PropertyValue::Float(v as f32),
-                );
-            }
-            if let Some(v) = sound
-                .get("roll_off_max_distance")
-                .and_then(|v| v.as_float())
-            {
-                bag.set(
-                    "sound.roll_off_max_distance",
-                    eustress_common::classes::PropertyValue::Float(v as f32),
-                );
-            }
-            if let Some(s) = sound.get("roll_off_mode").and_then(|v| v.as_str()) {
-                bag.set(
-                    "sound.roll_off_mode",
-                    eustress_common::classes::PropertyValue::Enum(s.into()),
-                );
-            }
-            if let Some(s) = sound.get("sound_group").and_then(|v| v.as_str()) {
-                bag.set(
-                    "sound.group",
-                    eustress_common::classes::PropertyValue::Enum(s.into()),
                 );
             }
         }
@@ -365,31 +258,7 @@ impl ClassSpawner for SoundSpawner {
         }
         if let Some(sound) = world.entity(entity).get::<Sound>() {
             let mut s = toml::value::Table::new();
-            s.insert(
-                "sound_id".into(),
-                toml::Value::String(sound.sound_id.clone()),
-            );
-            s.insert(
-                "sound_group".into(),
-                toml::Value::String(format!("{:?}", sound.sound_group)),
-            );
-            s.insert("playing".into(), toml::Value::Boolean(sound.playing));
-            s.insert("looped".into(), toml::Value::Boolean(sound.looped));
-            s.insert("volume".into(), toml::Value::Float(sound.volume as f64));
-            s.insert("pitch".into(), toml::Value::Float(sound.pitch as f64));
-            s.insert("spatial".into(), toml::Value::Boolean(sound.spatial));
-            s.insert(
-                "roll_off_min_distance".into(),
-                toml::Value::Float(sound.roll_off_min_distance as f64),
-            );
-            s.insert(
-                "roll_off_max_distance".into(),
-                toml::Value::Float(sound.roll_off_max_distance as f64),
-            );
-            s.insert(
-                "roll_off_mode".into(),
-                toml::Value::String(format!("{:?}", sound.roll_off_mode)),
-            );
+            write_sound_section(sound, &mut s);
             root.insert("sound".into(), toml::Value::Table(s));
         }
         toml::Value::Table(root)
@@ -397,43 +266,14 @@ impl ClassSpawner for SoundSpawner {
 }
 
 // ============================================================================
-// Internal helpers — PropertyBag <-> Sound conversion + audio mapping
+// Internal helpers — PropertyBag <-> Sound conversion
 // ============================================================================
 
 /// Build a fully-populated `Sound` component from the bag, falling back
 /// to `Default` for omitted keys.
 fn sound_from_bag(props: &PropertyBag) -> Sound {
     let mut sound = Sound::default();
-    if let Some(v) = props.get_string("sound.id") {
-        sound.sound_id = v.to_string();
-    }
-    if let Some(v) = props.get_f32("sound.volume") {
-        sound.volume = v;
-    }
-    if let Some(v) = props.get_f32("sound.pitch") {
-        sound.pitch = v;
-    }
-    if let Some(v) = props.get_bool("sound.playing") {
-        sound.playing = v;
-    }
-    if let Some(v) = props.get_bool("sound.looped") {
-        sound.looped = v;
-    }
-    if let Some(v) = props.get_bool("sound.spatial") {
-        sound.spatial = v;
-    }
-    if let Some(v) = props.get_f32("sound.roll_off_min_distance") {
-        sound.roll_off_min_distance = v;
-    }
-    if let Some(v) = props.get_f32("sound.roll_off_max_distance") {
-        sound.roll_off_max_distance = v;
-    }
-    if let Some(s) = props.get_enum("sound.roll_off_mode") {
-        sound.roll_off_mode = parse_rolloff_mode(s);
-    }
-    if let Some(s) = props.get_enum("sound.group") {
-        sound.sound_group = parse_sound_group(s);
-    }
+    apply_bag_to_sound(props, &mut sound);
     sound
 }
 
@@ -447,8 +287,10 @@ fn apply_bag_to_sound(props: &PropertyBag, sound: &mut Sound) {
     if let Some(v) = props.get_f32("sound.volume") {
         sound.volume = v;
     }
+    // PlaybackSpeed travels as `sound.pitch`; both fields carry it.
     if let Some(v) = props.get_f32("sound.pitch") {
         sound.pitch = v;
+        sound.playback_speed = v;
     }
     if let Some(v) = props.get_bool("sound.playing") {
         sound.playing = v;
@@ -465,11 +307,11 @@ fn apply_bag_to_sound(props: &PropertyBag, sound: &mut Sound) {
     if let Some(v) = props.get_f32("sound.roll_off_max_distance") {
         sound.roll_off_max_distance = v;
     }
-    if let Some(s) = props.get_enum("sound.roll_off_mode") {
-        sound.roll_off_mode = parse_rolloff_mode(s);
+    if let Some(m) = props.get_enum("sound.roll_off_mode").and_then(parse_rolloff_mode) {
+        sound.roll_off_mode = m;
     }
-    if let Some(s) = props.get_enum("sound.group") {
-        sound.sound_group = parse_sound_group(s);
+    if let Some(g) = props.get_enum("sound.group").and_then(parse_sound_group) {
+        sound.sound_group = g;
     }
 }
 
@@ -482,12 +324,12 @@ fn bag_from_sound(sound: &Sound) -> PropertyBag {
     bag.set("sound.id", PropertyValue::String(sound.sound_id.clone()));
     bag.set(
         "sound.group",
-        PropertyValue::Enum(format!("{:?}", sound.sound_group)),
+        PropertyValue::Enum(sound_group_name(sound.sound_group).to_string()),
     );
     bag.set("sound.playing", PropertyValue::Bool(sound.playing));
     bag.set("sound.looped", PropertyValue::Bool(sound.looped));
     bag.set("sound.volume", PropertyValue::Float(sound.volume));
-    bag.set("sound.pitch", PropertyValue::Float(sound.pitch));
+    bag.set("sound.pitch", PropertyValue::Float(sound.playback_speed));
     bag.set("sound.spatial", PropertyValue::Bool(sound.spatial));
     bag.set(
         "sound.roll_off_min_distance",
@@ -499,87 +341,15 @@ fn bag_from_sound(sound: &Sound) -> PropertyBag {
     );
     bag.set(
         "sound.roll_off_mode",
-        PropertyValue::Enum(format!("{:?}", sound.roll_off_mode)),
+        PropertyValue::Enum(rolloff_mode_name(sound.roll_off_mode).to_string()),
     );
     bag
-}
-
-/// Map a debug-printed `SoundRolloffMode` discriminant back to the
-/// enum. Round-trips the `format!("{:?}", mode)` shape `export_to_toml`
-/// emits.
-fn parse_rolloff_mode(s: &str) -> SoundRolloffMode {
-    match s {
-        "Linear" => SoundRolloffMode::Linear,
-        "Inverse" => SoundRolloffMode::Inverse,
-        "InverseSquared" => SoundRolloffMode::InverseSquared,
-        "Logarithmic" => SoundRolloffMode::Logarithmic,
-        "None" => SoundRolloffMode::None,
-        "Custom" => SoundRolloffMode::Custom,
-        _ => SoundRolloffMode::Inverse,
-    }
-}
-
-/// Sibling of `parse_rolloff_mode` for SoundGroup.
-fn parse_sound_group(s: &str) -> SoundGroup {
-    match s {
-        "Master" => SoundGroup::Master,
-        "SFX" => SoundGroup::SFX,
-        "Music" => SoundGroup::Music,
-        "Voice" => SoundGroup::Voice,
-        "Ambient" => SoundGroup::Ambient,
-        "UI" => SoundGroup::UI,
-        _ => SoundGroup::SFX,
-    }
-}
-
-/// Build Bevy's `PlaybackSettings` from the Eustress Sound knobs.
-///
-/// See module docs for the `RollOffMode → SpatialScale` table.
-fn playback_settings_from_sound(sound: &Sound) -> PlaybackSettings {
-    let mode = if sound.looped {
-        PlaybackMode::Loop
-    } else {
-        PlaybackMode::Once
-    };
-    let spatial_scale = if sound.spatial {
-        Some(spatial_scale_for(
-            sound.roll_off_mode,
-            sound.roll_off_min_distance,
-        ))
-    } else {
-        None
-    };
-    PlaybackSettings {
-        mode,
-        volume: Volume::Linear(sound.volume.max(0.0)),
-        speed: sound.pitch.max(0.01),
-        paused: !sound.playing,
-        muted: false,
-        spatial: sound.spatial,
-        spatial_scale,
-        start_position: None,
-        duration: None,
-    }
-}
-
-/// Conversion table — module docs explain the math. Guarded against
-/// roll_off_min == 0 (degenerate input — fall back to a 1:1 scale).
-fn spatial_scale_for(mode: SoundRolloffMode, roll_off_min: f32) -> SpatialScale {
-    let min = roll_off_min.max(0.0001);
-    let factor = match mode {
-        SoundRolloffMode::Inverse
-        | SoundRolloffMode::Logarithmic
-        | SoundRolloffMode::Custom => 1.0 / min,
-        SoundRolloffMode::InverseSquared => 1.0 / (min * min),
-        SoundRolloffMode::Linear => 1.0 / (min * 2.0),
-        SoundRolloffMode::None => 0.0,
-    };
-    SpatialScale(Vec3::splat(factor))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eustress_common::classes::SoundRolloffMode;
 
     /// The trait stays object-safe end-to-end — if this compiles, the
     /// registry can hold `Box<dyn ClassSpawner>` containing our spawner.
@@ -587,28 +357,6 @@ mod tests {
     fn sound_spawner_is_object_safe() {
         let boxed: Box<dyn ClassSpawner> = Box::new(SoundSpawner);
         assert_eq!(boxed.class_name(), ClassName::Sound);
-    }
-
-    /// Inverse default scales 1/min — Roblox parity check.
-    #[test]
-    fn spatial_scale_inverse_default() {
-        let scale = spatial_scale_for(SoundRolloffMode::Inverse, 10.0);
-        assert_eq!(scale.0, Vec3::splat(0.1));
-    }
-
-    /// Linear is half-rate of Inverse so listeners need to walk further
-    /// before the falloff bites — matches the table in module docs.
-    #[test]
-    fn spatial_scale_linear_softer() {
-        let scale = spatial_scale_for(SoundRolloffMode::Linear, 10.0);
-        assert_eq!(scale.0, Vec3::splat(0.05));
-    }
-
-    /// None disables distance — listener-relative volume only.
-    #[test]
-    fn spatial_scale_none_zero() {
-        let scale = spatial_scale_for(SoundRolloffMode::None, 10.0);
-        assert_eq!(scale.0, Vec3::splat(0.0));
     }
 
     /// Round-trip a Sound through the bag — keys must come out in the
@@ -637,6 +385,51 @@ mod tests {
                 "sound.roll_off_mode",
             ]
         );
+        let back = sound_from_bag(&bag);
+        assert_eq!(back.volume, 0.7);
+        assert_eq!(back.roll_off_mode, sound.roll_off_mode);
+    }
+
+    /// A Sound file's section reaches the component in any spelling, and a
+    /// file with no `[sound]` gets the class defaults.
+    #[test]
+    fn a_loaded_sound_gets_its_component_from_the_file() {
+        let doc: toml::Table = "[sound]\nrolloff_mode = \"Linear\"\nplayback_speed = 2.0\nvolume = 0.3"
+            .parse()
+            .unwrap();
+        let extra: HashMap<String, toml::Value> = doc.into_iter().collect();
+        let sound = sound_from_extra(&extra);
+        assert_eq!(sound.roll_off_mode, SoundRolloffMode::Linear);
+        assert_eq!(sound.playback_speed, 2.0);
+        assert_eq!(sound.volume, 0.3);
+        assert_eq!(sound_from_extra(&HashMap::new()).volume, Sound::default().volume);
+    }
+
+    /// A Sound exported to TOML imports back with the same fields.
+    #[test]
+    fn export_then_import_keeps_the_fields() {
+        let mut world = World::new();
+        let sound = Sound {
+            sound_id: "space://SoundService/flush.ogg".into(),
+            volume: 0.25,
+            looped: true,
+            roll_off_mode: SoundRolloffMode::InverseSquared,
+            ..Default::default()
+        };
+        let e = world
+            .spawn((
+                Instance { name: "Flush".into(), class_name: ClassName::Sound, ..Default::default() },
+                sound,
+            ))
+            .id();
+        let exported = SoundSpawner.export_to_toml(&world, e);
+        let bag = SoundSpawner.import_from_toml(&exported);
+        let back = sound_from_bag(&bag);
+        assert_eq!(back.sound_id, "space://SoundService/flush.ogg");
+        assert_eq!(back.volume, 0.25);
+        assert!(back.looped);
+        assert_eq!(back.roll_off_mode, SoundRolloffMode::InverseSquared);
+        assert_eq!(bag.get_string("metadata.name"), Some("Flush"));
     }
 
     /// LOD Horizon mutes — removes the AudioPlayer to silence the

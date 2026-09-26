@@ -38,7 +38,7 @@ fn get_toc() -> Vec<TocSection> {
                 TocSubsection { id: "roblox-run", title: "Running an Import" },
                 TocSubsection { id: "roblox-classes", title: "Classes and Services" },
                 TocSubsection { id: "roblox-parts", title: "Parts, Shapes and Units" },
-                TocSubsection { id: "roblox-scripts", title: "Scripts, Values and Joints" },
+                TocSubsection { id: "roblox-scripts", title: "Scripts, Values, Joints and Animations" },
             ],
         },
         TocSection {
@@ -420,6 +420,7 @@ pub fn DocsImportingPage() -> impl IntoView {
                             <h3>"Parts, Shapes and Units"</h3>
                             <ul class="docs-list">
                                 <li><strong>"CFrame"</strong>" becomes position and rotation. "<code>"Orientation"</code>" is used only when a part has no CFrame."</li>
+                                <li><strong>"Nested parts"</strong>" are written relative to their parent's position and rotation, never its size, and the Space's "<code>"space.toml"</code>" says so with "<code>"transform_rule = \"parent_pose\""</code>". Attachments and Bones are relative to their part, as in Roblox."</li>
                                 <li><strong>"Shape"</strong>" picks the built-in mesh: Ball, Cylinder, Wedge and CornerWedge get their own; Block keeps the default. Cylinders are turned 90 degrees in their own frame, because Roblox runs a cylinder along X and Eustress's cylinder mesh runs along Y."</li>
                                 <li><strong>"Color and BrickColor"</strong>" become the part color. A BrickColor's palette number and the original color are also kept in the part's metadata."</li>
                                 <li><strong>"Transparency"</strong>" becomes the color's alpha; "<strong>"Material"</strong>" maps to the preset of the same name; "<strong>"Anchored"</strong>", "<strong>"CanCollide"</strong>", "<strong>"Reflectance"</strong>", "<strong>"CastShadow"</strong>" and "<strong>"Locked"</strong>" carry over."</li>
@@ -427,8 +428,8 @@ pub fn DocsImportingPage() -> impl IntoView {
                             </ul>
                             <p>
                                 "Roblox lengths are written unchanged, and each instance's "<code>"[metadata]"</code>
-                                " sets "<code>"unit"</code>" to "<code>"ft"</code>". Eustress reads one Roblox unit as
-                                one foot and converts to meters when the Space loads, so a part 4 units long is 1.22 m."
+                                " sets "<code>"unit"</code>" to "<code>"stud"</code>". A Roblox stud is the Eustress stud, 0.28 m,
+                                so a part 4 studs long shows as 4 studs when Studio displays studs, and as 1.12 m by default."
                             </p>
                             <div class="callout callout-advanced">
                                 <img src="/assets/icons/settings.svg" alt="Pitfall" />
@@ -444,15 +445,16 @@ pub fn DocsImportingPage() -> impl IntoView {
                         </div>
 
                         <div id="roblox-scripts" class="subsection">
-                            <h3>"Scripts, Values and Joints"</h3>
+                            <h3>"Scripts, Values, Joints and Animations"</h3>
                             <p>
                                 "A script's source is written to "<code>"script.luau"</code>" beside its "
-                                <code>"_instance.toml"</code>". The ten Value classes (NumberValue, IntValue,
+                                <code>"_instance.toml"</code>". The twelve Value classes (NumberValue, IntValue,
                                 BoolValue, StringValue, ObjectValue, Color3Value, Vector3Value, CFrameValue,
-                                BrickColorValue, BinaryStringValue) become typed attributes on their parent, with a "
-                                <code>"_2"</code>" suffix when two share a name. RayValue, IntConstrainedValue and
-                                DoubleConstrainedValue are dropped and recorded in the report. Scripts are rewritten
-                                to match:"
+                                BrickColorValue, BinaryStringValue, IntConstrainedValue, DoubleConstrainedValue)
+                                become typed attributes on their parent, with a "<code>"_2"</code>" suffix when two
+                                share a name. They join the place's own attributes in the parent's "
+                                <code>"[attributes]"</code>" table. RayValue has no attribute form; it is dropped and
+                                recorded in the report. Scripts are rewritten to match:"
                             </p>
                             <div class="code-block">
                                 <div class="code-header">
@@ -472,6 +474,17 @@ car.Speed.Changed:Connect(onChange)   car:GetAttributeChangedSignal("Speed"):Con
                                 "Legacy surface joints hold assemblies together, so they are mapped rather than
                                 dropped: ManualWeld, Snap and Glue become Weld; Rotate becomes HingeConstraint; RotateP
                                 becomes Motor; RotateV becomes VelocityMotor."
+                            </p>
+                            <p>
+                                "Animations come across as clips. An Animation keeps its "<code>"AnimationId"</code>
+                                " as written. A KeyframeSequence, including the ones Roblox's Animation Editor saves
+                                under "<code>"ServerStorage/RBX_ANIMSAVES"</code>", becomes one record with its
+                                keyframes and poses inside it. Each Roblox animation id the place plays, from an
+                                Animation or from a script such as Roblox's "<code>"Animate"</code>", is downloaded
+                                into "<code>"assets/animations/"</code>" and listed in "
+                                <code>"assets/roblox_ids.toml"</code>", where the id finds its clip when the game
+                                runs. Most need a Roblox credential to download, and the report lists any that are
+                                missing."
                             </p>
                         </div>
                     </section>
@@ -540,12 +553,15 @@ car.Speed.Changed:Connect(onChange)   car:GetAttributeChangedSignal("Speed"):Con
                             <div class="callout callout-advanced">
                                 <img src="/assets/icons/settings.svg" alt="Pitfall" />
                                 <div>
-                                    <strong>"Mesh textures are not applied"</strong>
+                                    <strong>"A textured mesh gets its own copy"</strong>
                                     <p>
-                                        "A part's "<code>"[asset]"</code>" section has a mesh slot but no texture slot.
-                                        A SpecialMesh texture is dropped and recorded in the report, and a MeshPart's
-                                        texture is downloaded but not used, so textured meshes arrive in their part
-                                        color."
+                                        "A MeshPart's texture, or a SpecialMesh's, is baked into a copy of the mesh as
+                                        its glTF material, "<code>"rbx-<mesh>-tex-<texture>-<look>.glb"</code>", and the
+                                        part is set to "<code>"respect_gltf_materials"</code>". A MeshPart shows its
+                                        Color through the texture's transparent areas, as in Roblox; a SpecialMesh's
+                                        texture is tinted by its VertexColor. The part's own Material and Color no
+                                        longer change how it draws; edit the copy's material instead. Only PNG and
+                                        JPEG textures bake; anything else keeps the plain mesh and a report entry."
                                     </p>
                                 </div>
                             </div>

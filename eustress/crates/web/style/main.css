@@ -23134,6 +23134,294 @@ a.experience-card {
 }
 
 /* --------------------------------------------------------------------------
+   Hero: demo reel
+   --------------------------------------------------------------------------
+   Real Studio captures and a live simulation, looping muted in the tilted
+   frame. Click it to pause, the speaker button turns the sound on, the
+   timeline scrubs, and the corner button goes full screen.
+   The frame keeps the capture's panel styling so the swap from the still
+   image changes nothing around it. */
+
+.hero-reel {
+    position: relative;
+}
+
+.hero-render-video {
+    position: relative;
+    z-index: 1;
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    background: #05070a;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(60, 186, 84, 0.22);
+    box-shadow:
+        0 24px 60px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    transition: box-shadow 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hero-render-video { cursor: pointer; }
+
+.hero-render:hover .hero-render-video {
+    box-shadow:
+        0 34px 80px rgba(0, 0, 0, 0.55),
+        0 0 0 1px rgba(60, 186, 84, 0.16) inset;
+}
+
+/* In the browser's own full-screen player the reel is letterboxed, never
+   cropped, and loses the panel chrome. */
+.hero-render-video:fullscreen {
+    object-fit: contain;
+    border: 0;
+    border-radius: 0;
+    background: #000;
+}
+
+.hero-fullscreen {
+    position: absolute;
+    z-index: 2;
+    right: 14px;
+    bottom: 14px;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 12px;
+    border: 1px solid rgba(240, 246, 252, 0.18);
+    background: rgba(13, 17, 23, 0.72);
+    color: var(--color-text-primary);
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    opacity: 0.82;
+    transform: translateZ(1px);
+    transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.hero-fullscreen svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.hero-reel:hover .hero-fullscreen,
+.hero-fullscreen:focus-visible {
+    opacity: 1;
+}
+
+.hero-fullscreen:hover {
+    background: rgba(60, 186, 84, 0.22);
+    border-color: rgba(60, 186, 84, 0.6);
+    transform: translateZ(1px) scale(1.06);
+}
+
+.hero-fullscreen:focus-visible {
+    outline: 2px solid var(--color-eustress-green-hover);
+    outline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+    .hero-fullscreen {
+        width: 40px;
+        height: 40px;
+        right: 10px;
+        bottom: 10px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hero-fullscreen,
+    .hero-fullscreen:hover {
+        transition: none;
+        transform: none;
+    }
+}
+
+/* Sound toggle, stacked directly above the full-screen button. */
+.hero-sound {
+    bottom: 66px;
+}
+
+.hero-sound.is-muted {
+    color: rgba(240, 246, 252, 0.7);
+}
+
+/* A shade under the timeline so it reads over bright footage. */
+.hero-reel-scrim {
+    position: absolute;
+    z-index: 1;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 96px;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    background: linear-gradient(to top, rgba(5, 7, 10, 0.72), rgba(5, 7, 10, 0));
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+/* Timeline: click or drag the head to scrub. The hit area is taller than
+   the drawn track so it is easy to grab. */
+.hero-timeline {
+    position: absolute;
+    z-index: 2;
+    left: 18px;
+    right: 72px;
+    bottom: 26px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    touch-action: none;
+    outline: none;
+    transform: translateZ(1px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+}
+
+/* The timeline and its shade show while a pointer or a finger is active on
+   the reel (`show-controls`, set by the component, which drops it after a
+   few idle seconds), while the head is dragged, and while the timeline has
+   keyboard focus. Hidden, the timeline takes no clicks, so a tap near the
+   bottom of the video never seeks. */
+.hero-reel.show-controls .hero-reel-scrim,
+.hero-reel:has(.hero-timeline:focus-visible) .hero-reel-scrim,
+.hero-reel.show-controls .hero-timeline,
+.hero-timeline.dragging,
+.hero-timeline:focus-visible {
+    opacity: 1;
+}
+
+.hero-reel.show-controls .hero-timeline,
+.hero-timeline.dragging,
+.hero-timeline:focus-visible {
+    pointer-events: auto;
+}
+
+.hero-timeline-track {
+    position: relative;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(240, 246, 252, 0.22);
+    transition: height 0.15s ease;
+}
+
+.hero-timeline:hover .hero-timeline-track,
+.hero-timeline.dragging .hero-timeline-track,
+.hero-timeline:focus-visible .hero-timeline-track {
+    height: 6px;
+}
+
+.hero-timeline-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 2px;
+    background: var(--color-eustress-green-hover);
+    box-shadow: 0 0 10px rgba(0, 230, 118, 0.45);
+    transition: width 0.26s linear;
+}
+
+.hero-timeline-tick {
+    position: absolute;
+    top: 50%;
+    width: 2px;
+    height: 10px;
+    margin: -5px 0 0 -1px;
+    border-radius: 1px;
+    background: rgba(240, 246, 252, 0.5);
+    pointer-events: none;
+}
+
+.hero-timeline-head {
+    position: absolute;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border-radius: 50%;
+    background: #f0f6fc;
+    box-shadow: 0 0 0 3px rgba(0, 230, 118, 0.35), 0 2px 8px rgba(0, 0, 0, 0.5);
+    transition: left 0.26s linear, transform 0.15s ease;
+    cursor: grab;
+}
+
+.hero-timeline.dragging .hero-timeline-head {
+    transform: scale(1.2);
+    cursor: grabbing;
+}
+
+/* Jumps (dragging, the loop wrapping) move the head at once, not along a
+   slide across the whole track. */
+.hero-timeline.dragging .hero-timeline-fill,
+.hero-timeline.dragging .hero-timeline-head,
+.hero-timeline.jumped .hero-timeline-fill,
+.hero-timeline.jumped .hero-timeline-head {
+    transition: none;
+}
+
+/* The header over the head: current chapter and time. */
+.hero-timeline-label {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(13, 17, 23, 0.88);
+    border: 1px solid rgba(60, 186, 84, 0.35);
+    color: var(--color-text-primary);
+    font: 600 11px/1.2 var(--font-mono);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+}
+
+.hero-timeline:hover .hero-timeline-label,
+.hero-timeline.dragging .hero-timeline-label,
+.hero-timeline:focus-visible .hero-timeline-label {
+    opacity: 1;
+}
+
+.hero-timeline:focus-visible .hero-timeline-head {
+    outline: 2px solid var(--color-eustress-green-hover);
+    outline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+    .hero-sound {
+        bottom: 56px;
+    }
+    .hero-timeline {
+        left: 12px;
+        right: 60px;
+        bottom: 19px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hero-timeline-fill,
+    .hero-timeline-head,
+    .hero-timeline-track {
+        transition: none;
+    }
+}
+
+/* --------------------------------------------------------------------------
    Hero status pill
    --------------------------------------------------------------------------
    Its dot was still hard-coded to #4ade80, a green from before the canonical

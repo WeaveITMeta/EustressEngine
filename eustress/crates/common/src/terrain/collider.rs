@@ -9,8 +9,24 @@
 //! A chunk whose columns hold volumetric edits (see `volume`) collides on a
 //! trimesh of its LOD-0 marching-cubes surface instead (see `marching`),
 //! whatever LOD it renders at, since a heightfield cannot hold a cave.
-//! [`attach_chunk_collider`] and [`refresh_chunk_collider`] choose between
-//! the two for every chunk.
+//! A chunk of a sparse surface with holes in it (see
+//! `TerrainData::sparse_surface`) collides on a trimesh of exactly the quads
+//! its LOD-0 mesh keeps ([`super::chunk_ground_triangles`]), over the same
+//! heights and along the same diagonals, and a chunk that keeps none has no
+//! collider: a heightfield covers every cell of its chunk.
+//! [`attach_chunk_collider`] and [`refresh_chunk_collider`] choose among them
+//! for every chunk.
+//!
+//! Every trimesh is welded before it is built ([`weld_collider_triangles`]):
+//! vertices closer than [`collider_weld_tolerance`] merge, and triangles
+//! thinner than it, repeated, or on a vertex that is not finite are dropped.
+//! Marching cubes puts a crossing exactly on a lattice point wherever the
+//! field there is zero, which a cave cell beside a hole column does often, so
+//! a marched surface can carry many coincident vertices and sliver triangles
+//! that would spoil the internal-edge fix. A surface left with no triangle
+//! has no trimesh. Should parry still refuse the welded mesh with
+//! `FIX_INTERNAL_EDGES`, the trimesh is built without it (logged once) rather
+//! than dropped.
 //!
 //! The collider lives on a child entity offset by half a chunk. parry's
 //! heightfield is centred on its local origin (x and z span
@@ -34,6 +50,8 @@
 //! chunks it touched for a collider rebuild (see `dirty`), so a new collider
 //! is the signal that the chunk's material may have changed, and this needs
 //! no tracking of its own.
+
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use super::height_query::cache_cell_at_world;
@@ -61,8 +79,10 @@ pub fn chunk_collider_offset(config: &TerrainConfig) -> Vec3 {
 }
 
 /// Build the LOD-0 heightfield collider for `chunk_pos`, in the collider
-/// child's local frame (see [`chunk_collider_offset`]). `None` when the
-/// config has no usable chunk size.
+/// child's local frame (see [`chunk_collider_offset`]). A chunk with holes
+/// gets a trimesh of the quads its LOD-0 mesh keeps instead (see the module
+/// docs). `None` when the config has no usable chunk size, and for a chunk
+/// that keeps no quad.
 #[cfg(feature = "physics")]
 pub fn build_chunk_collider(
     chunk_pos: IVec2,
@@ -74,6 +94,14 @@ pub fn build_chunk_collider(
 
     if !(config.chunk_size.is_finite() && config.chunk_size > 0.0) {
         return None;
+    }
+    if let Some((positions, triangles)) = super::chunk_ground_triangles(chunk_pos, config, data) {
+        // Heights the heightfield below would replace, replaced alike.
+        let positions = positions
+            .into_iter()
+            .map(|p| if p.y.is_finite() { p } else { Vec3::new(p.x, config.height_offset, p.z) })
+            .collect();
+        return trimesh_collider_from_triangles(positions, triangles, config);
     }
     let resolution = config.resolution_for_lod(0);
     let stride = resolution as usize + 1;
@@ -111,30 +139,176 @@ pub fn build_volume_chunk_collider(
     volume: &TerrainVolume,
 ) -> Option<Collider> {
     let (positions, triangles) = super::volume_chunk_triangles(chunk_pos, config, data, volume)?;
-    volume_collider_from_triangles(positions, triangles, config)
+    trimesh_collider_from_triangles(positions, triangles, config)
 }
 
-/// The trimesh collider of a marched surface given as chunk-local positions
-/// and triangles, in the collider child's local frame.
+/// The trimesh collider of a surface given as chunk-local positions and
+/// triangles (a marched surface, or the ground a chunk with holes keeps), in
+/// the collider child's local frame, welded first (see the module docs).
+/// `None` when no triangle survives the weld.
 #[cfg(feature = "physics")]
-fn volume_collider_from_triangles(
+fn trimesh_collider_from_triangles(
     positions: Vec<Vec3>,
     triangles: Vec<[u32; 3]>,
     config: &TerrainConfig,
 ) -> Option<Collider> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Set by the first trimesh built without FIX_INTERNAL_EDGES.
+    static WITHOUT_EDGE_FIX_LOGGED: AtomicBool = AtomicBool::new(false);
+
+    let tolerance = collider_weld_tolerance(config, &positions);
+    let (positions, triangles) = weld_collider_triangles(&positions, &triangles, tolerance);
+    if triangles.is_empty() {
+        return None;
+    }
     let offset = chunk_collider_offset(config);
     let vertices: Vec<Vec3> = positions.into_iter().map(|p| p - offset).collect();
-    // FIX_INTERNAL_EDGES for the same reason as the heightfield's, and a
-    // lattice value of exactly zero makes coincident vertices whose sliver
-    // triangles are better merged away.
+    // FIX_INTERNAL_EDGES for the same reason as the heightfield's. The weld
+    // left no coincident vertex or sliver for DELETE_DEGENERATE_TRIANGLES to
+    // find; it stays as a guard.
     let flags = TrimeshFlags::FIX_INTERNAL_EDGES | TrimeshFlags::DELETE_DEGENERATE_TRIANGLES;
-    Collider::try_trimesh_with_config(vertices, triangles, flags).ok()
+    match Collider::try_trimesh_with_config(vertices.clone(), triangles.clone(), flags) {
+        Ok(collider) => Some(collider),
+        Err(error) => {
+            if !WITHOUT_EDGE_FIX_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "Terrain collider: a chunk trimesh could not be built with FIX_INTERNAL_EDGES ({error}); \
+                     it and any later one that fails alike are built without it"
+                );
+            }
+            Collider::try_trimesh_with_config(vertices, triangles, TrimeshFlags::empty()).ok()
+        }
+    }
+}
+
+/// Fraction of a lattice cell (`lattice_cell_size`) within which
+/// [`weld_collider_triangles`] merges vertices.
+const WELD_CELL_FRACTION: f32 = 1e-3;
+
+/// f32 steps at the largest coordinate that the weld tolerance always covers,
+/// so vertices high above the origin, whose rounding is coarser, still weld.
+const WELD_F32_STEPS: f32 = 8.0;
+
+/// Largest weld-grid coordinate [`weld_cell`] rounds to an integer; past it a
+/// vertex welds only with its exact copies.
+const MAX_WELD_CELL: f32 = 1.0e15;
+
+/// Distance within which the trimesh of a chunk welds its chunk-local
+/// `positions` (see [`weld_collider_triangles`]): a thousandth of a lattice
+/// cell, and at least [`WELD_F32_STEPS`] f32 steps at the largest finite
+/// coordinate among them.
+pub fn collider_weld_tolerance(config: &TerrainConfig, positions: &[Vec3]) -> f32 {
+    let largest = positions
+        .iter()
+        .filter(|position| position.is_finite())
+        .fold(0.0f32, |largest, position| largest.max(position.abs().max_element()));
+    (super::lattice_cell_size(config) * WELD_CELL_FRACTION).max(largest * WELD_F32_STEPS * f32::EPSILON)
+}
+
+/// Weld a triangle list for a trimesh collider. Vertices landing in one cube
+/// of a grid `tolerance` wide merge into the first of them; a triangle is
+/// dropped when a vertex is past the buffer or not finite, when two of its
+/// corners weld together, when it is no thicker than `tolerance` (its height
+/// over its longest edge), and when it repeats the corners of a kept triangle
+/// in any order. Returns the vertices the kept triangles use, in the order
+/// they first use them, and the kept triangles, in their order and winding.
+/// A tolerance that is not a positive number welds exact copies only.
+pub fn weld_collider_triangles(
+    positions: &[Vec3],
+    triangles: &[[u32; 3]],
+    tolerance: f32,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let tolerance = if tolerance.is_finite() { tolerance.max(0.0) } else { 0.0 };
+    let mut welded_of: Vec<Option<u32>> = vec![None; positions.len()];
+    let mut cells: HashMap<(bool, [i64; 3]), u32> = HashMap::new();
+    let mut welded: Vec<Vec3> = Vec::new();
+    let mut seen: HashSet<[u32; 3]> = HashSet::new();
+    let mut kept: Vec<[u32; 3]> = Vec::with_capacity(triangles.len());
+    'triangles: for triangle in triangles {
+        let mut ids = [0u32; 3];
+        for (id, &index) in ids.iter_mut().zip(triangle) {
+            let Some(welded_id) = weld_vertex(index, positions, tolerance, &mut welded_of, &mut cells, &mut welded)
+            else {
+                continue 'triangles;
+            };
+            *id = welded_id;
+        }
+        if ids[0] == ids[1] || ids[0] == ids[2] || ids[1] == ids[2] {
+            continue;
+        }
+        let [a, b, c] = ids.map(|id| welded[id as usize]);
+        let longest = (b - a).length().max((c - a).length()).max((c - b).length());
+        // Twice the area over the longest edge is the height onto that edge;
+        // written so a NaN drops the triangle too.
+        if !((b - a).cross(c - a).length() > tolerance * longest) {
+            continue;
+        }
+        let mut corners = ids;
+        corners.sort_unstable();
+        if seen.insert(corners) {
+            kept.push(ids);
+        }
+    }
+
+    let mut compact_of = vec![u32::MAX; welded.len()];
+    let mut vertices: Vec<Vec3> = Vec::new();
+    for triangle in &mut kept {
+        for id in triangle.iter_mut() {
+            let slot = &mut compact_of[*id as usize];
+            if *slot == u32::MAX {
+                *slot = vertices.len() as u32;
+                vertices.push(welded[*id as usize]);
+            }
+            *id = *slot;
+        }
+    }
+    (vertices, kept)
+}
+
+/// The welded vertex of `positions[index]` (see [`weld_collider_triangles`]),
+/// made the first time its weld cell is met. `None` for an index past the
+/// buffer or a position that is not finite.
+fn weld_vertex(
+    index: u32,
+    positions: &[Vec3],
+    tolerance: f32,
+    welded_of: &mut [Option<u32>],
+    cells: &mut HashMap<(bool, [i64; 3]), u32>,
+    welded: &mut Vec<Vec3>,
+) -> Option<u32> {
+    let slot = welded_of.get_mut(index as usize)?;
+    if slot.is_none() {
+        let position = positions[index as usize];
+        if !position.is_finite() {
+            return None;
+        }
+        let id = *cells.entry(weld_cell(position, tolerance)).or_insert_with(|| {
+            welded.push(position);
+            (welded.len() - 1) as u32
+        });
+        *slot = Some(id);
+    }
+    *slot
+}
+
+/// The weld cell of a finite `position`: its coordinates over `tolerance`,
+/// rounded, or (flagged) its exact bits where no grid applies, for a zero
+/// tolerance or coordinates past [`MAX_WELD_CELL`].
+fn weld_cell(position: Vec3, tolerance: f32) -> (bool, [i64; 3]) {
+    let scaled = (position / tolerance).round();
+    if tolerance > 0.0 && scaled.abs().max_element() <= MAX_WELD_CELL {
+        (false, [scaled.x as i64, scaled.y as i64, scaled.z as i64])
+    } else {
+        (true, [position.x.to_bits().into(), position.y.to_bits().into(), position.z.to_bits().into()])
+    }
 }
 
 /// The collider `chunk_pos` should have now: a trimesh of its marching-cubes
-/// surface when bricks reach its columns, else its LOD-0 heightfield. A
-/// volumetric chunk that cannot be marched keeps the heightfield, as its
-/// render mesh does.
+/// surface when bricks reach its columns, else its LOD-0 ground as
+/// [`build_chunk_collider`] builds it (a heightfield, or with holes a trimesh
+/// of the quads it keeps). A volumetric chunk that cannot be marched keeps
+/// that ground, as its render mesh does.
 #[cfg(feature = "physics")]
 pub fn build_terrain_chunk_collider(
     chunk_pos: IVec2,
@@ -171,7 +345,7 @@ pub fn attach_chunk_collider(
     {
         let marched = surface
             .filter(|_| !volume.is_empty() && super::chunk_has_volume(chunk_pos, config, volume))
-            .and_then(|(positions, triangles)| volume_collider_from_triangles(positions, triangles, config));
+            .and_then(|(positions, triangles)| trimesh_collider_from_triangles(positions, triangles, config));
         if let Some(collider) = marched.or_else(|| build_terrain_chunk_collider(chunk_pos, config, data, volume)) {
             spawn_collider_child(commands, chunk_entity, chunk_pos, config, collider);
         }
@@ -346,6 +520,7 @@ fn test_config() -> TerrainConfig {
         chunk_resolution: 16,
         chunks_x: 2,
         chunks_z: 2,
+        center_chunk: IVec2::ZERO,
         lod_levels: 3,
         lod_distances: vec![64.0, 128.0, 256.0],
         view_distance: 256.0,
@@ -437,6 +612,53 @@ mod tests {
         // (2, 0) starts at column 63 and has none.
         assert_eq!(dominant_chunk_slot(IVec2::new(0, 0), &config, &data), Some(grass));
         assert_eq!(dominant_chunk_slot(IVec2::new(2, 0), &config, &data), Some(grass));
+    }
+
+    #[test]
+    fn welding_merges_near_vertices_and_drops_degenerate_repeated_and_broken_triangles() {
+        let positions = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1e-4, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(0.5, 1e-5, 0.5),
+        ];
+        let triangles: [[u32; 3]; 10] = [
+            [0, 2, 1],  // kept
+            [3, 2, 1],  // the first, once vertex 3 welds onto vertex 0
+            [1, 2, 0],  // the first again, in another order
+            [0, 1, 4],  // collinear
+            [0, 0, 2],  // a repeated vertex
+            [0, 3, 2],  // a repeated vertex once welded
+            [5, 1, 2],  // a vertex that is not a number
+            [1, 2, 99], // a vertex past the buffer
+            [0, 6, 7],  // a sliver 10 micrometres thick
+            [1, 2, 6],  // kept
+        ];
+        let (vertices, kept) = weld_collider_triangles(&positions, &triangles, 1e-3);
+        assert_eq!(vertices, [Vec3::ZERO, Vec3::Z, Vec3::X, Vec3::new(1.0, 0.0, 1.0)]);
+        assert_eq!(kept, [[0u32, 1, 2], [2, 1, 3]]);
+
+        // Nothing usable leaves nothing, rather than an empty mesh with
+        // vertices.
+        let (vertices, kept) = weld_collider_triangles(&positions, &[[0, 0, 2], [0, 1, 4], [5, 1, 2]], 1e-3);
+        assert!(vertices.is_empty() && kept.is_empty());
+
+        // A tolerance that is not a number welds exact copies only, so
+        // vertex 3 stays apart and its triangle is kept.
+        let (_, kept) = weld_collider_triangles(&positions, &triangles[..2], f32::NAN);
+        assert_eq!(kept.len(), 2);
+
+        // A thousandth of a 4 m cell near the origin; a few f32 steps of the
+        // largest finite coordinate far from it.
+        let config = test_config();
+        let near = collider_weld_tolerance(&config, &[Vec3::new(3.0, -2.0, 1.0), Vec3::NAN]);
+        assert!((near - 4.0e-3).abs() < 1e-9, "got {near}");
+        let far = collider_weld_tolerance(&config, &[Vec3::new(1.0, -1.0e5, 2.0)]);
+        assert!((far - 1.0e5 * WELD_F32_STEPS * f32::EPSILON).abs() < 1e-6, "got {far}");
     }
 
     #[test]
@@ -564,6 +786,116 @@ mod physics_tests {
         // Without bricks the chunk keeps its heightfield.
         let plain = build_terrain_chunk_collider(chunk, &config, &data, &TerrainVolume::new()).expect("builds");
         assert!(plain.shape().as_heightfield().is_some());
+    }
+
+    #[test]
+    fn a_chunk_with_holes_collides_on_a_trimesh_of_the_quads_it_keeps() {
+        use bevy::ecs::system::RunSystemOnce;
+        use crate::realism::materials::properties::MaterialProperties;
+        use crate::terrain::height_query::ensure_material_cache;
+        use crate::terrain::material::MATERIAL_SLOT_NONE;
+        use crate::terrain::{chunk_ground_quads, chunk_height_grid, TerrainMaterialSlots, TerrainRoot};
+
+        let config = test_config();
+        let mut data = bumpy_data(&config);
+        ensure_material_cache(&mut data);
+        data.sparse_surface = true;
+        let chunk = IVec2::new(0, 0);
+        let resolution = config.resolution_for_lod(0);
+        let stride = resolution + 1;
+        // A hole under LOD-0 vertex (5, 7), whose cell no other vertex of the
+        // chunk stands on: it takes the four quads around that vertex.
+        let r = resolution as f32;
+        let cell_of = |x: u32, z: u32| {
+            let uv = config.chunk_point_uv(chunk, x as f32 / r, z as f32 / r);
+            let (cx, cz) = data.cell_at_uv(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0));
+            cz * data.cache_width as usize + cx
+        };
+        let hole = cell_of(5, 7);
+        assert_eq!((0..stride * stride).filter(|&i| cell_of(i % stride, i / stride) == hole).count(), 1);
+        data.material_cache[hole] = [MATERIAL_SLOT_NONE; 4];
+
+        let kept = chunk_ground_quads(chunk, resolution, &config, &data).expect("the chunk has a hole");
+        let kept = kept.iter().filter(|kept| **kept).count();
+        assert_eq!(kept, (resolution * resolution) as usize - 4);
+        let collider = build_chunk_collider(chunk, &config, &data).expect("the chunk keeps ground");
+        let trimesh = collider.shape().as_trimesh().expect("a chunk with holes collides on a trimesh");
+        assert_eq!(trimesh.num_triangles(), 2 * kept, "two triangles per quad the mesh keeps");
+
+        // Inside a kept quad the collider meets the mesh's triangle, one probe
+        // per triangle; over the hole's quads a ray falls through.
+        let grid = chunk_height_grid(chunk, resolution, &config, &data);
+        let step = config.chunk_size / r;
+        let corner = chunk_world_position(chunk, &config);
+        let (cx, cz) = (11usize, 12usize);
+        let h = |x: usize, z: usize| grid[z * stride as usize + x];
+        let (h00, h10, h01, h11) = (h(cx, cz), h(cx + 1, cz), h(cx, cz + 1), h(cx + 1, cz + 1));
+        for (fu, fv) in [(0.3f32, 0.2f32), (0.8, 0.6)] {
+            // The mesh splits each quad along its (x, z + 1)-(x + 1, z) diagonal.
+            let expected = if fu + fv <= 1.0 {
+                h00 + fu * (h10 - h00) + fv * (h01 - h00)
+            } else {
+                h11 + (1.0 - fu) * (h01 - h11) + (1.0 - fv) * (h10 - h11)
+            };
+            let (x, z) = (corner.x + (cx as f32 + fu) * step, corner.z + (cz as f32 + fv) * step);
+            let hit = collider_hit_y(&collider, chunk, &config, x, z);
+            assert!((hit - expected).abs() < 1e-3, "quad ({cx}, {cz}) at ({fu}, {fv}): collider y {hit}, mesh y {expected}");
+        }
+        let translation = corner + chunk_collider_offset(&config);
+        let over_hole = Vec3::new(corner.x + 5.5 * step, 200.0, corner.z + 7.5 * step);
+        assert!(collider.cast_ray(translation, Quat::IDENTITY, over_hole, Vec3::NEG_Y, 1_000.0, true).is_none());
+
+        // A chunk clear of the hole keeps its heightfield, and a chunk of
+        // holes has no collider.
+        let clear = build_chunk_collider(IVec2::new(2, 2), &config, &data).expect("builds");
+        assert!(clear.shape().as_heightfield().is_some());
+        let mut holes = data.clone();
+        holes.material_cache.fill([MATERIAL_SLOT_NONE; 4]);
+        assert!(build_chunk_collider(chunk, &config, &holes).is_none());
+
+        // The trimesh takes the friction of the ground it keeps.
+        let mut world = World::new();
+        world.insert_resource(TerrainMaterialSlots::builtins());
+        world.spawn((TerrainRoot, config.clone(), data));
+        let entity = world.spawn((TerrainChunkCollider { chunk }, collider)).id();
+        world.run_system_once(apply_terrain_chunk_friction).expect("the system runs");
+        let grass = MaterialProperties::from_name("Grass").expect("the registry knows grass");
+        assert_eq!(world.get::<Friction>(entity).map(|friction| friction.static_coefficient), Some(grass.friction_static));
+    }
+
+    #[test]
+    fn a_trimesh_keeps_its_good_triangles_among_degenerate_ones() {
+        let config = test_config();
+        // A flat square at y = 5 over x and z 10..20 of chunk (0, 0), and the
+        // junk a marched cell beside a hole column leaves: a vertex a
+        // millimetre from a corner (the weld tolerance is 4 mm here), a vertex
+        // that is not a number, and one on the square's diagonal.
+        let positions = vec![
+            Vec3::new(10.0, 5.0, 10.0),
+            Vec3::new(20.0, 5.0, 10.0),
+            Vec3::new(10.0, 5.0, 20.0),
+            Vec3::new(20.0, 5.0, 20.0),
+            Vec3::new(10.001, 5.0, 10.0),
+            Vec3::new(f32::NAN, 5.0, 15.0),
+            Vec3::new(15.0, 5.0, 15.0),
+        ];
+        let square: [[u32; 3]; 2] = [[0, 2, 1], [1, 2, 3]];
+        // A copy of the first triangle once welded, a collinear one, repeated
+        // vertices before and after the weld, a vertex that is not a number,
+        // one past the buffer, and the second triangle wound the other way.
+        let junk: [[u32; 3]; 7] = [[4, 2, 1], [0, 6, 3], [0, 0, 1], [5, 1, 2], [1, 2, 42], [4, 0, 2], [2, 1, 3]];
+        let triangles: Vec<[u32; 3]> = square.iter().chain(junk.iter()).copied().collect();
+        let collider =
+            trimesh_collider_from_triangles(positions.clone(), triangles, &config).expect("the square survives the weld");
+        let trimesh = collider.shape().as_trimesh().expect("a trimesh collider");
+        assert_eq!(trimesh.num_triangles(), 2, "only the square's two triangles");
+        let hit = collider_hit_y(&collider, IVec2::ZERO, &config, 15.3, 12.4);
+        assert!((hit - 5.0).abs() < 1e-3, "the square is hit at y {hit}");
+
+        // Nothing but degenerate or broken triangles: no collider, rather
+        // than an empty trimesh.
+        let broken: Vec<[u32; 3]> = vec![[0, 6, 3], [0, 0, 1], [5, 1, 2], [1, 2, 42], [4, 0, 2]];
+        assert!(trimesh_collider_from_triangles(positions, broken, &config).is_none());
     }
 
     #[test]

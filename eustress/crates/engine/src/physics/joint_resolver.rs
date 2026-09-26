@@ -85,8 +85,8 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use avian3d::prelude::{
-    AngleLimit, DistanceJoint, FixedJoint, JointDisabled, PrismaticJoint, RevoluteJoint, RigidBody,
-    SphericalJoint,
+    AngleLimit, DistanceJoint, FixedJoint, JointCollisionDisabled, JointDisabled, PrismaticJoint,
+    RevoluteJoint, RigidBody, SphericalJoint,
 };
 
 use eustress_common::classes::{
@@ -94,6 +94,8 @@ use eustress_common::classes::{
     Instance, Motor6D, PrismaticConstraint, RodConstraint, RopeConstraint, TorsionSpringConstraint,
     UniversalConstraint, WeldConstraint,
 };
+use eustress_common::avatar::spawn::AvatarBody;
+use bevy::math::Isometry3d;
 
 use crate::play_mode::PlayModeState;
 use crate::space::file_loader::LoadedFromFile;
@@ -180,6 +182,11 @@ pub struct PendingConstraintJoint {
     pub lower: f32,
     pub upper: f32,
     pub length: f32,
+    /// A legacy `Weld`'s `C0` and `C1`, its frame in each part, from
+    /// `[constraint]` `c0` / `c0_rotation` and `c1` / `c1_rotation`.
+    /// `None` for every other class.
+    pub c0: Option<Transform>,
+    pub c1: Option<Transform>,
 }
 
 impl PendingConstraintJoint {
@@ -300,7 +307,8 @@ fn resolve_attachment_side(
 /// name), and by how that ref resolves to a body:
 ///
 /// - [`RefKind::Part`] — `Part0`/`Part1` point **directly at part bodies**.
-///   In Roblox only `WeldConstraint` and `Motor6D` are part-referenced.
+///   In Roblox these are `WeldConstraint`, `Motor6D` and the legacy
+///   `Weld` (Roblox's `ManualWeld`, `Snap` and `Glue` import as `Weld`).
 /// - [`RefKind::Attachment`] — `Attachment0`/`Attachment1` point at
 ///   `Attachment` entities; the joint binds the attachment's **owning
 ///   RigidBody** (walk the `ChildOf` chain). Every other modern Roblox
@@ -318,7 +326,7 @@ fn constraint_ref_kind(class: ClassName) -> Option<RefKind> {
     use ClassName::*;
     match class {
         // Part-referenced (refs point straight at bodies).
-        WeldConstraint | Motor6D => Some(RefKind::Part),
+        WeldConstraint | Weld | Motor6D => Some(RefKind::Part),
         // Attachment-referenced (refs point at Attachments → owning body).
         HingeConstraint
         | DistanceConstraint
@@ -384,6 +392,78 @@ fn read_constraint_f32(doc: &toml::Value, key: &str) -> Option<f32> {
         })
 }
 
+/// A legacy weld's frame in one part: `[constraint] <base>` (meters) and
+/// `<base>_rotation` (a quaternion, x y z w), as roblox-import writes them.
+/// A missing half is identity, Roblox's default `C0` and `C1`.
+fn read_constraint_frame(doc: &toml::Value, base: &str) -> Transform {
+    let floats = |key: &str, n: usize| -> Option<Vec<f32>> {
+        let a = doc.get("constraint")?.get(key)?.as_array()?;
+        if a.len() != n {
+            return None;
+        }
+        a.iter()
+            .map(|v| v.as_float().map(|f| f as f32).or_else(|| v.as_integer().map(|i| i as f32)))
+            .collect()
+    };
+    let translation = floats(base, 3).map_or(Vec3::ZERO, |t| Vec3::new(t[0], t[1], t[2]));
+    let rotation = floats(&format!("{base}_rotation"), 4)
+        .map(|q| Quat::from_xyzw(q[0], q[1], q[2], q[3]))
+        .filter(|q| q.is_finite() && q.length() > 1e-6)
+        .map_or(Quat::IDENTITY, Quat::normalize);
+    Transform::from_translation(translation).with_rotation(rotation)
+}
+
+/// How far apart a legacy weld's two frames sit, in meters and degrees,
+/// when that is more than a centimeter or a degree: the weld will pull its
+/// parts together by that much when physics starts.
+fn weld_mismatch(t0: &GlobalTransform, t1: &GlobalTransform, c0: Transform, c1: Transform) -> Option<(f32, f32)> {
+    let pose = |t: &GlobalTransform| {
+        let (_, rotation, translation) = t.to_scale_rotation_translation();
+        Isometry3d::new(translation, rotation)
+    };
+    let a = pose(t0) * Isometry3d::new(c0.translation, c0.rotation);
+    let b = pose(t1) * Isometry3d::new(c1.translation, c1.rotation);
+    let gap = Vec3::from(a.translation).distance(Vec3::from(b.translation));
+    let turn = a.rotation.angle_between(b.rotation).to_degrees();
+    (gap > 0.01 || turn > 1.0).then_some((gap, turn))
+}
+
+/// A pose with the scale dropped: a part's `GlobalTransform` carries its
+/// size, which never moves what hangs from it.
+fn pose_of(t: &GlobalTransform) -> Isometry3d {
+    let (_, rotation, translation) = t.to_scale_rotation_translation();
+    Isometry3d::new(translation, rotation)
+}
+
+/// A frame given on a parent's pose, expressed in a body:
+/// `body⁻¹ · parent · local`.
+fn frame_in_body(body: Isometry3d, parent: Isometry3d, local: Isometry3d) -> Isometry3d {
+    body.inverse() * parent * local
+}
+
+/// An Attachment's frame in the body it moves with: its part-local
+/// `cframe` on its parent's pose, as Roblox composes `Part.CFrame *
+/// Attachment.CFrame`. A parent with no pose of its own counts as the world
+/// (Roblox's Attachments under Terrain are world-space). Without the
+/// component (an older loader), the attachment entity's own pose stands in.
+fn attachment_frame(
+    attachment: Entity,
+    body: Entity,
+    components: &Query<&eustress_common::classes::Attachment>,
+    child_of: &Query<&ChildOf>,
+    transforms: &Query<&GlobalTransform>,
+) -> Option<Isometry3d> {
+    let body_pose = pose_of(transforms.get(body).ok()?);
+    match components.get(attachment) {
+        Ok(a) => {
+            let parent = child_of.get(attachment).ok().and_then(|c| transforms.get(c.0).ok());
+            let local = Isometry3d::new(a.cframe.translation, a.cframe.rotation);
+            Some(frame_in_body(body_pose, parent.map_or(Isometry3d::IDENTITY, pose_of), local))
+        }
+        Err(_) => Some(frame_in_body(body_pose, pose_of(transforms.get(attachment).ok()?), Isometry3d::IDENTITY)),
+    }
+}
+
 /// Pass 1a: read each freshly-loaded constraint's `_instance.toml` **once**
 /// and stage everything needed to build its joint onto a
 /// [`PendingConstraintJoint`] component. This is the only system that
@@ -440,6 +520,7 @@ fn cache_loaded_constraint_refs(
         }
 
         let nan = f32::NAN;
+        let legacy_weld = matches!(inst.class_name, ClassName::Weld);
         commands.entity(entity).insert((
             ConstraintScanned,
             PendingConstraintJoint {
@@ -455,6 +536,8 @@ fn cache_loaded_constraint_refs(
                     .or_else(|| read_constraint_f32(&doc, "max_distance"))
                     .or_else(|| read_constraint_f32(&doc, "rest_length"))
                     .unwrap_or(nan),
+                c0: legacy_weld.then(|| read_constraint_frame(&doc, "c0")),
+                c1: legacy_weld.then(|| read_constraint_frame(&doc, "c1")),
             },
         ));
     }
@@ -472,6 +555,11 @@ fn resolve_pending_constraint_joints(
     instances: Query<(Entity, &Instance)>,
     child_of: Query<&ChildOf>,
     bodies: Query<(), With<RigidBody>>,
+    transforms: Query<&GlobalTransform>,
+    avatars: Query<(), With<AvatarBody>>,
+    attachment_components: Query<&eustress_common::classes::Attachment>,
+    unpropagated: Query<(), Added<GlobalTransform>>,
+    mut mismatched: Local<usize>,
 ) {
     if pending.is_empty() {
         return;
@@ -514,9 +602,66 @@ fn resolve_pending_constraint_joints(
             _ => continue,
         };
 
-        // Local anchors (`c0`/`c1`) are not applied here — same scope as
-        // the original placeholder resolver, which bound bodies only.
-        insert_joint_for_class(&mut commands, entity, inst.class_name, b0, b1, p);
+        // A weld between a seat and a character's avatar is a record (the
+        // SeatWeld a seat makes), never a joint: the avatar is a kinematic
+        // character, and a joint would drag the vehicle by its controller.
+        // Riding carries the character (docs/networking/SEATS.md). A weld of
+        // anything else to a character (a hat) stays an ordinary joint.
+        let seat = |b: Entity| {
+            instances.get(b).is_ok_and(|(_, i)| matches!(i.class_name, ClassName::Seat | ClassName::VehicleSeat))
+        };
+        if matches!(inst.class_name, ClassName::WeldConstraint | ClassName::Weld)
+            && ((seat(b0) && avatars.contains(b1)) || (seat(b1) && avatars.contains(b0)))
+        {
+            commands.entity(entity).insert(ConstraintBound).remove::<PendingConstraintJoint>();
+            continue;
+        }
+
+        if let (Some(c0), Some(c1), Ok(t0), Ok(t1)) = (p.c0, p.c1, transforms.get(b0), transforms.get(b1)) {
+            if let Some((gap, turn)) = weld_mismatch(t0, t1, c0, c1) {
+                *mismatched += 1;
+                if *mismatched <= 8 {
+                    warn!(
+                        "joint_resolver: Weld '{}' pulls its parts {gap:.3} m and {turn:.1} degrees to meet its C0 and C1",
+                        inst.name
+                    );
+                }
+                if *mismatched == 8 {
+                    warn!("joint_resolver: further welds whose parts sit apart from their C0 and C1 are not listed");
+                }
+            }
+        }
+
+        // A WeldConstraint takes its frame from where the two bodies are
+        // right now (see `insert_joint_for_class`), anchored between them.
+        let anchor = match (transforms.get(b0), transforms.get(b1)) {
+            (Ok(t0), Ok(t1)) => Some((t0.translation() + t1.translation()) * 0.5),
+            _ => None,
+        };
+        // An attachment-referenced joint works at its attachments: each
+        // end's frame in its body. While a pose is missing it keeps the
+        // bodies' own frames, as before.
+        let frames = if p.attachment_kind {
+            let end = |uuid: Option<&str>| uuid.filter(|u| !u.is_empty()).and_then(|u| uuid_index.get(u).copied());
+            match (end(p.ref0_uuid.as_deref()), end(p.ref1_uuid.as_deref())) {
+                (Some(a0), Some(a1)) => {
+                    // A GlobalTransform is filled in after Update, so one added
+                    // since this system last ran still reads as the origin.
+                    // Bind a frame later, once the poses are real (a Space
+                    // loaded during Play; at Play start, one frame).
+                    let parents = [a0, a1].map(|a| child_of.get(a).ok().map(|c| c.0));
+                    if [a0, a1, b0, b1].into_iter().chain(parents.into_iter().flatten()).any(|e| unpropagated.contains(e)) {
+                        continue;
+                    }
+                    attachment_frame(a0, b0, &attachment_components, &child_of, &transforms)
+                        .zip(attachment_frame(a1, b1, &attachment_components, &child_of, &transforms))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        insert_joint_for_class(&mut commands, entity, inst.class_name, b0, b1, p, anchor, frames);
         let mut ec = commands.entity(entity);
         ec.insert(ConstraintBound)
             .remove::<PendingConstraintJoint>();
@@ -531,6 +676,12 @@ fn resolve_pending_constraint_joints(
 /// Insert the Avian joint component matching `class`, bound to `b0`/`b1`,
 /// using the per-class scalars staged on [`PendingConstraintJoint`]. A
 /// `NaN` slot means "absent on disk — use the component default".
+///
+/// `anchor` is a world-space point between the two bodies, used by the weld.
+/// `frames` are an attachment-referenced joint's two ends, each in its
+/// body; a hinge turns about the frame's X axis and a slider slides along
+/// it, as in Roblox.
+#[allow(clippy::too_many_arguments)]
 fn insert_joint_for_class(
     commands: &mut Commands,
     entity: Entity,
@@ -538,11 +689,56 @@ fn insert_joint_for_class(
     b0: Entity,
     b1: Entity,
     p: &PendingConstraintJoint,
+    anchor: Option<Vec3>,
+    frames: Option<(Isometry3d, Isometry3d)>,
 ) {
     use ClassName::*;
+    let revolute = |j: RevoluteJoint| match frames {
+        Some((f0, f1)) => j.with_local_frame1(f0).with_local_frame2(f1).with_hinge_axis(Vec3::X),
+        None => j,
+    };
+    let prismatic = |j: PrismaticJoint| match frames {
+        Some((f0, f1)) => j.with_local_frame1(f0).with_local_frame2(f1).with_slider_axis(Vec3::X),
+        None => j,
+    };
+    let spherical = |j: SphericalJoint| match frames {
+        Some((f0, f1)) => j.with_local_frame1(f0).with_local_frame2(f1),
+        None => j,
+    };
+    let distance = |j: DistanceJoint| match frames {
+        Some((f0, f1)) => j.with_local_anchor1(Vec3::from(f0.translation)).with_local_anchor2(Vec3::from(f1.translation)),
+        None => j,
+    };
     match class {
         WeldConstraint => {
-            commands.entity(entity).insert(FixedJoint::new(b0, b1));
+            // A WeldConstraint holds its parts where they are when it binds,
+            // as in Roblox. `FixedJoint::new` alone uses identity frames: it
+            // pins both body ORIGINS together with matching rotations, which
+            // drags any two separated parts onto each other and twists a
+            // rotated part into line. Giving both frames the same GLOBAL
+            // anchor and basis makes Avian convert them to each body's local
+            // frame on the next step, so the current relative pose becomes
+            // the rest pose.
+            let mut joint = FixedJoint::new(b0, b1);
+            if let Some(anchor) = anchor {
+                joint = joint.with_anchor(anchor).with_basis(Quat::IDENTITY);
+            }
+            // Welded parts are one rigid assembly and do not collide with
+            // each other, as in Roblox. Parts welded where they overlap (a
+            // truss node) would otherwise have the contact solver pushing
+            // them apart against the joint every step.
+            commands.entity(entity).insert((joint, JointCollisionDisabled));
+        }
+        Weld => {
+            // A legacy weld (Roblox's ManualWeld, Snap, Glue) holds
+            // `Part0 * C0 == Part1 * C1`, its frames in each part, and its
+            // two parts never collide with each other.
+            let frame = |t: Option<Transform>| {
+                let t = t.unwrap_or_default();
+                Isometry3d::new(t.translation, t.rotation)
+            };
+            let joint = FixedJoint::new(b0, b1).with_local_frame1(frame(p.c0)).with_local_frame2(frame(p.c1));
+            commands.entity(entity).insert((joint, JointCollisionDisabled));
         }
         Motor6D | HingeConstraint => {
             // Avian sets angle limits via the `angle_limit` field (see the
@@ -550,7 +746,7 @@ fn insert_joint_for_class(
             // Eustress `HingeConstraint` component documents the angles as
             // radians and the spawner passes them through unconverted, so we
             // do the same (no deg→rad scaling) for round-trip consistency.
-            let mut joint = RevoluteJoint::new(b0, b1);
+            let mut joint = revolute(RevoluteJoint::new(b0, b1));
             if let (Some(lo), Some(hi)) = (
                 PendingConstraintJoint::scalar(p.lower),
                 PendingConstraintJoint::scalar(p.upper),
@@ -565,13 +761,13 @@ fn insert_joint_for_class(
             let max = PendingConstraintJoint::scalar(p.length).unwrap_or(5.0);
             commands
                 .entity(entity)
-                .insert(DistanceJoint::new(b0, b1).with_limits(0.0, max));
+                .insert(distance(DistanceJoint::new(b0, b1)).with_limits(0.0, max));
         }
         RopeConstraint => {
             let length = PendingConstraintJoint::scalar(p.length).unwrap_or(10.0);
             commands
                 .entity(entity)
-                .insert(DistanceJoint::new(b0, b1).with_limits(0.0, length));
+                .insert(distance(DistanceJoint::new(b0, b1)).with_limits(0.0, length));
         }
         SpringConstraint => {
             // Match the spring spawner: a near-rigid distance joint pinned
@@ -579,29 +775,29 @@ fn insert_joint_for_class(
             let rest = PendingConstraintJoint::scalar(p.length).unwrap_or(5.0);
             commands
                 .entity(entity)
-                .insert(DistanceJoint::new(b0, b1).with_limits(rest, rest));
+                .insert(distance(DistanceJoint::new(b0, b1)).with_limits(rest, rest));
         }
         PrismaticConstraint => {
-            commands.entity(entity).insert(PrismaticJoint::new(b0, b1));
+            commands.entity(entity).insert(prismatic(PrismaticJoint::new(b0, b1)));
         }
         BallSocketConstraint => {
-            commands.entity(entity).insert(SphericalJoint::new(b0, b1));
+            commands.entity(entity).insert(spherical(SphericalJoint::new(b0, b1)));
         }
         // ── Attachment-referenced ──
         RodConstraint => {
             let length = PendingConstraintJoint::scalar(p.length).unwrap_or(2.0);
             commands
                 .entity(entity)
-                .insert(DistanceJoint::new(b0, b1).with_limits(length, length));
+                .insert(distance(DistanceJoint::new(b0, b1)).with_limits(length, length));
         }
         CylindricalConstraint => {
-            commands.entity(entity).insert(PrismaticJoint::new(b0, b1));
+            commands.entity(entity).insert(prismatic(PrismaticJoint::new(b0, b1)));
         }
         TorsionSpringConstraint => {
-            commands.entity(entity).insert(RevoluteJoint::new(b0, b1));
+            commands.entity(entity).insert(revolute(RevoluteJoint::new(b0, b1)));
         }
         UniversalConstraint => {
-            commands.entity(entity).insert(SphericalJoint::new(b0, b1));
+            commands.entity(entity).insert(spherical(SphericalJoint::new(b0, b1)));
         }
         _ => {}
     }
@@ -783,5 +979,59 @@ impl Plugin for JointResolverPlugin {
                     .chain()
                     .run_if(in_state(PlayModeState::Playing)),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_attachment_frame_is_its_part_frame_times_its_cframe_in_the_body() {
+        // A 4 x 1 x 2 part at (10, 0, 0), turned a quarter turn about Y, is its
+        // own body. An attachment 1 m along the part's X lands 1 m along the
+        // part's turned X (world -Z), never scaled by the part's size.
+        let turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let part = GlobalTransform::from(
+            Transform::from_xyz(10.0, 0.0, 0.0).with_rotation(turn).with_scale(Vec3::new(4.0, 1.0, 2.0)),
+        );
+        let local = Isometry3d::from_translation(Vec3::X);
+        let frame = frame_in_body(pose_of(&part), pose_of(&part), local);
+        assert!(Vec3::from(frame.translation).distance(Vec3::X) < 1e-5, "in its own body, the cframe itself");
+        let world = pose_of(&part) * frame;
+        assert!(Vec3::from(world.translation).distance(Vec3::new(10.0, 0.0, -1.0)) < 1e-5, "{world:?}");
+        // The same part nested under a body 5 m below: the frame carries the offset.
+        let body = Isometry3d::from_translation(Vec3::new(10.0, -5.0, 0.0));
+        let nested = frame_in_body(body, pose_of(&part), local);
+        assert!((body * nested).translation.distance(world.translation) < 1e-5);
+    }
+
+    #[test]
+    fn a_weld_frame_reads_as_the_importer_writes_it() {
+        let doc: toml::Value = r#"
+            [constraint]
+            c0 = [0.6096, 0.0, 0.0]
+            c0_rotation = [0.0, 0.7071068, 0.0, 0.7071068]
+        "#
+        .parse()
+        .unwrap();
+        let c0 = read_constraint_frame(&doc, "c0");
+        assert!(c0.translation.distance(Vec3::new(0.6096, 0.0, 0.0)) < 1e-6);
+        assert!(c0.rotation.angle_between(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)) < 1e-4);
+        // C1 is absent: identity, Roblox's default.
+        assert_eq!(read_constraint_frame(&doc, "c1"), Transform::IDENTITY);
+    }
+
+    #[test]
+    fn a_weld_whose_parts_sit_where_it_says_is_quiet() {
+        // Part0 at the origin, Part1 two meters along X and turned about Y;
+        // C0 names Part1's pose in Part0, C1 is identity.
+        let turn = Quat::from_rotation_y(0.7);
+        let t0 = GlobalTransform::from(Transform::from_scale(Vec3::new(4.0, 1.0, 2.0)));
+        let t1 = GlobalTransform::from(Transform::from_xyz(2.0, 0.0, 0.0).with_rotation(turn).with_scale(Vec3::splat(3.0)));
+        let c0 = Transform::from_xyz(2.0, 0.0, 0.0).with_rotation(turn);
+        assert_eq!(weld_mismatch(&t0, &t1, c0, Transform::IDENTITY), None, "the parts' sizes are not part of the pose");
+        let (gap, _) = weld_mismatch(&t0, &t1, Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(turn), Transform::IDENTITY).unwrap();
+        assert!((gap - 1.0).abs() < 1e-5);
     }
 }

@@ -450,40 +450,50 @@ pub(crate) fn cylinder(
     Ok((solid, names))
 }
 
-/// A solid cone on `frame`'s z axis: radius `r_top` at `top` (a
-/// position along z), narrowing to a point at `apex`. Used for true
-/// countersinks, which the hole feature previously cut as a straight
-/// counterbore at a hard-coded depth.
-pub(crate) fn cone(frame: &Frame, r_top: f64, top: f64, apex: f64, prefix: &str) -> CadResult<(Solid, Vec<String>)> {
-    let a = frame.point(0.0, 0.0, top);
-    let rim = frame.point(r_top, 0.0, top);
-    let b = frame.point(0.0, 0.0, apex);
-    let va = builder::vertex(a);
-    let vr = builder::vertex(rim);
-    let vb = builder::vertex(b);
-    let wire: Wire = vec![builder::line(&va, &vr), builder::line(&vr, &vb)].into();
-    // truck revolves about the line through the wire's first vertex;
-    // its own closed-cone example runs the wire DOWN the axis while the
-    // axis points UP, so the axis here points from apex back to top.
-    let axis = (a - b).normalize();
-    let shell = builder::cone(&wire, axis, Rad(TAU));
-    let solid = Solid::try_new(vec![shell]).map_err(|e| kernel(format!("countersink cone: {e}")))?;
-    let solid = ensure_outward(solid);
-    let names = (0..solid.face_iter().count()).map(|i| format!("{prefix}.countersink.{i}")).collect();
-    Ok((solid, names))
-}
-
-/// Flip a solid that came out inside-out.
+/// The countersink cutter: a conical frustum on `frame`'s z axis, radius
+/// `r_top` at `top` narrowing to `r_bottom` at `bottom` (positions along z).
 ///
-/// Decided by the sign of the enclosed volume of a coarse tessellation,
-/// which is cheap for the small construction bodies this is used on and
-/// independent of how the builder happened to wind its faces.
-pub(crate) fn ensure_outward(mut solid: Solid) -> Solid {
-    let mesh = crate::eval::tessellate_solid(&solid, 0.02 * crate::eval::solid_size(&solid).max(1.0e-9));
-    if crate::measure::mass_properties(&mesh).signed_volume < 0.0 {
-        solid.not();
-    }
-    solid
+/// A frustum, not a cone to a point. A countersink's cone ends inside the
+/// bore, and the piece of a cone surface beyond its circle of contact with
+/// the bore keeps the apex, where the surface's angle parameter is
+/// undefined: truck-shapeops cannot divide a face there, so the union with
+/// the bore failed every time. Stopping inside the bore, short of the
+/// axis, removes the same material and leaves no singular point. It is a
+/// loft between two circles, whose ruled surface is the exact cone, capped
+/// by two flat disks.
+///
+/// The circles start 0.6 rad off the frame's x axis. A bore's circle joins
+/// its two arcs at 0 and 180 degrees, and seams of the two solids in one
+/// half-plane would cross exactly on their circle of contact.
+pub(crate) fn countersink_frustum(
+    frame: &Frame,
+    r_top: f64,
+    top: f64,
+    r_bottom: f64,
+    bottom: f64,
+    prefix: &str,
+) -> CadResult<(Solid, Vec<String>)> {
+    const START: f64 = 0.6;
+    let ring = |r: f64| {
+        let a = [r * START.cos(), r * START.sin()];
+        let b = [-a[0], -a[1]];
+        let tag = |i: usize| SegTag::Face(format!("{prefix}.countersink.{i}"));
+        Region {
+            outer: Loop {
+                segs: vec![
+                    Seg { geom: SegGeom::Arc { c: [0.0, 0.0], r, a, b, ccw: true }, tag: tag(0) },
+                    Seg { geom: SegGeom::Arc { c: [0.0, 0.0], r, a: b, b: a, ccw: true }, tag: tag(1) },
+                ],
+            },
+            holes: Vec::new(),
+        }
+    };
+    let sections = [(ring(r_top), frame.offset(top)), (ring(r_bottom), frame.offset(bottom))];
+    let (solid, mut names) = loft(&sections, prefix)?;
+    let last = names.len() - 1;
+    names[0] = format!("{prefix}.countersink.top");
+    names[last] = format!("{prefix}.countersink.bottom");
+    Ok((solid, names))
 }
 
 #[cfg(test)]

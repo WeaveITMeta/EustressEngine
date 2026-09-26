@@ -1,19 +1,29 @@
 # Lighting Service Properties
-# Controls global lighting and atmospheric effects
+#
+# Every row here reaches the renderer: `sync_service_properties_to_lighting`
+# (engine `plugins/lighting_plugin.rs`) reads each one, and a unit test there
+# walks this file and fails on any row it does not. A row's key in
+# `_service.toml` is its name in snake_case (`ColorShift_Top` is
+# `color_shift_top`). The sun's own light, colour and disc are the Sun's
+# properties (select Lighting > Sun); the sky's are the Sky's and the
+# Atmosphere's.
 
 [Data]
 Name = { type = "string", value = "Lighting", readonly = true }
 ClassName = { type = "string", value = "Lighting", readonly = true }
 
-[Lighting]
-Ambient = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Ambient light color" }
-Brightness = { type = "float", value = 2.0, description = "Overall brightness" }
-ColorShift_Bottom = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Bottom color shift" }
-ColorShift_Top = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Top color shift" }
-OutdoorAmbient = { type = "Color3", value = [0.5, 0.5, 0.5], description = "Outdoor ambient color" }
-ShadowSoftness = { type = "float", value = 0.2, description = "Shadow edge softness" }
-EnvironmentDiffuseScale = { type = "float", value = 1.0, description = "Environment diffuse lighting scale" }
-EnvironmentSpecularScale = { type = "float", value = 1.0, description = "Environment specular lighting scale" }
+[Appearance]
+Ambient = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Flat light that reaches every surface, indoors or out, sky or no sky. Black by default: OutdoorAmbient carries the sky's fill." }
+Brightness = { type = "float", value = 2.0, description = "Scales the sun's and the moon's light. 2 is the light as authored; 4 is twice as bright." }
+ColorShift_Bottom = { type = "Color3", value = [0.0, 0.0, 0.0], description = "A hue the shadowed side takes on (the sky's fill). Black is none." }
+ColorShift_Top = { type = "Color3", value = [0.0, 0.0, 0.0], description = "A hue the sun's and the moon's light takes on. Black is none." }
+EnvironmentDiffuseScale = { type = "float", value = 1.0, description = "How much the sky fills shadows and unlit sides." }
+EnvironmentSpecularScale = { type = "float", value = 1.0, description = "How strongly surfaces reflect the sky." }
+GlobalShadows = { type = "bool", value = true, description = "Shadows from every light. Off turns all shadow maps off." }
+OutdoorAmbient = { type = "Color3", value = [0.5, 0.5, 0.5], description = "The colour of the sky's fill in shadow." }
+
+[Exposure]
+ExposureCompensation = { type = "float", value = 0.0, description = "Camera exposure bias in stops: +1 is twice as bright, -1 half." }
 
 [Time]
 # ClockTime and TimeOfDay are two VIEWS of one stored number, `clock_time` in
@@ -21,19 +31,16 @@ EnvironmentSpecularScale = { type = "float", value = 1.0, description = "Environ
 # one writes `clock_time`, and both re-render from it.
 #
 # ClockTime is the readout, edited as text.
-ClockTime = { type = "string", source = "clock_time", display = "clock_hms", value = 14.0, description = "Time of day as HH:MM:SS. Drives the sun position and sky colour." }
+ClockTime = { type = "string", source = "clock_time", display = "clock_hms", value = 14.0, description = "Time of day as HH:MM:SS. Drives the sun, the moon and the sky." }
 # TimeOfDay is the same value as a slider. Its domain is 6..30 rather than 0..24
-# so the handle sweeps a whole day left to right starting at dawn — 06:00 at the
-# far left through 05:59 at the far right — instead of wrapping mid-track.
+# so the handle sweeps a whole day left to right starting at dawn: 06:00 at the
+# far left through 05:59 at the far right, instead of wrapping mid-track.
 TimeOfDay = { type = "slider", source = "clock_time", display = "clock", min = 6.0, max = 30.0, value = 14.0, description = "Drag to scrub the day, 06:00 through 05:59." }
-GeographicLatitude = { type = "float", value = 41.73, description = "Geographic latitude for sun position" }
+GeographicLatitude = { type = "float", value = 41.73, description = "Latitude in degrees, north positive. Sets the sun's and the moon's paths and the stars' turning." }
+DayCycle = { type = "bool", value = false, description = "Advance the clock on its own." }
+DayLengthMinutes = { type = "float", value = 24.0, description = "Real minutes for one whole day when DayCycle is on." }
 
-[Atmosphere] # AAA This will be in the atmosphere.toml object, not in lighting itself.
-FogColor = { type = "Color3", value = [0.75, 0.75, 0.75], description = "Fog color" }
-FogEnd = { type = "float", value = 100000.0, description = "Fog end distance" }
-FogStart = { type = "float", value = 0.0, description = "Fog start distance" }
-
-[Effects]
-GlobalShadows = { type = "bool", value = true, description = "Enable global shadows" }
-Technology = { type = "enum", value = "Default", options = ["Default"], description = "Lighting technology" }
-ExposureCompensation = { type = "float", value = 0.0, description = "Exposure compensation" }
+[Fog]
+FogColor = { type = "Color3", value = [0.75, 0.75, 0.75], description = "Fog colour." }
+FogEnd = { type = "float", value = 100000.0, description = "Distance in metres where fog is complete." }
+FogStart = { type = "float", value = 0.0, description = "Distance in metres where fog begins." }

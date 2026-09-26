@@ -5,6 +5,9 @@
 //! - LOD-aware resolution
 //! - Skirts for seamless LOD transitions
 //! - Smooth normals
+//! - Holes: on a sparse surface (`TerrainData::sparse_surface`) every quad
+//!   with a corner on a hole is left out, with the skirt below it (see
+//!   [`chunk_ground_quads`])
 
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -293,8 +296,6 @@ pub fn chunk_height_grid(
         .height_cache
         .is_empty()
         .then(|| TerrainNoiseContext::new(config.seed, config.height_scale));
-    let total_chunks_x = (config.chunks_x * 2 + 1) as f32;
-    let total_chunks_z = (config.chunks_z * 2 + 1) as f32;
 
     for z in 0..=resolution {
         for x in 0..=resolution {
@@ -306,9 +307,8 @@ pub fn chunk_height_grid(
                     chunk_pos.y as f32 * size + v * size,
                 ),
                 None => {
-                    let world_u = ((chunk_pos.x as f32 + u + config.chunks_x as f32) / total_chunks_x).clamp(0.0, 1.0);
-                    let world_v = ((chunk_pos.y as f32 + v + config.chunks_z as f32) / total_chunks_z).clamp(0.0, 1.0);
-                    config.world_height(data.sample_height(world_u, world_v))
+                    let uv = config.chunk_point_uv(chunk_pos, u, v);
+                    config.world_height(data.sample_height(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0)))
                 }
             };
             heights.push(height);
@@ -317,11 +317,125 @@ pub fn chunk_height_grid(
     heights
 }
 
+/// Which quads of chunk `chunk_pos`'s vertex grid at `resolution` have
+/// ground, one flag per quad laid out `z * resolution + x` (quad `(x, z)`
+/// spans vertices `x..=x + 1` by `z..=z + 1` of [`chunk_height_grid`]'s
+/// grid). On a sparse surface (`TerrainData::sparse_surface`) a quad has none
+/// when any of its four corners stands on a hole
+/// (`TerrainData::point_is_hole`). `None` when every quad has ground, which
+/// off a sparse surface is always.
+///
+/// The single definition of which ground a chunk keeps: the render mesh draws
+/// only these quads at every LOD, the LOD-0 collider (`collider.rs`) is built
+/// from exactly the quads LOD 0 keeps, and [`ground_at_world`] answers from
+/// them for raycasts and scatter.
+pub fn chunk_ground_quads(chunk_pos: IVec2, resolution: u32, config: &TerrainConfig, data: &TerrainData) -> Option<Vec<bool>> {
+    if !data.sparse_surface || data.material_cache.is_empty() {
+        return None;
+    }
+    let resolution = resolution.max(1);
+    let stride = resolution as usize + 1;
+    let mut holes = Vec::with_capacity(stride * stride);
+    for z in 0..=resolution {
+        for x in 0..=resolution {
+            // The vertex's own `u, v`, computed as `chunk_height_grid` does.
+            let u = x as f32 / resolution as f32;
+            let v = z as f32 / resolution as f32;
+            holes.push(data.point_is_hole(config, chunk_pos, u, v));
+        }
+    }
+    if !holes.contains(&true) {
+        return None;
+    }
+    let mut quads = Vec::with_capacity(resolution as usize * resolution as usize);
+    for z in 0..resolution as usize {
+        for x in 0..resolution as usize {
+            let i = z * stride + x;
+            quads.push(!(holes[i] || holes[i + 1] || holes[i + stride] || holes[i + stride + 1]));
+        }
+    }
+    Some(quads)
+}
+
+/// The two triangles of the quad whose first vertex is `i` in a vertex grid
+/// `stride` vertices wide, split along the `(x, z + 1)-(x + 1, z)` diagonal
+/// and wound counter-clockwise seen from above (Bevy's front face):
+/// bottom-left, top-left, bottom-right, then bottom-right, top-left,
+/// top-right. The render mesh and the collider of a chunk with holes both
+/// triangulate through this, and parry's heightfield splits along the same
+/// diagonal.
+#[inline]
+fn quad_triangles(i: u32, stride: u32) -> [[u32; 3]; 2] {
+    [[i, i + stride, i + 1], [i + 1, i + stride, i + stride + 1]]
+}
+
+/// The LOD-0 ground of chunk `chunk_pos` on a sparse surface with holes in
+/// it, as triangles: the LOD-0 vertex grid at [`chunk_height_grid`]'s
+/// heights, positions local to the chunk entity exactly as the render mesh
+/// places them, and the two triangles of every quad [`chunk_ground_quads`]
+/// keeps, split and wound as the render mesh splits and winds them. `None`
+/// when every quad has ground; no triangles when none has. What the collider
+/// of such a chunk is built from.
+pub fn chunk_ground_triangles(chunk_pos: IVec2, config: &TerrainConfig, data: &TerrainData) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    let resolution = config.resolution_for_lod(0).max(1);
+    let quads = chunk_ground_quads(chunk_pos, resolution, config, data)?;
+    let grid = chunk_height_grid(chunk_pos, resolution, config, data);
+    let size = config.chunk_size;
+    let stride = resolution + 1;
+    let mut positions = Vec::with_capacity(grid.len());
+    for z in 0..=resolution {
+        for x in 0..=resolution {
+            let u = x as f32 / resolution as f32;
+            let v = z as f32 / resolution as f32;
+            positions.push(Vec3::new(u * size, grid[(z * stride + x) as usize], v * size));
+        }
+    }
+    let mut triangles = Vec::new();
+    for z in 0..resolution {
+        for x in 0..resolution {
+            if quads[(z * resolution + x) as usize] {
+                triangles.extend(quad_triangles(z * stride + x, stride));
+            }
+        }
+    }
+    Some((positions, triangles))
+}
+
+/// Whether world XZ `(world_x, world_z)` has ground under it: it lies in a
+/// quad the LOD-0 mesh of its chunk keeps (see [`chunk_ground_quads`]).
+/// Every point of a full surface has ground; on a sparse one, no point off
+/// the chunk grid does. Terrain raycasts and scatter ask this, so neither
+/// lands on ground the meshes and colliders leave out.
+pub fn ground_at_world(config: &TerrainConfig, data: &TerrainData, world_x: f32, world_z: f32) -> bool {
+    if !data.sparse_surface || data.material_cache.is_empty() {
+        return true;
+    }
+    let (fx, fz) = (world_x / config.chunk_size, world_z / config.chunk_size);
+    if !(fx.is_finite() && fz.is_finite()) {
+        return false;
+    }
+    let chunk = IVec2::new(fx.floor() as i32, fz.floor() as i32);
+    if !config.contains_chunk(chunk) {
+        return false;
+    }
+    let resolution = config.resolution_for_lod(0).max(1);
+    // The quad along one axis: the fraction past the chunk's corner in quads.
+    let quad = |f: f32, start: i32| (((f - start as f32) * resolution as f32).floor().max(0.0) as u32).min(resolution - 1);
+    let (qx, qz) = (quad(fx, chunk.x), quad(fz, chunk.y));
+    [(qx, qz), (qx + 1, qz), (qx, qz + 1), (qx + 1, qz + 1)].into_iter().all(|(x, z)| {
+        !data.point_is_hole(config, chunk, x as f32 / resolution as f32, z as f32 / resolution as f32)
+    })
+}
+
 /// Generate the heightfield mesh for a terrain chunk.
 ///
 /// Systems that mesh chunks call [`super::generate_chunk_render_mesh`]
 /// instead, which draws a chunk holding volumetric edits with marching cubes
 /// at LOD 0 and comes here for everything else.
+///
+/// On a sparse surface only the quads [`chunk_ground_quads`] keeps are drawn,
+/// and only their skirts hang (see `add_skirts`). The vertex buffers keep
+/// every vertex, so a chunk that keeps no quad yields a mesh without indices.
 pub fn generate_chunk_mesh(
     chunk_pos: IVec2,
     lod: u32,
@@ -374,8 +488,9 @@ pub fn generate_chunk_mesh(
             let world_z = chunk_pos.y as f32 * size + v * size;
 
             // Global height-cache UV (data path — also drives colour + normals).
-            let world_u = ((chunk_pos.x as f32 + u + config.chunks_x as f32) / total_chunks_x).clamp(0.0, 1.0);
-            let world_v = ((chunk_pos.y as f32 + v + config.chunks_z as f32) / total_chunks_z).clamp(0.0, 1.0);
+            let uv = config.chunk_point_uv(chunk_pos, u, v);
+            let world_u = uv.x.clamp(0.0, 1.0);
+            let world_v = uv.y.clamp(0.0, 1.0);
 
             // Surface height (procedural or from the cached heightmap).
             let height = grid[z as usize * grid_stride + x as usize];
@@ -417,29 +532,36 @@ pub fn generate_chunk_mesh(
         }
     }
 
-    // Generate indices for triangle list
+    // Generate indices for triangle list: two triangles per quad that has
+    // ground, which off a sparse surface is every quad.
+    let ground = chunk_ground_quads(chunk_pos, resolution, config, data);
     let quad_count = (resolution * resolution) as usize;
     let mut indices: Vec<u32> = Vec::with_capacity(quad_count * 6);
-    
+
     for z in 0..resolution {
         for x in 0..resolution {
+            if ground.as_ref().is_some_and(|quads| !quads[(z * resolution + x) as usize]) {
+                continue;
+            }
             let i = z * (resolution + 1) + x;
-            
-            // Two triangles per quad (counter-clockwise winding for front face)
-            // Triangle 1: bottom-left, top-left, bottom-right
-            indices.push(i);
-            indices.push(i + resolution + 1);
-            indices.push(i + 1);
-            
-            // Triangle 2: bottom-right, top-left, top-right
-            indices.push(i + 1);
-            indices.push(i + resolution + 1);
-            indices.push(i + resolution + 2);
+            for triangle in quad_triangles(i, resolution + 1) {
+                indices.extend_from_slice(&triangle);
+            }
         }
     }
-    
+
     // Add skirts for LOD seam hiding
-    add_skirts(&mut positions, &mut normals, &mut uvs, &mut colors, &mut indices, resolution, size, height_scale);
+    add_skirts(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut colors,
+        &mut indices,
+        resolution,
+        size,
+        height_scale,
+        ground.as_deref(),
+    );
     
     // Build mesh
     let mut mesh = Mesh::new(
@@ -557,9 +679,20 @@ fn calculate_normals(normals: &mut Vec<[f32; 3]>, positions: &[[f32; 3]], resolu
 }
 
 /// Add skirts to hide LOD seams between chunks at different LOD levels
-/// 
+///
 /// Skirts are vertical strips extending downward from chunk edges that
 /// prevent gaps from appearing when adjacent chunks have different resolutions.
+///
+/// Each skirt segment hangs below the border edge of one border quad, and
+/// `ground` (the chunk's [`chunk_ground_quads`], `None` when every quad has
+/// ground) leaves it out whenever that quad is left out. That is exactly when
+/// one of the segment's two top vertices belongs to no kept quad of the chunk:
+/// a hole on either top vertex drops every quad around that vertex, and a
+/// hole on either inner corner drops both border quads around the top vertex
+/// beside it. So no skirt hangs from ground the chunk does not draw. Every
+/// skirt vertex is still added, so the vertex count does not depend on the
+/// holes.
+#[allow(clippy::too_many_arguments)]
 fn add_skirts(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
@@ -569,10 +702,13 @@ fn add_skirts(
     resolution: u32,
     size: f32,
     _height_scale: f32,
+    ground: Option<&[bool]>,
 ) {
     let skirt_depth = skirt_depth(size);
     let stride = resolution + 1;
     let base_vertex_count = positions.len() as u32;
+    // Whether the segment below the border edge of quad `(x, z)` hangs.
+    let hangs = |x: u32, z: u32| ground.map_or(true, |quads| quads[(z * resolution + x) as usize]);
     
     // Add skirt vertices for each edge
     // Bottom edge (z = 0)
@@ -621,6 +757,9 @@ fn add_skirts(
     // Bottom edge triangles (face -Z direction)
     let bottom_skirt_start = base_vertex_count;
     for x in 0..resolution {
+        if !hangs(x, 0) {
+            continue;
+        }
         let top_left = x;
         let top_right = x + 1;
         let bottom_left = bottom_skirt_start + x;
@@ -639,6 +778,9 @@ fn add_skirts(
     // Top edge triangles (face +Z direction)
     let top_skirt_start = bottom_skirt_start + stride;
     for x in 0..resolution {
+        if !hangs(x, resolution - 1) {
+            continue;
+        }
         let top_left = resolution * stride + x;
         let top_right = resolution * stride + x + 1;
         let bottom_left = top_skirt_start + x;
@@ -657,6 +799,9 @@ fn add_skirts(
     // Left edge triangles (face -X direction)
     let left_skirt_start = top_skirt_start + stride;
     for z in 0..resolution {
+        if !hangs(0, z) {
+            continue;
+        }
         let top_top = z * stride;
         let top_bottom = (z + 1) * stride;
         let bottom_top = left_skirt_start + z;
@@ -675,6 +820,9 @@ fn add_skirts(
     // Right edge triangles (face +X direction)
     let right_skirt_start = left_skirt_start + stride;
     for z in 0..resolution {
+        if !hangs(resolution - 1, z) {
+            continue;
+        }
         let top_top = z * stride + resolution;
         let top_bottom = (z + 1) * stride + resolution;
         let bottom_top = right_skirt_start + z;
@@ -684,9 +832,216 @@ fn add_skirts(
         indices.push(top_top);
         indices.push(top_bottom);
         indices.push(bottom_top);
-        
+
         indices.push(top_bottom);
         indices.push(bottom_bottom);
         indices.push(bottom_top);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::terrain::material::{material_cell, MaterialCell, MATERIAL_SLOT_NONE};
+
+    const NO_MATERIAL: MaterialCell = [MATERIAL_SLOT_NONE, MATERIAL_SLOT_NONE, 0, 0];
+
+    /// 3 x 3 chunks of 32 m at 8 cells: a 24 x 24 raster sloping gently
+    /// along X, all Grass. LOD 0 meshes a chunk at 8 quads a side, 4 m each.
+    fn config() -> TerrainConfig {
+        TerrainConfig {
+            chunk_size: 32.0,
+            chunk_resolution: 8,
+            chunks_x: 1,
+            chunks_z: 1,
+            height_scale: 10.0,
+            ..TerrainConfig::default()
+        }
+    }
+
+    fn grassy(config: &TerrainConfig) -> TerrainData {
+        let mut data = TerrainData::procedural();
+        data.resize_cache(config);
+        let w = data.cache_width as usize;
+        for (i, h) in data.height_cache.iter_mut().enumerate() {
+            *h = 0.3 + 0.01 * (i % w) as f32;
+        }
+        data.material_cache = vec![material_cell(TerrainMaterial::Grass.to_u8()); data.height_cache.len()];
+        data
+    }
+
+    /// Raster index of the cell LOD-0 vertex `(x, z)` of `chunk` stands on.
+    fn vertex_cell(config: &TerrainConfig, data: &TerrainData, chunk: IVec2, x: u32, z: u32) -> usize {
+        let r = config.resolution_for_lod(0) as f32;
+        let uv = config.chunk_point_uv(chunk, x as f32 / r, z as f32 / r);
+        let (cx, cz) = data.cell_at_uv(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0));
+        cz * data.cache_width as usize + cx
+    }
+
+    /// Makes the cell under LOD-0 vertex `(x, z)` of `chunk` a hole, after
+    /// checking that no other vertex of the chunk stands on it, so the quads
+    /// it takes are the ones around that vertex.
+    fn hole_under(config: &TerrainConfig, data: &mut TerrainData, chunk: IVec2, x: u32, z: u32) {
+        let r = config.resolution_for_lod(0);
+        let cell = vertex_cell(config, data, chunk, x, z);
+        let sharing = (0..=r)
+            .flat_map(|b| (0..=r).map(move |a| (a, b)))
+            .filter(|&(a, b)| vertex_cell(config, data, chunk, a, b) == cell)
+            .count();
+        assert_eq!(sharing, 1, "vertex ({x}, {z}) shares its cell with another vertex");
+        data.material_cache[cell] = NO_MATERIAL;
+    }
+
+    /// The quads the LOD-`lod` mesh of `chunk` draws, as `(x, z)`, and the
+    /// skirt segments it hangs.
+    fn drawn(chunk: IVec2, lod: u32, config: &TerrainConfig, data: &TerrainData) -> (HashSet<(u32, u32)>, usize) {
+        let mut meshes = Assets::<Mesh>::default();
+        let handle = generate_chunk_mesh(chunk, lod, config, data, &mut meshes);
+        let mesh = meshes.get(&handle).expect("mesh was just added");
+        let stride = config.resolution_for_lod(lod) + 1;
+        assert_eq!(mesh.count_vertices(), (stride * stride + 4 * stride) as usize, "every vertex is kept");
+        let indices: &[u32] = match mesh.indices() {
+            Some(Indices::U32(values)) => values.as_slice(),
+            _ => panic!("terrain mesh indices are U32"),
+        };
+        assert_eq!(indices.len() % 6, 0, "whole quads and whole skirt segments");
+        let mut quads = HashSet::new();
+        let mut skirts = 0;
+        for pair in indices.chunks_exact(6) {
+            // A skirt segment's pair of triangles uses a skirt vertex.
+            if pair.iter().all(|&i| i < stride * stride) {
+                assert!(quads.insert((pair[0] % stride, pair[0] / stride)), "a quad is drawn twice");
+            } else {
+                skirts += 1;
+            }
+        }
+        (quads, skirts)
+    }
+
+    fn every_quad(resolution: u32) -> HashSet<(u32, u32)> {
+        (0..resolution).flat_map(|z| (0..resolution).map(move |x| (x, z))).collect()
+    }
+
+    #[test]
+    fn a_hole_drops_exactly_the_quads_touching_its_vertex() {
+        let config = config();
+        let r = config.resolution_for_lod(0);
+        let mut data = grassy(&config);
+        data.sparse_surface = true;
+        hole_under(&config, &mut data, IVec2::ZERO, 2, 3);
+
+        let (quads, skirts) = drawn(IVec2::ZERO, 0, &config, &data);
+        let mut expected = every_quad(r);
+        for quad in [(1, 2), (2, 2), (1, 3), (2, 3)] {
+            assert!(expected.remove(&quad));
+        }
+        assert_eq!(quads, expected);
+        assert_eq!(skirts, 4 * r as usize, "no border quad went, so every skirt segment hangs");
+        let kept = chunk_ground_quads(IVec2::ZERO, r, &config, &data).expect("the chunk has a hole");
+        assert_eq!(kept.iter().filter(|kept| !**kept).count(), 4);
+        // The chunk beside it stands on none of the hole.
+        assert_eq!(chunk_ground_quads(IVec2::new(1, 0), r, &config, &data), None);
+    }
+
+    #[test]
+    fn a_hole_at_the_border_takes_the_skirt_below_its_quads() {
+        let config = config();
+        let r = config.resolution_for_lod(0);
+        // On the -Z border, and one row in: either way two border quads go,
+        // and so do the two skirt segments below them.
+        for (x, z, gone, dropped) in [(3, 0, [(2, 0), (3, 0)], 2), (6, 1, [(5, 0), (6, 0)], 4)] {
+            let mut data = grassy(&config);
+            data.sparse_surface = true;
+            hole_under(&config, &mut data, IVec2::ZERO, x, z);
+            let (quads, skirts) = drawn(IVec2::ZERO, 0, &config, &data);
+            assert_eq!(quads.len(), (r * r) as usize - dropped, "hole at ({x}, {z})");
+            assert!(gone.iter().all(|quad| !quads.contains(quad)), "hole at ({x}, {z})");
+            assert_eq!(skirts, 4 * r as usize - 2, "hole at ({x}, {z})");
+        }
+    }
+
+    #[test]
+    fn a_chunk_without_ground_keeps_no_quad_at_any_lod() {
+        let config = config();
+        let mut data = grassy(&config);
+        data.sparse_surface = true;
+        // Every cell of chunk (0, 0)'s tile is a hole; the chunks around it
+        // keep their ground.
+        let side = config.chunk_resolution;
+        let tile = config.chunk_grid_index(IVec2::ZERO).expect("on the grid") * side;
+        let w = data.cache_width as usize;
+        for z in tile.y..tile.y + side {
+            for x in tile.x..tile.x + side {
+                data.material_cache[z as usize * w + x as usize] = NO_MATERIAL;
+            }
+        }
+        assert!(!data.chunk_has_ground(&config, IVec2::ZERO));
+        assert!(data.chunk_has_ground(&config, IVec2::new(1, 0)));
+        for lod in 0..config.lod_levels {
+            assert_eq!(drawn(IVec2::ZERO, lod, &config, &data), (HashSet::new(), 0), "LOD {lod}");
+        }
+        let (positions, triangles) = chunk_ground_triangles(IVec2::ZERO, &config, &data).expect("the chunk has holes");
+        assert!(triangles.is_empty());
+        assert_eq!(positions.len(), 81);
+        assert!(!drawn(IVec2::new(1, 0), 0, &config, &data).0.is_empty());
+    }
+
+    #[test]
+    fn a_full_surface_keeps_every_quad_whatever_its_materials() {
+        let config = config();
+        let r = config.resolution_for_lod(0);
+        let mut data = grassy(&config);
+        data.material_cache.fill(NO_MATERIAL);
+        assert!(!data.sparse_surface);
+        assert_eq!(chunk_ground_quads(IVec2::ZERO, r, &config, &data), None);
+        assert_eq!(chunk_ground_triangles(IVec2::ZERO, &config, &data), None);
+        assert_eq!(drawn(IVec2::ZERO, 0, &config, &data), (every_quad(r), 4 * r as usize));
+        assert!(data.chunk_has_ground(&config, IVec2::ZERO));
+        assert!(ground_at_world(&config, &data, 10.0, 10.0));
+    }
+
+    #[test]
+    fn the_ground_triangles_are_the_kept_quads_over_the_mesh_vertices() {
+        let config = config();
+        let r = config.resolution_for_lod(0);
+        let mut data = grassy(&config);
+        data.sparse_surface = true;
+        hole_under(&config, &mut data, IVec2::ZERO, 2, 3);
+        let (positions, triangles) = chunk_ground_triangles(IVec2::ZERO, &config, &data).expect("the chunk has a hole");
+        assert_eq!(triangles.len(), 2 * (r * r - 4) as usize);
+
+        // The vertices the render mesh draws, and its surface triangles.
+        let mut meshes = Assets::<Mesh>::default();
+        let handle = generate_chunk_mesh(IVec2::ZERO, 0, &config, &data, &mut meshes);
+        let mesh = meshes.get(&handle).expect("mesh was just added");
+        let mesh_positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("terrain mesh positions are Float32x3");
+        for (i, p) in positions.iter().enumerate() {
+            assert_eq!(p.to_array(), mesh_positions[i], "vertex {i}");
+        }
+        let indices: &[u32] = match mesh.indices() {
+            Some(Indices::U32(values)) => values.as_slice(),
+            _ => panic!("terrain mesh indices are U32"),
+        };
+        let surface: Vec<u32> = triangles.iter().flatten().copied().collect();
+        assert_eq!(indices[..surface.len()], surface[..]);
+    }
+
+    #[test]
+    fn ground_at_world_follows_the_kept_quads() {
+        let config = config();
+        let mut data = grassy(&config);
+        hole_under(&config, &mut data, IVec2::ZERO, 2, 3);
+        // 4 m quads: quad (1, 2) of chunk (0, 0), around (6, 10), touches the
+        // hole's vertex; quad (4, 4), around (18, 18), does not.
+        assert!(ground_at_world(&config, &data, 6.0, 10.0), "a full surface has ground everywhere");
+        data.sparse_surface = true;
+        assert!(!ground_at_world(&config, &data, 6.0, 10.0));
+        assert!(ground_at_world(&config, &data, 18.0, 18.0));
+        assert!(!ground_at_world(&config, &data, 500.0, 18.0), "off the grid");
     }
 }

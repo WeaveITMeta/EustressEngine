@@ -66,21 +66,16 @@
 //!   included, first removes the layers an earlier export wrote; the other
 //!   layers in the folder stay.
 //!
-//! ## Load trigger — INTEGRATOR NOTE
+//! ## Loading it back
 //!
-//! The engine currently has NO code path that reads this format on Space
-//! open: `load_terrain_toml` / `load_chunks_from_disk` /
-//! `chunk_matmap_path` have zero callers, so an exported
-//! `Workspace/Terrain/` directory is inert until one of these lands:
-//! (a) in-session, spawn it the way `handle_import_terrain` (engine
-//! `ui/spawn_events.rs`) does — `TerrainTomlFile::to_terrain_config()`,
-//! then `TerrainData::procedural()` + `resize_cache(&config)` +
-//! `load_chunks_from_disk(terrain_dir, &config, &mut data)`, then
-//! `spawn_terrain(...)`; or (b) an engine-side once-per-Space latch
-//! mirroring `terrain_voxel_load.rs`. CAUTION: `sync_terrain_class_to_system`
-//! (engine `terrain_plugin.rs`) despawns `TerrainRoot` and respawns pure
-//! procedural data on `Added<Terrain>` — a disk-load hook must run after
-//! (or suppress) it, or the loaded R16 terrain is clobbered.
+//! `terrain::disk::hydrate_terrain_from_disk` reads this format:
+//! `_terrain.toml` through `TerrainTomlFile::to_terrain_config()`, a raster
+//! sized with `resize_cache`, the chunks through `load_chunks_from_disk`, and
+//! the `volume/*.vbk` bricks. Studio runs it when a Space opens (the engine's
+//! `terrain_disk_load`), after an export (`ui/spawn_events.rs`) and when a
+//! Terrain instance is added to a Space without terrain
+//! (`sync_terrain_class_to_system`, which never replaces a terrain already
+//! loaded); the Player runs it when it opens a Space.
 //!
 //! Determinism: same [`WorldOutput`] in, byte-identical files out — fixed
 //! templates (no timestamps), fixed chunk order (`cz` outer `-N..=N`, `cx`
@@ -298,10 +293,11 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     // out-of-range chunks are bounds-dropped by the loader anyway, so a
     // failed removal is non-fatal.) The previous terrain's volume bricks go
     // too, or its caves would be carved into the new ground on load, and so
-    // do its material maps, legacy splatmaps included.
+    // do its material maps, legacy splatmaps included, and its water.
     clear_stale_files(&chunks_dir, "r16");
     clear_stale_material_maps(&terrain_dir);
     clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
+    clear_stale_water(&terrain_dir);
 
     let mut summary = ExportSummary::default();
 
@@ -379,10 +375,10 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
 
 /// A dead-flat terrain plate — the ground a builder starts on.
 ///
-/// Written in EXACTLY the format [`export_to_space`] writes and the engine's
-/// `hydrate_terrain_from_disk` reads, so the plate persists across a Space
-/// reload and every brush / LOD / streaming path treats it like any other
-/// terrain. Unlike the worldgen pipeline (hydrology + erosion + climate +
+/// Written in EXACTLY the format [`export_to_space`] writes and
+/// `terrain::disk::hydrate_terrain_from_disk` reads, so the plate persists
+/// across a Space reload and every brush / LOD / streaming path treats it
+/// like any other terrain. Unlike the worldgen pipeline (hydrology + erosion + climate +
 /// materials), nothing is simulated here: the heights are a constant, so the
 /// write returns in well under a second at the sizes the ribbon offers.
 ///
@@ -521,8 +517,8 @@ impl FlatSpec {
 ///
 /// Deterministic: same spec in, byte-identical files out. Clears stale
 /// `.r16`/`.png` a previous, larger export left behind (legacy splatmaps
-/// included), and the previous terrain's `.vbk` volume bricks, first, so
-/// the directory afterwards contains EXACTLY this plate.
+/// included), and the previous terrain's `.vbk` volume bricks and water,
+/// first, so the directory afterwards contains EXACTLY this plate.
 pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<ExportSummary, String> {
     let grid = spec.grid()?;
 
@@ -543,6 +539,7 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
     clear_stale_files(&chunks_dir, "r16");
     clear_stale_material_maps(&terrain_dir);
     clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
+    clear_stale_water(&terrain_dir);
     // A generated world's default layers go with its ground: its lakes would
     // otherwise flood their whole footprints on the flat plate. Layers the
     // user made stay.
@@ -621,6 +618,12 @@ fn cache_pixel_coords(grid: &ExportGrid) -> Vec<f64> {
     let w = grid.cache_samples_per_axis() as usize;
     let pitch = grid.total_extent_m() / (w - 1) as f64;
     (0..w).map(|p| p as f64 * pitch).collect()
+}
+
+/// Remove the previous terrain's `water.bin` (best-effort, like
+/// [`clear_stale_files`]), or its water would stand over the new ground.
+fn clear_stale_water(terrain_dir: &Path) {
+    let _ = fs::remove_file(crate::terrain::voxel_water::water_file_path(terrain_dir));
 }
 
 /// Remove `*.{ext}` files from `dir` (best-effort; see call site).

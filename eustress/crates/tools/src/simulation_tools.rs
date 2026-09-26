@@ -425,7 +425,7 @@ impl ToolHandler for RaycastTool {
                 "properties": {
                     "origin": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] ray origin in world coordinates" },
                     "direction": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] ray direction (will be normalized)" },
-                    "max_distance": { "type": "number", "description": "Maximum ray distance in studs (default: 1000)", "default": 1000 }
+                    "max_distance": { "type": "number", "description": "Maximum ray distance in meters (default: 1000)", "default": 1000 }
                 },
                 "required": ["origin", "direction"]
             }),

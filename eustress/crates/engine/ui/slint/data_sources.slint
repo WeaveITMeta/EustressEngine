@@ -18,17 +18,23 @@
 //                 `new-source-url` off `self`. The Add button is disabled
 //                 until name and URL are both non-empty, so the handler can
 //                 assume they are populated. Clearing the fields and
-//                 lowering `adding-source` is the caller's job — the dialog
+//                 lowering `adding-source` is the caller's job; the dialog
 //                 does not guess whether the add succeeded.
 //   `on-close()`  fired by the ×, the Close button, a backdrop click, and
 //                 Escape.
+//
+// Chrome is the shared dialog kit (DRAFTING_UX.md Law 1): DialogScrim >
+// DialogCard > DialogFooter. The footer's two buttons are always present and
+// change meaning with `adding-source` (Close / Add source, or Cancel / Add),
+// so no button ever sits inside the `if` its own click tears down.
 //
 // Secrets never live here. A source's credential is named by an env var on
 // the Rust side; this dialog only ever shows an endpoint.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
+import { LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitSectionLabel, SettingsGroup, SettingRow, KitNotice } from "dialog_kit.slint";
 
 // Data source entry
 export struct DataSourceEntry {
@@ -39,8 +45,8 @@ export struct DataSourceEntry {
     status: string, // "connected", "disconnected", "error"
 
     // ── Last explicit Test ──
-    // "idle"    never tested this session — the row shows nothing
-    // "testing" a probe is in flight — the Test button is greyed and spins
+    // "idle"    never tested this session; the row shows nothing
+    // "testing" a probe is in flight; the Test button is greyed
     // "ok"      the probe reached the endpoint
     // "failed"  the probe did not
     test-state: string,
@@ -51,145 +57,48 @@ export struct DataSourceEntry {
     tested-at: string,
 }
 
-component DSSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
-
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-    }
-
-    Text {
-        x: 10px;
-        text: root.title;
-        color: Theme.text-primary;
-        font-size: Theme.font-sm;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
-    }
-}
-
-// Neutral row/footer button with hover, pressed and disabled states.
-component DSButton inherits Rectangle {
-    in property <string> label: "";
-    in property <bool> enabled: true;
-    in property <length> font-size: Theme.font-xs;
-
-    callback clicked();
-
-    height: 24px;
-    border-radius: 3px;
-    border-width: 1px;
-    border-color: Theme.border-color;
-    background: !root.enabled ? Theme.button-background
-              : ta.pressed ? Theme.button-pressed
-              : ta.has-hover ? Theme.button-hover
-              : Theme.button-background;
-    opacity: root.enabled ? 1.0 : 0.45;
-    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => { root.clicked(); }
-    }
-
-    Text {
-        text: root.label;
-        color: root.enabled ? Theme.text-primary : Theme.text-disabled;
-        font-size: root.font-size;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// Affirmative (green) button — Add / + Add Source.
-component DSAddButton inherits Rectangle {
-    in property <string> label: "";
-    in property <bool> enabled: true;
-
-    callback clicked();
-
-    height: 24px;
-    border-radius: 4px;
-    border-width: 1px;
-    background: !root.enabled ? Theme.button-background
-              : ta.pressed ? Theme.success-surface
-              : ta.has-hover ? Theme.success-surface-hover
-              : Theme.success-surface;
-    border-color: !root.enabled ? Theme.border-color
-                : ta.has-hover ? Theme.accent-green
-                : Theme.success-surface-border;
-    opacity: root.enabled ? 1.0 : 0.45;
-    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => { root.clicked(); }
-    }
-
-    Text {
-        text: root.label;
-        color: !root.enabled ? Theme.text-disabled
-             : ta.has-hover ? Theme.success-surface-text-hover
-             : Theme.accent-green;
-        font-size: Theme.font-sm;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// Labelled text field used by the new-source form. `invalid` paints the
-// error border once the user has been told the field is required.
-component DSField inherits Rectangle {
-    in property <string> label: "";
+// The text field of the new-source form. It reports caret entry and exit the
+// instant they happen, not on the first keystroke: the parent needs to know
+// before a key is pressed, or the Delete shortcut fires once against the scene.
+component DSField inherits LineEdit {
     in-out property <string> value: "";
-    in property <bool> invalid: false;
-    out property <bool> editing: edit.has-focus;
+    out property <bool> editing: self.has-focus;
 
-    // Fired the instant the caret enters or leaves, not on the first
-    // keystroke — the parent needs to know before a key is pressed, or the
-    // Delete shortcut fires once against the scene.
     callback focus-changed(bool);
     changed editing => { root.focus-changed(self.editing); }
 
+    width: 300px;
+    text <=> root.value;
+}
+
+// A square icon-only button for a row's delete action. Red only on hover.
+component DSIconButton inherits Rectangle {
+    in property <image> icon;
+    callback clicked();
+
+    width: 28px;
     height: 28px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: ta.has-hover ? Theme.accent-red.with-alpha(0.6) : Theme.border-color;
+    background: ta.pressed ? Theme.accent-red.with-alpha(0.35)
+        : ta.has-hover ? Theme.accent-red.with-alpha(0.22)
+        : Theme.button-background;
+    animate background { duration: 100ms; easing: ease-out; }
 
-    HorizontalLayout {
-        spacing: 8px;
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px;
+        height: 13px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: ta.has-hover ? Theme.accent-red : Theme.text-secondary;
+    }
 
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: Theme.font-sm;
-            vertical-alignment: center;
-        }
-
-        Rectangle {
-            horizontal-stretch: 1;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: root.invalid ? Theme.border-error
-                        : edit.has-focus ? Theme.input-focus
-                        : Theme.input-border;
-            animate border-color { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
-
-            edit := LineEdit {
-                x: 0px; y: 0px;
-                width: 100%; height: 100%;
-                text <=> root.value;
-            }
-        }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -246,7 +155,6 @@ export component DataSourcesDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
     // Swallows keys so they cannot reach the Explorer or the viewport behind
     // the modal, and turns Escape into a close. Escape backs out of the
@@ -266,305 +174,240 @@ export component DataSourcesDialog inherits Rectangle {
         key-released(event) => { return accept; }
     }
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 580px;
-        height: min(parent.height - 80px, 520px);
-        background: Theme.background-secondary;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 580px;
+            height: min(parent.height - 80px, 520px);
+            icon: @image-url("../../assets/icons/ui/database.svg");
+            title: "Data sources";
+            subtitle: "APIs, databases and files your scripts can read";
+            close => { root.on-close(); }
 
-        // Absorbs clicks on the card so they never reach the backdrop's
-        // close-on-click TouchArea.
-        TouchArea {
-            scroll-event(event) => { return accept; }
-        }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: Theme.radius-md;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Data Sources";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-md;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.pressed ? Theme.error-surface
-                              : close-ta.has-hover ? Theme.error-surface-hover
-                              : transparent;
-                    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
-                    }
-
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content ──
             ScrollView {
                 vertical-stretch: 1;
 
                 VerticalLayout {
-                    padding: 20px;
-                    spacing: 4px;
+                    padding: 16px;
+                    spacing: 12px;
                     alignment: start;
 
-                    // Add new source form
+                    // ── New source form ──
                     if root.adding-source: VerticalLayout {
-                        spacing: 4px;
+                        spacing: 8px;
 
-                        DSSection { title: "NEW SOURCE"; }
+                        SettingsGroup {
+                            title: "New source";
 
-                        DSField {
-                            label: "Name";
-                            value <=> root.new-source-name;
-                            invalid: root.new-source-name == "";
-                            focus-changed(f) => { root.name-focused = f; }
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 110px;
-                                    text: "Type";
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.font-sm;
-                                    vertical-alignment: center;
+                            SettingRow {
+                                label: "Name";
+                                description: "How the source appears in lists and bindings";
+                                divider: false;
+                                DSField {
+                                    value <=> root.new-source-name;
+                                    placeholder-text: "Weather API";
+                                    focus-changed(f) => { root.name-focused = f; }
                                 }
+                            }
+
+                            SettingRow {
+                                label: "Type";
+                                description: "The protocol Eustress uses to read it";
                                 ComboBox {
-                                    horizontal-stretch: 1;
+                                    width: 300px;
                                     model: ["REST", "GraphQL", "PostgreSQL", "CSV", "Firebase", "Supabase"];
                                     current-value <=> root.new-source-type;
                                 }
                             }
-                        }
 
-                        DSField {
-                            // CSV points at a file, everything else at a
-                            // service, so the label follows the type rather
-                            // than calling a path a URL.
-                            label: root.new-source-type == "CSV" ? "File path" : "Endpoint";
-                            value <=> root.new-source-url;
-                            invalid: root.new-source-url == "";
-                            focus-changed(f) => { root.url-focused = f; }
-                        }
-
-                        if !root.can-add: Text {
-                            text: "Name and endpoint are both required.";
-                            color: Theme.text-disabled;
-                            font-size: Theme.font-xs;
-                        }
-
-                        Rectangle { height: 4px; }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: end;
-
-                            DSButton {
-                                width: 70px;
-                                height: 28px;
-                                label: "Cancel";
-                                font-size: Theme.font-sm;
-                                clicked => { root.adding-source = false; }
-                            }
-
-                            DSAddButton {
-                                width: 70px;
-                                height: 28px;
-                                label: "Add";
-                                enabled: root.can-add;
-                                clicked => { root.on-add-source(); }
+                            SettingRow {
+                                // CSV points at a file, everything else at a
+                                // service, so the label follows the type rather
+                                // than calling a path a URL.
+                                label: root.new-source-type == "CSV" ? "File path" : "Endpoint";
+                                description: root.new-source-type == "CSV" ? "A CSV file on this machine" : "The URL or connection string";
+                                DSField {
+                                    value <=> root.new-source-url;
+                                    placeholder-text: root.new-source-type == "CSV" ? "C:/data/readings.csv" : "https://api.example.com/v1";
+                                    focus-changed(f) => { root.url-focused = f; }
+                                }
                             }
                         }
 
-                        Rectangle { height: 8px; }
-                    }
-
-                    DSSection { title: "CONFIGURED SOURCES"; }
-
-                    // Add button
-                    if !root.adding-source: Rectangle {
-                        height: 28px;
-                        HorizontalLayout {
-                            alignment: start;
-
-                            DSAddButton {
-                                width: 100px;
-                                label: "+ Add Source";
-                                clicked => { root.adding-source = true; }
-                            }
+                        if !root.can-add: KitNotice {
+                            kind: "info";
+                            text: root.new-source-type == "CSV"
+                                ? "Name and file path are both required."
+                                : "Name and endpoint are both required.";
                         }
                     }
 
-                    Rectangle { height: 4px; }
-
-                    // Empty state
-                    if root.sources.length == 0: Rectangle {
-                        height: 120px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 6px;
-
-                            Text {
-                                text: "No data sources configured";
-                                color: Theme.text-secondary;
-                                font-size: Theme.font-md;
-                                horizontal-alignment: center;
-                            }
-
-                            Text {
-                                text: "Add a source to connect to external APIs and databases";
-                                color: Theme.text-disabled;
-                                font-size: Theme.font-xs;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Sources list
-                    for source in root.sources: Rectangle {
-                        // Taller than the old 52px because each row now has a
-                        // third line for the last test result.
-                        height: 62px;
-                        background: source.id == root.selected-source ? Theme.selection-background
-                                  : source-touch.has-hover ? Theme.explorer-item-hover
-                                  : transparent;
-                        border-radius: Theme.radius-sm;
-                        animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
-
-                        source-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.selected-source = source.id; }
-                        }
+                    // ── Configured sources ──
+                    VerticalLayout {
+                        spacing: 6px;
 
                         HorizontalLayout {
-                            padding: 10px;
-                            spacing: 10px;
+                            padding-left: 2px;
+                            KitSectionLabel { text: "Configured sources"; }
+                        }
 
-                            // Standing connection status
-                            Rectangle {
-                                width: 8px; height: 8px;
-                                y: (parent.height - self.height) / 2;
-                                background: source.status == "connected" ? Theme.accent-green
-                                          : source.status == "error" ? Theme.text-error
-                                          : Theme.text-secondary;
-                                border-radius: 4px;
-                            }
+                        Rectangle {
+                            background: Theme.background-secondary.with-alpha(0.6);
+                            border-radius: Theme.radius-md;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
 
-                            // Info
                             VerticalLayout {
-                                horizontal-stretch: 1;
+                                padding: 4px;
                                 spacing: 2px;
-                                alignment: center;
 
-                                Text {
-                                    text: source.name;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.font-sm;
-                                    font-weight: 500;
-                                    overflow: elide;
+                                // Empty state
+                                if root.sources.length == 0: VerticalLayout {
+                                    padding-top: 28px;
+                                    padding-bottom: 28px;
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Image {
+                                            width: 22px;
+                                            height: 22px;
+                                            source: @image-url("../../assets/icons/ui/database.svg");
+                                            image-fit: contain;
+                                            colorize: Theme.text-disabled;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "No data sources yet";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.font-md;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Add a source to connect to external APIs and databases.";
+                                        color: Theme.text-disabled;
+                                        font-size: Theme.font-xs;
+                                        horizontal-alignment: center;
+                                    }
                                 }
 
-                                Text {
-                                    text: source.source-type + " · " + source.url;
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.font-xs;
-                                    overflow: elide;
-                                }
+                                // Sources list
+                                for source in root.sources: Rectangle {
+                                    // Three lines: name, endpoint, last test.
+                                    height: 58px;
+                                    border-radius: Theme.radius-sm;
+                                    background: source.id == root.selected-source ? Theme.accent-cyan.with-alpha(0.14)
+                                        : source-touch.has-hover ? Theme.explorer-item-hover
+                                        : transparent;
+                                    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
 
-                                // Where the Test button's answer lands.
-                                // Hidden until the source has been probed, so
-                                // an untested row stays quiet rather than
-                                // claiming an outcome it does not have.
-                                if source.test-state != "" && source.test-state != "idle": Text {
-                                    text: root.test-label(source)
-                                        + (source.tested-at == "" ? "" : "  (" + source.tested-at + ")");
-                                    color: root.test-color(source);
-                                    font-size: Theme.font-xs;
-                                    overflow: elide;
-                                }
-                            }
+                                    source-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.selected-source = source.id; }
+                                    }
 
-                            // Actions
-                            DSButton {
-                                width: 40px;
-                                label: source.test-state == "testing" ? "…" : "Test";
-                                enabled: source.test-state != "testing";
-                                clicked => { root.on-test-source(source.id); }
-                            }
+                                    // The selection bar on the left edge.
+                                    Rectangle {
+                                        x: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 3px;
+                                        height: source.id == root.selected-source ? 22px : 0px;
+                                        border-radius: 1.5px;
+                                        background: Theme.accent-cyan;
+                                        animate height { duration: 120ms; easing: ease-out; }
+                                    }
 
-                            DSButton {
-                                width: 40px;
-                                label: "Edit";
-                                clicked => { root.on-edit-source(source.id); }
-                            }
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 10px;
+                                        spacing: 10px;
 
-                            Rectangle {
-                                width: 24px; height: 24px;
-                                border-radius: 3px;
-                                background: del-ta.pressed ? Theme.error-surface
-                                          : del-ta.has-hover ? Theme.error-surface-hover
-                                          : Theme.button-background;
-                                border-width: 1px;
-                                border-color: del-ta.has-hover ? Theme.error-surface-border : Theme.border-color;
-                                animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+                                        // Standing connection status
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 8px;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: source.status == "connected" ? Theme.text-success
+                                                    : source.status == "error" ? Theme.text-error
+                                                    : Theme.text-disabled;
+                                            }
+                                        }
 
-                                del-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-remove-source(source.id); }
-                                }
+                                        // Info
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            alignment: center;
 
-                                Text {
-                                    text: "×";
-                                    color: del-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                                    font-size: 14px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                            Text {
+                                                text: source.name;
+                                                color: Theme.text-primary;
+                                                font-size: 12px;
+                                                font-weight: source.id == root.selected-source ? 600 : 500;
+                                                overflow: elide;
+                                            }
+
+                                            Text {
+                                                text: source.source-type + " · " + source.url;
+                                                color: Theme.text-secondary;
+                                                font-size: Theme.font-xs;
+                                                overflow: elide;
+                                            }
+
+                                            // Where the Test button's answer lands.
+                                            // Hidden until the source has been probed,
+                                            // so an untested row stays quiet rather
+                                            // than claiming an outcome it does not have.
+                                            if source.test-state != "" && source.test-state != "idle": Text {
+                                                text: root.test-label(source)
+                                                    + (source.tested-at == "" ? "" : "  (" + source.tested-at + ")");
+                                                color: root.test-color(source);
+                                                font-size: Theme.font-xs;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        // Actions. Stretch 0 so the buttons keep
+                                        // their own width and the info column
+                                        // takes the free space.
+                                        VerticalLayout {
+                                            horizontal-stretch: 0;
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+
+                                                KitButton {
+                                                    horizontal-stretch: 0;
+                                                    text: source.test-state == "testing" ? "Testing" : "Test";
+                                                    has-icon: true;
+                                                    icon: @image-url("../../assets/icons/ui/plug.svg");
+                                                    enabled: source.test-state != "testing";
+                                                    clicked => { root.on-test-source(source.id); }
+                                                }
+
+                                                KitButton {
+                                                    horizontal-stretch: 0;
+                                                    text: "Edit";
+                                                    has-icon: true;
+                                                    icon: @image-url("../../assets/icons/ui/pen.svg");
+                                                    clicked => { root.on-edit-source(source.id); }
+                                                }
+
+                                                DSIconButton {
+                                                    icon: @image-url("../../assets/icons/ui/delete.svg");
+                                                    clicked => { root.on-remove-source(source.id); }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -573,29 +416,40 @@ export component DataSourcesDialog inherits Rectangle {
             }
 
             // ── Footer ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: Theme.radius-md;
+            // Both buttons stay mounted and switch meaning with the form, so
+            // neither is destroyed by its own click.
+            DialogFooter {
+                // The footer packs its children at their preferred width
+                // against the right edge, so the count sits beside Close.
+                Text {
+                    text: root.sources.length == 1 ? "1 source" : "\{root.sources.length} sources";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
 
-                // Centre on BOTH axes: the horizontal layout only centres across,
-                // so a fixed-height button in a taller footer needs the vertical
-                // wrapper to sit on the footer's centre line.
-                VerticalLayout {
-                    alignment: center;
+                KitButton {
+                    text: root.adding-source ? "Cancel" : "Close";
+                    clicked => {
+                        if root.adding-source {
+                            root.adding-source = false;
+                        } else {
+                            root.on-close();
+                        }
+                    }
+                }
 
-                    HorizontalLayout {
-                        alignment: center;
-
-                        DSButton {
-                            width: 80px;
-                            height: 32px;
-                            label: "Close";
-                            font-size: Theme.font-md;
-                            clicked => { root.on-close(); }
+                KitButton {
+                    kind: "primary";
+                    text: root.adding-source ? "Add" : "Add source";
+                    has-icon: true;
+                    icon: @image-url("../../assets/icons/ui/plus.svg");
+                    enabled: !root.adding-source || root.can-add;
+                    clicked => {
+                        if root.adding-source {
+                            root.on-add-source();
+                        } else {
+                            root.adding-source = true;
                         }
                     }
                 }

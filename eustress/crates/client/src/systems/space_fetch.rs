@@ -38,8 +38,11 @@ use eustress_networking::session::{assemble_world, ChunkCache, DownloadedWorld, 
 
 use super::live_world::{find_spawn, world_from_universe_dir, DiskChunkCache};
 
-/// Where published content is fetched from. Matches Studio's `PUBLISH_API`.
-pub const PUBLISH_API: &str = "https://api.eustress.dev";
+/// `path` on the API published content is fetched from, the one Studio
+/// publishes to (`eustress_common::api_base`).
+fn api_url(path: &str) -> String {
+    eustress_common::api_base::api_url(path)
+}
 
 /// Where a published world's players stand when it names no SpawnLocation.
 const DEFAULT_SPAWN: [f32; 3] = [0.0, 2.0, 8.0];
@@ -139,7 +142,7 @@ fn fetch_world(sim_id: &str, token: Option<&str>) -> Result<DownloadedWorld, Str
         req.send().map_err(|e| format!("GET {url}: {e}"))
     };
 
-    let manifest_url = format!("{PUBLISH_API}/api/simulations/{sim_id}/world/manifest");
+    let manifest_url = api_url(&format!("/api/simulations/{sim_id}/world/manifest"));
     let resp = get(&manifest_url)?;
     let status = resp.status();
     if status.as_u16() == 409 {
@@ -163,7 +166,7 @@ fn fetch_world(sim_id: &str, token: Option<&str>) -> Result<DownloadedWorld, Str
             chunks.insert(hash, bytes);
             continue;
         }
-        let url = format!("{PUBLISH_API}/api/simulations/{sim_id}/world/chunks/{hash}");
+        let url = api_url(&format!("/api/simulations/{sim_id}/world/chunks/{hash}"));
         let resp = get(&url)?;
         let status = resp.status();
         if !status.is_success() {
@@ -188,7 +191,7 @@ fn fetch_legacy_pak(
     sim_id: &str,
     get: &dyn Fn(&str) -> Result<reqwest::blocking::Response, String>,
 ) -> Result<DownloadedWorld, String> {
-    let url = format!("{PUBLISH_API}/api/simulations/{sim_id}/download");
+    let url = api_url(&format!("/api/simulations/{sim_id}/download"));
     let resp = get(&url)?;
     let status = resp.status();
     if !status.is_success() {

@@ -26,9 +26,15 @@ pub struct DataRecording {
 }
 
 pub mod active_db;
+/// Snapshots of a Space's database, and the revert that puts one back.
+pub mod checkpoint;
+/// Restore points: snapshots of the Space and reverting to one.
+pub mod snapshot;
 pub mod class_defaults;
 pub mod launch;
 pub mod file_loader;
+pub mod pose_anchor;
+pub mod rule_migration;
 /// Lightweight, always-compiled load-phase instrumentation (env-gated on
 /// `EUSTRESS_PROFILE`). Records wall-clock at each open→interactive
 /// milestone so the ~50s a huge import spends loading can be attributed.
@@ -70,6 +76,9 @@ pub mod echk_export;
 /// Publishing a Universe to the gallery as `.echk` chunks.
 #[cfg(feature = "world-db")]
 pub mod echk_publish;
+/// Edit on an open-source gallery listing: download its world as a new
+/// Universe and open it (`eustress://edit/<id>`).
+pub mod gallery_edit;
 #[cfg(feature = "world-db")]
 pub mod residency;
 /// Velocity-predictive streaming: prefetch along the heading, order the

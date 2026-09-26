@@ -6,15 +6,22 @@
 //! character stays upright (Roblox humanoids never tip over), and each frame
 //! its horizontal velocity is set from the move request while gravity keeps
 //! the vertical.
+//!
+//! `Jump` follows Roblox's rule, which is the player's too: under
+//! `UseJumpPower` it takes off at `JumpPower`, otherwise at the speed that
+//! peaks at `JumpHeight` under the live gravity. An NPC and the player with
+//! equal numbers jump alike under any gravity the Space has.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use avian3d::prelude::{LinearVelocity, LockedAxes};
+use avian3d::prelude::{Gravity, LinearVelocity, LockedAxes};
 
+use eustress_common::avatar::locomotion::downward_gravity;
 use eustress_common::avatar::spawn::AvatarBody;
-use eustress_common::datamodel::{DmEvent, DmValue, HumanoidCommand, InstanceId};
+use eustress_common::avatar::ResolvedMotion;
+use eustress_common::datamodel::{DataModel, DmEvent, DmValue, HumanoidCommand, InstanceId};
 use eustress_common::scripting::Vector3;
 
 use super::PlayDataModel;
@@ -49,6 +56,7 @@ pub fn drive_npc_humanoids(
     dm: Option<Res<PlayDataModel>>,
     mut ctl: ResMut<NpcControllers>,
     mut bodies: Query<(&mut LinearVelocity, &mut Transform), Without<AvatarBody>>,
+    gravity: Option<Res<Gravity>>,
 ) {
     let Some(dm) = dm else { return };
     let mut g = dm.dm.lock();
@@ -123,8 +131,7 @@ pub fn drive_npc_humanoids(
         vel.0.x = dir.x * speed;
         vel.0.z = dir.z * speed;
         if state.jump {
-            let height = g.get_prop(*humanoid, "JumpHeight").and_then(|v| v.as_number()).unwrap_or(2.0) as f32;
-            vel.0.y = (2.0 * 9.81 * height.max(0.0)).sqrt();
+            vel.0.y = jump_speed(&g, *humanoid, downward_gravity(gravity.as_deref()));
             state.jump = false;
         }
         if auto_rotate && dir.length_squared() > 1e-6 {
@@ -141,5 +148,104 @@ pub fn drive_npc_humanoids(
     }
     for (h, reached) in finished {
         g.push_event(DmEvent::MoveToFinished { humanoid: h, reached });
+    }
+}
+
+/// Take-off speed, m/s, of `humanoid`'s jump under a downward gravity of
+/// `gravity` m/s²: `JumpPower` under `UseJumpPower`, otherwise the speed that
+/// peaks at `JumpHeight`, by the player's rule
+/// ([`ResolvedMotion::take_off_speed`]). A missing number is the Humanoid
+/// class default.
+fn jump_speed(g: &DataModel, humanoid: InstanceId, gravity: f32) -> f32 {
+    let number = |name: &str, default: f64| {
+        g.get_prop(humanoid, name).and_then(|v| v.as_number()).unwrap_or(default) as f32
+    };
+    let use_jump_power = g.get_prop(humanoid, "UseJumpPower").and_then(|v| v.as_bool()).unwrap_or(false);
+    let launch = use_jump_power.then(|| number("JumpPower", 14.0));
+    ResolvedMotion::take_off_speed(launch, number("JumpHeight", 2.0), gravity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eustress_common::units::STANDARD_GRAVITY_F32;
+
+    fn humanoid(g: &mut DataModel) -> InstanceId {
+        let ws = g.get_service("Workspace").unwrap();
+        let model = g.create_virtual("Model", "Npc", Some(ws));
+        g.create_virtual("Humanoid", "Humanoid", Some(model))
+    }
+
+    /// Under any gravity, Roblox's 54.9 m/s² included, a jump peaks at its
+    /// `JumpHeight`; weightless, a height needs no take-off.
+    #[test]
+    fn a_jump_peaks_at_its_height_under_any_gravity() {
+        let mut g = DataModel::new();
+        let h = humanoid(&mut g);
+        g.set_prop(h, "JumpHeight", DmValue::Number(2.0)).unwrap();
+        for gravity in [1.62_f32, STANDARD_GRAVITY_F32, 54.936] {
+            let v = jump_speed(&g, h, gravity);
+            let apex = v * v / (2.0 * gravity);
+            assert!((apex - 2.0).abs() < 1e-4, "apex {apex} under {gravity}");
+        }
+        assert_eq!(jump_speed(&g, h, 0.0), 0.0, "weightless, a height needs no take-off");
+    }
+
+    /// Under `UseJumpPower`, `JumpPower` is the take-off speed, whatever the
+    /// gravity and whatever `JumpHeight` says; turned off, `JumpHeight` rules
+    /// again.
+    #[test]
+    fn under_use_jump_power_the_npc_takes_off_at_jump_power() {
+        let mut g = DataModel::new();
+        let h = humanoid(&mut g);
+        g.set_prop(h, "JumpHeight", DmValue::Number(2.0)).unwrap();
+        g.set_prop(h, "JumpPower", DmValue::Number(9.5)).unwrap();
+        g.set_prop(h, "UseJumpPower", DmValue::Bool(true)).unwrap();
+        for gravity in [0.0_f32, 1.62, STANDARD_GRAVITY_F32, 54.936] {
+            assert_eq!(jump_speed(&g, h, gravity), 9.5, "gravity {gravity}");
+        }
+        g.set_prop(h, "UseJumpPower", DmValue::Bool(false)).unwrap();
+        let v = jump_speed(&g, h, STANDARD_GRAVITY_F32);
+        assert!((v * v / (2.0 * STANDARD_GRAVITY_F32) - 2.0).abs() < 1e-4, "JumpHeight rules again");
+    }
+
+    /// The same rule as the player's jump, so equal numbers take off alike.
+    #[test]
+    fn an_npc_and_the_player_take_off_alike() {
+        let mut g = DataModel::new();
+        let h = humanoid(&mut g);
+        let mut motion = ResolvedMotion {
+            walk_speed: 1.0,
+            run_speed: 1.0,
+            sprint_multiplier: 1.0,
+            jump_apex_m: 0.0,
+            jump_speed_mps: None,
+        };
+        for height in [0.5_f32, 2.0, 7.2] {
+            g.set_prop(h, "JumpHeight", DmValue::Number(height as f64)).unwrap();
+            motion.jump_apex_m = height;
+            for gravity in [1.62_f32, STANDARD_GRAVITY_F32, 54.936] {
+                let player = motion.jump_velocity_under(gravity);
+                assert!((jump_speed(&g, h, gravity) - player).abs() < 1e-5, "height {height}, gravity {gravity}");
+            }
+        }
+        g.set_prop(h, "JumpPower", DmValue::Number(11.0)).unwrap();
+        g.set_prop(h, "UseJumpPower", DmValue::Bool(true)).unwrap();
+        motion.jump_speed_mps = Some(11.0);
+        assert_eq!(jump_speed(&g, h, STANDARD_GRAVITY_F32), motion.jump_velocity());
+    }
+
+    #[test]
+    fn a_bad_number_does_not_launch_the_body() {
+        let mut g = DataModel::new();
+        let h = humanoid(&mut g);
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -3.0] {
+            g.set_prop(h, "UseJumpPower", DmValue::Bool(false)).unwrap();
+            g.set_prop(h, "JumpHeight", DmValue::Number(bad)).unwrap();
+            assert_eq!(jump_speed(&g, h, STANDARD_GRAVITY_F32), 0.0, "JumpHeight {bad}");
+            g.set_prop(h, "UseJumpPower", DmValue::Bool(true)).unwrap();
+            g.set_prop(h, "JumpPower", DmValue::Number(bad)).unwrap();
+            assert_eq!(jump_speed(&g, h, STANDARD_GRAVITY_F32), 0.0, "JumpPower {bad}");
+        }
     }
 }

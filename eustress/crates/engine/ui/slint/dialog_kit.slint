@@ -1,0 +1,603 @@
+// ============================================================================
+// Dialog kit: the parts every Studio dialog, modal and settings page is made of
+// ============================================================================
+// DRAFTING_UX.md Law 1: one panel chrome. A dialog is a DialogScrim (the dim
+// backdrop that closes on an outside click) holding a DialogCard (the glass
+// surface with the shared FloatingPanelHeader), with a DialogFooter of
+// KitButtons at the bottom. Settings pages are SettingsGroups of SettingRows.
+//
+// Law 3: colour is semantic. Selection, focus and "on" are `accent-cyan`; the
+// primary action is the brand accent (`accent-eustress`), as in ToolPanel's
+// Apply; red is only for destructive actions and errors. No component here
+// takes a raw colour.
+
+import { Theme, FloatingPanelHeader } from "theme.slint";
+
+// ── Surfaces ────────────────────────────────────────────────────────────────
+
+/// A 1px rule in the separator colour.
+export component KitDivider inherits Rectangle {
+    height: 1px;
+    background: Theme.ribbon-separator;
+}
+
+/// The full-window backdrop behind a modal. A click outside the card
+/// dismisses; scrolling never reaches the viewport behind it.
+export component DialogScrim inherits Rectangle {
+    callback dismiss();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    TouchArea {
+        clicked => { root.dismiss(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    @children
+}
+
+/// The dialog surface: glass, `radius-lg`, one border, the 1px top hairline
+/// and the shared header with the close button top-right. Content goes under
+/// the header's divider. Clicks and scrolls on the card stay on it.
+export component DialogCard inherits Rectangle {
+    in property <image> icon;
+    in property <bool> show-icon: true;
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    in property <bool> closable: true;
+    callback close();
+
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 28px;
+    drop-shadow-color: Theme.shadow-float;
+    clip: true;
+
+    TouchArea {
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+
+        FloatingPanelHeader {
+            icon: root.icon;
+            show-icon: root.show-icon;
+            title: root.title;
+            subtitle: root.subtitle;
+            closable: root.closable;
+            close => { root.close(); }
+        }
+
+        KitDivider { }
+
+        @children
+    }
+}
+
+/// The sticky bottom row of a dialog: a divider, then the buttons packed to
+/// the right. For a left-hand button (Reset, Delete), set `pack-end: false`
+/// and put `Rectangle { horizontal-stretch: 1; }` after it.
+export component DialogFooter inherits VerticalLayout {
+    in property <bool> pack-end: true;
+
+    padding: 0;
+    spacing: 0;
+
+    KitDivider { }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 8px;
+
+        if root.pack-end: Rectangle { horizontal-stretch: 1; }
+        @children
+    }
+}
+
+// ── Buttons ─────────────────────────────────────────────────────────────────
+
+/// One button for every dialog. `kind`:
+/// - "primary": the one main action, brand-accent fill.
+/// - "secondary" (default): the plain button surface.
+/// - "danger": a destructive action; red only on hover and press.
+/// - "ghost": no surface until hovered, for low-weight actions.
+export component KitButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <string> kind: "secondary";
+    in property <bool> enabled: true;
+    callback clicked();
+
+    property <bool> primary: root.kind == "primary";
+    property <bool> danger: root.kind == "danger";
+    property <bool> ghost: root.kind == "ghost";
+
+    height: 28px;
+    horizontal-stretch: 0;
+    min-width: max(row.preferred-width, 72px);
+    border-radius: Theme.radius-sm;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.primary
+        ? (touch.pressed ? Theme.accent-eustress.darker(0.15) : touch.has-hover ? Theme.accent-eustress : Theme.accent-eustress.with-alpha(0.85))
+        : root.danger
+        ? (touch.pressed ? Theme.accent-red.with-alpha(0.35) : touch.has-hover ? Theme.accent-red.with-alpha(0.22) : Theme.button-background)
+        : root.ghost
+        ? (touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : transparent)
+        : (touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : Theme.button-background);
+    border-width: root.primary || root.ghost ? 0px : 1px;
+    border-color: root.danger && touch.has-hover ? Theme.accent-red.with-alpha(0.6) : Theme.border-color;
+    animate background { duration: 100ms; easing: ease-out; }
+
+    row := HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 6px;
+        alignment: center;
+
+        if root.has-icon: VerticalLayout {
+            alignment: center;
+            Image {
+                width: 13px;
+                height: 13px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.primary ? white : root.danger && touch.has-hover ? Theme.accent-red : Theme.text-primary;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.primary ? white : root.danger && touch.has-hover ? Theme.accent-red : Theme.text-primary;
+            font-size: 12px;
+            font-weight: root.primary ? 700 : 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+/// An on/off switch. On is the selection cyan.
+///
+/// `managed`: the switch mirrors a value someone else owns (an engine
+/// setting pushed through the root). A click then only reports the wanted
+/// state through `toggled` and leaves `checked` to follow its binding;
+/// flipping it locally would break that binding for good.
+export component KitSwitch inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    in property <bool> managed: false;
+    callback toggled(bool);
+
+    width: 34px;
+    height: 18px;
+    border-radius: 9px;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.checked ? Theme.accent-cyan : Theme.button-background;
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent-cyan : Theme.input-border;
+    animate background { duration: 120ms; }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: root.checked ? white : Theme.text-secondary;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if root.managed {
+                root.toggled(!root.checked);
+            } else {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            }
+        }
+    }
+}
+
+/// A row of mutually exclusive choices, for two to five short options.
+export component KitSegmented inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> current-index: 0;
+    // Managed: a click only fires `selected`, and the owner moves
+    // `current-index` (so a one-way binding to it survives the click).
+    in property <bool> managed: false;
+    callback selected(int);
+
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: Theme.input-background;
+    border-width: 1px;
+    border-color: Theme.input-border;
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        for option[i] in root.options: Rectangle {
+            border-radius: Theme.radius-sm - 1px;
+            min-width: seg-text.preferred-width + 20px;
+            background: i == root.current-index ? Theme.accent-cyan.with-alpha(0.2)
+                : seg-touch.has-hover ? Theme.button-hover : transparent;
+            border-width: i == root.current-index ? 1px : 0px;
+            border-color: Theme.accent-cyan.with-alpha(0.6);
+            seg-text := Text {
+                text: option;
+                color: i == root.current-index ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                font-weight: i == root.current-index ? 600 : 400;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            seg-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if !root.managed {
+                        root.current-index = i;
+                    }
+                    root.selected(i);
+                }
+            }
+        }
+    }
+}
+
+/// A key chord drawn as a keycap: "Ctrl+Shift+S". `live` is the capture
+/// state, outlined in the selection cyan.
+export component KeyCap inherits Rectangle {
+    in property <string> chord;
+    in property <bool> live: false;
+
+    height: 22px;
+    min-width: max(cap-text.preferred-width + 16px, 44px);
+    border-radius: Theme.radius-sm;
+    background: root.live ? Theme.accent-cyan.with-alpha(0.14) : Theme.background-tertiary;
+    border-width: 1px;
+    border-color: root.live ? Theme.accent-cyan : Theme.input-border;
+
+    // The keycap's lower lip.
+    Rectangle {
+        y: parent.height - 2px;
+        x: 1px;
+        width: parent.width - 2px;
+        height: 1px;
+        background: root.live ? transparent : Theme.border-highlight;
+    }
+
+    cap-text := Text {
+        text: root.chord;
+        color: root.live ? Theme.accent-cyan : Theme.text-primary;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: "Consolas";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ── Settings layout ─────────────────────────────────────────────────────────
+
+/// The small capitals over a group of rows.
+export component KitSectionLabel inherits Text {
+    color: Theme.text-disabled;
+    font-size: Theme.font-xs;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}
+
+/// A titled card of setting rows. Rows go inside; the card draws the rules
+/// between them.
+export component SettingsGroup inherits VerticalLayout {
+    in property <string> title: "";
+    in property <string> note: "";
+
+    spacing: 6px;
+
+    if root.title != "": HorizontalLayout {
+        padding-left: 2px;
+        KitSectionLabel {
+            text: root.title;
+        }
+    }
+
+    Rectangle {
+        background: Theme.background-secondary.with-alpha(0.6);
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            spacing: 0;
+
+            @children
+        }
+    }
+
+    if root.note != "": HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        Text {
+            text: root.note;
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
+    }
+}
+
+/// One setting: its name and a line saying what it does on the left, the
+/// control on the right. `divider` draws the rule above it (off for a
+/// group's first row).
+export component SettingRow inherits VerticalLayout {
+    in property <string> label: "";
+    in property <string> description: "";
+    in property <bool> divider: true;
+
+    spacing: 0;
+
+    if root.divider: KitDivider { }
+
+    HorizontalLayout {
+        padding-top: 9px;
+        padding-bottom: 9px;
+        spacing: 16px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.label;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 500;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    spacing: 8px;
+                    @children
+                }
+            }
+        }
+    }
+}
+
+/// A sidebar entry: icon and label; the selected one is marked in cyan.
+export component NavItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.accent-cyan.with-alpha(0.14)
+        : touch.has-hover ? Theme.button-hover : transparent;
+
+    // The selection bar on the left edge.
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.selected ? 16px : 0px;
+        border-radius: 1.5px;
+        background: Theme.accent-cyan;
+        animate height { duration: 120ms; easing: ease-out; }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 9px;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.selected ? Theme.accent-cyan : Theme.text-secondary;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: 12px;
+            font-weight: root.selected ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// A one-line message strip: "info", "success", "warn" or "error".
+export component KitNotice inherits Rectangle {
+    in property <string> text;
+    in property <string> kind: "info";
+
+    property <color> tone: root.kind == "error" ? Theme.text-error
+        : root.kind == "warn" ? Theme.text-warning
+        : root.kind == "success" ? Theme.text-success
+        : Theme.accent-cyan;
+
+    height: max(notice-text.preferred-height + 14px, 30px);
+    border-radius: Theme.radius-sm;
+    background: root.tone.with-alpha(0.1);
+    border-width: 1px;
+    border-color: root.tone.with-alpha(0.35);
+
+    Rectangle {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: root.tone;
+    }
+
+    notice-text := Text {
+        x: 24px;
+        y: 7px;
+        width: parent.width - 34px;
+        text: root.text;
+        color: Theme.text-primary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+        vertical-alignment: center;
+    }
+}
+
+/// The kit's compact text field: the input colours, a 6px text inset and the
+/// selection cyan on focus, at whatever height its parent gives it (the
+/// Properties panel's fields are 20px). Behaves like the std LineEdit: it
+/// scrolls to keep the cursor in view and has the Cut, Copy, Paste and
+/// Select All menu. It has no minimum width of its own, so a narrow slot
+/// never pushes its row wider.
+export component KitField inherits Rectangle {
+    in-out property <string> text <=> text-input.text;
+    in property <string> placeholder-text: "";
+    in property <bool> enabled <=> text-input.enabled;
+    in property <length> font-size: 11px;
+    in property <length> inset: 6px;
+    out property <bool> has-focus: text-input.has-focus;
+
+    callback edited(text: string);
+    callback accepted(text: string);
+
+    public function select-all() {
+        text-input.select-all();
+    }
+
+    min-width: 1px;
+    forward-focus: text-input;
+    background: root.enabled ? Theme.input-background : transparent;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: text-input.has-focus ? Theme.accent-cyan
+        : root.enabled ? Theme.input-border
+        : Theme.border-color;
+
+    // A click in the inset still puts the cursor in the field.
+    TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { text-input.focus(); }
+    }
+
+    Rectangle {
+        x: root.inset;
+        width: root.width - 2 * root.inset;
+        height: root.height;
+        clip: true;
+
+        if root.text == "" && root.placeholder-text != "": Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder-text;
+            color: Theme.text-disabled;
+            font-size: root.font-size;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        ContextMenuArea {
+            enabled: root.enabled;
+            Menu {
+                MenuItem {
+                    title: "Cut";
+                    enabled: root.enabled;
+                    activated => { text-input.cut(); }
+                }
+                MenuItem {
+                    title: "Copy";
+                    enabled: root.text != "";
+                    activated => { text-input.copy(); }
+                }
+                MenuItem {
+                    title: "Paste";
+                    enabled: root.enabled;
+                    activated => { text-input.paste(); }
+                }
+                MenuItem {
+                    title: "Select All";
+                    enabled: root.text != "";
+                    activated => { text-input.select-all(); }
+                }
+            }
+
+            text-input := TextInput {
+                property <length> computed-x;
+
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                vertical-alignment: center;
+                single-line: true;
+                font-size: root.font-size;
+                color: root.enabled ? Theme.text-primary : Theme.text-secondary;
+                selection-background-color: Theme.accent-cyan.with-alpha(0.35);
+                selection-foreground-color: Theme.text-primary;
+
+                // Keep the cursor in view, as the std LineEdit does.
+                cursor-position-changed(cursor-position) => {
+                    if cursor-position.x + self.computed-x < 0px {
+                        self.computed-x = - cursor-position.x;
+                    } else if cursor-position.x + self.computed-x > parent.width - self.text-cursor-width {
+                        self.computed-x = parent.width - cursor-position.x - self.text-cursor-width;
+                    }
+                }
+                accepted => { root.accepted(self.text); }
+                edited => { root.edited(self.text); }
+            }
+        }
+    }
+}

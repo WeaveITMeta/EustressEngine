@@ -228,6 +228,50 @@ and undo restores the part but not the label. Parts that leave the selection
 mid-drag (a script or the bridge clearing it) are not in that drag's step.
 Status: source only; compile and live test pending.
 
+## Dynamic Insert menu (2026-09-24)
+
+The Insert catalog was pushed once at startup, from the class registry plus a
+hand-kept list of template-only classes, and never changed after that. It now
+updates each time the menu bar's Insert dropdown or the Insert Object dialog
+opens (`slint_ui::refresh_insert_menu`).
+
+1. The catalog is rebuilt from the template folders on disk
+   (`insert_classes::live_catalog`). A class is listed when
+   `class_schema/<Class>/_instance.toml` exists under its canonical name, so a
+   template added while Studio runs appears the next time the menu opens.
+   Template-backed classes without a registered spawner are listed too: Seat,
+   VehicleSeat, SpawnLocation, Humanoid, Decal, Sky, Atmosphere, Clouds, Team,
+   WebFrame and others. `blank_insert_allowed` keeps out Terrain, Camera, Star
+   and Moon (one per Space), Image and Video (File > Import makes them) and the
+   procurement records (the Procurement panel makes them).
+2. An "Inserts into" line names where the next insert lands: the selected
+   instance, the folder a single-file instance sits in, the selected service,
+   or "its usual service" when nothing is selected.
+3. "Suggested for <selection>" lists what usually goes inside it: Attachment,
+   Decal, lights and effects for a Part; Frame, TextLabel and buttons for a GUI
+   container; Sky, Atmosphere and Clouds for Lighting; RemoteEvent and
+   ModuleScript for ReplicatedStorage. A Folder takes its service's list. Only
+   classes in the live catalog are suggested (`suggestions_for`,
+   `context_rows`).
+4. "Recent" lists the latest inserts from every surface, the ribbon's shape and
+   CAD buttons included, and persists across sessions
+   (`EditorSettings.recent_inserts`).
+5. With its search empty, the Insert Object dialog shows the same sections,
+   then Shapes (Sphere, Cylinder, Wedge, Corner Wedge, Cone), then every class
+   by category. Typing ranks matches: exact, prefix, word start ("light" finds
+   PointLight), anywhere in the name, then category (`match_rank`).
+6. Inserts honor a selected service row. The Explorer plus button on
+   ReplicatedStorage used to put a Folder in Workspace. The template, Model and
+   Folder, script and shape handlers now resolve the service's entity
+   (`insert_parent_entity`), and new scripts, Models and Folders carry their
+   parent's service, so a storage service hides them straight away.
+7. The Explorer plus button selects its row, then opens the dialog, in that
+   order through the action queue, so the dialog's target and suggestions come
+   from that row.
+
+Status: source only; compile and live test pending. `main.slint` compiles in
+`slint-viewer`.
+
 ## Already ahead of Roblox
 
 - Group delta for multi-select Position and Rotation (Roblox collapses every

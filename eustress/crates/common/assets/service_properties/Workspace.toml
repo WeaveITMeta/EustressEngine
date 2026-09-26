@@ -9,7 +9,7 @@ ClassName = { type = "string", value = "Workspace", readonly = true }
 AllowThirdPartySales = { type = "bool", value = false, description = "Allow third-party sales in this workspace" }
 
 [Physics]
-Gravity = { type = "float", value = 196.2, description = "Workspace gravity in studs/s²" }
+Gravity = { type = "Vector3", value = [0.0, -9.80665, 0.0], description = "Workspace gravity in m/s², as a vector: [0, -9.80665, 0] is Earth" }
 FallenPartsDestroyHeight = { type = "float", value = -500.0, description = "Y position where parts are destroyed" }
 GlobalWind = { type = "Vector3", value = [0.0, 0.0, 0.0], description = "Global wind direction and speed" }
 

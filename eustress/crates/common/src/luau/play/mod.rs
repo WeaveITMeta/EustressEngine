@@ -9,48 +9,71 @@
 //! ## What the engine does each frame
 //!
 //! ```text
-//! engine pulls ECS -> DataModel      (poses, input, mouse, camera, collisions)
-//! PlayLuau::frame(raycaster)         (input + queued events, RenderStepped,
-//!                                     Stepped, task scheduler, tweens,
-//!                                     Heartbeat, events the scripts caused)
-//! engine applies DataModel -> ECS    (spawns, writes, destroys, commands)
+//! engine pulls ECS -> DataModel        (poses, input, mouse, camera,
+//!                                       collisions)
+//! PlayLuau::frame(raycaster, terrain)  (input + queued events, RenderStepped,
+//!                                       Stepped, task scheduler, tweens,
+//!                                       Heartbeat, events the scripts caused)
+//! engine applies DataModel -> ECS      (spawns, writes, destroys, commands,
+//!                                       terrain edits)
 //! ```
 //!
-//! Every entry into the VM goes through [`instance::with_raycaster`], so
-//! `workspace:Raycast` answers synchronously against the current physics.
+//! Every entry into the VM goes through [`instance::with_raycaster`] and
+//! [`terrain::with_terrain_reader`], so `workspace:Raycast` and the
+//! Terrain's reads answer synchronously against the current physics and
+//! terrain.
 //!
 //! ## Differences from Roblox worth knowing
 //!
 //! - One process: Scripts and LocalScripts share this VM (each with its own
 //!   environment and `script`), RemoteEvents loop back, `IsServer` and
 //!   `IsClient` are both true.
-//! - Units are metres (Eustress is metre-native).
-//! - A script that runs 5 s without yielding is stopped with Roblox's
-//!   "Script timeout" error instead of freezing Studio.
+//! - Units are metres (Eustress is metre-native), terrain voxel
+//!   resolutions included.
+//! - Terrain writes apply after the frame's scripts have run; a read in the
+//!   same frame sees the terrain as the frame began.
+//! - A script that runs 10 s without yielding (Roblox's budget) is stopped
+//!   with "Script timeout at <script>:<line>" instead of freezing Studio,
+//!   and a `pcall` around the loop can't hold the stop off.
+//! - Output lines point at the code they came from: the script's file, the
+//!   line and, for an error, the stack. Each script's start, the end of its
+//!   top-level code, and a thread that will never resume are reported too.
 
 pub mod convert;
 pub mod instance;
+pub mod terrain;
 pub mod types_ext;
+/// Studs at the boundary, for scripts written for Roblox.
+pub mod studs;
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use mlua::{Function, Lua, Table, Value, Variadic};
 
 use crate::datamodel::{
     CommerceStatus, DmEvent, DmValue, EnumItem, InputPhase, InstanceId, OutputLevel, ProductKind, PurchasePrompt,
-    ReceiptDecision, SharedDataModel,
+    ReceiptDecision, RemoteCall, RemoteReply, RemoteTarget, RemoteValue, SharedDataModel, INVOKE_TIMEOUT_SECS,
 };
 use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim2, LuauVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, Vector3};
 
 pub use instance::{handle, with_raycaster, LInst, RayHit, RayQuery, RaycastFn};
+pub use terrain::{with_terrain_reader, TerrainReadFn, TerrainView};
 
 const PRELUDE: &str = include_str!("prelude.luau");
 
-/// Longest a script may run without yielding before it is stopped.
-const SCRIPT_TIMEOUT_MS: u64 = 5_000;
+/// Longest a script may run without yielding before it is stopped, as in
+/// Roblox. [`PlayLuau::set_script_timeout`] changes it for one VM.
+const SCRIPT_TIMEOUT_MS: u64 = 10_000;
+
+/// The prelude's chunk name, which stacks and positions skip.
+const PRELUDE_CHUNK: &str = "EustressPlayPrelude";
+
+/// Registry key of the prelude's `coroutine` wrapper, which ties a coroutine
+/// to the script that made it.
+const OWNED_COROUTINE: &str = "__eus_owned_coroutine";
 
 /// A script to start on Play.
 #[derive(Debug, Clone)]
@@ -69,7 +92,7 @@ pub struct PlayLuau {
     host: Table,
     event_cursor: u64,
     listeners: Arc<parking_lot::Mutex<HashSet<(u64, String)>>>,
-    entry_started_ms: Arc<AtomicU64>,
+    watchdog: Arc<Watchdog>,
     started: HashSet<InstanceId>,
 }
 
@@ -82,6 +105,132 @@ fn lua_err(e: mlua::Error) -> String {
     e.to_string()
 }
 
+/// An mlua error as Roblox shows one: the message alone, without mlua's
+/// "syntax error: " or "runtime error: " in front.
+fn error_text(e: mlua::Error) -> String {
+    match e {
+        mlua::Error::SyntaxError { message, .. } => message,
+        mlua::Error::RuntimeError(message) => message,
+        e => e.to_string(),
+    }
+}
+
+/// The line a message's `Chunk:12:` position names, or 0.
+fn error_line(message: &str, chunk: &str) -> u32 {
+    message
+        .strip_prefix(chunk)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>())
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The runaway-script guard the VM's interrupt consults.
+struct Watchdog {
+    /// How long a script may run without yielding.
+    budget_ms: AtomicU64,
+    /// When the host last resumed a script or began an entry.
+    started_ms: AtomicU64,
+    /// Interrupts so far. The interrupt fires at every call, return and loop
+    /// back-edge, so the clock is read only on every 4096th.
+    ticks: AtomicU32,
+    /// The running resume has used up its budget. Every script thread under
+    /// it then stops at its next interrupt, so a `pcall` around the loop
+    /// can't catch the timeout and carry on.
+    tripped: AtomicBool,
+    /// The timeout, naming where the script was.
+    message: parking_lot::Mutex<String>,
+    /// The VM's main thread, by address: the host's own code, which a
+    /// script's timeout never stops.
+    main: usize,
+}
+
+impl Watchdog {
+    /// A fresh budget, as the host resumes a script or begins an entry.
+    fn restart(&self) {
+        self.started_ms.store(now_ms(), Ordering::Relaxed);
+        self.tripped.store(false, Ordering::Relaxed);
+    }
+
+    /// The interrupt: carry on, or stop the running script.
+    fn check(&self, lua: &Lua) -> mlua::Result<mlua::VmState> {
+        let tripped = self.tripped.load(Ordering::Relaxed);
+        if !tripped {
+            if (self.ticks.fetch_add(1, Ordering::Relaxed) & 4095) != 0 {
+                return Ok(mlua::VmState::Continue);
+            }
+            let ran = now_ms().saturating_sub(self.started_ms.load(Ordering::Relaxed));
+            if ran <= self.budget_ms.load(Ordering::Relaxed) {
+                return Ok(mlua::VmState::Continue);
+            }
+        }
+        if lua.current_thread().to_pointer() as usize == self.main {
+            // The host's own code. After a timeout the stopped script has
+            // unwound to here, and the scheduler carries on; otherwise the
+            // host's entry itself ran long, and that stops.
+            self.restart();
+            return if tripped {
+                Ok(mlua::VmState::Continue)
+            } else {
+                Err(mlua::Error::RuntimeError(self.timeout_message(lua)))
+            };
+        }
+        if !tripped {
+            *self.message.lock() = self.timeout_message(lua);
+            self.tripped.store(true, Ordering::Relaxed);
+        }
+        Err(mlua::Error::RuntimeError(self.message.lock().clone()))
+    }
+
+    /// Where the script was when its budget ran out.
+    fn timeout_message(&self, lua: &Lua) -> String {
+        let secs = self.budget_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+        match script_position(lua, 0) {
+            Some((chunk, line)) => format!(
+                "Script timeout at {chunk}:{line}: exhausted allowed execution time ({secs} s without yielding)"
+            ),
+            None => format!("Script timeout: exhausted allowed execution time ({secs} s without yielding)"),
+        }
+    }
+}
+
+/// The innermost script code on the running thread's stack, from level
+/// `from` out: its chunk name (the script's path) and line. Host functions
+/// and the prelude are skipped.
+fn script_position(lua: &Lua, from: usize) -> Option<(String, u32)> {
+    for level in from..from + 32 {
+        let frame = lua.inspect_stack(level)?;
+        let line = frame.curr_line();
+        if line <= 0 {
+            continue;
+        }
+        let source = frame.source();
+        match source.short_src.as_deref() {
+            Some(chunk) if chunk != PRELUDE_CHUNK && chunk != "[C]" => return Some((chunk.to_string(), line as u32)),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Which script each compiled chunk is, by chunk name (the script's path),
+/// so an Output line points at the file of the code it came from, a
+/// ModuleScript's included.
+#[derive(Default)]
+struct ChunkScripts(parking_lot::Mutex<HashMap<String, InstanceId>>);
+
+fn register_chunk(lua: &Lua, chunk: &str, script: InstanceId) {
+    if let Some(chunks) = lua.app_data_ref::<ChunkScripts>() {
+        chunks.0.lock().insert(chunk.to_string(), script);
+    }
+}
+
+fn script_of_chunk(lua: &Lua, chunk: &str) -> Option<InstanceId> {
+    let chunks = lua.app_data_ref::<ChunkScripts>()?;
+    let script = chunks.0.lock().get(chunk).copied();
+    script
+}
+
 impl PlayLuau {
     /// A fresh VM bound to `dm`. `dm` should already hold the seeded tree.
     pub fn new(dm: SharedDataModel) -> Result<Self, String> {
@@ -90,40 +239,40 @@ impl PlayLuau {
         lua.set_app_data(dm.clone());
 
         let listeners: Arc<parking_lot::Mutex<HashSet<(u64, String)>>> = Arc::new(parking_lot::Mutex::new(HashSet::new()));
-        let entry_started_ms = Arc::new(AtomicU64::new(now_ms()));
+        lua.set_app_data(ChunkScripts::default());
 
-        // Runaway-script guard. The interrupt fires often, so the clock is
-        // read only every 4096 calls.
+        // Runaway-script guard.
+        let watchdog = Arc::new(Watchdog {
+            budget_ms: AtomicU64::new(SCRIPT_TIMEOUT_MS),
+            started_ms: AtomicU64::new(now_ms()),
+            ticks: AtomicU32::new(0),
+            tripped: AtomicBool::new(false),
+            message: parking_lot::Mutex::new(String::new()),
+            main: lua.current_thread().to_pointer() as usize,
+        });
         {
-            let started = entry_started_ms.clone();
-            let ticks = Arc::new(AtomicU32::new(0));
-            lua.set_interrupt(move |_| {
-                if ticks.fetch_add(1, Ordering::Relaxed) & 4095 == 0 {
-                    let elapsed = now_ms().saturating_sub(started.load(Ordering::Relaxed));
-                    if elapsed > SCRIPT_TIMEOUT_MS {
-                        started.store(now_ms(), Ordering::Relaxed);
-                        return Err(mlua::Error::RuntimeError(
-                            "Script timeout: exhausted allowed execution time".into(),
-                        ));
-                    }
-                }
-                Ok(mlua::VmState::Continue)
-            });
+            let watchdog = watchdog.clone();
+            lua.set_interrupt(move |lua| watchdog.check(lua));
         }
 
-        let host = Self::install(&lua, &dm, &listeners).map_err(lua_err)?;
+        let host = Self::install(&lua, &dm, &listeners, &watchdog).map_err(lua_err)?;
         Ok(Self {
             lua,
             dm,
             host,
             event_cursor: 0,
             listeners,
-            entry_started_ms,
+            watchdog,
             started: HashSet::new(),
         })
     }
 
-    fn install(lua: &Lua, dm: &SharedDataModel, listeners: &Arc<parking_lot::Mutex<HashSet<(u64, String)>>>) -> mlua::Result<Table> {
+    fn install(
+        lua: &Lua,
+        dm: &SharedDataModel,
+        listeners: &Arc<parking_lot::Mutex<HashSet<(u64, String)>>>,
+        watchdog: &Arc<Watchdog>,
+    ) -> mlua::Result<Table> {
         let globals = lua.globals();
 
         // Registry caches.
@@ -194,15 +343,41 @@ impl PlayLuau {
 
         // Host functions the prelude calls.
         let host_fns = lua.create_table()?;
+        // Metres in a stud, for the speeds Humanoid signals hand a script
+        // written for Roblox.
+        host_fns.raw_set("studMetres", studs::stud_metres())?;
         {
             let dm = dm.clone();
-            host_fns.raw_set("output", lua.create_function(move |_, (level, text): (String, String)| {
+            // `host.output(level, text, source?, chunk?, line?, stack?)`: the
+            // line points at `chunk`'s script, whose file Output shows.
+            type OutputArgs = (String, String, Option<String>, Option<String>, Option<f64>, Option<Vec<String>>);
+            host_fns.raw_set("output", lua.create_function(move |lua, (level, text, source, chunk, line, stack): OutputArgs| {
                 let level = match level.as_str() {
                     "error" => OutputLevel::Error,
                     "warn" => OutputLevel::Warn,
                     _ => OutputLevel::Info,
                 };
-                dm.lock().print(level, "Luau", text);
+                let script = chunk.as_deref().and_then(|c| script_of_chunk(lua, c));
+                let line = line.map_or(0, |l| l.max(0.0) as u32);
+                let source = source.as_deref().unwrap_or("Luau");
+                dm.lock().print_from(level, script, source, text, line, stack.unwrap_or_default());
+                Ok(())
+            })?)?;
+        }
+        {
+            // A script's top-level code finishing or stopping.
+            let dm = dm.clone();
+            host_fns.raw_set("lifecycle", lua.create_function(move |_, (text, source, owner): (String, Option<String>, Option<f64>)| {
+                let script = owner.map(|key| InstanceId(key as u64));
+                dm.lock().print_lifecycle(OutputLevel::Info, script, source.as_deref().unwrap_or("Luau"), text);
+                Ok(())
+            })?)?;
+        }
+        {
+            // A fresh run budget, as the host resumes a script.
+            let watchdog = watchdog.clone();
+            host_fns.raw_set("newBudget", lua.create_function(move |_, ()| {
+                watchdog.restart();
                 Ok(())
             })?)?;
         }
@@ -258,7 +433,8 @@ impl PlayLuau {
                     (src, g.full_name(module.0))
                 };
                 let env = make_env(lua, &dm, Some(module.0), &name)?;
-                lua.load(source).set_name(name).set_environment(env).into_function()
+                register_chunk(lua, &name, module.0);
+                lua.load(source).set_name(format!("={name}")).set_environment(env).into_function()
             })?)?;
         }
         {
@@ -286,6 +462,7 @@ impl PlayLuau {
                 Ok(())
             })?)?;
         }
+        install_remote(lua, &host_fns, dm)?;
         install_commerce(lua, &host_fns, dm)?;
         globals.set("__host", host_fns)?;
 
@@ -306,7 +483,7 @@ impl PlayLuau {
         }
 
         // The prelude: scheduler, signals, Lua-side services.
-        let host: Table = lua.load(PRELUDE).set_name("=EustressPlayPrelude").eval()?;
+        let host: Table = lua.load(PRELUDE).set_name(format!("={PRELUDE_CHUNK}")).eval()?;
         lua.set_named_registry_value(instance::HOST, host.clone())?;
 
         // Globals from the prelude.
@@ -343,6 +520,9 @@ impl PlayLuau {
             let (k, v) = pair?;
             methods.raw_set(k, v)?;
         }
+        // Scripts see `coroutine` through the prelude's owned wrapper, so a
+        // coroutine a script makes stops with that script.
+        lua.set_named_registry_value(OWNED_COROUTINE, host.get::<Value>("ownedCoroutine")?)?;
         Ok(host)
     }
 
@@ -352,23 +532,28 @@ impl PlayLuau {
     }
 
     fn begin_entry(&self) {
-        self.entry_started_ms.store(now_ms(), Ordering::Relaxed);
+        self.watchdog.restart();
     }
 
     /// Start scripts. Each runs as its own thread with its own environment;
     /// a compile error is reported and the rest still start.
-    pub fn run_scripts(&mut self, scripts: Vec<ScriptLaunch>, raycaster: &RaycastFn<'_>) {
-        with_raycaster(raycaster, || {
-            for s in scripts {
-                if !self.started.insert(s.instance) {
-                    continue;
+    pub fn run_scripts(&mut self, scripts: Vec<ScriptLaunch>, raycaster: &RaycastFn<'_>, terrain: &TerrainReadFn<'_>) {
+        with_terrain_reader(terrain, || {
+            with_raycaster(raycaster, || {
+                for s in scripts {
+                    if !self.started.insert(s.instance) {
+                        continue;
+                    }
+                    self.begin_entry();
+                    if let Err(e) = self.spawn_one(&s) {
+                        // A compile error names its line: "Path:5: Expected 'end' ...".
+                        let line = error_line(&e, &s.chunk_name);
+                        let text = format!("{e} (the script did not start)");
+                        self.dm.lock().print_from(OutputLevel::Error, Some(s.instance), &s.chunk_name, text, line, Vec::new());
+                    }
                 }
-                self.begin_entry();
-                if let Err(e) = self.spawn_one(&s) {
-                    self.dm.lock().print(OutputLevel::Error, &s.chunk_name, e);
-                }
-            }
-            let _ = self.dispatch_events();
+                let _ = self.dispatch_events();
+            })
         });
     }
 
@@ -377,43 +562,57 @@ impl PlayLuau {
         let f = self
             .lua
             .load(s.source.as_str())
-            .set_name(s.chunk_name.as_str())
+            .set_name(format!("={}", s.chunk_name))
             .set_environment(env)
             .into_function()
-            .map_err(lua_err)?;
-        let sched: Table = self.host.get("Sched").map_err(lua_err)?;
-        let spawn: Function = sched.get("spawn").map_err(lua_err)?;
-        spawn.call::<Value>(f).map_err(lua_err)?;
+            .map_err(error_text)?;
+        register_chunk(&self.lua, &s.chunk_name, s.instance);
+        self.dm.lock().print_lifecycle(OutputLevel::Info, Some(s.instance), &s.chunk_name, "Started");
+        // Through startScript, so every thread and connection the script
+        // makes is its own and stops when the script is destroyed.
+        let start: Function = self.host.get("startScript").map_err(lua_err)?;
+        // A script written for Roblox works in studs; the boundary converts
+        // for every thread it owns.
+        let in_studs = studs::script_writes_studs(&self.dm.lock(), s.instance);
+        start.call::<Value>((instance::id_key(s.instance), f, in_studs, s.chunk_name.as_str())).map_err(lua_err)?;
         Ok(())
     }
 
     /// Run one frame: input, queued events, RunService signals, the task
     /// scheduler and tweens, then the events scripts caused this frame.
-    pub fn frame(&mut self, raycaster: &RaycastFn<'_>) {
-        with_raycaster(raycaster, || {
-            self.begin_entry();
-            let (now, dt, inputs) = {
-                let g = self.dm.lock();
-                (g.frame.time, g.frame.dt, g.input.events.clone())
-            };
-            if let Err(e) = self.dispatch_input(&inputs) {
-                self.dm.lock().print(OutputLevel::Error, "Luau", format!("input dispatch: {}", e));
-            }
-            if let Err(e) = self.dispatch_events() {
-                self.dm.lock().print(OutputLevel::Error, "Luau", format!("event dispatch: {}", e));
-            }
-            let frame: mlua::Result<Function> = self.host.get("frame");
-            match frame {
-                Ok(f) => {
-                    if let Err(e) = f.call::<()>((now, dt)) {
-                        self.dm.lock().print(OutputLevel::Error, "Luau", e.to_string());
-                    }
+    pub fn frame(&mut self, raycaster: &RaycastFn<'_>, terrain: &TerrainReadFn<'_>) {
+        with_terrain_reader(terrain, || {
+            with_raycaster(raycaster, || {
+                self.begin_entry();
+                let (now, dt, inputs) = {
+                    let g = self.dm.lock();
+                    (g.frame.time, g.frame.dt, g.input.events.clone())
+                };
+                if let Err(e) = self.dispatch_input(&inputs) {
+                    self.dm.lock().print(OutputLevel::Error, "Luau", format!("input dispatch: {}", e));
                 }
-                Err(e) => self.dm.lock().print(OutputLevel::Error, "Luau", e.to_string()),
-            }
-            if let Err(e) = self.dispatch_events() {
-                self.dm.lock().print(OutputLevel::Error, "Luau", format!("event dispatch: {}", e));
-            }
+                if let Err(e) = self.dispatch_events() {
+                    self.dm.lock().print(OutputLevel::Error, "Luau", format!("event dispatch: {}", e));
+                }
+                // Before the scheduler step below, so a handler this delivery
+                // starts, and a parked `InvokeServer` its answer frees, both
+                // run in this frame rather than the next.
+                if let Err(e) = self.dispatch_remotes() {
+                    self.dm.lock().print(OutputLevel::Error, "Luau", format!("remote dispatch: {}", e));
+                }
+                let frame: mlua::Result<Function> = self.host.get("frame");
+                match frame {
+                    Ok(f) => {
+                        if let Err(e) = f.call::<()>((now, dt)) {
+                            self.dm.lock().print(OutputLevel::Error, "Luau", e.to_string());
+                        }
+                    }
+                    Err(e) => self.dm.lock().print(OutputLevel::Error, "Luau", e.to_string()),
+                }
+                if let Err(e) = self.dispatch_events() {
+                    self.dm.lock().print(OutputLevel::Error, "Luau", format!("event dispatch: {}", e));
+                }
+            })
         });
     }
 
@@ -430,6 +629,7 @@ impl PlayLuau {
         let fire_attr: Function = self.host.get("fireAttributeChanged")?;
         let fire_tag: Function = self.host.get("fireTagSignal")?;
         let drop_signals: Function = self.host.get("dropSignals")?;
+        let stop_script: Function = self.host.get("stopScript")?;
         let lua = &self.lua;
         let listening = |id: InstanceId, name: &str| -> bool {
             self.listeners.lock().contains(&(id.0, name.to_string()))
@@ -459,7 +659,18 @@ impl PlayLuau {
                     if listening(id, "Destroying") {
                         fire.call::<()>((instance::id_key(id), "Destroying"))?;
                     }
-                    drop_signals.call::<()>(instance::id_key(id))?;
+                    // With its name, so a thread left waiting on one of its
+                    // signals is reported: it never resumes.
+                    let name = self.dm.lock().get(id).map(|i| i.name.clone());
+                    drop_signals.call::<()>((instance::id_key(id), true, name))?;
+                    // A running script that is destroyed stops, as in Roblox:
+                    // its threads end and its connections drop, wherever they
+                    // were made. A PlayerGui reset on respawn destroys the old
+                    // copies, and without this each one's HUD script would
+                    // keep running beside the fresh copy.
+                    if self.started.contains(&id) {
+                        stop_script.call::<()>(instance::id_key(id))?;
+                    }
                 }
                 DmEvent::Changed { id, prop } => {
                     fire_prop.call::<()>((instance::id_key(id), prop.as_str()))?;
@@ -517,6 +728,24 @@ impl PlayLuau {
                             fire.call::<()>((instance::id_key(button), name))?;
                         }
                     }
+                }
+                // Animation and Humanoid state events: a named signal and its
+                // arguments.
+                // TextBox focus, which only the GUI hit test changes.
+                DmEvent::TextBoxFocused { textbox } if listening(textbox, "Focused") => {
+                    fire.call::<()>((instance::id_key(textbox), "Focused"))?;
+                }
+                DmEvent::TextBoxFocusLost { textbox, enter_pressed } if listening(textbox, "FocusLost") => {
+                    fire.call::<()>((instance::id_key(textbox), "FocusLost", enter_pressed))?;
+                }
+                DmEvent::Signal { id, name, args } if listening(id, &name) => {
+                    let mut all: Vec<Value> = Vec::with_capacity(args.len() + 2);
+                    all.push(Value::Number(instance::id_key(id)));
+                    all.push(Value::String(lua.create_string(&name)?));
+                    for a in &args {
+                        all.push(convert::to_lua(lua, a)?);
+                    }
+                    fire.call::<()>(mlua::MultiValue::from_vec(all))?;
                 }
                 DmEvent::Fired { event, args, from_luau } if !from_luau && listening(event, "Event") => {
                     let mut vals = Vec::with_capacity(args.len());
@@ -595,6 +824,64 @@ impl PlayLuau {
         Ok(())
     }
 
+    /// Fire the remote calls and answers the session delivered. Handlers run
+    /// on the scheduler, so one may yield, and an answer frees whichever
+    /// `InvokeServer` was parked on it.
+    pub fn dispatch_remotes(&mut self) -> mlua::Result<()> {
+        let (calls, replies) = {
+            let mut g = self.dm.lock();
+            if g.remote_in.is_empty() && g.reply_in.is_empty() {
+                return Ok(());
+            }
+            (std::mem::take(&mut g.remote_in), std::mem::take(&mut g.reply_in))
+        };
+        let lua = &self.lua;
+
+        if !calls.is_empty() {
+            let deliver: Function = self.host.get("deliverRemote")?;
+            for call in calls {
+                let args: Variadic<Value> = call
+                    .args
+                    .iter()
+                    .map(|a| convert::remote_to_lua(lua, a))
+                    .collect::<mlua::Result<Vec<_>>>()?
+                    .into_iter()
+                    .collect();
+                let from = match call.from {
+                    Some(player) => handle(lua, player)?,
+                    None => Value::Nil,
+                };
+                let invocation = match call.invocation {
+                    Some(id) => Value::String(lua.create_string(id.to_string())?),
+                    None => Value::Nil,
+                };
+                deliver.call::<()>((instance::id_key(call.remote), from, invocation, args))?;
+            }
+        }
+
+        if !replies.is_empty() {
+            let deliver: Function = self.host.get("deliverReply")?;
+            for reply in replies {
+                let id = reply.invocation.to_string();
+                match reply.result {
+                    Ok(values) => {
+                        let args: Variadic<Value> = values
+                            .iter()
+                            .map(|a| convert::remote_to_lua(lua, a))
+                            .collect::<mlua::Result<Vec<_>>>()?
+                            .into_iter()
+                            .collect();
+                        deliver.call::<()>((id, true, Value::Nil, args))?;
+                    }
+                    Err(message) => {
+                        deliver.call::<()>((id, false, message, Variadic::<Value>::new()))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Stop every thread and connection. The VM itself is dropped with `self`.
     pub fn stop(&mut self) {
         if let Ok(reset) = self.host.get::<Function>("reset") {
@@ -607,6 +894,12 @@ impl PlayLuau {
     /// can trim events every reader has seen.
     pub fn event_cursor(&self) -> u64 {
         self.event_cursor
+    }
+
+    /// How long a script may run without yielding before it is stopped
+    /// (10 s unless set).
+    pub fn set_script_timeout(&self, budget: std::time::Duration) {
+        self.watchdog.budget_ms.store(budget.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Luau heap in bytes (diagnostics).
@@ -627,9 +920,17 @@ fn make_env(lua: &Lua, dm: &SharedDataModel, script: Option<InstanceId>, name: &
         let source = name.to_string();
         env.raw_set(fname, lua.create_function(move |lua, args: Variadic<Value>| {
             let text = join_args(lua, args)?;
-            dm.lock().print(level, &source, text);
+            // Output points at the call: the script of its chunk, and the line.
+            let (at, line) = match script_position(lua, 0) {
+                Some((chunk, line)) => (script_of_chunk(lua, &chunk).or(script), line),
+                None => (script, 0),
+            };
+            dm.lock().print_from(level, at, &source, text, line, Vec::new());
             Ok(())
         })?)?;
+    }
+    if let Ok(Value::Table(owned)) = lua.named_registry_value::<Value>(OWNED_COROUTINE) {
+        env.raw_set("coroutine", owned)?;
     }
     let meta = lua.create_table()?;
     meta.raw_set("__index", lua.globals())?;
@@ -663,6 +964,119 @@ fn join_args(lua: &Lua, args: Variadic<Value>) -> mlua::Result<String> {
 /// `Host.MarketplaceService` in the prelude). They read and queue only; the
 /// engine talks to the Commerce API (see `datamodel::commerce`). Every one
 /// wakes commerce, so the catalog loads the first time a script asks.
+/// Remote calls: what `FireServer`, `FireClient`, `FireAllClients`,
+/// `InvokeServer` and the return of `OnServerInvoke` push onto the DataModel
+/// for the session to send. With no session up the prelude never calls these
+/// and keeps looping remotes back inside the VM, the way a Space playing on
+/// its own always has.
+///
+/// An invocation id crosses this boundary as a string. The host builds one
+/// from the peer and the call number, which can pass the range a Luau number
+/// holds exactly, and the prelude only ever echoes it back.
+fn install_remote(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::Result<()> {
+    // How long a parked `InvokeServer` waits, read by the prelude so the
+    // limit lives in one place.
+    host_fns.raw_set("remoteInvokeTimeout", INVOKE_TIMEOUT_SECS)?;
+    {
+        let dm = dm.clone();
+        host_fns.raw_set(
+            "remoteNetworked",
+            lua.create_function(move |_, ()| Ok(dm.lock().networked))?,
+        )?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set(
+            "remoteIsServer",
+            lua.create_function(move |_, ()| Ok(dm.lock().is_server))?,
+        )?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set(
+            "remoteFire",
+            lua.create_function(
+                move |_, (remote, target, player, args): (LInst, String, Option<LInst>, Variadic<Value>)| {
+                    let target = match target.as_str() {
+                        "Server" => RemoteTarget::Server,
+                        "All" => RemoteTarget::AllClients,
+                        _ => match player {
+                            Some(p) => RemoteTarget::Client(p.0),
+                            None => {
+                                return Err(mlua::Error::RuntimeError(
+                                    "FireClient needs a player".into(),
+                                ))
+                            }
+                        },
+                    };
+                    let args = remote_args(&args)?;
+                    dm.lock().remote_out.push(RemoteCall {
+                        remote: remote.0,
+                        target,
+                        args,
+                        invocation: None,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let dm = dm.clone();
+        // A Player's id has to fit the u32 call number on the wire, where 0
+        // means an event, so these run from 1 upward and wrap.
+        let next = Arc::new(AtomicU64::new(0));
+        host_fns.raw_set(
+            "remoteInvoke",
+            lua.create_function(move |_, (remote, args): (LInst, Variadic<Value>)| {
+                let n = next.fetch_add(1, Ordering::Relaxed);
+                let id = n % (u32::MAX as u64 - 1) + 1;
+                let args = remote_args(&args)?;
+                dm.lock().remote_out.push(RemoteCall {
+                    remote: remote.0,
+                    target: RemoteTarget::Server,
+                    args,
+                    invocation: Some(id),
+                });
+                Ok(id.to_string())
+            })?,
+        )?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set(
+            "remoteReply",
+            lua.create_function(
+                move |_, (invocation, player, ok, args): (String, Option<LInst>, bool, Variadic<Value>)| {
+                    let invocation = invocation.parse::<u64>().map_err(|_| {
+                        mlua::Error::RuntimeError("a reply carried an unreadable invocation id".into())
+                    })?;
+                    let result = if ok {
+                        Ok(remote_args(&args)?)
+                    } else {
+                        Err(match args.first() {
+                            Some(Value::String(s)) => s.to_str()?.to_string(),
+                            _ => "the server refused the call".to_string(),
+                        })
+                    };
+                    dm.lock().reply_out.push(RemoteReply {
+                        invocation,
+                        to: player.map(|p| p.0),
+                        result,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
+/// Every argument converted for the wire.
+fn remote_args(args: &[Value]) -> mlua::Result<Vec<RemoteValue>> {
+    args.iter().map(convert::remote_from_lua).collect()
+}
+
 fn install_commerce(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::Result<()> {
     {
         let dm = dm.clone();
@@ -678,8 +1092,11 @@ fn install_commerce(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::
     }
     {
         let dm = dm.clone();
+        // A script set ProcessReceipt: receipts are Luau's to answer.
         host_fns.raw_set("commerceWanted", lua.create_function(move |_, ()| {
-            dm.lock().commerce.wake();
+            let mut g = dm.lock();
+            g.commerce.luau_process_receipt = true;
+            g.commerce.wake();
             Ok(())
         })?)?;
     }
@@ -736,10 +1153,17 @@ fn install_commerce(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::
             let number = product_arg(&pass)?;
             let mut g = dm.lock();
             g.commerce.wake();
-            // Studio knows the passes of the signed-in account, who plays the
-            // local player.
+            // The local player's passes are the signed-in account's; a joined
+            // player's are the ones its verified purchases proved.
             let local = g.local_player.and_then(|p| g.get_prop(p, "UserId")).and_then(|v| v.as_number());
-            Ok(local == Some(user_id) && g.commerce.owned_passes.contains(&number))
+            Ok(g.commerce.owns_pass(user_id, local, number))
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commercePassesPending", lua.create_function(move |_, user: Value| {
+            let user_id = user_id_arg(&dm, &user)?;
+            Ok(dm.lock().commerce.passes_pending(user_id))
         })?)?;
     }
     {
@@ -840,6 +1264,12 @@ fn product_arg(v: &Value) -> mlua::Result<u64> {
 }
 
 fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> {
+    // Hit, Origin and UnitRay's origin are positions, in the caller's units.
+    let k = if matches!(key, "Hit" | "Origin" | "UnitRay") {
+        studs::script_scale(&instance::host_table(lua)?)?
+    } else {
+        1.0
+    };
     // Copy what is needed and release the lock before touching Lua.
     let (m, x, y, w, h) = {
         let g = dm.lock();
@@ -851,11 +1281,11 @@ fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> 
             let p = if m.has_hit { m.hit_position } else { m.ray_origin + dir * 1000.0 };
             let mut cf = CFrame::look_at(m.ray_origin, p, None);
             cf.position = p;
-            Value::UserData(lua.create_userdata(LuauCFrame(cf))?)
+            Value::UserData(lua.create_userdata(LuauCFrame(studs::scale_frame(cf, 1.0 / k)))?)
         }
         "Origin" => {
             let cf = CFrame::look_at(m.ray_origin, m.ray_origin + dir, None);
-            Value::UserData(lua.create_userdata(LuauCFrame(cf))?)
+            Value::UserData(lua.create_userdata(LuauCFrame(studs::scale_frame(cf, 1.0 / k)))?)
         }
         "Target" => match m.target {
             Some(t) => handle(lua, t)?,
@@ -866,7 +1296,7 @@ fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> 
             None => Value::Nil,
         },
         "TargetSurface" => convert::enum_item(lua, &EnumItem::new("NormalId", "Top"))?,
-        "UnitRay" => Value::UserData(lua.create_userdata(types_ext::LuauRay { origin: m.ray_origin, direction: dir })?),
+        "UnitRay" => Value::UserData(lua.create_userdata(types_ext::LuauRay { origin: m.ray_origin * (1.0 / k), direction: dir })?),
         "X" => Value::Number(x),
         "Y" => Value::Number(y),
         "ViewSizeX" => Value::Number(w),
@@ -906,11 +1336,14 @@ mod tests {
 
     fn run(vm: &mut PlayLuau, script: InstanceId, source: &str) {
         let launch = ScriptLaunch { instance: script, source: source.to_string(), chunk_name: "Shop".into() };
-        vm.run_scripts(vec![launch], &no_rays);
+        // A Space without terrain: the reader never visits.
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        vm.run_scripts(vec![launch], &no_rays, no_terrain);
     }
 
+    /// What the scripts wrote, without the host's lifecycle lines.
     fn output(dm: &SharedDataModel) -> Vec<String> {
-        dm.lock().output.iter().map(|l| l.text.clone()).collect()
+        dm.lock().output.iter().filter(|l| !l.lifecycle).map(|l| l.text.clone()).collect()
     }
 
     #[test]
@@ -941,7 +1374,8 @@ mod tests {
             sim_id: "sim".into(),
             space: None,
         });
-        vm.frame(&no_rays);
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        vm.frame(&no_rays, no_terrain);
         assert_eq!(dm.lock().commerce.receipts.len(), 1, "with no ProcessReceipt the receipt waits");
 
         run(&mut vm, script, r#"
@@ -957,13 +1391,14 @@ mod tests {
             end)
         "#);
         assert_eq!(dm.lock().commerce.status, CommerceStatus::Loading, "setting ProcessReceipt wakes commerce");
+        assert!(dm.lock().commerce.luau_process_receipt, "and makes receipts Luau's to answer");
         dm.lock().commerce.outcomes.push(PromptOutcome {
             user_id: 42.0,
             product: 3,
             expects: Some(ProductKind::Consumable),
             purchased: true,
         });
-        vm.frame(&no_rays);
+        vm.frame(&no_rays, no_terrain);
 
         let g = dm.lock();
         assert!(g.commerce.receipts.is_empty());
@@ -997,5 +1432,218 @@ mod tests {
             print(pcall(function() return MarketplaceService:GetProductInfo(8) end) == false)
         "#);
         assert_eq!(output(&dm), vec!["VIP 99 Game Pass", "true false", "true"]);
+    }
+
+    /// Start `source` as a new Script in ServerScriptService, its source
+    /// read from `file` when one is given.
+    fn start(vm: &mut PlayLuau, dm: &SharedDataModel, name: &str, file: Option<&str>, source: &str) -> InstanceId {
+        let id = {
+            let mut g = dm.lock();
+            let service = g.get_service("ServerScriptService").expect("ServerScriptService");
+            let id = g.create_virtual("Script", name, Some(service));
+            if let Some(file) = file {
+                g.set_script_file(id, file);
+            }
+            id
+        };
+        let launch = ScriptLaunch { instance: id, source: source.to_string(), chunk_name: format!("ServerScriptService.{name}") };
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        vm.run_scripts(vec![launch], &no_rays, no_terrain);
+        id
+    }
+
+    fn step(vm: &mut PlayLuau) {
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        vm.frame(&no_rays, no_terrain);
+    }
+
+    fn lines(dm: &SharedDataModel) -> Vec<crate::datamodel::OutputLine> {
+        dm.lock().output.clone()
+    }
+
+    #[test]
+    fn a_runaway_loop_stops_where_it_was_and_pcall_cannot_hold_it() {
+        let (mut vm, dm, _) = session();
+        vm.set_script_timeout(std::time::Duration::from_millis(200));
+        start(&mut vm, &dm, "Runaway", None, "local ok = pcall(function()\n    while true do end\nend)\nprint(\"carried on\", ok)\n");
+        let out = lines(&dm);
+        let err = out.iter().find(|l| l.level == OutputLevel::Error).expect("the loop is stopped");
+        assert!(
+            err.text.starts_with("Script timeout at ServerScriptService.Runaway:2: exhausted allowed execution time"),
+            "{}",
+            err.text
+        );
+        assert_eq!((err.source.as_str(), err.line), ("ServerScriptService.Runaway", 2));
+        assert!(out.iter().all(|l| !l.text.starts_with("carried on")), "a pcall does not catch the timeout: {out:?}");
+    }
+
+    #[test]
+    fn the_budget_is_per_resume_and_play_goes_on_after_a_timeout() {
+        let (mut vm, dm, _) = session();
+        vm.set_script_timeout(std::time::Duration::from_millis(500));
+        start(&mut vm, &dm, "Ticker", None, "game:GetService(\"RunService\").Heartbeat:Connect(function() print(\"tick\") end)\n");
+        start(&mut vm, &dm, "Runaway", None, "while true do end\n");
+        assert_eq!(lines(&dm).iter().filter(|l| l.level == OutputLevel::Error).count(), 1);
+        step(&mut vm);
+        assert!(output(&dm).contains(&"tick".to_string()), "the other scripts carry on: {:?}", lines(&dm));
+
+        // Busy 50 ms at a time with a yield in between: 200 ms in all, and
+        // never 500 ms in one resume.
+        start(&mut vm, &dm, "Paced", None, r#"
+            for i = 1, 4 do
+                local t = os.clock()
+                while os.clock() - t < 0.05 do end
+                task.wait()
+            end
+            print("paced")
+        "#);
+        for _ in 0..6 {
+            step(&mut vm);
+        }
+        assert!(output(&dm).contains(&"paced".to_string()), "{:?}", lines(&dm));
+        assert_eq!(lines(&dm).iter().filter(|l| l.level == OutputLevel::Error).count(), 1, "{:?}", lines(&dm));
+    }
+
+    #[test]
+    fn an_error_names_its_line_and_stack() {
+        let (mut vm, dm, _) = session();
+        start(&mut vm, &dm, "Boom", None, "local function explode()\n    local t = nil\n    return t.x\nend\nexplode()\n");
+        let out = lines(&dm);
+        let err = out.iter().find(|l| l.level == OutputLevel::Error).expect("an error");
+        assert!(err.text.starts_with("ServerScriptService.Boom:3: attempt to index nil"), "{}", err.text);
+        assert_eq!((err.source.as_str(), err.line), ("ServerScriptService.Boom", 3));
+        assert_eq!(err.stack, vec!["ServerScriptService.Boom:3 function explode", "ServerScriptService.Boom:5"]);
+        let last = out.last().expect("a last line");
+        assert!(last.lifecycle && last.text == "Stopped by the error above; nothing left running", "{last:?}");
+    }
+
+    #[test]
+    fn a_host_error_reads_as_roblox_shows_it() {
+        let (mut vm, dm, _) = session();
+        // Workspace has its one Terrain, and the host refuses another.
+        start(&mut vm, &dm, "Missing", None, "\nlocal ground = Instance.new(\"Terrain\")\n");
+        let err = lines(&dm).into_iter().find(|l| l.level == OutputLevel::Error).expect("an error");
+        assert_eq!(err.text, "ServerScriptService.Missing:2: Unable to create an Instance of type \"Terrain\"");
+        assert_eq!(err.line, 2);
+    }
+
+    #[test]
+    fn a_print_points_at_its_line_and_the_scripts_file() {
+        let (mut vm, dm, _) = session();
+        let file = "C:/Space/ServerScriptService/Hello.server.luau";
+        let id = start(&mut vm, &dm, "Hello", Some(file), "\n\nprint(\"hi\")\n");
+        let out = lines(&dm);
+        let hi = out.iter().find(|l| l.text == "hi").expect("the print");
+        assert_eq!((hi.source.as_str(), hi.file.as_str(), hi.line, hi.lifecycle), ("ServerScriptService.Hello", file, 3, false));
+        let started = out.iter().find(|l| l.lifecycle && l.text == "Started").expect("a start line");
+        assert_eq!(started.file, file);
+        let finished = out.iter().find(|l| l.lifecycle && l.text.starts_with("Finished")).expect("a finish line");
+        assert_eq!(finished.text, "Finished its top-level code; nothing left running");
+
+        // A copy of the script (a PlayerGui's, a character's) points at the same file.
+        let copy = dm.lock().clone_instance(id).expect("a copy");
+        assert_eq!(dm.lock().script_file(copy), Some(file));
+    }
+
+    #[test]
+    fn the_finish_line_says_what_is_still_running() {
+        let (mut vm, dm, _) = session();
+        start(&mut vm, &dm, "Listener", None, r#"
+            game:GetService("RunService").Heartbeat:Connect(function() end)
+            task.spawn(function() task.wait(60) end)
+        "#);
+        let out = lines(&dm);
+        let finished = out.iter().find(|l| l.lifecycle && l.text.starts_with("Finished")).expect("a finish line");
+        assert_eq!(finished.text, "Finished its top-level code; 1 connection and 1 thread still running");
+    }
+
+    #[test]
+    fn a_compile_error_says_the_script_did_not_start() {
+        let (mut vm, dm, _) = session();
+        start(&mut vm, &dm, "Broken", None, "local x = (\n");
+        let out = lines(&dm);
+        let err = out.iter().find(|l| l.level == OutputLevel::Error).expect("an error");
+        assert!(err.text.starts_with("ServerScriptService.Broken:"), "{}", err.text);
+        assert!(err.text.ends_with("(the script did not start)"), "{}", err.text);
+        assert!(err.line >= 1, "{err:?}");
+        assert!(out.iter().all(|l| !l.lifecycle), "a script that never started has no lifecycle lines: {out:?}");
+    }
+
+    #[test]
+    fn a_wait_on_a_destroyed_instance_is_reported() {
+        let (mut vm, dm, _) = session();
+        start(&mut vm, &dm, "Waiter", None, r#"
+            local part = Instance.new("Part")
+            part.Parent = workspace
+            task.spawn(function()
+                part.Touched:Wait()
+            end)
+            part:Destroy()
+        "#);
+        step(&mut vm);
+        let out = lines(&dm);
+        let warn = out.iter().find(|l| l.level == OutputLevel::Warn).expect("a warning");
+        assert_eq!(warn.text, "Infinite yield: this thread waits on the Touched event of Part, which was destroyed, so it never resumes");
+        assert_eq!((warn.source.as_str(), warn.line), ("ServerScriptService.Waiter", 5));
+    }
+
+    /// A part in the Workspace.
+    fn mass_part(dm: &SharedDataModel, name: &str, size: f64, material: &str, shape: Option<&str>, anchored: bool) -> InstanceId {
+        let mut g = dm.lock();
+        let ws = g.get_service("Workspace").expect("Workspace");
+        let p = g.create_virtual("Part", name, Some(ws));
+        g.set_prop(p, "Size", DmValue::Vector3(Vector3::new(size, size, size))).expect("Size");
+        g.set_prop(p, "Material", DmValue::Enum(EnumItem::new("Material", material))).expect("Material");
+        if let Some(shape) = shape {
+            g.set_prop(p, "Shape", DmValue::Enum(EnumItem::new("PartType", shape))).expect("Shape");
+        }
+        g.set_prop(p, "Anchored", DmValue::Bool(anchored)).expect("Anchored");
+        p
+    }
+
+    #[test]
+    fn a_parts_mass_is_its_density_times_its_collider_volume() {
+        let (mut vm, dm, _) = session();
+        let crate_part = mass_part(&dm, "Crate", 1.0, "Wood", None, false);
+        mass_part(&dm, "Post", 1.0, "Wood", None, true);
+        mass_part(&dm, "Rock", 2.0, "Plastic", Some("Ball"), false);
+        start(&mut vm, &dm, "Weigh", None, r#"
+            local c = workspace.Crate
+            print(c:GetMass(), c.Mass, c.AssemblyMass)
+            print(workspace.Post:GetMass(), workspace.Post.AssemblyMass == math.huge)
+            print(string.format("%.3f", workspace.Rock:GetMass()))
+            print(pcall(function() c.Mass = 1 end))
+        "#);
+        {
+            // What the reader seeds for a custom density, and what the
+            // physics engine reports for the crate's body.
+            let mut g = dm.lock();
+            g.set_prop_from_engine(crate_part, crate::datamodel::PART_DENSITY, DmValue::Number(1000.0));
+            g.set_prop_from_engine(crate_part, "AssemblyMass", DmValue::Number(1500.0));
+        }
+        start(&mut vm, &dm, "Again", None, "print(workspace.Crate:GetMass(), workspace.Crate.AssemblyMass)");
+        let out = output(&dm);
+        assert_eq!(out[0], "600 600 600", "a 1 m Wood cube, alone in its assembly: {out:?}");
+        assert_eq!(out[1], "600 true", "an anchored assembly is infinite: {out:?}");
+        assert_eq!(out[2], format!("{:.3}", 900.0 * 4.0 / 3.0 * std::f64::consts::PI), "a Ball is a sphere: {out:?}");
+        assert!(out[3].starts_with("false") && out[3].contains("Mass is read-only"), "{out:?}");
+        assert_eq!(out[4], "1000 1500", "{out:?}");
+    }
+
+    #[test]
+    fn a_bare_coroutine_yield_left_alone_is_reported() {
+        let (mut vm, dm, _) = session();
+        start(&mut vm, &dm, "Yielder", None, "coroutine.yield()\nprint(\"never\")\n");
+        step(&mut vm);
+        assert!(lines(&dm).iter().all(|l| l.level != OutputLevel::Warn), "not before 5 s");
+        dm.lock().frame.time = 6.0;
+        step(&mut vm);
+        let out = lines(&dm);
+        let warn = out.iter().find(|l| l.level == OutputLevel::Warn).expect("a warning");
+        assert_eq!(
+            warn.text,
+            "Infinite yield possible: this thread called coroutine.yield() and nothing has resumed it for 5 s"
+        );
+        assert_eq!(warn.line, 1);
     }
 }

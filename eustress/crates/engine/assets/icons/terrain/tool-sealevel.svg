@@ -1,0 +1,9 @@
+<!-- Terrain Sea Level: a hill standing in water, two wavy water lines at its base.
+     Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Hill silhouette, its feet on the upper water line -->
+  <path d="M3.5 14.4C5.5 10 7.5 5 11.5 5C15 5 16.5 9.5 20.5 15.6"/>
+  <!-- Water lines -->
+  <path d="M2 15Q4.5 13.5 7 15T12 15T17 15T22 15"/>
+  <path d="M2 19Q4.5 17.5 7 19T12 19T17 19T22 19"/>
+</svg>

@@ -36,6 +36,9 @@ fn bounds(out: &EvalOutput) -> ([f64; 3], [f64; 3]) {
     (mp.min, mp.max)
 }
 
+/// Positions come back from the mesh as f32: 0.03 m reads 0.030000001.
+const MESH_EPS: f64 = 1e-6;
+
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-30)
 }
@@ -89,9 +92,9 @@ depth = "30 mm"
     all_ok(&out);
     let (lo, hi) = bounds(&out);
     // u runs along +X, v along -Z, and the extrusion along +Y.
-    assert!((lo[1] - 0.0).abs() < 1e-9 && (hi[1] - 0.03).abs() < 1e-9, "y {lo:?} {hi:?}");
-    assert!((lo[0] - 0.0).abs() < 1e-9 && (hi[0] - 0.02).abs() < 1e-9, "x {lo:?} {hi:?}");
-    assert!((lo[2] + 0.01).abs() < 1e-9 && hi[2].abs() < 1e-9, "z {lo:?} {hi:?}");
+    assert!((lo[1] - 0.0).abs() < MESH_EPS && (hi[1] - 0.03).abs() < MESH_EPS, "y {lo:?} {hi:?}");
+    assert!((lo[0] - 0.0).abs() < MESH_EPS && (hi[0] - 0.02).abs() < MESH_EPS, "x {lo:?} {hi:?}");
+    assert!((lo[2] + 0.01).abs() < MESH_EPS && hi[2].abs() < MESH_EPS, "z {lo:?} {hi:?}");
 }
 
 #[test]
@@ -119,7 +122,7 @@ depth = "5 mm"
     all_ok(&out);
     assert_eq!(out.bodies.len(), 1, "the boss joins the plate");
     let (_, hi) = bounds(&out);
-    assert!((hi[2] - 0.015).abs() < 1e-9, "boss top at {}", hi[2]);
+    assert!((hi[2] - 0.015).abs() < MESH_EPS, "boss top at {}", hi[2]);
     assert!(rel(volume(&out), PLATE_V + 0.02 * 0.02 * 0.005) < 1e-6);
 }
 
@@ -154,7 +157,7 @@ combine = "subtract"
     assert_eq!(out.bodies.len(), 1);
     assert!(rel(volume(&out), PLATE_V - 0.02 * 0.02 * 0.005) < 1e-6, "volume {}", volume(&out));
     let (_, hi) = bounds(&out);
-    assert!((hi[2] - 0.01).abs() < 1e-9, "nothing may be added above the plate: top at {}", hi[2]);
+    assert!((hi[2] - 0.01).abs() < MESH_EPS, "nothing may be added above the plate: top at {}", hi[2]);
 }
 
 // ── Profiles ────────────────────────────────────────────────────────
@@ -265,7 +268,7 @@ plane = "yz"
     // Positive total volume: an inside-out mirror would cancel it.
     assert!(rel(volume(&out), 2.0 * BLOCK_V) < 1e-6, "{}", volume(&out));
     let (lo, _) = bounds(&out);
-    assert!((lo[0] + 0.03).abs() < 1e-9);
+    assert!((lo[0] + 0.03).abs() < MESH_EPS);
 }
 
 #[test]
@@ -432,8 +435,9 @@ fn chamfering_the_corners_of_a_plate_is_exact() {
     let d: f64 = 0.004;
     let removed = PLATE_V - volume(&out);
     let expect = 4.0 * 0.5 * d * d * 0.01;
-    // Planar faces only: exact to rounding.
-    assert!(rel(removed, expect) < 1e-6, "removed {removed} vs {expect}");
+    // Planar faces only, so exact up to the mesh's f32 positions: the
+    // difference of two plate volumes is good to about 2e-5 relative.
+    assert!(rel(removed, expect) < 1e-4, "removed {removed} vs {expect}");
 }
 
 #[test]
@@ -632,7 +636,7 @@ to = "P"
     ));
     all_ok(&out);
     let (_, hi) = bounds(&out);
-    assert!((hi[2] - 0.025).abs() < 1e-9, "top at {}", hi[2]);
+    assert!((hi[2] - 0.025).abs() < MESH_EPS, "top at {}", hi[2]);
     // The boss adds 10 x 10 mm from the plate top (10 mm) to 25 mm.
     assert!(rel(volume(&out), PLATE_V + 0.01 * 0.01 * 0.015) < 1e-6);
 }

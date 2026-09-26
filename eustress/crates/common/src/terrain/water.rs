@@ -1,6 +1,6 @@
 //! # Terrain water
 //!
-//! Every water surface over the terrain draws with one shared material,
+//! Every water surface over the terrain draws with the same material,
 //! [`WaterSurfaceMaterial`]: a `StandardMaterial` extended with the terrain
 //! height texture (`surface_material::TerrainHeightTexture`) and the water's
 //! colours ([`WaterSurfaceExtension`]). Its fragment shader,
@@ -21,12 +21,19 @@
 //!   level from its position, inside its footprint (see `water_bodies`).
 //! - **Rivers**: every River-mode `TerrainSpline` with WaterSurface on lays a
 //!   sloped ribbon along its channel (see `water_bodies`).
+//! - **Imported water**: the water a Roblox place's voxel terrain carries, a
+//!   flat surface at each of its levels over the columns that hold it (see
+//!   `voxel_water`).
 //!
 //! Water has no colliders: nothing swims or floats yet, and a body walks
 //! through the surface onto the ground below. A host without a renderer
 //! builds no water at all.
 //!
-//! [`WaterConfig`]'s colour tints all three, so a world's water is one colour.
+//! One instance of the material, tinted by [`WaterConfig`]'s colour, draws
+//! all of them, so a world's water is one colour. The exception is imported
+//! water that brings its own colour or transparency: it draws in a variant
+//! with those ([`WaterSurfaceAssets::tinted_material`]), which follows the
+//! config in whatever the import leaves out.
 //! The height texture is bound [`SURFACE_SETTLE_FRAMES`] frames after it is
 //! made (see `surface_material`); until then, and over terrain without a
 //! height raster, every pixel counts as [`WATER_FALLBACK_DEPTH`] deep.
@@ -46,6 +53,7 @@ use tracing::{debug, info};
 use super::surface_material::{
     sync_terrain_height_textures, TerrainHeightTexture, TerrainHeightTextureRequest, TerrainSurfacePlugin,
 };
+use super::voxel_water::{sync_voxel_water, VoxelWaterState};
 use super::water_bodies::{sync_river_water, sync_water_bodies, RiverWaterState, WaterBodyState};
 use super::{apply_terrain_dirty_chunks, TerrainConfig, TerrainDirtyChunks, TerrainRoot};
 
@@ -251,16 +259,51 @@ fn water_base_material() -> StandardMaterial {
     }
 }
 
+/// A water material with `params`, before any height texture is bound.
+fn water_material(params: WaterSurfaceParams) -> WaterSurfaceMaterial {
+    WaterSurfaceMaterial { base: water_base_material(), extension: WaterSurfaceExtension { terrain_height: None, params } }
+}
+
 /// Marks every entity drawn with the water material: the ocean plane, the
-/// water body chunks and the river ribbons. While one exists the terrain
-/// height texture is kept.
+/// water body chunks, the river ribbons and the imported water's chunks.
+/// While one exists the terrain height texture is kept.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct WaterSurface;
 
-/// The water material every water surface shares, made on first use.
+/// A variant's own colour and opacity in place of [`WaterConfig`]'s (see
+/// [`WaterSurfaceAssets::tinted_material`]). A part left `None` follows the
+/// config, as the shared material does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaterTint {
+    /// sRGB of deep water, in place of `WaterConfig::color`'s.
+    color: Option<[f32; 3]>,
+    /// Opacity of deep water, in place of `WaterConfig::color`'s alpha times
+    /// `WaterConfig::opacity`.
+    alpha: Option<f32>,
+}
+
+impl WaterTint {
+    /// `config` in this tint's colour and opacity.
+    fn apply(&self, config: &WaterConfig) -> WaterConfig {
+        let mut tinted = config.clone();
+        if let Some([r, g, b]) = self.color {
+            tinted.color = [r, g, b, config.color[3]];
+        }
+        if let Some(alpha) = self.alpha {
+            tinted.color[3] = 1.0;
+            tinted.opacity = alpha;
+        }
+        tinted
+    }
+}
+
+/// The water material every water surface shares, made on first use, and
+/// its variants in other colours.
 #[derive(Resource, Debug, Default)]
 pub struct WaterSurfaceAssets {
     material: Option<Handle<WaterSurfaceMaterial>>,
+    /// One variant per distinct tint asked for (see [`Self::tinted_material`]).
+    tinted: Vec<(WaterTint, Handle<WaterSurfaceMaterial>)>,
 }
 
 impl WaterSurfaceAssets {
@@ -269,23 +312,46 @@ impl WaterSurfaceAssets {
     /// [`sync_water_material`].
     pub fn material(&mut self, materials: &mut Assets<WaterSurfaceMaterial>) -> Handle<WaterSurfaceMaterial> {
         self.material
-            .get_or_insert_with(|| {
-                materials.add(WaterSurfaceMaterial {
-                    base: water_base_material(),
-                    extension: WaterSurfaceExtension {
-                        terrain_height: None,
-                        params: WaterSurfaceParams::new(&WaterConfig::default(), None),
-                    },
-                })
-            })
+            .get_or_insert_with(|| materials.add(water_material(WaterSurfaceParams::new(&WaterConfig::default(), None))))
             .clone()
+    }
+
+    /// A variant of the shared water material whose deep water is `color`
+    /// (sRGB 0..1) at opacity `alpha`, for water that keeps a colour of its
+    /// own (imported water, see `voxel_water`). A part left `None`, or not a
+    /// number, follows [`WaterConfig`] as the shared material does; with
+    /// neither part this is the shared material. A tint is made in
+    /// `materials` the first time it is asked for and shared from then on;
+    /// its parameters and height texture are kept current by
+    /// [`sync_water_material`].
+    pub fn tinted_material(
+        &mut self,
+        materials: &mut Assets<WaterSurfaceMaterial>,
+        color: Option<[f32; 3]>,
+        alpha: Option<f32>,
+    ) -> Handle<WaterSurfaceMaterial> {
+        // Only numbers, so every cached tint equals itself.
+        let tint = WaterTint {
+            color: color.filter(|rgb| rgb.iter().all(|c| c.is_finite())).map(|rgb| rgb.map(|c| c.clamp(0.0, 1.0))),
+            alpha: alpha.filter(|alpha| alpha.is_finite()).map(|alpha| alpha.clamp(0.0, 1.0)),
+        };
+        if tint.color.is_none() && tint.alpha.is_none() {
+            return self.material(materials);
+        }
+        if let Some((_, handle)) = self.tinted.iter().find(|(cached, _)| *cached == tint) {
+            return handle.clone();
+        }
+        let handle = materials.add(water_material(WaterSurfaceParams::new(&tint.apply(&WaterConfig::default()), None)));
+        self.tinted.push((tint, handle.clone()));
+        handle
     }
 }
 
-/// Keep the shared water material in step with [`WaterConfig`] and the
-/// terrain's height texture, binding the texture once it is ready, and ask
-/// for the texture while any [`WaterSurface`] exists. The material is only
-/// written when something differs, so an idle frame does not re-prepare it.
+/// Keep the shared water material and its tinted variants in step with
+/// [`WaterConfig`] and the terrain's height texture, binding the texture once
+/// it is ready, and ask for the texture while any [`WaterSurface`] exists. A
+/// material is only written when something differs, so an idle frame does
+/// not re-prepare it.
 pub fn sync_water_material(
     water: Option<Res<WaterConfig>>,
     mut assets: ResMut<WaterSurfaceAssets>,
@@ -314,15 +380,21 @@ pub fn sync_water_material(
         .iter()
         .next()
         .and_then(|(terrain, texture)| Some((terrain, texture.filter(|texture| texture.is_ready())?)));
-    let params = WaterSurfaceParams::new(config, bound.map(|(terrain, texture)| (terrain, texture.size())));
+    let terrain = bound.map(|(terrain, texture)| (terrain, texture.size()));
     let image = bound.map(|(_, texture)| texture.image().clone());
-    let stale = materials
-        .get(&handle)
-        .is_some_and(|material| material.extension.params != params || material.extension.terrain_height != image);
-    if stale {
-        if let Some(mut material) = materials.get_mut(&handle) {
-            material.extension.params = params;
-            material.extension.terrain_height = image;
+    // The shared material, then every tinted variant in its own colours.
+    let targets = std::iter::once((handle, WaterSurfaceParams::new(config, terrain))).chain(
+        assets.tinted.iter().map(|(tint, handle)| (handle.clone(), WaterSurfaceParams::new(&tint.apply(config), terrain))),
+    );
+    for (handle, params) in targets {
+        let stale = materials
+            .get(&handle)
+            .is_some_and(|material| material.extension.params != params || material.extension.terrain_height != image);
+        if stale {
+            if let Some(mut material) = materials.get_mut(&handle) {
+                material.extension.params = params;
+                material.extension.terrain_height = image.clone();
+            }
         }
     }
 }
@@ -398,9 +470,9 @@ pub fn water_sync_system(
         }
     }
 
-    // The chunk grid runs from -chunks_x * chunk_size to
-    // (chunks_x + 1) * chunk_size, so its centre is half a chunk off the
-    // origin on each axis.
+    // The chunk grid runs from its lowest chunk's corner to the far side of
+    // its highest chunk, so its centre is half a chunk past the centre
+    // chunk's corner on each axis.
     let (min, max) = terrain_config.footprint_xz();
     let size = max - min;
     let center = (min + max) * 0.5;
@@ -431,9 +503,9 @@ pub fn water_update_system(
 // ============================================================================
 
 /// Every water surface and the material they share: the ocean plane, water
-/// bodies and river ribbons, the shader and its `MaterialPlugin`. Added by
-/// the shared `TerrainPlugin` (the Client) and by the engine's terrain
-/// plugin, each guarding against adding it twice.
+/// bodies, river ribbons and imported water, the shader and its
+/// `MaterialPlugin`. Added by the shared `TerrainPlugin` (the Client) and by
+/// the engine's terrain plugin, each guarding against adding it twice.
 pub struct TerrainWaterPlugin;
 
 impl Plugin for TerrainWaterPlugin {
@@ -457,17 +529,20 @@ impl Plugin for TerrainWaterPlugin {
             .init_resource::<WaterSurfaceAssets>()
             .init_resource::<WaterBodyState>()
             .init_resource::<RiverWaterState>()
+            .init_resource::<VoxelWaterState>()
             .add_systems(Update, (water_sync_system, water_update_system).chain())
             // After the dirty-chunk pass, so a lake or river follows the
-            // ground and the channel that pass just baked, in the same frame.
-            .add_systems(Update, (sync_water_bodies, sync_river_water).after(apply_terrain_dirty_chunks))
+            // ground and the channel that pass just baked, and imported water
+            // is built over them, in the same frame.
+            .add_systems(Update, (sync_water_bodies, sync_river_water, sync_voxel_water).after(apply_terrain_dirty_chunks))
             .add_systems(
                 Update,
                 sync_water_material
                     .after(sync_terrain_height_textures)
                     .after(water_sync_system)
                     .after(sync_water_bodies)
-                    .after(sync_river_water),
+                    .after(sync_river_water)
+                    .after(sync_voxel_water),
             );
     }
 }
@@ -571,5 +646,36 @@ mod tests {
         assert!((bound.deep_color.w - config.color[3] * config.opacity).abs() < 1e-6);
         assert!(bound.shallow_color.w < bound.deep_color.w);
         assert!(bound.foam_depth < bound.fallback_depth, "no foam without a height texture");
+    }
+
+    #[test]
+    fn a_tinted_variant_keeps_its_own_colour_and_follows_the_config_in_the_rest() {
+        let mut world = World::new();
+        world.init_resource::<WaterSurfaceAssets>();
+        world.init_resource::<Assets<WaterSurfaceMaterial>>();
+        world.insert_resource(WaterConfig { color: [0.2, 0.4, 0.8, 1.0], opacity: 0.5, ..WaterConfig::default() });
+        // A surface, so the materials are kept current.
+        world.spawn(WaterSurface);
+        let (red, clear) = world.resource_scope(|world, mut assets: Mut<WaterSurfaceAssets>| {
+            let mut materials = world.resource_mut::<Assets<WaterSurfaceMaterial>>();
+            let red = assets.tinted_material(&mut materials, Some([1.0, 0.0, 0.0]), None);
+            let clear = assets.tinted_material(&mut materials, None, Some(0.25));
+            (red, clear)
+        });
+        let system = world.register_system(sync_water_material);
+        assert!(world.run_system(system).is_ok(), "the water material system runs");
+
+        let params = |handle: &Handle<WaterSurfaceMaterial>| {
+            world.resource::<Assets<WaterSurfaceMaterial>>().get(handle).expect("the material").extension.params
+        };
+        // Red at the config's opacity.
+        let red = params(&red);
+        assert!((red.deep_color.x - 1.0).abs() < 1e-6 && red.deep_color.y.abs() < 1e-6 && red.deep_color.z.abs() < 1e-6);
+        assert!((red.deep_color.w - 0.5).abs() < 1e-6, "the config's opacity");
+        // A quarter opaque in the config's colour.
+        let clear = params(&clear);
+        let blue = Color::srgb(0.2, 0.4, 0.8).to_linear();
+        assert!((clear.deep_color.w - 0.25).abs() < 1e-6);
+        assert!((clear.deep_color.z - blue.blue).abs() < 1e-6, "the config's colour");
     }
 }

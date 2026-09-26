@@ -51,7 +51,8 @@ use bevy::prelude::*;
 use bevy::anti_alias::smaa::Smaa;
 use bevy::pbr::{ContactShadows, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::auto_exposure::{AutoExposure, AutoExposurePlugin};
-use bevy::post_process::bloom::Bloom;
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use eustress_common::classes::BloomEffect;
 use bevy::render::view::Msaa;
 use std::sync::OnceLock;
 
@@ -97,6 +98,63 @@ fn bloom() -> Bloom {
             .unwrap_or(natural.intensity)
     });
     Bloom { intensity, ..natural }
+}
+
+/// The bloom an authored Bloom object (Roblox's `BloomEffect`) asks for.
+///
+/// Roblox's `Size` (0-56, default 24) is how far the glow reaches, so it
+/// scales bevy's wide, low-frequency part. A `Threshold` above 0 means only
+/// what is brighter than it glows, which is bevy's additive, thresholded
+/// bloom (its `OLD_SCHOOL` look); a lit white surface here sits near 1, the
+/// sky below it, the sun, lamps at night and silver-lined clouds far above.
+/// With no threshold it stays energy-conserving, `Intensity` scaling the
+/// baseline (Roblox's default 0.4 is the baseline itself).
+fn bloom_from_effect(effect: &BloomEffect) -> Bloom {
+    let base = bloom();
+    let reach = (effect.size.max(0.0) / 24.0).min(2.3);
+    let low_frequency_boost = (base.low_frequency_boost * reach).clamp(0.0, 1.0);
+    if effect.threshold > 0.0 {
+        Bloom {
+            intensity: (0.1 * effect.intensity.max(0.0)).min(1.0),
+            low_frequency_boost,
+            prefilter: BloomPrefilter { threshold: effect.threshold, threshold_softness: 0.3 },
+            composite_mode: BloomCompositeMode::Additive,
+            ..base
+        }
+    } else {
+        Bloom {
+            intensity: (base.intensity * effect.intensity.max(0.0) / 0.4).min(1.0),
+            low_frequency_boost,
+            ..base
+        }
+    }
+}
+
+/// Carry an enabled Bloom object's settings to every Studio camera, and
+/// restore the baseline when it is disabled or deleted.
+fn apply_bloom_effect(
+    effects: Query<&BloomEffect>,
+    changed: Query<(), Changed<BloomEffect>>,
+    mut removed: RemovedComponents<BloomEffect>,
+    mut cameras: Query<&mut Bloom, With<StudioCamera>>,
+) {
+    let removed_any = removed.read().count() > 0;
+    // A camera that just got its Bloom takes the effect too. Asked through
+    // the one mutable query: a second query filtering on `Added<Bloom>` reads
+    // Bloom while this one writes it, which Bevy rejects at startup (B0001).
+    // `is_added` on `Mut` does not mark the component changed.
+    let new_bloom = cameras.iter_mut().any(|b| b.is_added());
+    if changed.is_empty() && !removed_any && !new_bloom {
+        return;
+    }
+    let desired = effects
+        .iter()
+        .find(|e| e.enabled)
+        .map(bloom_from_effect)
+        .unwrap_or_else(bloom);
+    for mut camera_bloom in cameras.iter_mut() {
+        *camera_bloom = desired.clone();
+    }
 }
 
 fn gtao_on() -> bool {
@@ -176,6 +234,9 @@ impl Plugin for PhotorealPlugin {
         }
 
         app.add_systems(Update, apply_camera_stages);
+        if bloom_on() {
+            app.add_systems(Update, apply_bloom_effect.after(apply_camera_stages));
+        }
 
         let s = PhotorealSettings::default();
         info!(

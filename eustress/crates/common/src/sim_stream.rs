@@ -26,11 +26,11 @@ use tracing::info;
 use eustress_stream::{EustressStream, StreamConfig};
 
 use crate::scene_delta::{
-    TOPIC_ARC_EPISODES, TOPIC_ITERATION_HISTORY, TOPIC_RUNE_SCRIPTS,
+    TOPIC_EPISODES, TOPIC_ITERATION_HISTORY, TOPIC_RUNE_SCRIPTS,
     TOPIC_SIM_RESULTS, TOPIC_WORKSHOP_ITERATIONS,
 };
 use crate::change_queue::ChangeQueueConfig;
-use crate::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
+use crate::sim_record::{EpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SimStreamConfig — type alias to ChangeQueueConfig
@@ -87,9 +87,9 @@ impl SimStreamWriter {
         Ok(())
     }
 
-    pub async fn publish_arc_episode(&self, record: &ArcEpisodeRecord) -> Result<(), String> {
-        let bytes = record.to_bytes().map_err(|e| format!("rkyv ArcEpisodeRecord: {e}"))?;
-        self.stream.producer(TOPIC_ARC_EPISODES).send_bytes(Bytes::from(bytes));
+    pub async fn publish_episode(&self, record: &EpisodeRecord) -> Result<(), String> {
+        let bytes = record.to_bytes().map_err(|e| format!("rkyv EpisodeRecord: {e}"))?;
+        self.stream.producer(TOPIC_EPISODES).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
@@ -218,10 +218,10 @@ impl SimStreamReader {
         records
     }
 
-    pub async fn replay_arc_episodes(&self, query: &SimQuery) -> Vec<ArcEpisodeRecord> {
-        let mut records: Vec<ArcEpisodeRecord> = Vec::new();
-        self.stream.replay_ring(TOPIC_ARC_EPISODES, query.from_offset, |view| {
-            if let Ok(r) = ArcEpisodeRecord::from_bytes(view.data) {
+    pub async fn replay_episodes(&self, query: &SimQuery) -> Vec<EpisodeRecord> {
+        let mut records: Vec<EpisodeRecord> = Vec::new();
+        self.stream.replay_ring(TOPIC_EPISODES, query.from_offset, |view| {
+            if let Ok(r) = EpisodeRecord::from_bytes(view.data) {
                 records.push(r);
             }
         });
@@ -230,9 +230,9 @@ impl SimStreamReader {
         records
     }
 
-    pub async fn best_arc_episode(&self, task_id: &str) -> Option<ArcEpisodeRecord> {
+    pub async fn best_episode(&self, task_id: &str) -> Option<EpisodeRecord> {
         let query = SimQuery { limit: 0, ..Default::default() };
-        let records = self.replay_arc_episodes(&query).await;
+        let records = self.replay_episodes(&query).await;
         records
             .into_iter()
             .filter(|r| r.task_id == task_id)

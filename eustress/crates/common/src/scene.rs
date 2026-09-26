@@ -216,9 +216,9 @@ impl OrbitalSettings {
 /// Workspace/physics settings for the scene
 #[derive(Debug, Clone, Serialize, Deserialize, Reflect)]
 pub struct WorkspaceSettings {
-    /// Gravity strength in studs/s². Default `196.8` ≡ SI standard gravity
-    /// after conversion through `eustress_common::units` (1 stud = 9.815/196.8 m),
-    /// matching `Workspace::default().gravity` and the engine's startup gravity.
+    /// Gravity strength in legacy studs/s² (`units::Unit::LegacyStud`,
+    /// 9.815/196.8 m). Default `196.8` ≡ 9.815 m/s², close to standard
+    /// gravity, the Workspace's default.
     pub gravity: f32,
     
     /// Maximum entity speed (studs/s)
@@ -243,8 +243,8 @@ pub struct WorkspaceSettings {
 impl Default for WorkspaceSettings {
     fn default() -> Self {
         Self {
-            // 196.8 studs/s² → ~9.815 m/s² (≈ SI standard gravity) via the unit
-            // system; keeps loaded-scene gravity equal to Workspace::default().
+            // 196.8 legacy studs/s² → 9.815 m/s² (≈ standard gravity) via
+            // `Unit::LegacyStud`, close to Workspace::default().
             gravity: 196.8,
             max_entity_speed: 100.0,
             max_fall_speed: 200.0,

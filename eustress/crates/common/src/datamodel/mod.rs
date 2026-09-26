@@ -29,12 +29,19 @@
 //! the slot. Instances bound to an ECS entity carry its bits in
 //! [`LiveInstance::entity`].
 
+/// Animation tracks: `Animator:LoadAnimation`, the track clock and its events.
+pub mod animation;
 mod classes;
 mod commerce;
+/// One conversion from a world's records to the tree's properties, shared by
+/// Studio's seed and a Player's reader.
+pub mod record;
+mod remote;
 mod value;
 
 pub use classes::*;
 pub use commerce::*;
+pub use remote::*;
 pub use value::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -174,6 +181,12 @@ struct Slot {
 // Events and commands
 // ============================================================================
 
+/// A part's density in kg/m³, hidden from scripts: its custom physical
+/// properties' when it has them, otherwise its material's
+/// (`BasePart::effective_density`). The readers seed it; the Luau VM's
+/// `Mass` multiplies it by the part's volume.
+pub const PART_DENSITY: &str = "__Density";
+
 /// Something scripts may react to. Queued, then fired by each runtime at
 /// its next resumption point (Roblox's deferred signal behaviour).
 #[derive(Debug, Clone, PartialEq)]
@@ -199,10 +212,20 @@ pub enum DmEvent {
     MoveToFinished { humanoid: InstanceId, reached: bool },
     /// A GuiButton was clicked (MouseButton1Click / Activated).
     GuiActivated { button: InstanceId },
+    /// A TextBox took the keyboard focus (`TextBox.Focused`).
+    TextBoxFocused { textbox: InstanceId },
+    /// A TextBox gave the keyboard focus up (`TextBox.FocusLost`):
+    /// `enter_pressed` when Enter or `ReleaseFocus(true)` submitted it.
+    TextBoxFocusLost { textbox: InstanceId, enter_pressed: bool },
     /// A BindableEvent fired from either language. Luau delivers its own
     /// fires directly (tables and functions intact), so it skips events
     /// marked `from_luau`; Rune reads them all.
     Fired { event: InstanceId, args: Vec<DmValue>, from_luau: bool },
+    /// A named signal on an instance, with its arguments: an AnimationTrack's
+    /// `Stopped`, `Ended`, `DidLoop`, `KeyframeReached` and `Marker:<name>`, an
+    /// Animator's `AnimationPlayed`, a Humanoid's `Running`, `Jumping`,
+    /// `FreeFalling`, `Climbing` and `StateChanged`.
+    Signal { id: InstanceId, name: String, args: Vec<DmValue> },
 }
 
 /// Output routed to the Studio Output panel.
@@ -216,8 +239,21 @@ pub enum OutputLevel {
 #[derive(Debug, Clone)]
 pub struct OutputLine {
     pub level: OutputLevel,
+    /// Who wrote it: a script's path in the tree
+    /// (`ServerScriptService.GameDirector`), or a host system's name.
     pub source: String,
     pub text: String,
+    /// The source file of the code the line points at, where the host
+    /// recorded one ([`DataModel::set_script_file`]); empty otherwise.
+    pub file: String,
+    /// The line in that code, from 1; 0 when the line points at none.
+    pub line: u32,
+    /// For an error, where it happened, innermost call first:
+    /// `ServerScriptService.GameDirector:12 function spawnWave`.
+    pub stack: Vec<String>,
+    /// A script starting, finishing its top-level code or stopping, which
+    /// the host reports rather than the script.
+    pub lifecycle: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +277,28 @@ pub enum HumanoidCommand {
     /// `Humanoid:MoveTo(point)`.
     MoveTo { humanoid: InstanceId, target: Vector3 },
     Jump { humanoid: InstanceId },
+}
+
+/// `Seat:Sit(humanoid)` or `VehicleSeat:Sit(humanoid)` on the host: a request,
+/// not a seating. The host's seat system drains
+/// [`DataModel::sit_requests`] each frame and applies the same checks as a
+/// touch (distance, an occupant already there, `Disabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SitRequest {
+    pub seat: InstanceId,
+    pub humanoid: InstanceId,
+}
+
+/// A script's request to move the keyboard focus, applied by the GUI hit test
+/// at the start of the next frame: the hit test is the only thing that
+/// changes focus. `submitted` is what `TextBox.FocusLost` reports as
+/// `enterPressed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRequest {
+    /// `TextBox:CaptureFocus()`.
+    Capture { textbox: InstanceId },
+    /// `TextBox:ReleaseFocus(submitted)`.
+    Release { textbox: InstanceId, submitted: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -368,20 +426,60 @@ pub struct DataModel {
     pub input: InputState,
     pub mouse: MouseState,
     pub local_player: Option<InstanceId>,
+    /// Each script's source file, where the host recorded one.
+    script_files: HashMap<InstanceId, String>,
     pub output: Vec<OutputLine>,
     pub sound_commands: Vec<SoundCommand>,
     pub particle_emits: Vec<(InstanceId, u32)>,
     pub humanoid_commands: Vec<HumanoidCommand>,
+    /// `Seat:Sit` calls, drained only by the host's seat system. Their own
+    /// queue rather than a [`HumanoidCommand`], whose drainer is the humanoid
+    /// system: one queue per consumer, so neither drops the other's.
+    pub sit_requests: Vec<SitRequest>,
+    /// The TextBox holding the keyboard focus, if any. Only the GUI hit test
+    /// writes it; `UserInputService:GetFocusedTextBox()` reads it.
+    pub focused_textbox: Option<InstanceId>,
+    /// `CaptureFocus` and `ReleaseFocus` calls, for the hit test to apply.
+    pub focus_requests: Vec<FocusRequest>,
     pub physics_commands: Vec<PhysicsCommand>,
+    /// Terrain edits scripts made (`workspace.Terrain:FillBall`, ...), in
+    /// call order, for the engine to apply after the scripts have run.
+    pub terrain_commands: Vec<crate::terrain::api::TerrainCommand>,
     /// Parts a script listens to `Touched` / `TouchEnded` on. Physics only
     /// reports contacts for colliders that ask for them, so the engine turns
     /// reporting on for each part queued here.
     pub touch_watch: Vec<InstanceId>,
     /// `MarketplaceService`: products, purchase prompts and receipts.
     pub commerce: CommerceState,
+    /// On a host, each joined player's input by its `Player` instance: what
+    /// `Player:IsKeyDown` reads for anyone but this machine's own player,
+    /// whose input is [`DataModel::input`]. The engine writes it every frame.
+    pub player_input: HashMap<InstanceId, InputState>,
+    /// True on the machine running the server Scripts, which is Studio's Play
+    /// session, and on a Space playing on its own. False on a Player, where
+    /// `RunService:IsServer` reads false and `FireServer` leaves the machine
+    /// instead of looping back. The shell sets it.
+    pub is_server: bool,
+    /// True once a session is up, which switches `RemoteEvent` and
+    /// `RemoteFunction` from looping back inside this VM to the four queues
+    /// below. The shell sets it.
+    pub networked: bool,
+    /// Calls scripts made that are leaving this machine: `FireServer` and
+    /// `InvokeServer` on a player, `FireClient` and `FireAllClients` on the
+    /// host. The session drains it each frame.
+    pub remote_out: Vec<RemoteCall>,
+    /// Calls that arrived, for the VM to drain and fire as `OnServerEvent`
+    /// on the host and `OnClientEvent` on a player.
+    pub remote_in: Vec<RemoteDelivery>,
+    /// Answers leaving this machine, which is what `OnServerInvoke` returned.
+    pub reply_out: Vec<RemoteReply>,
+    /// Answers that arrived, each resuming a parked `InvokeServer`.
+    pub reply_in: Vec<RemoteReply>,
     /// Bumped on every structural change, so caches keyed on the tree
     /// shape (the Rune snapshot, name lookups) know when to rebuild.
     pub structure_version: u64,
+    /// Every Animator's tracks: their control state, clocks and clips.
+    pub animation: animation::AnimationState,
 }
 
 impl Default for DataModel {
@@ -411,14 +509,27 @@ impl DataModel {
             input: InputState::default(),
             mouse: MouseState::default(),
             local_player: None,
+            script_files: HashMap::default(),
             output: Vec::new(),
             sound_commands: Vec::new(),
             particle_emits: Vec::new(),
             humanoid_commands: Vec::new(),
+            sit_requests: Vec::new(),
+            focused_textbox: None,
+            focus_requests: Vec::new(),
             physics_commands: Vec::new(),
+            terrain_commands: Vec::new(),
             touch_watch: Vec::new(),
             commerce: CommerceState::default(),
+            player_input: HashMap::default(),
+            is_server: true,
+            networked: false,
+            remote_out: Vec::new(),
+            remote_in: Vec::new(),
+            reply_out: Vec::new(),
+            reply_in: Vec::new(),
             structure_version: 0,
+            animation: animation::AnimationState::default(),
         };
         let root = dm.alloc("DataModel", "Game", Origin::Scene);
         dm.root = root;
@@ -551,6 +662,45 @@ impl DataModel {
         }
         if class_is_service_like(class) {
             self.services.entry(class.to_string()).or_insert(id);
+        }
+        self.structure_version += 1;
+        id
+    }
+
+    /// A world reader's seeding: an instance loaded from a record on a shell
+    /// that has no entity for it yet. `props` replace the class defaults, as
+    /// in [`DataModel::create_bound`], and nothing is marked dirty and no
+    /// event fires, since loading is not a script write. Once the instance is
+    /// in the tree it is queued for spawn exactly once, so the shell's apply
+    /// step meets it as one spawn carrying its full properties. Services are
+    /// registered and never queued: nothing draws a service.
+    pub fn create_scene(
+        &mut self,
+        class: &str,
+        name: &str,
+        parent: Option<InstanceId>,
+        props: Vec<(String, DmValue)>,
+    ) -> InstanceId {
+        let id = self.alloc(class, name, Origin::Scene);
+        let defaults = default_properties(class);
+        if let Some(inst) = self.get_mut(id) {
+            for (k, v) in defaults {
+                inst.props.insert(k.to_string(), v);
+            }
+            for (k, v) in props {
+                inst.props.insert(k, v);
+            }
+        }
+        if let Some(p) = parent {
+            self.link(id, p);
+        }
+        if class_is_service_like(class) {
+            self.services.entry(class.to_string()).or_insert(id);
+        } else if self.in_tree(id) {
+            if let Some(inst) = self.get_mut(id) {
+                inst.queued_spawn = true;
+            }
+            self.spawn_queue.push(id);
         }
         self.structure_version += 1;
         id
@@ -851,9 +1001,11 @@ impl DataModel {
 
     /// `Instance:Destroy()`: the instance and all its descendants leave the
     /// tree for good. Their slots are released at the end of the frame, so a
-    /// `Destroying` handler can still read them.
+    /// `Destroying` handler can still read them. An instance whose Parent is
+    /// locked while it is alive (Workspace's Terrain) is never destroyed,
+    /// whichever script language asks, so `ClearAllChildren` keeps it too.
     pub fn destroy(&mut self, id: InstanceId) {
-        if id == self.root || !self.exists(id) {
+        if id == self.root || !self.exists(id) || self.get(id).map_or(false, |i| i.parent_locked) {
             return;
         }
         let subtree: Vec<InstanceId> = std::iter::once(id).chain(self.descendants(id)).collect();
@@ -978,6 +1130,29 @@ impl DataModel {
             "Archivable" => return Some(DmValue::Bool(inst.archivable)),
             _ => {}
         }
+        // An Attachment's CFrame is relative to its part's pose; its axes and
+        // world frame are derived from it.
+        if inst.class_name == "Attachment" {
+            let local = inst.cframe().unwrap_or_default();
+            match name {
+                "Axis" => return Some(DmValue::Vector3(local.right_vector())),
+                "SecondaryAxis" => return Some(DmValue::Vector3(local.up_vector())),
+                "WorldCFrame" | "WorldPosition" | "WorldOrientation" | "WorldAxis" | "WorldSecondaryAxis" => {
+                    let world = self.attachment_parent_pose(id) * local;
+                    return Some(match name {
+                        "WorldCFrame" => DmValue::CFrame(world),
+                        "WorldPosition" => DmValue::Vector3(world.position),
+                        "WorldOrientation" => {
+                            let (rx, ry, rz) = world.to_euler_angles_yxz();
+                            DmValue::Vector3(Vector3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()))
+                        }
+                        "WorldAxis" => DmValue::Vector3(world.right_vector()),
+                        _ => DmValue::Vector3(world.up_vector()),
+                    });
+                }
+                _ => {}
+            }
+        }
         if has_pose(&inst.class_name) {
             match name {
                 "Position" => return inst.cframe().map(|cf| DmValue::Vector3(cf.position)),
@@ -1039,6 +1214,46 @@ impl DataModel {
                 return Ok(());
             }
             _ => {}
+        }
+
+        // An Attachment's axes and world frame write through to its part-local CFrame.
+        if class == "Attachment" {
+            let local = self.get(id).and_then(|i| i.cframe()).unwrap_or_default();
+            let parent = self.attachment_parent_pose(id);
+            let vector = |v: &DmValue| v.as_vector3().ok_or_else(|| type_error(name, "Vector3", v));
+            let new_local = match name {
+                "Axis" => Some(with_axes(local, vector(&value)?, local.up_vector())),
+                "SecondaryAxis" => Some(with_axes(local, local.right_vector(), vector(&value)?)),
+                "WorldAxis" => Some(with_axes(local, parent.vector_to_object_space(vector(&value)?), local.up_vector())),
+                "WorldSecondaryAxis" => {
+                    Some(with_axes(local, local.right_vector(), parent.vector_to_object_space(vector(&value)?)))
+                }
+                "WorldPosition" => {
+                    let mut cf = local;
+                    cf.position = parent.point_to_object_space(vector(&value)?);
+                    Some(cf)
+                }
+                "WorldCFrame" => {
+                    let world = value.as_cframe().ok_or_else(|| type_error(name, "CFrame", &value))?;
+                    Some(parent.inverse() * world)
+                }
+                "WorldOrientation" => {
+                    let deg = vector(&value)?;
+                    let world = CFrame::from_euler_angles_yxz(deg.x.to_radians(), deg.y.to_radians(), deg.z.to_radians());
+                    let mut cf = parent.inverse() * world;
+                    cf.position = local.position;
+                    Some(cf)
+                }
+                _ => None,
+            };
+            if let Some(cf) = new_local {
+                return self.store(id, "CFrame", DmValue::CFrame(cf));
+            }
+        }
+
+        // An AnimationTrack's properties are its control state.
+        if class == "AnimationTrack" {
+            return self.set_track_prop(id, name, value);
         }
 
         // Derived pose properties write through to CFrame.
@@ -1107,6 +1322,17 @@ impl DataModel {
             other => other,
         };
         self.store(id, name, value)
+    }
+
+    /// The pose an Attachment's CFrame is relative to: its parent part's
+    /// CFrame (position and rotation; the part's size never enters), or the
+    /// world when it hangs from anything else.
+    fn attachment_parent_pose(&self, id: InstanceId) -> CFrame {
+        self.parent(id)
+            .and_then(|p| self.get(p))
+            .filter(|p| is_base_part(&p.class_name))
+            .and_then(|p| p.cframe())
+            .unwrap_or_default()
     }
 
     fn store(&mut self, id: InstanceId, name: &str, value: DmValue) -> Result<(), String> {
@@ -1311,7 +1537,56 @@ impl DataModel {
     // ── Output and commands ────────────────────────────────────────────────
 
     pub fn print(&mut self, level: OutputLevel, source: &str, text: impl Into<String>) {
-        self.output.push(OutputLine { level, source: source.to_string(), text: text.into() });
+        self.print_from(level, None, source, text, 0, Vec::new());
+    }
+
+    /// A line from script code: `script` is the script whose code it points
+    /// at (its recorded file goes on the line), `line` the line in that code
+    /// (0 for none) and `stack`, for an error, where it happened.
+    pub fn print_from(
+        &mut self,
+        level: OutputLevel,
+        script: Option<InstanceId>,
+        source: &str,
+        text: impl Into<String>,
+        line: u32,
+        stack: Vec<String>,
+    ) {
+        let file = script.and_then(|s| self.script_file(s)).unwrap_or_default().to_string();
+        self.output.push(OutputLine { level, source: source.to_string(), text: text.into(), file, line, stack, lifecycle: false });
+    }
+
+    /// A script starting, finishing its top-level code or stopping.
+    pub fn print_lifecycle(&mut self, level: OutputLevel, script: Option<InstanceId>, source: &str, text: impl Into<String>) {
+        let file = script.and_then(|s| self.script_file(s)).unwrap_or_default().to_string();
+        self.output.push(OutputLine {
+            level,
+            source: source.to_string(),
+            text: text.into(),
+            file,
+            line: 0,
+            stack: Vec::new(),
+            lifecycle: true,
+        });
+    }
+
+    /// Record the file a script's source was read from, for the Output lines
+    /// about its code to point at.
+    pub fn set_script_file(&mut self, id: InstanceId, file: impl Into<String>) {
+        self.script_files.insert(id, file.into());
+    }
+
+    /// The file a script's source was read from: its own, or that of the
+    /// script it was cloned from (a character's or a PlayerGui's copy).
+    pub fn script_file(&self, id: InstanceId) -> Option<&str> {
+        let mut at = id;
+        for _ in 0..16 {
+            if let Some(file) = self.script_files.get(&at) {
+                return Some(file.as_str());
+            }
+            at = self.get(at)?.clone_of?;
+        }
+        None
     }
 
     // ── Engine drains ──────────────────────────────────────────────────────
@@ -1475,6 +1750,22 @@ pub struct CameraView {
     pub height: f64,
 }
 
+/// `cf` with its rotation rebuilt from a primary (X) and a secondary (Y) axis,
+/// the way Roblox's `Attachment.Axis` and `SecondaryAxis` define a frame; the
+/// position is kept. The secondary axis is squared up against the primary.
+fn with_axes(cf: CFrame, axis: Vector3, secondary: Vector3) -> CFrame {
+    let x = if axis.magnitude() > 1e-9 { axis.unit() } else { cf.right_vector() };
+    let mut z = x.cross(&secondary);
+    if z.magnitude() < 1e-9 {
+        // A secondary axis along the primary: any perpendicular will do.
+        let helper = if x.x.abs() < 0.9 { Vector3::new(1.0, 0.0, 0.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+        z = x.cross(&helper);
+    }
+    let z = z.unit();
+    let y = z.cross(&x);
+    CFrame::from_matrix(cf.position, x, y, z)
+}
+
 /// Classes whose pose lives in a `CFrame` property.
 fn has_pose(class: &str) -> bool {
     is_base_part(class) || matches!(class, "Camera" | "Attachment")
@@ -1527,6 +1818,55 @@ mod tests {
         let id = dm.create("Part");
         dm.rename(id, name).unwrap();
         id
+    }
+
+    #[test]
+    fn constraints_start_with_roblox_defaults() {
+        let mut dm = DataModel::new();
+        let hinge = dm.create("HingeConstraint");
+        assert!(dm.is_a(hinge, "Constraint"));
+        assert_eq!(dm.get_prop(hinge, "Enabled"), Some(DmValue::Bool(true)));
+        assert_eq!(dm.get_prop(hinge, "MotorMaxTorque"), Some(DmValue::Number(0.0)));
+        dm.set_prop(hinge, "ActuatorType", DmValue::String("Servo".into())).unwrap();
+        assert_eq!(dm.get_prop(hinge, "ActuatorType"), Some(DmValue::Enum(EnumItem::new("ActuatorType", "Servo"))));
+        let a = dm.create("Attachment");
+        dm.set_prop(hinge, "Attachment0", DmValue::Instance(a)).unwrap();
+        assert_eq!(dm.get_prop(hinge, "Attachment0"), Some(DmValue::Instance(a)));
+        dm.set_prop(hinge, "Attachment0", DmValue::Nil).unwrap();
+        assert_eq!(dm.get_prop(hinge, "Attachment0"), Some(DmValue::Nil));
+        let slider = dm.create("PrismaticConstraint");
+        assert!(dm.is_a(slider, "SlidingBallConstraint"));
+    }
+
+    #[test]
+    fn attachment_world_frame_follows_its_part() {
+        let mut dm = DataModel::new();
+        let p = part(&mut dm, "Body");
+        // The part at (10, 0, 0), turned a quarter turn about Y: its X axis
+        // points along world -Z.
+        let pose = CFrame::new(10.0, 0.0, 0.0) * CFrame::from_euler_angles_yxz(0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        dm.set_prop(p, "CFrame", DmValue::CFrame(pose)).unwrap();
+        let a = dm.create("Attachment");
+        dm.set_parent(a, Some(p)).unwrap();
+
+        dm.set_prop(a, "WorldPosition", DmValue::Vector3(Vector3::new(10.0, 1.0, 0.0))).unwrap();
+        let local = dm.get_prop(a, "Position").and_then(|v| v.as_vector3()).unwrap();
+        assert!(local.fuzzy_eq(&Vector3::new(0.0, 1.0, 0.0), 1e-9), "{local:?}");
+
+        dm.set_prop(a, "WorldAxis", DmValue::Vector3(Vector3::new(1.0, 0.0, 0.0))).unwrap();
+        let world_axis = dm.get_prop(a, "WorldAxis").and_then(|v| v.as_vector3()).unwrap();
+        assert!(world_axis.fuzzy_eq(&Vector3::new(1.0, 0.0, 0.0), 1e-9), "{world_axis:?}");
+        let axis = dm.get_prop(a, "Axis").and_then(|v| v.as_vector3()).unwrap();
+        assert!(axis.fuzzy_eq(&pose.vector_to_object_space(Vector3::new(1.0, 0.0, 0.0)), 1e-9), "{axis:?}");
+        let secondary = dm.get_prop(a, "SecondaryAxis").and_then(|v| v.as_vector3()).unwrap();
+        assert!(axis.dot(&secondary).abs() < 1e-9, "the axes stay perpendicular");
+
+        // The world position holds while the axes turn, and follows the part when it moves.
+        let world = dm.get_prop(a, "WorldPosition").and_then(|v| v.as_vector3()).unwrap();
+        assert!(world.fuzzy_eq(&Vector3::new(10.0, 1.0, 0.0), 1e-9), "{world:?}");
+        dm.set_prop(p, "Position", DmValue::Vector3(Vector3::new(0.0, 5.0, 0.0))).unwrap();
+        let moved = dm.get_prop(a, "WorldPosition").and_then(|v| v.as_vector3()).unwrap();
+        assert!(moved.fuzzy_eq(&Vector3::new(0.0, 6.0, 0.0), 1e-9), "{moved:?}");
     }
 
     #[test]

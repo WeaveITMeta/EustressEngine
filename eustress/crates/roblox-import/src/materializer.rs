@@ -53,7 +53,7 @@ use crate::property_map::{map_properties, PropertyBag};
 use crate::service_router::{RouteOutcome, ServiceRouter};
 use crate::sink::{ImportSink, ImportStorage, NodeSpec, TomlSink, TomlWrite, WrittenRef};
 use crate::value_objects::{
-    encode_value_object, is_convertible_value_object, is_value_object_class,
+    constrained_range, encode_value_object, is_convertible_value_object, is_value_object_class,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,9 +119,9 @@ pub struct ImportOptions {
     /// imports are deterministic across runs against the same Space.
     pub space_salt: Option<Vec<u8>>,
 
-    /// Authoring unit symbol stamped into `metadata.unit`. Defaults to
-    /// `"ft"` — imported Roblox parts treat 1 stud = 1 foot; the engine's
-    /// unit system converts ft->m (x0.3048) at the load boundary. Verbatim
+    /// Authoring unit symbol stamped into `metadata.unit`. Defaults to the
+    /// Eustress stud (`Unit::Stud`, 0.28 m), which a Roblox stud is; the
+    /// engine's unit system converts to metres at the load boundary. Verbatim
     /// Size / Position / CFrame stud numbers are unchanged; the tag does the
     /// conversion. Angular props (Orientation, CFrame rotation) are never
     /// unit-converted.
@@ -163,7 +163,8 @@ impl Default for ImportOptions {
             recompute_csg_when_missing: true,
             transform_scripts: true,
             space_salt: None,
-            unit_symbol: Some("ft".to_string()),
+            // A Roblox stud is the Eustress stud: files keep Roblox's numbers.
+            unit_symbol: Some(eustress_common::units::Unit::Stud.symbol().to_string()),
             asset_fetcher: None,
             storage: ImportStorage::default(),
             #[cfg(feature = "binary-sink")]
@@ -220,6 +221,22 @@ pub struct Materializer<'dom> {
     /// used for the second-pass `Ref` resolution.
     referent_to_uuid: HashMap<Ref, Uuid>,
 
+    /// Every written node's world pose, as Roblox means it and as a loader
+    /// composes it from the files (`crate::pose`), so each node's
+    /// `[transform]` is written relative to its parent's pose.
+    poses: HashMap<Ref, (crate::pose::Pose, crate::pose::Pose)>,
+
+    /// Roblox animation ids the place uses (an `Animation`'s `AnimationId`,
+    /// a literal in a script that works with animations), each with where it
+    /// was first found. After the walk each becomes a clip file
+    /// (`crate::animation`) or a report line saying why not.
+    animation_ids: std::collections::BTreeMap<u64, &'static str>,
+
+    /// The Lighting Sky's `SunAngularSize` and `MoonAngularSize`, in Roblox's
+    /// degrees. After the walk they size the Space's Sun and Moon
+    /// (`write_celestial_sizes`).
+    celestial_sizes: (Option<f64>, Option<f64>),
+
     /// Roblox referent → on-disk space-relative path. Used for
     /// `ImportReport::unresolved_refs` reporting.
     referent_to_path: HashMap<Ref, String>,
@@ -228,8 +245,8 @@ pub struct Materializer<'dom> {
     /// to be patched after the walk completes.
     pending_refs: Vec<(PathBuf, String, Ref)>,
 
-    /// Pending `[properties.extras]` / `[references]` / `[metadata.tags]` /
-    /// `[properties.attributes]` / `[properties.physics]` / `[asset]` patches
+    /// Pending `[properties.extras]` / `[references]` / root `tags` /
+    /// root `[attributes]` / `[properties.physics]` / `[asset]` patches
     /// keyed by absolute TOML path. Applied at the end of the walk so we
     /// only touch each file once.
     pending_patches: HashMap<PathBuf, TomlPatch>,
@@ -279,6 +296,9 @@ struct TomlPatch {
     uuid_stamp: Option<String>,
     script_body: Option<String>,
     script_class: Option<ClassName>,
+    /// A `KeyframeSequence`'s `keyframes` array (`crate::animation`), written
+    /// at the document root, where the clip reader reads it.
+    keyframes: Option<toml::Value>,
 }
 
 /// Project rbx_dom_weak 4.x's interned-`Ustr`-keyed `properties` map into a
@@ -349,6 +369,9 @@ impl<'dom> Materializer<'dom> {
             salt,
             vo_ctx: eustress_common::luau::compat::ValueObjectContext::default(),
             referent_to_uuid: HashMap::new(),
+            poses: HashMap::new(),
+            animation_ids: Default::default(),
+            celestial_sizes: (None, None),
             referent_to_path: HashMap::new(),
             pending_refs: Vec::new(),
             pending_patches: HashMap::new(),
@@ -387,6 +410,9 @@ impl<'dom> Materializer<'dom> {
             if class == "ObjectValue" {
                 self.vo_ctx.ref_names.insert(name.clone());
             }
+            if constrained_range(class, &inst.properties).is_some() {
+                self.vo_ctx.range_names.insert(name.clone());
+            }
             self.vo_ctx.names.insert(name);
         }
 
@@ -412,6 +438,12 @@ impl<'dom> Materializer<'dom> {
 
         self.finalise_pending_patches()?;
         self.finalise_refs(report)?;
+
+        // ── A clip for each Roblox animation id the place uses ──
+        self.write_animation_clips(report);
+
+        // ── The Sky's sun and moon sizes, on the Sun and the Moon ──
+        self.write_celestial_sizes(report);
 
         // ── Flush the per-place color manifest ──
         if !self.color_manifest.is_empty() {
@@ -461,6 +493,11 @@ impl<'dom> Materializer<'dom> {
                 std::fs::create_dir_all(&absolute_dest)
                     .map_err(|e| ImportError::Io(absolute_dest.clone(), e))?;
                 let dest_str = dest.to_string_lossy().to_string();
+                // The service's own properties: Lighting's time of day and fog,
+                // Workspace's gravity, and so on.
+                if cognate {
+                    self.write_service_toml(service_ref, &absolute_dest, report)?;
+                }
 
                 // ── Workspace container folder (place-scoped subtree) ──
                 //
@@ -568,6 +605,36 @@ impl<'dom> Materializer<'dom> {
         }
     }
 
+    /// Write `<dir>/_service.toml` for a Roblox service: the engine's template
+    /// for it with the place's own values laid over `[properties]`
+    /// (`service_props`). A service without a template is left alone, and an
+    /// existing file is never overwritten.
+    fn write_service_toml(
+        &self,
+        service_ref: Ref,
+        dir: &Path,
+        report: &mut ImportReport,
+    ) -> Result<(), ImportError> {
+        let Some(service) = self.dom.get_by_ref(service_ref) else {
+            return Ok(());
+        };
+        let path = dir.join("_service.toml");
+        if path.exists() {
+            return Ok(());
+        }
+        let props = props_to_string_map(service);
+        let Some(mapped) = crate::service_props::map_service_properties(service.class.as_str(), &props) else {
+            return Ok(());
+        };
+        for (property, ty) in &mapped.unmapped {
+            report.record_unmapped_property(service.class.as_str(), property, ty);
+        }
+        if let Some(body) = crate::service_props::service_toml(service.class.as_str(), &mapped) {
+            std::fs::write(&path, body).map_err(|e| ImportError::Io(path.clone(), e))?;
+        }
+        Ok(())
+    }
+
     fn handle_starter_player(
         &mut self,
         service_ref: Ref,
@@ -576,6 +643,11 @@ impl<'dom> Materializer<'dom> {
         let Some(service) = self.dom.get_by_ref(service_ref) else {
             return Ok(());
         };
+        // StarterPlayer's own properties (character and camera defaults) go to
+        // its service folder even though its children land elsewhere.
+        let starter_dir = self.router.absolute(Path::new("StarterPlayer"));
+        std::fs::create_dir_all(&starter_dir).map_err(|e| ImportError::Io(starter_dir.clone(), e))?;
+        self.write_service_toml(service_ref, &starter_dir, report)?;
         for child_ref in service.children().iter() {
             let Some(child) = self.dom.get_by_ref(*child_ref) else {
                 continue;
@@ -653,6 +725,9 @@ impl<'dom> Materializer<'dom> {
         // the CSG dispatcher can swap in the baked mesh (or fall back to
         // an AABB block when no MeshData is present).
         let eustress_class = match roblox_to_eustress_class(inst.class.as_str()) {
+            // A value object that holds children: a Folder for them (its
+            // value was folded into its parent's attributes).
+            _ if is_value_object_class(inst.class.as_str()) && !inst.children().is_empty() => ClassName::Folder,
             Some(c) => c,
             None if special == SpecialKind::Csg => ClassName::Part,
             None => {
@@ -697,10 +772,29 @@ impl<'dom> Materializer<'dom> {
             if !is_value_object_class(child.class.as_str()) {
                 continue;
             }
-            // From here on the child is folded out of the instance tree
-            // regardless of whether it converts.
-            folded_children.insert(*child_ref);
-            report.total_nodes_seen += 1;
+            // A value object with children of its own (a car's
+            // `Handling.Torque` holding `Location`, `Suspension`, ...) stays
+            // in the tree as a Folder (see `walk_subtree`'s class mapping),
+            // so its children fold into ITS attributes. Its value still folds
+            // here: `Handling.Torque.Value` reads `Handling`'s attribute.
+            // Any other value object is folded out of the tree, whether or
+            // not it converts.
+            let keeps_children = !child.children().is_empty();
+            if keeps_children {
+                report.record_approximation(
+                    parent_relpath,
+                    child.class.as_str(),
+                    "attribute",
+                    &format!(
+                        "value object '{}' holds children: kept as a Folder for them; \
+                         its value is an attribute of '{}'",
+                        child.name, requested_name
+                    ),
+                );
+            } else {
+                folded_children.insert(*child_ref);
+                report.total_nodes_seen += 1;
+            }
 
             let salt = &self.salt;
             let encoded = encode_value_object(child.class.as_str(), &child.properties, |target| {
@@ -735,6 +829,14 @@ impl<'dom> Materializer<'dom> {
                             ),
                         );
                     }
+                    // A constrained value's range folds beside it, keyed off
+                    // the value's own (possibly de-duplicated) key.
+                    if let Some((min, max)) = constrained_range(child.class.as_str(), &child.properties) {
+                        for (suffix, bound) in [("MinValue", min), ("MaxValue", max)] {
+                            let bound_key = unique_attribute_key(&bag.attributes, &format!("{key}_{suffix}"));
+                            bag.attributes.insert(bound_key, bound);
+                        }
+                    }
                     bag.attributes.insert(key, value);
                 }
                 None => {
@@ -755,34 +857,23 @@ impl<'dom> Materializer<'dom> {
             }
         }
 
-        // ── SpecialMesh / BlockMesh / CylinderMesh → parent folding ──
+        // ── DataMesh children: SpecialMesh / BlockMesh / CylinderMesh ──
         //
-        // Roblox renders a legacy DataMesh child (`SpecialMesh`,
-        // `BlockMesh`, `CylinderMesh`) INSTEAD of the parent part's own
-        // shape. Eustress has no standalone runtime DataMesh instance —
-        // the idiomatic shape is the parent's own `[asset]` mesh. Mirror
-        // the ValueObject folding pattern above: detect the child class,
-        // fold its effect into THIS node's bag / pending patch, and add
-        // it to `folded_children` so it never materialises.
-        //
-        // MeshType routing (numeric values per the rbx reflection
-        // database, `rbx_reflection_database 2.0.2+roblox-700`:
-        // Head=0 Torso=1 Wedge=2 Sphere=3 Cylinder=4 FileMesh=5 Brick=6
-        // Prism=7 Pyramid=8 ParallelRamp=9 RightAngleRamp=10
-        // CornerWedge=11):
-        // - FileMesh(5) with a mesh ref → the ref joins the PARENT's
-        //   `bag.asset_refs` and rides the existing resolver/fetch path
-        //   below into `[asset].mesh`;
-        // - Brick(6)→block, Sphere(3)→ball, Cylinder(4)→cylinder,
-        //   Wedge(2)→wedge engine primitives; Head(0)→ball and
-        //   Torso(1)/Prism..CornerWedge(7..=11)→block, each with an
-        //   approximation note;
-        // - unknown values keep FileMesh when an asset ref is present,
-        //   else block + approximation;
-        // - `Scale` / `Offset` → additive top-level `mesh_scale` /
-        //   `mesh_offset` TOML keys the engine loader applies visually
-        //   (render transform only — never BasePart.size / collider).
-        let mut folded_mesh_primitive: Option<&'static str> = None;
+        // A Roblox DataMesh changes what its part DRAWS, never what it
+        // collides as: a ball wheel with a SpecialMesh Cylinder rolls on a
+        // sphere. So a primitive DataMesh (BlockMesh, CylinderMesh, a
+        // SpecialMesh of any MeshType but FileMesh) stays a child instance
+        // with its `[mesh]` section, both apps draw it
+        // (`eustress_common::data_mesh`), and this part's `[asset]` mesh
+        // stays its own shape. Only a SpecialMesh FileMesh with a mesh
+        // folds here: its `MeshId` joins the PARENT's `bag.asset_refs` and
+        // rides the resolver/fetch path below into `[asset].mesh`, with
+        // `Scale` / `Offset` as the top-level visual `mesh_scale` /
+        // `mesh_offset` keys (render transform only, never the collider).
+        // MeshType numbers (rbx reflection database): Head=0 Torso=1
+        // Wedge=2 Sphere=3 Cylinder=4 FileMesh=5 Brick=6 Prism=7 Pyramid=8
+        // ParallelRamp=9 RightAngleRamp=10 CornerWedge=11; an unknown
+        // number with a mesh is treated as FileMesh.
         let mut folded_mesh_scale: Option<[f32; 3]> = None;
         let mut folded_mesh_offset: Option<[f32; 3]> = None;
         // True when a SpecialMesh FileMesh supplied this part's mesh (its
@@ -790,18 +881,37 @@ impl<'dom> Materializer<'dom> {
         // size times `Scale`, independent of the part's `Size`, unlike a
         // MeshPart whose mesh stretches to fill `Size`.
         let mut folded_file_mesh = false;
+        let mut folded_texture_uri: Option<String> = None;
+        let mut folded_vertex_color: Option<[f32; 3]> = None;
         let mut saw_mesh_child = false;
         for child_ref in inst.children().iter() {
             let Some(child) = self.dom.get_by_ref(*child_ref) else {
                 continue;
             };
-            let child_class = child.class.as_str();
-            if !matches!(child_class, "SpecialMesh" | "BlockMesh" | "CylinderMesh") {
+            if child.class.as_str() != "SpecialMesh" {
                 continue;
             }
-            // Folded out of the instance tree regardless of how (or
-            // whether) it converts — a DataMesh child must never spawn
-            // as its own instance.
+            // Route the child's properties through the same mapper the
+            // parent used so every URI spelling (`Content` / legacy
+            // `ContentId` / plain `String`) of `MeshId` / `MeshContent`
+            // lands in `asset_refs` uniformly.
+            let child_props = props_to_string_map(child);
+            let child_bag = map_properties(&child_props, ClassName::SpecialMesh);
+            let mesh_uri: Option<String> = ["MeshId", "MeshContent", "Content"]
+                .iter()
+                .find_map(|k| child_bag.asset_refs.get(*k))
+                .filter(|u| !u.trim().is_empty())
+                .cloned();
+            let mesh_type: Option<u32> = match child_props.get("MeshType") {
+                Some(rbx_dom_weak::types::Variant::Enum(e)) => Some(e.to_u32()),
+                _ => None,
+            };
+            // A primitive SpecialMesh stays a child (above).
+            let file_mesh = mesh_uri.is_some() && !matches!(mesh_type, Some(t) if t != 5 && t <= 11);
+            if !file_mesh {
+                continue;
+            }
+            // A folded file mesh never spawns as its own instance.
             folded_children.insert(*child_ref);
             report.total_nodes_seen += 1;
 
@@ -810,7 +920,7 @@ impl<'dom> Materializer<'dom> {
                 // dead data. Fold them out + note the drop.
                 report.record_approximation(
                     parent_relpath,
-                    child_class,
+                    "SpecialMesh",
                     "asset",
                     &format!(
                         "duplicate mesh child '{}' under '{}' dropped — one DataMesh per part",
@@ -820,33 +930,26 @@ impl<'dom> Materializer<'dom> {
                 continue;
             }
             saw_mesh_child = true;
+            if let Some(unknown) = mesh_type.filter(|t| *t > 11) {
+                report.record_approximation(
+                    parent_relpath,
+                    "SpecialMesh",
+                    "asset",
+                    &format!("unknown SpecialMesh MeshType {unknown} — treated as FileMesh"),
+                );
+            }
 
-            // Route the child's properties through the same mapper the
-            // parent used so every URI spelling (`Content` / legacy
-            // `ContentId` / plain `String`) of `MeshId` / `MeshContent`
-            // lands in `asset_refs` uniformly.
-            let child_props = props_to_string_map(child);
-            let child_bag = map_properties(&child_props, ClassName::SpecialMesh);
-
-            let mesh_uri: Option<String> = ["MeshId", "MeshContent", "Content"]
+            // The texture is baked into the part's mesh after the mesh
+            // resolves (see `texture_bake`); an empty TextureId is no texture.
+            if let Some(uri) = ["TextureContent", "TextureId"]
                 .iter()
                 .find_map(|k| child_bag.asset_refs.get(*k))
-                .cloned();
-
-            // Parent parts have no texture asset slot in the `[asset]`
-            // schema — record the drop instead of silently losing it.
-            for tex_key in ["TextureId", "TextureContent"] {
-                if let Some(uri) = child_bag.asset_refs.get(tex_key) {
-                    report.record_approximation(
-                        parent_relpath,
-                        child_class,
-                        "asset",
-                        &format!(
-                            "{tex_key} '{uri}' on '{}' dropped — parent part has no texture asset slot",
-                            child.name
-                        ),
-                    );
-                }
+                .filter(|u| !u.trim().is_empty())
+            {
+                folded_texture_uri = Some(uri.clone());
+            }
+            if let Some(rbx_dom_weak::types::Variant::Vector3(v)) = child_props.get("VertexColor") {
+                folded_vertex_color = Some([v.x, v.y, v.z]);
             }
 
             // DataMesh base properties: `Scale` (default 1,1,1) and
@@ -863,97 +966,14 @@ impl<'dom> Materializer<'dom> {
                 }
             }
 
-            let mesh_type: Option<u32> = match child_props.get("MeshType") {
-                Some(rbx_dom_weak::types::Variant::Enum(e)) => Some(e.to_u32()),
-                _ => None,
-            };
-
-            // `(primitive path, optional approximation note)`; `None`
-            // means "FileMesh — handled by the asset-ref path".
-            let primitive: Option<(&'static str, Option<String>)> = match child_class {
-                "BlockMesh" => Some(("parts/block.glb", None)),
-                "CylinderMesh" => Some(("parts/cylinder.glb", None)),
-                // SpecialMesh — dispatch on MeshType (mapping above).
-                _ => match mesh_type {
-                    Some(5) => {
-                        if mesh_uri.is_some() {
-                            None
-                        } else {
-                            Some((
-                                "parts/block.glb",
-                                Some(
-                                    "SpecialMesh FileMesh without a MeshId — block fallback"
-                                        .to_string(),
-                                ),
-                            ))
-                        }
-                    }
-                    Some(6) => Some(("parts/block.glb", None)),
-                    Some(4) => Some(("parts/cylinder.glb", None)),
-                    Some(3) => Some(("parts/ball.glb", None)),
-                    Some(0) => Some((
-                        "parts/ball.glb",
-                        Some("SpecialMesh Head approximated as sphere".to_string()),
-                    )),
-                    Some(2) => Some(("parts/wedge.glb", None)),
-                    Some(n) if n == 1 || (7..=11).contains(&n) => Some((
-                        "parts/block.glb",
-                        Some(format!("SpecialMesh MeshType {n} approximated as block")),
-                    )),
-                    Some(unknown) => {
-                        // Future/unrecognised enum value: keep FileMesh
-                        // when an asset ref is present, else block.
-                        if mesh_uri.is_some() {
-                            report.record_approximation(
-                                parent_relpath,
-                                child_class,
-                                "asset",
-                                &format!(
-                                    "unknown SpecialMesh MeshType {unknown} — treated as FileMesh"
-                                ),
-                            );
-                            None
-                        } else {
-                            Some((
-                                "parts/block.glb",
-                                Some(format!(
-                                    "unknown SpecialMesh MeshType {unknown} — block fallback"
-                                )),
-                            ))
-                        }
-                    }
-                    None => {
-                        if mesh_uri.is_some() {
-                            None
-                        } else {
-                            Some((
-                                "parts/block.glb",
-                                Some("SpecialMesh missing MeshType — block fallback".to_string()),
-                            ))
-                        }
-                    }
-                },
-            };
-
-            match primitive {
-                Some((path, note)) => {
-                    folded_mesh_primitive = Some(path);
-                    if let Some(note) = note {
-                        report.record_approximation(parent_relpath, child_class, "asset", &note);
-                    }
+            // The ref joins the PARENT's asset_refs and rides the resolve →
+            // fetch → `.glb` pipeline below. `entry().or_insert` so a
+            // MeshPart's own MeshId/MeshContent always wins over the child's.
+            if let Some(uri) = mesh_uri {
+                if !bag.asset_refs.contains_key("MeshId") {
+                    folded_file_mesh = true;
                 }
-                None => {
-                    // FileMesh: the ref joins the PARENT's asset_refs and
-                    // rides the existing resolve → fetch → `.glb` pipeline
-                    // below. `entry().or_insert` so a MeshPart's own
-                    // MeshId/MeshContent always wins over the child's.
-                    if let Some(uri) = mesh_uri {
-                        if !bag.asset_refs.contains_key("MeshId") {
-                            folded_file_mesh = true;
-                        }
-                        bag.asset_refs.entry("MeshId".to_string()).or_insert(uri);
-                    }
-                }
+                bag.asset_refs.entry("MeshId".to_string()).or_insert(uri);
             }
         }
 
@@ -966,6 +986,86 @@ impl<'dom> Materializer<'dom> {
         let class_template_name = eustress_class.as_str();
         let mut overrides = bag.overrides.clone();
         overrides.display_name = Some(requested_name.clone());
+
+        // ── A Roblox cylinder or ball part's size ──
+        // A SpecialMesh FileMesh folded onto a Shape=Cylinder part draws it
+        // instead of the engine's cylinder, so the part keeps Roblox's pose
+        // and size rather than the cylinder's turn. A part that draws as its
+        // own cylinder or ball gets Roblox's round sides; one with a DataMesh
+        // child keeps its whole box, which that child's look is scaled by.
+        let has_data_mesh = inst.children().iter().any(|r| {
+            self.dom
+                .get_by_ref(*r)
+                .is_some_and(|c| matches!(c.class.as_str(), "SpecialMesh" | "BlockMesh" | "CylinderMesh" | "FileMesh"))
+        });
+        if folded_file_mesh && overrides.asset_mesh.as_deref() == Some("parts/cylinder.glb") {
+            crate::property_map::unturn_cylinder(&mut overrides);
+        } else if !has_data_mesh {
+            if let Some(roblox) = crate::property_map::round_sides(&mut overrides) {
+                let across = overrides.scale.map_or(0.0, |s| s[0]);
+                let note = if overrides.asset_mesh.as_deref() == Some("parts/ball.glb") {
+                    format!("the ball is {across} studs across, as Roblox draws it: the smallest side of Size {roblox:?}")
+                } else {
+                    format!(
+                        "the cylinder is {across} studs across, as Roblox draws it: the smaller of Size.Y {} and Size.Z {}",
+                        roblox[0], roblox[2]
+                    )
+                };
+                report.record_approximation(
+                    &format!("{parent_relpath}/{requested_name}"),
+                    inst.class.as_str(),
+                    class_template_name,
+                    &note,
+                );
+            }
+        }
+
+        // ── Pose relative to the parent's pose (the `ParentPose` rule) ──
+        // Roblox gives a part's CFrame in world space and an Attachment's
+        // relative to its part. Each node's `[transform]` is its world pose
+        // relative to its PARENT's pose as a loader composes it, so a reader
+        // that composes parent by parent lands every node where Roblox had
+        // it, whatever sits in between. A node whose parent chain holds no
+        // pose is written exactly as before.
+        {
+            use crate::pose::Pose;
+            let (parent_roblox, parent_written) = self
+                .poses
+                .get(&inst.parent())
+                .copied()
+                .unwrap_or((Pose::IDENTITY, Pose::IDENTITY));
+            let posed = overrides.position.is_some() || overrides.rotation.is_some();
+            let own = Pose {
+                t: overrides.position.unwrap_or([0.0; 3]),
+                r: overrides.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            };
+            let is_part = eustress_common::datamodel::record::loads_as_part(eustress_class);
+            let is_attached = matches!(eustress_class, ClassName::Attachment | ClassName::Bone);
+            let (roblox, written) = if posed && is_part {
+                // `own` is the part's world pose as written (a cylinder's axis
+                // correction included); Roblox's is its CFrame.
+                let roblox = match string_props.get("CFrame") {
+                    Some(rbx_dom_weak::types::Variant::CFrame(cf)) => {
+                        let (t, r) = crate::property_map::cframe_to_translation_quat(cf);
+                        Pose { t, r }
+                    }
+                    _ => own,
+                };
+                (roblox, own)
+            } else if posed && is_attached {
+                // `own` is relative to the part's CFrame.
+                let world = parent_roblox.compose(&own);
+                (world, world)
+            } else {
+                (parent_roblox, parent_written)
+            };
+            if posed && (is_part || is_attached) && parent_written != Pose::IDENTITY {
+                let local = parent_written.relative(&written);
+                overrides.position = Some(local.t);
+                overrides.rotation = Some(local.r);
+            }
+            self.poses.insert(inst.referent(), (roblox, written));
+        }
         if let Some(unit) = &self.opts.unit_symbol {
             overrides.unit_symbol = Some(unit.clone());
         }
@@ -1130,6 +1230,21 @@ impl<'dom> Materializer<'dom> {
         for (k, v) in bag.metadata_extras {
             patch.metadata.insert(k, v);
         }
+        // A Sky's SunAngularSize and MoonAngularSize size the Space's Sun and
+        // Moon, which own their discs (`write_celestial_sizes`); the Sky
+        // itself holds neither. Only the Sky under Lighting is the one Roblox
+        // draws.
+        if eustress_class == ClassName::Sky {
+            if let Some(sky) = bag.section_props.get_mut("sky") {
+                let number = |v: toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+                let sun = sky.remove("sun_angular_size").and_then(number);
+                let moon = sky.remove("moon_angular_size").and_then(number);
+                let under_lighting = self.dom.get_by_ref(inst.parent()).is_some_and(|p| p.class.as_str() == "Lighting");
+                if under_lighting {
+                    self.celestial_sizes = (sun.or(self.celestial_sizes.0), moon.or(self.celestial_sizes.1));
+                }
+            }
+        }
         for (section, kvs) in bag.section_props {
             patch.section_props.entry(section).or_default().extend(kvs);
         }
@@ -1144,6 +1259,18 @@ impl<'dom> Materializer<'dom> {
         // `assets/sounds/`. Fetch/decode/sniff failures stay on the
         // placeholder path with a warning.
         let mut file_mesh_native_extent: Option<[f32; 3]> = None;
+        // The mesh the part draws, once it is a real fetched `.mesh`, and a
+        // MeshPart's own texture: together they make a textured variant below.
+        let mut resolved_mesh_id: Option<u64> = None;
+        let meshpart_texture_uri: Option<String> = if eustress_class == ClassName::Part {
+            ["TextureContent", "TextureID"]
+                .iter()
+                .find_map(|k| bag.asset_refs.get(*k))
+                .filter(|u| !u.trim().is_empty())
+                .cloned()
+        } else {
+            None
+        };
         if special == SpecialKind::Csg {
             // A union's `AssetId` names the `PartOperationAsset` model that
             // holds its geometry; `import_csg_instance` fetches and decodes
@@ -1152,6 +1279,22 @@ impl<'dom> Materializer<'dom> {
             bag.asset_refs.remove("AssetId");
         }
         for (prop, uri) in bag.asset_refs {
+            // An Animation's id is kept as written: a Roblox id finds its
+            // clip through the Space's id map, which the clip fetch after the
+            // walk fills (`crate::animation`).
+            if eustress_class == ClassName::Animation && prop == "AnimationId" {
+                if !uri.trim().is_empty() {
+                    patch
+                        .section_props
+                        .entry("properties".to_string())
+                        .or_default()
+                        .insert("animation_id".to_string(), toml::Value::String(uri.clone()));
+                    if let Some(id) = eustress_common::animation::content::roblox_asset_id(&uri) {
+                        self.animation_ids.entry(id).or_insert("AnimationId");
+                    }
+                }
+                continue;
+            }
             let prop_is_mesh = is_mesh_property(&prop, eustress_class);
             let resolved = asset_resolver::resolve(
                 &uri,
@@ -1169,6 +1312,9 @@ impl<'dom> Materializer<'dom> {
                 // Mesh-class properties point at mesh assets.
                 if folded_file_mesh && prop == "MeshId" {
                     file_mesh_native_extent = resolved.native_extent;
+                }
+                if resolved.resolved {
+                    resolved_mesh_id = asset_resolver::AssetReference::parse(&uri).asset_id();
                 }
                 // Forward slashes, so the path reads the same on every OS.
                 patch.asset_mesh =
@@ -1209,15 +1355,7 @@ impl<'dom> Materializer<'dom> {
             }
         }
 
-        // Folded DataMesh child (SpecialMesh / BlockMesh / CylinderMesh):
-        // primitive routing + visual scale/offset. The primitive only
-        // fills an EMPTY mesh slot — a mesh the parent's own asset ref
-        // (or the CSG decoder below) resolves always wins.
-        if let Some(prim) = folded_mesh_primitive {
-            if patch.asset_mesh.is_none() {
-                patch.asset_mesh = Some(prim.to_string());
-            }
-        }
+        // A folded SpecialMesh FileMesh's visual scale and offset.
         if folded_mesh_scale.is_some() {
             patch.mesh_scale = folded_mesh_scale;
         }
@@ -1237,8 +1375,75 @@ impl<'dom> Materializer<'dom> {
             patch.mesh_offset = folded_mesh_offset;
         }
 
+        // Textured mesh: bake the texture into the part's glb and let the
+        // engine draw the glb's own material (`respect_gltf_materials`).
+        let texture = meshpart_texture_uri
+            .map(|uri| (uri, true))
+            .or_else(|| folded_texture_uri.map(|uri| (uri, false)));
+        if let (Some((tex_uri, is_meshpart)), Some(mesh_id), Some(fetcher)) =
+            (texture, resolved_mesh_id, self.opts.asset_fetcher.as_deref())
+        {
+            match asset_resolver::AssetReference::parse(&tex_uri).asset_id() {
+                Some(tex_id) => {
+                    let colour = overrides.color_rgba.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    let (roughness, metallic, _) = eustress_common::classes::Material::from_string(
+                        overrides.material.as_deref().unwrap_or("Plastic"),
+                    )
+                    .pbr_params();
+                    let look = crate::texture_bake::TextureLook {
+                        under: is_meshpart.then(|| {
+                            [0, 1, 2].map(|c| (colour[c].clamp(0.0, 1.0) * 255.0).round() as u8)
+                        }),
+                        tint: if is_meshpart {
+                            [1.0, 1.0, 1.0]
+                        } else {
+                            folded_vertex_color.unwrap_or([1.0, 1.0, 1.0])
+                        },
+                        opacity: colour[3],
+                        roughness,
+                        metallic,
+                    };
+                    match asset_resolver::bake_textured_mesh(
+                        fetcher,
+                        mesh_id,
+                        tex_id,
+                        &look,
+                        &self.space_root,
+                        &created.folder_path,
+                    ) {
+                        Ok(rel) => {
+                            patch.asset_mesh = Some(rel.to_string_lossy().replace('\\', "/"));
+                            patch
+                                .section_props
+                                .entry("properties".to_string())
+                                .or_default()
+                                .insert("respect_gltf_materials".to_string(), toml::Value::Boolean(true));
+                            report.textured_meshes += 1;
+                        }
+                        Err(e) => report.record_asset_warning(
+                            &tex_uri,
+                            class_template_name,
+                            if is_meshpart { "TextureID" } else { "TextureId" },
+                            &format!("texture not applied: {e}"),
+                        ),
+                    }
+                }
+                None => report.record_asset_warning(
+                    &tex_uri,
+                    class_template_name,
+                    if is_meshpart { "TextureID" } else { "TextureId" },
+                    "texture not applied: not an asset id",
+                ),
+            }
+        }
+
         // Script-source post-processing.
         if let Some(body) = bag.script_source {
+            // Roblox animation ids the script names in literals join the
+            // clip fetch (`crate::animation::script_animation_ids`).
+            for id in crate::animation::script_animation_ids(&body) {
+                self.animation_ids.entry(id).or_insert("script");
+            }
             let final_body = if self.opts.transform_scripts {
                 // Phase 1: route through the ValueObject-aware transform so a
                 // script that read `someValue.Value` (on a now-folded
@@ -1266,6 +1471,23 @@ impl<'dom> Materializer<'dom> {
             };
             patch.script_body = Some(final_body);
             patch.script_class = Some(eustress_class);
+        }
+
+        // A KeyframeSequence is one record: its Keyframes, with their Poses,
+        // NumberPoses and markers, are written inline (`crate::animation`)
+        // rather than as folders of their own.
+        if eustress_class == ClassName::KeyframeSequence {
+            let record = crate::animation::sequence_record(self.dom, inst);
+            for note in &record.notes {
+                report.record_approximation(&entity_relpath, inst.class.as_str(), "KeyframeSequence", note);
+            }
+            patch
+                .section_props
+                .entry("keyframe_sequence".to_string())
+                .or_default()
+                .extend(record.sequence);
+            patch.keyframes = Some(toml::Value::Array(record.keyframes));
+            report.animation_sequences += 1;
         }
 
         // ── Terrain + CSG: dispatch to the dedicated decoders. ──
@@ -1304,6 +1526,12 @@ impl<'dom> Materializer<'dom> {
         // materialise as its own instance).
         for child_ref in inst.children().iter() {
             if folded_children.contains(child_ref) {
+                continue;
+            }
+            // A KeyframeSequence's Keyframes are in its record.
+            if eustress_class == ClassName::KeyframeSequence
+                && self.dom.get_by_ref(*child_ref).is_some_and(|c| c.class.as_str() == "Keyframe")
+            {
                 continue;
             }
             // This node is the children's parent — pass its deterministic
@@ -1508,6 +1736,103 @@ impl<'dom> Materializer<'dom> {
         Ok(())
     }
 
+    /// Fetch each Roblox animation id the place uses and write the clip it
+    /// holds to `assets/animations/rbx-<id>.anim.toml`, naming the file in
+    /// the Space's id map (`assets/roblox_ids.toml`), where an `AnimationId`
+    /// finds its clip at run time. An id with no clip is reported with the
+    /// reason; a script's literal that turns out to be an image or a sound
+    /// is left alone.
+    /// The Lighting Sky's `SunAngularSize` and `MoonAngularSize` as the
+    /// Space's Sun and Moon disc sizes: `Lighting/Sun.instance.toml`
+    /// `[star] angular_size` and `Lighting/Moon.instance.toml`
+    /// `[moon] angular_size`, where the engine reads them. A file the Space
+    /// lacks is made from the engine's own template first. Without the Roblox
+    /// values the Sun and Moon keep their defaults.
+    fn write_celestial_sizes(&mut self, report: &mut ImportReport) {
+        let (sun, moon) = std::mem::take(&mut self.celestial_sizes);
+        let targets = [
+            (sun, "Sun.instance.toml", ClassName::Star, SUN_TEMPLATE, ROBLOX_SUN_ANGULAR_SIZE, SUN_ANGULAR_SIZE),
+            (moon, "Moon.instance.toml", ClassName::Moon, MOON_TEMPLATE, ROBLOX_MOON_ANGULAR_SIZE, MOON_ANGULAR_SIZE),
+        ];
+        for (roblox, file, class, template, roblox_default, default) in targets {
+            let Some(roblox) = roblox.filter(|v| v.is_finite()) else { continue };
+            let size = celestial_size(roblox, roblox_default, default);
+            let rel = format!("Lighting/{file}");
+            let path = self.space_root.join("Lighting").join(file);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| template.to_string());
+            let written = text
+                .parse::<toml::Value>()
+                .map_err(|e| e.to_string())
+                .and_then(|mut doc| {
+                    let mut section = toml::value::Table::new();
+                    section.insert("angular_size".to_string(), toml::Value::Float(size));
+                    eustress_common::plugins::celestial_sections::store_section(&mut doc, class, section);
+                    toml::to_string_pretty(&doc).map_err(|e| e.to_string())
+                })
+                .and_then(|out| {
+                    std::fs::create_dir_all(self.space_root.join("Lighting")).map_err(|e| e.to_string())?;
+                    std::fs::write(&path, out).map_err(|e| e.to_string())
+                });
+            let note = match written {
+                Ok(()) => format!("the Sky's {roblox} degrees (Roblox's size includes its glow) is a disc of {size} degrees"),
+                Err(e) => format!("the Sky's {roblox} degrees were not written: {e}"),
+            };
+            report.record_approximation(&rel, "Sky", class.as_str(), &note);
+        }
+    }
+
+    fn write_animation_clips(&mut self, report: &mut ImportReport) {
+        let ids = std::mem::take(&mut self.animation_ids);
+        let mut clips = std::collections::BTreeMap::new();
+        for (id, found_in) in ids {
+            let missing = |reason: String| crate::import_report::MissingAnimation {
+                id,
+                found_in: found_in.to_string(),
+                reason,
+            };
+            let fetched = match self.opts.asset_fetcher.as_deref() {
+                Some(fetcher) => fetcher.fetch(id).map_err(|e| format!("not fetched: {e}")),
+                None => Err("not fetched: this import has no asset fetcher".to_string()),
+            };
+            match fetched.and_then(|bytes| crate::animation::clip_from_model(&bytes, id)) {
+                Ok(Some(clip)) => {
+                    let rel = crate::animation::clip_path(id);
+                    let path = self.space_root.join(&rel);
+                    let written = path
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .and_then(|_| std::fs::write(&path, &clip.text));
+                    match written {
+                        Ok(()) => {
+                            for note in &clip.notes {
+                                report.record_approximation(&rel, "KeyframeSequence", "KeyframeSequence", note);
+                            }
+                            clips.insert(id, rel);
+                            report.animation_clips += 1;
+                        }
+                        Err(e) => report.animation_ids_missing.push(missing(format!("{}: {e}", path.display()))),
+                    }
+                }
+                Ok(None) if found_in == "script" => {}
+                Ok(None) => report
+                    .animation_ids_missing
+                    .push(missing("the asset holds no KeyframeSequence".to_string())),
+                Err(reason) => report.animation_ids_missing.push(missing(reason)),
+            }
+        }
+        if !clips.is_empty() {
+            if let Err(e) = crate::animation::merge_id_map(&self.space_root, &clips) {
+                for id in clips.keys() {
+                    report.animation_ids_missing.push(crate::import_report::MissingAnimation {
+                        id: *id,
+                        found_in: "AnimationId".to_string(),
+                        reason: format!("the clip was written but the id map was not: {e}"),
+                    });
+                }
+            }
+        }
+    }
+
     fn finalise_pending_patches(&mut self) -> Result<(), ImportError> {
         let patches = std::mem::take(&mut self.pending_patches);
         for (toml_path, patch) in patches {
@@ -1590,25 +1915,23 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
     }
 
     // ── Tags ──
+    // At the document root: `tags = [...]` is what the engine's
+    // `InstanceDefinition` and `datamodel::record::record_props` read.
+    // Written under `[metadata]`, every imported CollectionService tag was
+    // invisible to Studio, to Play and to a Player.
     if !patch.tags.is_empty() {
-        let meta = root
-            .entry("metadata".to_string())
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        if let Some(t) = meta.as_table_mut() {
-            let mut tags_array: Vec<toml::Value> = patch
-                .tags
-                .iter()
-                .map(|s| toml::Value::String(s.clone()))
-                .collect();
-            if let Some(existing) = t.get("tags").and_then(|v| v.as_array()) {
-                for v in existing {
-                    if let Some(s) = v.as_str() {
-                        tags_array.push(toml::Value::String(s.to_string()));
-                    }
-                }
+        let mut tags_array: Vec<toml::Value> = Vec::new();
+        let existing = root.get("tags").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for tag in existing
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .chain(patch.tags.iter().cloned())
+        {
+            if !tags_array.iter().any(|t| t.as_str() == Some(tag.as_str())) {
+                tags_array.push(toml::Value::String(tag));
             }
-            t.insert("tags".to_string(), toml::Value::Array(tags_array));
         }
+        root.insert("tags".to_string(), toml::Value::Array(tags_array));
     }
 
     // ── Metadata extras (roblox_brick_color, roblox_color_srgb) ──
@@ -1641,8 +1964,13 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
         }
     }
 
-    // ── Properties extras / physics / attributes ──
-    if !patch.extras.is_empty() || !patch.physics.is_empty() || !patch.attributes.is_empty() {
+    // ── A KeyframeSequence's keyframes ──
+    if let Some(keyframes) = &patch.keyframes {
+        root.insert("keyframes".to_string(), keyframes.clone());
+    }
+
+    // ── Properties extras / physics ──
+    if !patch.extras.is_empty() || !patch.physics.is_empty() {
         let props = root
             .entry("properties".to_string())
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
@@ -1667,15 +1995,22 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
                     }
                 }
             }
-            if !patch.attributes.is_empty() {
-                let attrs = p
-                    .entry("attributes".to_string())
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-                if let Some(t) = attrs.as_table_mut() {
-                    for (k, v) in &patch.attributes {
-                        t.insert(k.clone(), v.clone());
-                    }
-                }
+        }
+    }
+
+    // ── Attributes ──
+    // At the document root: `[attributes]` is the table the engine reads
+    // (`InstanceDefinition::attributes`, `datamodel::record::record_props`,
+    // the Properties panel). Written under `[properties]`, every Roblox
+    // attribute and every folded value object was invisible to Studio, to
+    // Play and to a Player, and `GetAttribute` returned nil.
+    if !patch.attributes.is_empty() {
+        let attrs = root
+            .entry("attributes".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(t) = attrs.as_table_mut() {
+            for (k, v) in &patch.attributes {
+                t.insert(k.clone(), v.clone());
             }
         }
     }
@@ -1765,6 +2100,27 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
 
 /// Derive a per-Space salt from the Space root path. Stable across
 /// runs against the same Space, different across Spaces.
+/// Roblox's default `SunAngularSize` and `MoonAngularSize`, in degrees.
+const ROBLOX_SUN_ANGULAR_SIZE: f64 = 21.0;
+const ROBLOX_MOON_ANGULAR_SIZE: f64 = 11.0;
+/// The engine's default drawn Sun and Moon sizes those defaults stand for, in
+/// degrees across.
+const SUN_ANGULAR_SIZE: f64 = 8.0;
+const MOON_ANGULAR_SIZE: f64 = 2.0;
+/// The engine's own Sun and Moon files, which a Space's open-time repair
+/// writes when they are missing.
+const SUN_TEMPLATE: &str = include_str!("../../engine/assets/lighting_templates/Sun.instance.toml");
+const MOON_TEMPLATE: &str = include_str!("../../engine/assets/lighting_templates/Moon.instance.toml");
+
+/// A Roblox Sky size as the engine's disc. Roblox's sizes a billboard that
+/// includes a wide glow and the engine's is the physical disc, so the size is
+/// scaled from Roblox's default to the engine's: a place at Roblox's default
+/// lands exactly on the engine's, and one that doubled its sun gets twice the
+/// engine's. Kept within the readers' 0.05 to 20 degrees.
+fn celestial_size(roblox: f64, roblox_default: f64, default: f64) -> f64 {
+    (default * (roblox / roblox_default)).clamp(0.05, 20.0)
+}
+
 pub(crate) fn derive_space_salt(space_root: &Path) -> Vec<u8> {
     let canonical = std::fs::canonicalize(space_root).unwrap_or_else(|_| space_root.to_path_buf());
     let s = canonical.to_string_lossy().to_string();
@@ -1889,9 +2245,66 @@ pub fn import_into_space(
         format: dom.format,
         ..Default::default()
     };
+    // Before the first instance file: a Space whose import stops partway
+    // never holds parent-relative files without the key that says so.
+    mark_parent_pose_rule(space_root);
     let materializer = Materializer::new(dom.dom(), space_root, options)?;
     materializer.run(&mut report)?;
+    write_import_readme(space_root);
     Ok(report)
+}
+
+/// The note an imported Space carries at its root, `README.md`: its lengths
+/// are Roblox studs, its scripts work in studs through the script boundary,
+/// and its gravity is Roblox's. Written only when the Space has no README,
+/// so a user's own is never replaced.
+fn write_import_readme(space_root: &Path) {
+    // Roblox's standard gravity, studs/s².
+    const ROBLOX_GRAVITY_STUDS: f64 = 196.2;
+    let path = space_root.join("README.md");
+    if path.exists() {
+        return;
+    }
+    let stud = eustress_common::units::Unit::Stud.to_meters();
+    let text = format!(
+        "# Imported from Roblox\n\n\
+         This Space was imported from a Roblox place. Its lengths are in Roblox studs \
+         (1 stud = {stud} m); Studio shows metres by default and studs when the unit menu \
+         is set to Studs.\n\n\
+         Its scripts are marked `origin = \"roblox\"` and work in studs: lengths they read or \
+         write on parts, models, attachments, the camera, the mouse and in spatial calls \
+         convert at the script boundary. Values a script hands another script directly \
+         (attributes, RemoteEvents, BindableEvents, ModuleScripts, value objects) keep the \
+         units they were written in, so a native Eustress script reading them gets studs.\n\n\
+         Its gravity is Roblox's, {g} studs/s² ({gm:.1} m/s²), so imported scripts that \
+         assume it match the physics.\n",
+        g = ROBLOX_GRAVITY_STUDS,
+        gm = ROBLOX_GRAVITY_STUDS * stud,
+    );
+    let _ = std::fs::write(&path, text);
+}
+
+/// Set `[space] transform_rule = "parent_pose"` in the Space's `space.toml`,
+/// creating the file when there is none and keeping everything else in it.
+/// An imported instance's `[transform]` is relative to its parent's pose.
+fn mark_parent_pose_rule(space_root: &Path) {
+    let path = space_root.join("space.toml");
+    let mut doc: toml::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(root) = doc.as_table_mut() {
+        let space = root
+            .entry("space".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(space) = space.as_table_mut() {
+            space.insert("transform_rule".to_string(), toml::Value::String("parent_pose".to_string()));
+        }
+    }
+    let _ = std::fs::create_dir_all(space_root);
+    if let Ok(text) = toml::to_string_pretty(&doc) {
+        let _ = std::fs::write(&path, text);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2440,6 +2853,391 @@ mod tests {
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
+    /// CollectionService tags land in the document's root `tags` array, the
+    /// key the engine's loader and the shared record conversion read.
+    #[test]
+    fn tags_are_written_where_the_engine_reads_them() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Part").with_name("Tagged").with_property(
+                    "Tags",
+                    rbx_dom_weak::types::Tags::from(vec!["car".to_string(), "sfx".to_string()]),
+                ),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("root_tags");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let raw = std::fs::read_to_string(space_root.join("Workspace/Tagged/_instance.toml"))
+            .expect("the part's toml");
+        let doc: toml::Value = raw.parse().expect("parse");
+        let tags: Vec<&str> = doc
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .expect("root tags array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert_eq!(tags, vec!["car", "sfx"]);
+        assert!(
+            doc.get("metadata").and_then(|m| m.get("tags")).is_none(),
+            "no second copy under [metadata]"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A value object with children stays as a Folder for them; its own
+    /// value is still its parent's attribute.
+    #[test]
+    fn a_value_object_with_children_keeps_them() {
+        use rbx_dom_weak::types::{Variant, Vector3};
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Folder").with_name("Handling").with_child(
+                    InstanceBuilder::new("NumberValue")
+                        .with_name("Torque")
+                        .with_property("Value", Variant::Float64(500.0))
+                        .with_child(
+                            InstanceBuilder::new("Vector3Value")
+                                .with_name("Location")
+                                .with_property("Value", Variant::Vector3(Vector3::new(1.0, 2.0, 3.0))),
+                        ),
+                ),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("vo_children");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let read = |rel: &str| -> toml::Value {
+            std::fs::read_to_string(space_root.join(rel)).expect(rel).parse().expect("parse")
+        };
+        let handling = read("Workspace/Handling/_instance.toml");
+        assert_eq!(handling["attributes"]["Torque"].as_float(), Some(500.0), "the value folds into the parent");
+        let torque = read("Workspace/Handling/Torque/_instance.toml");
+        assert_eq!(torque["metadata"]["class_name"].as_str(), Some("Folder"));
+        assert_eq!(
+            torque["attributes"]["Location"].as_array().map(|a| a.len()),
+            Some(3),
+            "its child folds into it"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// Under the `ParentPose` rule a part nested in a part is written
+    /// relative to its parent's pose, and the Space says so in space.toml.
+    #[test]
+    fn a_nested_part_is_written_relative_to_its_parent() {
+        use rbx_dom_weak::types::{CFrame, Matrix3, Variant, Vector3};
+        // Parent at (10, 0, 0), turned +90 degrees about Y (columns: right,
+        // up, back; rows are what rbx_types stores).
+        let turned = Matrix3::new(
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+        );
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Part")
+                    .with_name("Pad")
+                    .with_property("CFrame", Variant::CFrame(CFrame::new(Vector3::new(10.0, 0.0, 0.0), turned)))
+                    .with_child(
+                        InstanceBuilder::new("Part").with_name("Ignore").with_property(
+                            "CFrame",
+                            Variant::CFrame(CFrame::new(Vector3::new(10.0, 0.0, 5.0), Matrix3::identity())),
+                        ),
+                    ),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("parent_pose");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let read = |rel: &str| -> toml::Value {
+            std::fs::read_to_string(space_root.join(rel)).expect(rel).parse().expect("parse")
+        };
+        let pos = |doc: &toml::Value| -> Vec<f64> {
+            doc["transform"]["position"].as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect()
+        };
+        let pad = read("Workspace/Pad/_instance.toml");
+        assert!((pos(&pad)[0] - 10.0).abs() < 1e-4, "a top-level part keeps its world pose");
+        let ignore = read("Workspace/Pad/Ignore/_instance.toml");
+        let local = pos(&ignore);
+        // 5 studs along world +Z from the pad is 5 along the pad's local -X.
+        assert!((local[0] + 5.0).abs() < 1e-3 && local[1].abs() < 1e-3 && local[2].abs() < 1e-3, "{local:?}");
+        let space = read("space.toml");
+        assert_eq!(space["space"]["transform_rule"].as_str(), Some("parent_pose"));
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// An Animation keeps its id where the engine reads it, a
+    /// KeyframeSequence is one record with its keyframes inline, and a
+    /// fetched clip is named in the id map the runtime reads.
+    #[test]
+    fn animations_import_as_clips_the_runtime_finds() {
+        use rbx_dom_weak::types::{ContentId, Enum};
+        let clip = WeakDom::new(
+            InstanceBuilder::new("KeyframeSequence").with_name("Wave").with_child(
+                InstanceBuilder::new("Keyframe")
+                    .with_property("Time", Variant::Float32(0.5))
+                    .with_child(InstanceBuilder::new("Pose").with_name("HumanoidRootPart")),
+            ),
+        );
+        let mut clip_bytes = Vec::new();
+        rbx_binary::to_writer(&mut clip_bytes, &clip, &[clip.root_ref()]).expect("clip model");
+        struct Clips(Vec<u8>);
+        impl crate::asset_resolver::AssetFetcher for Clips {
+            fn fetch(&self, id: u64) -> Result<Vec<u8>, String> {
+                if id == 507770239 {
+                    Ok(self.0.clone())
+                } else {
+                    Err("HTTP 401".to_string())
+                }
+            }
+        }
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(
+                InstanceBuilder::new("Workspace").with_child(
+                    InstanceBuilder::new("Animation")
+                        .with_name("Wave")
+                        .with_property("AnimationId", Variant::ContentId(ContentId::from("rbxassetid://507770239"))),
+                ),
+            )
+            .with_child(
+                InstanceBuilder::new("ReplicatedStorage").with_child(
+                    InstanceBuilder::new("KeyframeSequence")
+                        .with_name("Idle")
+                        .with_property("Priority", Variant::Enum(Enum::from_u32(0)))
+                        .with_child(
+                            InstanceBuilder::new("Keyframe").with_property("Time", Variant::Float32(1.0)).with_child(
+                                InstanceBuilder::new("Pose")
+                                    .with_name("HumanoidRootPart")
+                                    .with_child(InstanceBuilder::new("Pose").with_name("LowerTorso")),
+                            ),
+                        ),
+                ),
+            );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("animations");
+        let options = ImportOptions {
+            asset_fetcher: Some(std::sync::Arc::new(Clips(clip_bytes))),
+            ..ImportOptions::default()
+        };
+        let report = import_into_space(&rbx, &space_root, options).expect("import");
+        let text = |rel: &str| std::fs::read_to_string(space_root.join(rel)).expect(rel);
+
+        let animation: toml::Value = text("Workspace/Wave/_instance.toml").parse().expect("parse");
+        assert_eq!(animation["properties"]["animation_id"].as_str(), Some("rbxassetid://507770239"));
+        assert_eq!(eustress_common::datamodel::record::record_animation_id(&animation).as_deref(), Some("rbxassetid://507770239"));
+
+        let idle_text = text("ReplicatedStorage/Idle/_instance.toml");
+        let idle: toml::Value = idle_text.parse().expect("parse");
+        assert_eq!(idle["keyframe_sequence"]["priority"].as_str(), Some("Idle"));
+        assert_eq!(idle["keyframes"][0]["poses"]["LowerTorso"]["parent"].as_str(), Some("HumanoidRootPart"));
+        let (sequence, problems) = eustress_common::animation::clip::parse_sequence(&idle_text, "Idle").expect("clip");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(sequence.keyframes.len(), 1);
+        assert!(!space_root.join("ReplicatedStorage/Idle/Keyframe").exists(), "keyframes are inline");
+        assert!(report.unmapped_classes.iter().all(|u| u.roblox_class != "Keyframe"));
+        assert_eq!(report.animation_sequences, 1);
+
+        assert_eq!(report.animation_clips, 1, "{:?}", report.animation_ids_missing);
+        let file = eustress_common::animation::content::roblox_id_file(&space_root, 507770239).expect("mapped");
+        assert_eq!(file, "assets/animations/rbx-507770239.anim.toml");
+        let (fetched, problems) = eustress_common::animation::clip::parse_sequence(&text(&file), "x").expect("clip");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(fetched.keyframes[0].time, 0.5);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A Roblox cylinder part fills Roblox's box on the engine's turned axes,
+    /// and a cylinder or ball with no DataMesh child draws at its smallest
+    /// round side, as Roblox draws it. One with a DataMesh child keeps its
+    /// whole box, and one a FileMesh draws keeps Roblox's pose and size.
+    #[test]
+    fn cylinder_and_ball_parts_keep_their_roblox_shape() {
+        let part = |name: &str, shape: u32, size: Vector3| {
+            InstanceBuilder::new("Part")
+                .with_name(name)
+                .with_property("Shape", rbx_dom_weak::types::Enum::from_u32(shape))
+                .with_property("Size", size)
+        };
+        let file_mesh = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(5))
+            .with_property(
+                "MeshId",
+                rbx_dom_weak::types::Variant::ContentId(rbx_dom_weak::types::ContentId::from("rbxassetid://123456")),
+            );
+        let lopsided = Vector3::new(60.0, 40.0, 30.0);
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace")
+                .with_child(part("Helipad", 2, Vector3::new(1.4, 30.0, 30.0)))
+                .with_child(part("Lights", 2, lopsided))
+                .with_child(part("Lamp", 0, Vector3::new(6.5, 1.25, 7.75)))
+                .with_child(part("Hub", 2, lopsided).with_child(InstanceBuilder::new("BlockMesh").with_name("Mesh")))
+                .with_child(part("Knob", 2, lopsided).with_child(file_mesh)),
+        );
+        let rbx = RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new());
+        let space_root = make_temp_root("cylinder_ball_sizes");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let transform = |name: &str, key: &str| -> Vec<f64> {
+            let path = space_root.join("Workspace").join(name).join("_instance.toml");
+            let doc: toml::Value = std::fs::read_to_string(&path).expect("part file").parse().expect("parses");
+            doc.get("transform")
+                .and_then(|t| t.get(key))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_float()).collect())
+                .unwrap_or_else(|| if key == "rotation" { vec![0.0, 0.0, 0.0, 1.0] } else { panic!("{name} has no {key}") })
+        };
+        let close = |got: Vec<f64>, want: &[f64]| {
+            assert!(
+                got.len() == want.len() && got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4),
+                "{got:?} vs {want:?}"
+            );
+        };
+        // Roblox's length (Size.X) is the mesh's Y.
+        close(transform("Helipad", "scale"), &[30.0, 1.4, 30.0]);
+        // The smaller of Size.Y and Size.Z; a ball's smallest side.
+        close(transform("Lights", "scale"), &[30.0, 60.0, 30.0]);
+        close(transform("Lamp", "scale"), &[1.25, 1.25, 1.25]);
+        // A DataMesh child's look is scaled by the whole turned box.
+        close(transform("Hub", "scale"), &[40.0, 60.0, 30.0]);
+        // A FileMesh draws the Knob: Roblox's pose and size.
+        close(transform("Knob", "scale"), &[60.0, 40.0, 30.0]);
+        close(transform("Knob", "rotation"), &[0.0, 0.0, 0.0, 1.0]);
+        let notes = report.approximations.iter().filter(|a| a.reason.contains("as Roblox draws it")).count();
+        assert_eq!(notes, 2, "the Lights and the Lamp are noted");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// An imported Space explains itself in a README.md, and a README the
+    /// Space already has is kept.
+    #[test]
+    fn an_imported_space_gets_a_readme_and_keeps_its_own() {
+        let place = || {
+            let dm = InstanceBuilder::new("DataModel").with_child(InstanceBuilder::new("Workspace"));
+            RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new())
+        };
+        let space_root = make_temp_root("readme");
+        import_into_space(&place(), &space_root, ImportOptions::default()).expect("import");
+        let text = std::fs::read_to_string(space_root.join("README.md")).expect("a README");
+        assert!(text.starts_with("# Imported from Roblox"), "{text}");
+        assert!(text.contains("origin = \"roblox\"") && text.contains("studs/s"), "{text}");
+        let _ = std::fs::remove_dir_all(&space_root);
+
+        let space_root = make_temp_root("readme_kept");
+        std::fs::create_dir_all(&space_root).unwrap();
+        std::fs::write(space_root.join("README.md"), "mine").unwrap();
+        import_into_space(&place(), &space_root, ImportOptions::default()).expect("import");
+        assert_eq!(std::fs::read_to_string(space_root.join("README.md")).unwrap(), "mine");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A Roblox Sky's sun and moon sizes land on the Space's Sun and Moon,
+    /// scaled from Roblox's defaults, and the Sky keeps neither.
+    #[test]
+    fn the_sky_sizes_the_sun_and_moon() {
+        assert_eq!(celestial_size(21.0, ROBLOX_SUN_ANGULAR_SIZE, SUN_ANGULAR_SIZE), 8.0, "Roblox's default is ours");
+        assert_eq!(celestial_size(11.0, ROBLOX_MOON_ANGULAR_SIZE, MOON_ANGULAR_SIZE), 2.0, "the Moon's too");
+        assert!((celestial_size(10.5, 21.0, 8.0) - 4.0).abs() < 1e-12, "half Roblox's is half ours");
+        assert_eq!(celestial_size(1e6, 21.0, 8.0), 20.0);
+        assert_eq!(celestial_size(0.0, 11.0, 2.0), 0.05);
+
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("Workspace"))
+            .with_child(
+                InstanceBuilder::new("Lighting").with_child(
+                    InstanceBuilder::new("Sky")
+                        .with_property("SunAngularSize", Variant::Float32(42.0))
+                        .with_property("MoonAngularSize", Variant::Float32(11.0)),
+                ),
+            );
+        let rbx = RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new());
+        let space_root = make_temp_root("sky_sizes");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let read = |rel: &str| -> toml::Value {
+            std::fs::read_to_string(space_root.join(rel)).expect(rel).parse().expect("parse")
+        };
+        let sun = read("Lighting/Sun.instance.toml");
+        assert_eq!(sun["metadata"]["class_name"].as_str(), Some("Star"));
+        let size = sun["star"]["angular_size"].as_float().unwrap();
+        assert!((size - 16.0).abs() < 1e-9, "twice Roblox's default is twice ours: {size}");
+        assert!(sun["star"].get("intensity").is_some(), "the template's other keys are kept");
+        let moon = read("Lighting/Moon.instance.toml");
+        assert!((moon["moon"]["angular_size"].as_float().unwrap() - 2.0).abs() < 1e-9);
+        // The engine's reader sees the same sizes.
+        let read_sun = eustress_common::plugins::celestial_sections::sun_from_section(
+            sun.get("star"),
+            eustress_common::plugins::celestial_sections::default_sun(),
+        );
+        assert!((read_sun.angular_size as f64 - 16.0).abs() < 1e-5, "{}", read_sun.angular_size);
+        let sky_text = std::fs::read_dir(space_root.join("Lighting"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("Sky"))
+            .map(|e| {
+                let p = e.path();
+                let file = if p.is_dir() { p.join("_instance.toml") } else { p };
+                std::fs::read_to_string(file).unwrap_or_default()
+            })
+            .collect::<String>();
+        assert!(!sky_text.contains("angular_size"), "the Sky holds neither size");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn attributes_are_written_where_the_engine_reads_them() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Part")
+                    .with_name("Car")
+                    .with_property(
+                        "Attributes",
+                        rbx_dom_weak::types::Attributes::new()
+                            .with("Speed", rbx_dom_weak::types::Variant::Float64(12.5)),
+                    )
+                    .with_child(
+                        InstanceBuilder::new("NumberValue")
+                            .with_name("Fuel")
+                            .with_property("Value", rbx_dom_weak::types::Variant::Float64(40.0)),
+                    ),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("root_attributes");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let raw = std::fs::read_to_string(space_root.join("Workspace/Car/_instance.toml"))
+            .expect("the part's toml");
+        let doc: toml::Value = raw.parse().expect("parse");
+        let attrs = doc.get("attributes").and_then(|a| a.as_table()).expect("root [attributes]");
+        assert_eq!(attrs.get("Speed").and_then(|v| v.as_float()), Some(12.5), "a Roblox attribute");
+        assert_eq!(attrs.get("Fuel").and_then(|v| v.as_float()), Some(40.0), "a folded value object");
+        assert!(
+            doc.get("properties").and_then(|p| p.get("attributes")).is_none(),
+            "no copy under [properties], which nothing reads"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
     #[test]
     fn assetid_emits_asset_warning() {
         let dm = InstanceBuilder::new("DataModel").with_child(
@@ -2544,25 +3342,92 @@ mod tests {
             .to_string()
     }
 
+    /// Import a Workspace Part (Shape `shape`, when given) carrying one
+    /// primitive DataMesh child, which stays a child. Returns
+    /// `(space_root, the part's TOML, the child's TOML)`.
+    fn import_part_keeping_mesh_child(
+        prefix: &str,
+        shape: Option<u32>,
+        child: InstanceBuilder,
+    ) -> (PathBuf, toml::Value, toml::Value) {
+        let mut part = InstanceBuilder::new("Part")
+            .with_name("MeshHost")
+            .with_property("Size", Vector3::new(4.0, 1.0, 2.0));
+        if let Some(s) = shape {
+            part = part.with_property("Shape", rbx_dom_weak::types::Enum::from_u32(s));
+        }
+        let dm = InstanceBuilder::new("DataModel").with_child(InstanceBuilder::new("Workspace").with_child(part.with_child(child)));
+        let rbx = RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new());
+        let space_root = make_temp_root(prefix);
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let host_dir = space_root.join("Workspace").join("MeshHost");
+        let read = |p: PathBuf| -> toml::Value {
+            std::fs::read_to_string(&p).unwrap_or_else(|_| panic!("{} exists", p.display())).parse().expect("TOML parses")
+        };
+        let part_doc = read(host_dir.join("_instance.toml"));
+        let child_doc = read(host_dir.join("Mesh").join("_instance.toml"));
+        (space_root, part_doc, child_doc)
+    }
+
+    fn mesh_section<'a>(doc: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+        doc.get("mesh").and_then(|m| m.get(key))
+    }
+
+    fn floats(v: Option<&toml::Value>) -> Vec<f64> {
+        v.and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_float()).collect()).unwrap_or_default()
+    }
+
     #[test]
-    fn special_mesh_brick_folds_to_block_with_scale() {
+    fn a_special_mesh_brick_stays_a_child_and_the_part_keeps_its_shape() {
         let child = InstanceBuilder::new("SpecialMesh")
             .with_name("Mesh")
             .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(6)) // Brick
             .with_property("Scale", Vector3::new(2.0, 3.0, 4.0));
-        let (space_root, doc, _report) =
-            import_part_with_mesh_child("specialmesh_brick", child);
-        assert_eq!(asset_mesh_of(&doc), "parts/block.glb");
-        let scale: Vec<f64> = doc
-            .get("mesh_scale")
-            .and_then(|v| v.as_array())
-            .expect("top-level mesh_scale written")
-            .iter()
-            .filter_map(|v| v.as_float())
-            .collect();
-        assert_eq!(scale, vec![2.0, 3.0, 4.0]);
-        // Default offset is omitted.
-        assert!(doc.get("mesh_offset").is_none());
+        let (space_root, part, mesh) = import_part_keeping_mesh_child("specialmesh_brick", None, child);
+        // A block part carries no [asset]: both apps load it as the block.
+        assert_eq!(asset_mesh_of(&part), "", "the part keeps its own block shape");
+        assert!(part.get("mesh_scale").is_none(), "the look is the child's, not the part's");
+        assert_eq!(mesh.get("metadata").and_then(|m| m.get("class_name")).and_then(|v| v.as_str()), Some("SpecialMesh"));
+        assert_eq!(mesh_section(&mesh, "mesh_type").and_then(|v| v.as_str()), Some("Brick"));
+        assert_eq!(floats(mesh_section(&mesh, "scale")), vec![2.0, 3.0, 4.0]);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn a_ball_wheel_keeps_its_ball_under_a_cylinder_special_mesh() {
+        // Vehicle Simulator's wheels: a Ball part drawn as a disc.
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(4)) // Cylinder
+            .with_property("Scale", Vector3::new(0.33, 1.0, 1.0));
+        let (space_root, part, mesh) = import_part_keeping_mesh_child("ball_wheel", Some(0), child);
+        assert_eq!(asset_mesh_of(&part), "parts/ball.glb", "the wheel collides as its ball");
+        assert_eq!(mesh_section(&mesh, "mesh_type").and_then(|v| v.as_str()), Some("Cylinder"));
+        assert!((floats(mesh_section(&mesh, "scale"))[0] - 0.33).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn every_mesh_type_keeps_its_name_and_offset_is_metres() {
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(2)) // Wedge
+            .with_property("Offset", Vector3::new(0.0, 10.0, 0.0));
+        let (space_root, _part, mesh) = import_part_keeping_mesh_child("specialmesh_wedge", None, child);
+        assert_eq!(mesh_section(&mesh, "mesh_type").and_then(|v| v.as_str()), Some("Wedge"));
+        let stud = eustress_common::units::Unit::Stud.to_meters();
+        assert!((floats(mesh_section(&mesh, "offset"))[1] - 10.0 * stud).abs() < 1e-5, "offsets are metres");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn a_data_mesh_on_a_cylinder_part_keeps_roblox_values() {
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(6))
+            .with_property("Scale", Vector3::new(1.0, 2.0, 3.0));
+        let (space_root, _part, mesh) = import_part_keeping_mesh_child("cylinder_part_mesh", Some(2), child);
+        assert_eq!(floats(mesh_section(&mesh, "scale")), vec![1.0, 2.0, 3.0]);
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
@@ -2599,37 +3464,20 @@ mod tests {
     }
 
     #[test]
-    fn special_mesh_head_folds_to_ball_with_approximation() {
-        let child = InstanceBuilder::new("SpecialMesh")
-            .with_name("Mesh")
-            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(0)); // Head
-        let (space_root, doc, report) =
-            import_part_with_mesh_child("specialmesh_head", child);
-        assert_eq!(asset_mesh_of(&doc), "parts/ball.glb");
-        assert!(
-            report
-                .approximations
-                .iter()
-                .any(|a| a.reason.contains("Head")),
-            "Head→sphere approximation should be recorded: {:?}",
-            report.approximations
-        );
-        let _ = std::fs::remove_dir_all(&space_root);
-    }
-
-    #[test]
-    fn block_and_cylinder_mesh_fold_to_primitives() {
+    fn block_and_cylinder_meshes_stay_children() {
         let block_child = InstanceBuilder::new("BlockMesh")
             .with_name("Mesh")
             .with_property("Scale", Vector3::new(0.5, 0.5, 0.5));
-        let (root_a, doc_a, _) = import_part_with_mesh_child("blockmesh", block_child);
-        assert_eq!(asset_mesh_of(&doc_a), "parts/block.glb");
-        assert!(doc_a.get("mesh_scale").is_some());
+        let (root_a, part_a, mesh_a) = import_part_keeping_mesh_child("blockmesh", None, block_child);
+        assert_eq!(asset_mesh_of(&part_a), "", "a block part keeps its block (no [asset])");
+        assert_eq!(mesh_a.get("metadata").and_then(|m| m.get("class_name")).and_then(|v| v.as_str()), Some("BlockMesh"));
+        assert_eq!(floats(mesh_section(&mesh_a, "scale")), vec![0.5, 0.5, 0.5]);
         let _ = std::fs::remove_dir_all(&root_a);
 
         let cyl_child = InstanceBuilder::new("CylinderMesh").with_name("Mesh");
-        let (root_b, doc_b, _) = import_part_with_mesh_child("cylindermesh", cyl_child);
-        assert_eq!(asset_mesh_of(&doc_b), "parts/cylinder.glb");
+        let (root_b, part_b, mesh_b) = import_part_keeping_mesh_child("cylindermesh", None, cyl_child);
+        assert_eq!(asset_mesh_of(&part_b), "", "a checkpoint collides as its block (no [asset])");
+        assert_eq!(mesh_b.get("metadata").and_then(|m| m.get("class_name")).and_then(|v| v.as_str()), Some("CylinderMesh"));
         let _ = std::fs::remove_dir_all(&root_b);
     }
 }

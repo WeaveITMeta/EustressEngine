@@ -23,9 +23,19 @@ pub mod slint_ui;
 /// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
 pub mod insert_classes;
 pub mod particle_sim_panel;
+/// PointLight / SpotLight / SurfaceLight / DirectionalLight rows, edits and
+/// insert placement.
+pub mod light_panel;
+/// Sun (Star) / Moon / Sky / Atmosphere rows and edits, from their own
+/// `[star]`/`[moon]`/`[sky]`/`[atmosphere]` sections.
+pub mod celestial_panel;
+/// Sound rows and edits, from its own `[sound]` section.
+pub mod sound_panel;
 /// The editor camera's Perspective (2D/3D, projection, axis view) into the
 /// tab-bar ViewSelector and the View menu.
 pub mod perspective_hud;
+/// The dialog a script's purchase prompt shows in Play.
+pub mod purchase_prompt;
 pub mod explorer_query;
 pub mod slint_native;
 pub mod slint_bridge;
@@ -36,6 +46,8 @@ pub mod rune_ecs_bindings;
 // Core modules that don't depend on egui
 pub mod file_dialogs;
 pub mod file_event_handler;
+/// The History panel's Restore points view.
+pub mod restore_points;
 mod spawn_events;
 mod menu_events;
 pub mod webview;
@@ -45,6 +57,8 @@ pub mod center_tabs;
 /// callbacks back into the Odoo state machine.
 pub mod procurement_bridge;
 pub mod highlight;
+// The Output panel's rows: filters, collapsed repeats, Play dividers, stacks.
+pub mod output_rows;
 #[path = "notifications.rs"]
 pub mod notifications_impl;
 
@@ -55,6 +69,7 @@ pub use spawn_events::{
     SpawnPartEvent, PastePartEvent, SpawnEventsPlugin,
     SpawnTerrainEvent, ToggleTerrainEditEvent, SetTerrainBrushEvent,
     ImportTerrainEvent, ExportTerrainEvent,
+    GenerateWorldEvent, GenerateFlatTerrainEvent, WorldgenTask,
 };
 pub use menu_events::MenuActionEvent;
 pub use rune_ecs_bindings::{ECSBindings, RuneECSBindingsPlugin};
@@ -225,36 +240,7 @@ pub struct ServiceOwner(pub ServiceType);
 // UI State Resources
 // ============================================================================
 
-/// Viewport bounds reported by Slint layout (in PHYSICAL pixels from top-left).
-/// Used by the camera controller to clip 3D rendering to the viewport area.
-///
-/// IMPORTANT: these fields are physical pixels (logical × scale_factor). When
-/// comparing against `Window::cursor_position()` — which returns LOGICAL
-/// pixels — call `contains_logical` or divide by the window scale factor
-/// first. Forgetting this is the bug that made 3D click selection silently
-/// reject every click on any display with DPI scaling ≠ 1.0.
-#[derive(Resource, Default, Clone, Copy)]
-pub struct ViewportBounds {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl ViewportBounds {
-    /// Test whether a cursor point (in LOGICAL pixels, as returned by
-    /// `Window::cursor_position()`) falls inside the viewport rectangle.
-    /// Converts physical bounds to logical using the provided scale factor.
-    pub fn contains_logical(&self, cursor: bevy::math::Vec2, scale_factor: f32) -> bool {
-        if self.width <= 0.0 || self.height <= 0.0 { return true; }
-        let s = scale_factor.max(0.0001);
-        let x = self.x / s;
-        let y = self.y / s;
-        let w = self.width / s;
-        let h = self.height / s;
-        cursor.x >= x && cursor.x <= x + w && cursor.y >= y && cursor.y <= y + h
-    }
-}
+pub use eustress_common::play_session::ViewportBounds;
 
 #[derive(Resource)]
 pub struct StudioState {
@@ -349,6 +335,36 @@ pub struct StudioState {
     pub open_find_pulse: u32,
     pub script_editor_content: String,
     pub script_content_dirty: bool,
+    /// Bumped when an editor text change is applied. The analyzer compares
+    /// against it rather than consuming `script_content_dirty`, which belongs
+    /// to the highlighter.
+    pub script_content_revision: u64,
+    /// Highlight language for the active script tab, resolved from its
+    /// source file. A script folder's tab title has no extension, so the
+    /// title cannot say whether the script is Rune or Luau.
+    pub script_language: String,
+    /// The source file behind the active tab's Code view (`None` for a
+    /// Summary or Markdown view). The editor hands it to the language
+    /// registry to pick the service that highlights it.
+    pub script_source_path: Option<std::path::PathBuf>,
+    /// Every token span of the active script, ordered by line. The editor
+    /// draws only those near the visible lines (`script_span_window`), so a
+    /// long file never builds one Slint element per token.
+    pub script_spans_all: Vec<crate::ui::highlight::TokenSpanData>,
+    /// Lines `[start, end)` whose spans the editor holds now; `None` after
+    /// the spans change.
+    pub script_span_window: Option<(i32, i32)>,
+    /// Undo and redo for each code tab, by tab id.
+    pub script_history: std::collections::HashMap<u32, crate::script_editor::editing::History>,
+    /// An edit the engine made, waiting for the editor: the selection
+    /// (anchor, cursor) to set with `script_editor_content`.
+    pub pending_external_edit: Option<(u32, u32)>,
+    /// Bumped with each edit pushed through `pending_external_edit`.
+    pub script_external_revision: i32,
+    /// The find bar's query and case sensitivity, and the current match.
+    pub find_query: String,
+    pub find_match_case: bool,
+    pub find_index: usize,
 
     // ── Code completion ──────────────────────────────────────────────
     //
@@ -357,7 +373,7 @@ pub struct StudioState {
     // output to Slint and track the selection between frames.
     /// Current match list. Empty means the popup is closed — there is no
     /// separate `visible` flag to fall out of sync with the contents.
-    pub completion_items: Vec<crate::script_editor::Completion>,
+    pub completion_items: Vec<crate::script_editor::language::Completion>,
     /// Index into `completion_items`. Clamped on every mutation.
     pub completion_selected: usize,
     /// Identifier text the list is filtered on, shown in the popup footer.
@@ -403,7 +419,7 @@ pub struct StudioState {
     pub last_selected_entity: Option<Entity>,
     pub last_selection_hash: u64,
     pub frames_since_selection_change: u32,
-    pub last_log_count: usize,
+    pub last_output_revision: u64,
     pub last_output_filter: String,
 }
 
@@ -483,6 +499,17 @@ impl Default for StudioState {
             open_find_pulse: 0,
             script_editor_content: String::new(),
             script_content_dirty: false,
+            script_content_revision: 0,
+            script_language: String::new(),
+            script_source_path: None,
+            script_spans_all: Vec::new(),
+            script_span_window: None,
+            script_history: std::collections::HashMap::new(),
+            pending_external_edit: None,
+            script_external_revision: 0,
+            find_query: String::new(),
+            find_match_case: false,
+            find_index: 0,
             completion_items: Vec::new(),
             completion_selected: 0,
             completion_prefix: String::new(),
@@ -507,53 +534,16 @@ impl Default for StudioState {
             last_selected_entity: None,
             last_selection_hash: 0,
             frames_since_selection_change: 0,
-            last_log_count: 0,
+            last_output_revision: 0,
             last_output_filter: String::new(),
         }
     }
 }
 
-#[derive(Resource)]
-pub struct OutputConsole {
-    pub entries: Vec<LogEntry>,
-    pub max_entries: usize,
-    pub auto_scroll: bool,
-    pub filter_level: LogLevel,
-}
-
-impl Default for OutputConsole {
-    fn default() -> Self {
-        // 10_000 lines ≈ 600–800 KB at 60–80 chars per line; cheap even
-        // with per-frame diagnostics flooding from Rune/Luau scripts.
-        // Enough headroom that a user scrolling back through a full
-        // Play-mode session sees the whole thing, not a truncated tail.
-        Self { entries: Vec::new(), max_entries: 10_000, auto_scroll: true, filter_level: LogLevel::Info }
-    }
-}
-
-impl OutputConsole {
-    pub fn info(&mut self, msg: impl Into<String>) { self.push(LogLevel::Info, msg.into()); }
-    pub fn warn(&mut self, msg: impl Into<String>) { self.push(LogLevel::Warn, msg.into()); }
-    pub fn warning(&mut self, msg: impl Into<String>) { self.push(LogLevel::Warn, msg.into()); }
-    pub fn error(&mut self, msg: impl Into<String>) { self.push(LogLevel::Error, msg.into()); }
-    pub fn debug(&mut self, msg: impl Into<String>) { self.push(LogLevel::Debug, msg.into()); }
-    fn push(&mut self, level: LogLevel, message: String) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.entries.push(LogEntry { level, message, timestamp });
-        while self.entries.len() > self.max_entries { self.entries.remove(0); }
-    }
-    pub fn clear(&mut self) { self.entries.clear(); }
-}
-
-#[derive(Clone, Debug)]
-pub struct LogEntry {
-    pub level: LogLevel,
-    pub message: String,
-    pub timestamp: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum LogLevel { #[default] Info, Warn, Warning, Error, Debug, System }
+// The Output panel's buffer. One definition, in slint_ui.rs, because
+// resources are found by type: a second `OutputConsole` would be a resource
+// nothing registers or reads, and lines written to it would vanish.
+pub use slint_ui::{LogEntry, LogLevel, OutputConsole};
 
 #[derive(Resource, Default)]
 pub struct CommandBarState {

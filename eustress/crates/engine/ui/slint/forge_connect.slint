@@ -1,45 +1,59 @@
 // ============================================================================
 // Eustress Engine - Forge Connect Dialog
 // Connect to Forge cloud infrastructure
+//
+// Chrome: DialogScrim > DialogCard > DialogFooter (DRAFTING_UX.md Law 1).
+// Status and errors are KitNotices (Law 6). Escape, the close button, Cancel
+// and an outside click all close it.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, CheckBox } from "std-widgets.slint";
+import { LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitSwitch, KitSectionLabel, KitNotice, SettingsGroup, SettingRow } from "dialog_kit.slint";
 
-component ForgeSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
+// A labelled text field with a hint under it.
+component ForgeField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint: "";
+    in-out property <string> text;
+    in property <bool> password: false;
 
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 12px;
+        Text {
+            width: 84px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 30px;
+            background: Theme.input-background;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: edit.has-focus ? Theme.accent-cyan : Theme.input-border;
+
+            edit := LineEdit {
+                width: 100%;
+                height: 100%;
+                text <=> root.text;
+                input-type: root.password ? InputType.password : InputType.text;
+            }
+        }
     }
 
-    Text {
-        x: 10px;
-        text: root.title;
-        color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
-    }
-}
-
-component ForgeHint inherits Rectangle {
-    in property <string> text: "";
-    height: 16px;
-    background: transparent;
-    Text {
-        text: root.text;
-        color: Theme.text-disabled;
-        font-size: 10px;
-        vertical-alignment: center;
-        wrap: word-wrap;
-        width: parent.width;
+    if root.hint != "": HorizontalLayout {
+        padding-left: 96px;
+        Text {
+            text: root.hint;
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
     }
 }
 
@@ -56,273 +70,99 @@ export component ForgeConnectDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
+    background: transparent;
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => {
-            return accept;
-        }
-    }
-
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 480px;
-        height: 380px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
-
-        TouchArea {
-            scroll-event(event) => {
+    // Escape closes. Other keys pass through as before.
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.on-close();
                 return accept;
             }
+            return reject;
         }
 
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
+        DialogScrim {
+            dismiss => { root.on-close(); }
 
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
+            DialogCard {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 480px;
+                height: min(body.preferred-height + footer.preferred-height + 45px, parent.height - 40px);
+                icon: @image-url("../../assets/icons/ui/server.svg");
+                title: "Connect to Forge";
+                subtitle: "Hosting and autoscaling for multiplayer servers";
+                close => { root.on-close(); }
 
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Connect to Forge";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                // ── Content ──
+                body := VerticalLayout {
+                    vertical-stretch: 1;
+                    padding: 16px;
+                    spacing: 14px;
+                    alignment: start;
+
+                    VerticalLayout {
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            padding-left: 2px;
+                            KitSectionLabel { text: "CONNECTION"; }
+                        }
+
+                        ForgeField {
+                            label: "Server URL";
+                            text <=> root.server-url;
+                            hint: "The Forge server that hosts and scales your multiplayer sessions.";
+                        }
+
+                        ForgeField {
+                            label: "API key";
+                            text <=> root.api-key;
+                            password: true;
+                            hint: "Sent only to the Forge server above.";
+                        }
+                    }
+
+                    SettingsGroup {
+                        title: "OPTIONS";
+
+                        SettingRow {
+                            label: "Remember credentials";
+                            description: "Keep the URL and key on this computer for next time";
+                            divider: false;
+                            KitSwitch { checked <=> root.remember-credentials; }
+                        }
+                    }
+
+                    // Status
+                    if root.status-message != "": KitNotice {
+                        kind: "info";
+                        text: root.status-message;
+                    }
+
+                    // Error
+                    if root.error-message != "": KitNotice {
+                        kind: "error";
+                        text: root.error-message;
+                    }
                 }
 
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? Theme.error-surface-hover : transparent;
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
+                // ── Footer ──
+                footer := DialogFooter {
+                    KitButton {
+                        text: "Cancel";
                         clicked => { root.on-close(); }
                     }
 
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content ──
-            VerticalLayout {
-                vertical-stretch: 1;
-                padding: 20px;
-                spacing: 4px;
-                alignment: start;
-
-                ForgeSection { title: "CONNECTION"; }
-
-                // Server URL
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        // Centre the 22px child in the 28px row. A HorizontalLayout does
-                        // NOT centre a fixed-height child: lower_layout pins it at
-                        // y = padding.top and leaves its height alone, so with no vertical
-                        // padding it sat flush against the top with 6px of dead space below.
-                        padding-top: 3px;
-                        padding-bottom: 3px;
-                        spacing: 8px;
-                        Text {
-                            width: 100px;
-                            text: "Server URL";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 22px;
-                            background: Theme.input-background;
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: Theme.input-border;
-
-                            LineEdit {
-                                width: 100%; height: 100%;
-                                text <=> root.server-url;
-                            }
-                        }
-                    }
-                }
-
-                ForgeHint { text: "Forge server endpoint for multiplayer game hosting and autoscaling."; }
-
-                Rectangle { height: 4px; }
-
-                // API Key
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        // Centre the 22px child in the 28px row. A HorizontalLayout does
-                        // NOT centre a fixed-height child: lower_layout pins it at
-                        // y = padding.top and leaves its height alone, so with no vertical
-                        // padding it sat flush against the top with 6px of dead space below.
-                        padding-top: 3px;
-                        padding-bottom: 3px;
-                        spacing: 8px;
-                        Text {
-                            width: 100px;
-                            text: "API Key";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 22px;
-                            background: Theme.input-background;
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: Theme.input-border;
-
-                            LineEdit {
-                                width: 100%; height: 100%;
-                                text <=> root.api-key;
-                                input-type: password;
-                            }
-                        }
-                    }
-                }
-
-                ForgeHint { text: "Your Forge API key. Stored locally, never transmitted outside of Forge connections."; }
-
-                Rectangle { height: 8px; }
-
-                ForgeSection { title: "OPTIONS"; }
-
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        CheckBox {
-                            text: "Remember credentials";
-                            checked <=> root.remember-credentials;
-                        }
-                    }
-                }
-
-                // Status
-                if root.status-message != "": Rectangle {
-                    height: 20px;
-                    HorizontalLayout {
-                        spacing: 4px;
-                        Text { text: root.status-message; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
-                    }
-                }
-
-                // Error
-                if root.error-message != "": Rectangle {
-                    height: 28px;
-                    background: Theme.error-surface;
-                    border-radius: 3px;
-                    border-width: 1px;
-                    border-color: Theme.error-surface-border;
-
-                    Text {
-                        x: 10px;
-                        text: root.error-message;
-                        color: Theme.text-error;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // ── Footer ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    spacing: 10px;
-                    alignment: center;
-
-                    // Cancel
-                    Rectangle {
-                        width: 80px; height: 32px;
-                        border-radius: 5px;
-                        background: cancel-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-
-                        cancel-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-
-                        Text {
-                            text: "Cancel";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Connect (green)
-                    Rectangle {
-                        width: 100px; height: 32px;
-                        border-radius: 5px;
-                        background: root.connecting ?
-                            Theme.button-background :
-                            (connect-ta.has-hover ? Theme.success-surface-hover : Theme.success-surface);
-                        border-width: 1px;
-                        border-color: root.connecting ?
-                            Theme.border-color :
-                            (connect-ta.has-hover ? Theme.accent-green : Theme.success-surface-border);
-
-                        connect-ta := TouchArea {
-                            mouse-cursor: root.connecting ? default : pointer;
-                            enabled: !root.connecting;
-                            clicked => { root.on-connect(); }
-                        }
-
-                        Text {
-                            text: root.connecting ? "Connecting..." : "Connect";
-                            color: root.connecting ?
-                                Theme.text-secondary :
-                                (connect-ta.has-hover ? Theme.success-surface-text-hover : Theme.accent-green);
-                            font-size: 12px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    KitButton {
+                        text: root.connecting ? "Connecting..." : "Connect";
+                        kind: "primary";
+                        enabled: !root.connecting;
+                        clicked => { root.on-connect(); }
                     }
                 }
             }

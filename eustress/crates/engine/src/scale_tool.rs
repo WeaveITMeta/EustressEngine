@@ -13,6 +13,9 @@
 #![allow(unused_variables)]
 
 use bevy::prelude::*;
+// The collider follows `BasePart.size` in Play too, so the Player shares it.
+use eustress_play_runtime::part_colliders::rebuild_collider_on_size_change;
+pub use eustress_play_runtime::part_colliders::ColliderBuiltForSize;
 use bevy::window::PrimaryWindow;
 use crate::selection_box::Selected;
 use crate::gizmo_tools::TransformGizmoGroup;
@@ -155,74 +158,6 @@ impl Plugin for ScaleToolPlugin {
                 // update picks up the final size in the same frame.
                 rebuild_collider_on_size_change.after(handle_resize_part_events),
             ));
-    }
-}
-
-/// The size (and transform scale) an entity's collider was last rebuilt
-/// for by [`rebuild_collider_on_size_change`].
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct ColliderBuiltForSize {
-    pub size: Vec3,
-    pub scale: Vec3,
-}
-
-/// Rebuild the Avian `Collider` in-place whenever an entity's
-/// `BasePart.size` changes — scale-tool drag, Properties-panel type-in,
-/// paste-props, MCP resize, undo/redo, any write-back from disk. Without
-/// this, the visual mesh resized but the collider stayed at the spawn
-/// dimensions, so raycasts, surface snapping, selection hit-test, and
-/// physics all stepped into "shadow-of-the-old-size" territory.
-///
-/// Only runs for entities that already have a `Collider` — we never
-/// add physics to a part that was spawned without `can_collide`.
-///
-/// `Changed<BasePart>` also fires for colour, transparency and material
-/// writes (a script tweening a part touches it every frame), so the size
-/// the collider was last built for is remembered and anything else is
-/// skipped.
-fn rebuild_collider_on_size_change(
-    mut commands: Commands,
-    changed: Query<
-        (
-            Entity,
-            &crate::classes::BasePart,
-            Option<&crate::classes::Part>,
-            &Transform,
-            Option<&ColliderBuiltForSize>,
-        ),
-        (Changed<crate::classes::BasePart>, With<avian3d::prelude::Collider>),
-    >,
-) {
-    use avian3d::prelude::Collider;
-    use crate::classes::PartType;
-
-    for (entity, base_part, part_opt, transform, built) in changed.iter() {
-        if built.map_or(false, |b| b.size == base_part.size && b.scale == transform.scale) {
-            continue;
-        }
-        commands
-            .entity(entity)
-            .insert(ColliderBuiltForSize { size: base_part.size, scale: transform.scale });
-        // Sanitise dimensions first — a degenerate 0 / negative / non-finite
-        // size would panic Avian's collider builder on the next physics step.
-        let safe_size = Vec3::new(
-            if base_part.size.x.is_finite() { base_part.size.x.abs().max(0.1) } else { 0.1 },
-            if base_part.size.y.is_finite() { base_part.size.y.abs().max(0.1) } else { 0.1 },
-            if base_part.size.z.is_finite() { base_part.size.z.abs().max(0.1) } else { 0.1 },
-        );
-        // Collider dimensions are LOCAL — Avian re-applies the entity's
-        // transform scale. Use the same canonical cancellation as loading and
-        // spawning, or a resize would silently change the part's collision
-        // size relative to how it loaded.
-        let half = crate::spawn::collider_local_half(safe_size, transform.scale);
-        let collider = match part_opt.map(|p| p.shape) {
-            Some(PartType::Ball) => Collider::sphere(half.x),
-            Some(PartType::Cylinder) | Some(PartType::Cone) => {
-                Collider::cylinder(half.x, half.y * 2.0)
-            }
-            _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
-        };
-        commands.entity(entity).insert(collider);
     }
 }
 
@@ -828,12 +763,7 @@ fn handle_scale_interaction(
                 if !size_changed && !pos_changed { continue; }
                 if let Ok(inst_file) = extras.instance_files.get(entity) {
                     if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                        def.transform.position = transform.translation.to_array();
-                        def.transform.rotation = [
-                            transform.rotation.x, transform.rotation.y,
-                            transform.rotation.z, transform.rotation.w,
-                        ];
-                        def.transform.scale = new_size.to_array();
+                        crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, Some(new_size));
                         let _ = crate::space::instance_loader::write_instance_definition_signed(
                             &inst_file.toml_path, &mut def, stamp.as_ref(),
                         );
@@ -1023,12 +953,7 @@ fn finalize_numeric_input_on_scale(
             if !size_changed && !pos_changed { continue; }
             if let Ok(inst_file) = instance_files.get(entity) {
                 if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                    def.transform.position = transform.translation.to_array();
-                    def.transform.rotation = [
-                        transform.rotation.x, transform.rotation.y,
-                        transform.rotation.z, transform.rotation.w,
-                    ];
-                    def.transform.scale = new_size.to_array();
+                    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, Some(new_size));
                     let _ = crate::space::instance_loader::write_instance_definition_signed(
                         &inst_file.toml_path, &mut def, stamp.as_ref(),
                     );

@@ -9,13 +9,14 @@
 use mlua::{FromLua, Function, Lua, MetaMethod, Result as LuaResult, Table, UserData, UserDataFields, UserDataMethods, Value, Variadic};
 
 use crate::datamodel::{
-    class_is_a, is_base_part, DataModel, DmValue, EnumItem, HumanoidCommand, InstanceId, OutputLevel,
+    class_is_a, is_base_part, DataModel, PART_DENSITY, DmValue, EnumItem, HumanoidCommand, InstanceId, OutputLevel,
     PhysicsCommand, SharedDataModel, SoundAction, SoundCommand,
 };
 use crate::luau::types::{userdata_eq, LuauCFrame, LuauVector3, UserDataPeek};
 use crate::scripting::{CFrame, Vector2, Vector3};
 
 use super::convert::{enum_item, enum_name_arg, from_lua, to_lua};
+use super::terrain;
 use super::types_ext::{LuauRay, LuauRaycastParams, LuauVector2};
 
 pub(crate) const HANDLES: &str = "__eus_handles";
@@ -72,10 +73,22 @@ pub fn shared(lua: &Lua) -> LuaResult<SharedDataModel> {
         .ok_or_else(|| mlua::Error::RuntimeError("no DataModel bound to this VM".into()))
 }
 
-fn with_dm<R>(lua: &Lua, f: impl FnOnce(&mut DataModel) -> R) -> LuaResult<R> {
+pub(crate) fn with_dm<R>(lua: &Lua, f: impl FnOnce(&mut DataModel) -> R) -> LuaResult<R> {
     let dm = shared(lua)?;
     let mut g = dm.lock();
     Ok(f(&mut g))
+}
+
+/// `test` against the input `this` asks about: another player's own when
+/// `this` is a `Player` other than this machine's (nothing held until its
+/// first input arrives), else this machine's.
+fn held(dm: &DataModel, this: InstanceId, test: impl Fn(&crate::datamodel::InputState) -> bool) -> bool {
+    let other_player = dm.class_of(this) == Some("Player") && dm.local_player != Some(this);
+    if other_player {
+        dm.player_input.get(&this).is_some_and(test)
+    } else {
+        test(&dm.input)
+    }
 }
 
 /// Numeric key for Lua-side tables (exact below 2^53).
@@ -111,7 +124,12 @@ fn handle_list(lua: &Lua, ids: &[InstanceId]) -> LuaResult<Table> {
     Ok(t)
 }
 
-fn host_table(lua: &Lua) -> LuaResult<Table> {
+/// Metres per length unit of the running script (see `studs::script_scale`).
+fn scale(lua: &Lua) -> LuaResult<f64> {
+    super::studs::script_scale(&host_table(lua)?)
+}
+
+pub(super) fn host_table(lua: &Lua) -> LuaResult<Table> {
     lua.named_registry_value(HOST)
 }
 
@@ -130,28 +148,7 @@ fn tag_target(this: LInst, first: Value, second: Option<String>) -> LuaResult<(I
 
 /// Events every instance exposes, plus the class-specific ones.
 fn is_event(class: &str, key: &str) -> bool {
-    match key {
-        "Changed" | "ChildAdded" | "ChildRemoved" | "DescendantAdded" | "DescendantRemoving" | "AncestryChanged"
-        | "Destroying" | "AttributeChanged" => true,
-        "Touched" | "TouchEnded" => is_base_part(class),
-        "Died" | "HealthChanged" | "MoveToFinished" | "Running" | "Jumping" | "StateChanged" | "FreeFalling" => {
-            class == "Humanoid"
-        }
-        "PlayerAdded" | "PlayerRemoving" => class == "Players",
-        "CharacterAdded" | "CharacterRemoving" | "CharacterAppearanceLoaded" | "Chatted" | "Idled" => class == "Player",
-        "MouseButton1Click" | "MouseButton1Down" | "MouseButton1Up" | "MouseButton2Click" | "Activated"
-        | "MouseEnter" | "MouseLeave" => class_is_a(class, "GuiButton") || class_is_a(class, "GuiObject"),
-        "Event" => class == "BindableEvent",
-        "OnServerEvent" | "OnClientEvent" => class == "RemoteEvent",
-        "InputBegan" | "InputEnded" | "InputChanged" | "JumpRequest" | "WindowFocused" | "WindowFocusReleased" => {
-            class == "UserInputService" || class_is_a(class, "GuiObject")
-        }
-        "MouseClick" | "RightMouseClick" | "MouseHoverEnter" | "MouseHoverLeave" => class == "ClickDetector",
-        "Triggered" | "TriggerEnded" | "PromptShown" | "PromptHidden" => class == "ProximityPrompt",
-        "Ended" | "Played" | "Loaded" => class == "Sound",
-        "Close" | "Loaded_" => class == "DataModel",
-        _ => false,
-    }
+    crate::luau::catalog::is_event(class, key)
 }
 
 fn run_service_signal(key: &str) -> bool {
@@ -197,6 +194,12 @@ fn index(lua: &Lua, id: InstanceId, key: &str) -> LuaResult<Value> {
         return get.call((id_key(id), key));
     }
 
+    // A part's mass, as Roblox defines it (read-only).
+    if is_base_part(&class) && matches!(key, "Mass" | "AssemblyMass") {
+        let m = with_dm(lua, |dm| if key == "Mass" { part_mass(dm, id) } else { assembly_mass(dm, id) })?;
+        return Ok(Value::Number(m));
+    }
+
     // 4. Properties.
     let (prop, child) = {
         let dm = shared(lua)?;
@@ -206,6 +209,12 @@ fn index(lua: &Lua, id: InstanceId, key: &str) -> LuaResult<Value> {
         (prop, child)
     };
     if let Some(v) = prop {
+        // A script written for Roblox reads lengths in studs.
+        if super::studs::converts(&class, key) && super::studs::running_in_studs(&host_table(lua)?)? {
+            if let Some(v) = with_dm(lua, |dm| super::studs::read_in_studs(dm, id, &class, key))? {
+                return to_lua(lua, &v);
+            }
+        }
         return to_lua(lua, &v);
     }
 
@@ -214,6 +223,48 @@ fn index(lua: &Lua, id: InstanceId, key: &str) -> LuaResult<Value> {
         return handle(lua, c);
     }
     Ok(Value::Nil)
+}
+
+/// A part's mass in kg, as Roblox defines it: its density times its volume.
+/// The density is the part's own (the tree's [`PART_DENSITY`], which the
+/// reader seeds from its custom physical properties or its material), else its
+/// material's. The volume is its collider's, so the physics engine weighs the
+/// part the same.
+fn part_mass(dm: &DataModel, id: InstanceId) -> f64 {
+    let density = dm.get_prop(id, PART_DENSITY).and_then(|v| v.as_number()).unwrap_or_else(|| {
+        let material = dm.get_prop(id, "Material").and_then(|v| v.as_enum_name().map(str::to_string)).unwrap_or_default();
+        crate::classes::BasePart::material_default_density(&crate::classes::Material::from_string(&material)) as f64
+    });
+    let size = dm.get_prop(id, "Size").and_then(|v| v.as_vector3()).unwrap_or(Vector3::ONE);
+    let shape = dm.get_prop(id, "Shape").and_then(|v| v.as_enum_name().map(str::to_string));
+    density * collider_volume(size, shape.as_deref())
+}
+
+/// A part's volume in m³ as its collider is built (play-runtime's
+/// `part_colliders`): a Ball is a sphere of radius `Size.X / 2`, a Cylinder
+/// or Cone a cylinder of radius `Size.X / 2` and height `Size.Y`, and every
+/// other shape the whole box.
+fn collider_volume(size: Vector3, shape: Option<&str>) -> f64 {
+    use crate::classes::PartType;
+    let (x, y, z) = (size.x.abs(), size.y.abs(), size.z.abs());
+    match shape.map(PartType::from_string) {
+        Some(PartType::Ball) => 4.0 / 3.0 * std::f64::consts::PI * (x / 2.0).powi(3),
+        Some(PartType::Cylinder) | Some(PartType::Cone) => std::f64::consts::PI * (x / 2.0).powi(2) * y,
+        _ => x * y * z,
+    }
+}
+
+/// The mass of the assembly the part is in, as Roblox defines it: infinite
+/// when the part is anchored, else what the physics engine reports for its
+/// body (the pull writes it), and the part's own mass until it has.
+fn assembly_mass(dm: &DataModel, id: InstanceId) -> f64 {
+    if dm.get_prop(id, "Anchored").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return f64::INFINITY;
+    }
+    if let Some(m) = dm.get_prop(id, "AssemblyMass").and_then(|v| v.as_number()) {
+        return m;
+    }
+    part_mass(dm, id)
 }
 
 /// The Humanoid property behind `SetStateEnabled(state, ...)`: Jumping and
@@ -242,9 +293,20 @@ fn newindex(lua: &Lua, id: InstanceId, key: &str, value: Value) -> LuaResult<()>
     if is_event(&class, key) {
         return Err(mlua::Error::RuntimeError(format!("{} is a signal and cannot be assigned", key)));
     }
+    if is_base_part(&class) && matches!(key, "Mass" | "AssemblyMass") {
+        return Err(mlua::Error::RuntimeError(format!("{key} is read-only")));
+    }
     if class == "UserInputService" && key == "MouseIconEnabled" {
         if let Value::Boolean(b) = value {
             with_dm(lua, |dm| dm.input.mouse_icon_enabled = b)?;
+        }
+    }
+    // ... and writes them in studs, stored where an imported value would land.
+    if super::studs::converts(&class, key) && super::studs::running_in_studs(&host_table(lua)?)? {
+        let v = from_lua(&value).map_err(|e| mlua::Error::RuntimeError(format!("{}: {}", key, e)))?;
+        if let Some(writes) = super::studs::writes_from_studs(&class, key, &v) {
+            return with_dm(lua, |dm| writes.into_iter().try_for_each(|(prop, v)| dm.set_prop(id, prop, v)))?
+                .map_err(mlua::Error::RuntimeError);
         }
     }
     let v = from_lua(&value).map_err(|e| mlua::Error::RuntimeError(format!("{}: {}", key, e)))?;
@@ -315,50 +377,7 @@ pub(crate) fn data_service(lua: &Lua, op: &str, arg: Value) -> LuaResult<Value> 
 /// Whether `key` names a method on `class`, so a child called "Play" is not
 /// shadowed on a Part.
 fn method_applies(class: &str, key: &str) -> bool {
-    match key {
-        "Destroy" | "Clone" | "ClearAllChildren" | "FindFirstChild" | "FindFirstChildOfClass"
-        | "FindFirstChildWhichIsA" | "FindFirstAncestor" | "FindFirstAncestorOfClass" | "FindFirstAncestorWhichIsA"
-        | "FindFirstDescendant" | "GetChildren" | "GetDescendants" | "IsA" | "IsDescendantOf" | "IsAncestorOf"
-        | "GetFullName" | "WaitForChild" | "GetAttribute" | "SetAttribute" | "GetAttributes"
-        | "GetAttributeChangedSignal" | "GetPropertyChangedSignal" | "AddTag" | "RemoveTag" | "HasTag" | "GetTags"
-        | "GetDebugId" | "isA" | "findFirstChild" | "children" | "remove" | "Remove" => true,
-        "GetPivot" | "PivotTo" => is_base_part(class) || class_is_a(class, "Model"),
-        "ApplyImpulse" | "ApplyAngularImpulse" | "ApplyImpulseAtPosition" | "GetMass" | "SetNetworkOwner"
-        | "GetNetworkOwner" | "SetNetworkOwnershipAuto" | "BreakJoints" | "GetTouchingParts" | "GetConnectedParts"
-        | "GetRootPart" | "CanCollideWith" => is_base_part(class),
-        "GetBoundingBox" | "GetExtentsSize" | "MoveTo" | "SetPrimaryPartCFrame" | "GetPrimaryPartCFrame"
-        | "TranslateBy" | "GetModelCFrame" => class_is_a(class, "Model") || (key == "MoveTo" && class == "Humanoid"),
-        "TakeDamage" | "Move" | "ChangeState" | "GetState" | "LoadAnimation" | "UnequipTools" | "EquipTool"
-        | "GetPlayingAnimationTracks" | "SetStateEnabled" | "GetStateEnabled" => {
-            class == "Humanoid" || (key == "LoadAnimation" && class == "Animator")
-        }
-        "Play" | "Stop" | "Pause" | "Resume" => class == "Sound",
-        "Emit" | "Clear" => class == "ParticleEmitter",
-        "Fire" => class == "BindableEvent",
-        "Invoke" => class == "BindableFunction",
-        "FireServer" | "FireClient" | "FireAllClients" => class == "RemoteEvent",
-        "InvokeServer" | "InvokeClient" => class == "RemoteFunction",
-        "GetPlayers" | "GetPlayerFromCharacter" | "GetPlayerByUserId" => class == "Players",
-        "GetMouse" | "LoadCharacter" | "Kick" | "GetRankInGroup" | "IsInGroup" | "DistanceFromCharacter" => {
-            class == "Player"
-        }
-        "ViewportPointToRay" | "ScreenPointToRay" | "WorldToViewportPoint" | "WorldToScreenPoint" => class == "Camera",
-        "Raycast" | "GetServerTimeNow" | "GetPartBoundsInRadius" | "GetPartBoundsInBox" | "FindPartOnRay"
-        | "FindPartOnRayWithIgnoreList" | "Spherecast" | "Blockcast" | "GetRealPhysicsFPS" => class == "Workspace",
-        "GetService" | "FindService" | "IsLoaded" | "BindToClose" => class == "DataModel",
-        "IsKeyDown" | "IsMouseButtonPressed" | "GetMouseLocation" | "GetMouseDelta" | "GetKeysPressed"
-        | "GetMouseButtonsPressed" | "GetLastInputType" | "GetFocusedTextBox" | "IsGamepadButtonDown"
-        | "GetConnectedGamepads" => class == "UserInputService",
-        "IsClient" | "IsServer" | "IsStudio" | "IsRunning" | "IsRunMode" | "IsEdit" | "BindToRenderStep"
-        | "UnbindFromRenderStep" => class == "RunService",
-        "GetTagged" | "GetInstanceAddedSignal" | "GetInstanceRemovedSignal" | "GetAllTags" => {
-            class == "CollectionService"
-        }
-        "JSONEncode" | "JSONDecode" | "GenerateGUID" | "UrlEncode" => class == "HttpService",
-        "Mine" | "Describe" | "Query" | "Render" => class == "DataService",
-        "PlayLocalSound" => class == "SoundService",
-        _ => false,
-    }
+    crate::luau::catalog::method_applies(class, key)
 }
 
 // ============================================================================
@@ -377,8 +396,14 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
 
     // ── Instance ─────────────────────────────────────────────────────────
     method!(lua, t, "Destroy", |lua, this: LInst| {
-        with_dm(lua, |dm| dm.destroy(this.0))?;
-        Ok(())
+        with_dm(lua, |dm| match locked_parent(dm, this.0) {
+            Some(refusal) => Err(refusal),
+            None => {
+                dm.destroy(this.0);
+                Ok(())
+            }
+        })?
+        .map_err(mlua::Error::RuntimeError)
     });
     method!(lua, t, "Remove", |lua, this: LInst| {
         with_dm(lua, |dm| dm.set_parent(this.0, None))?.map_err(mlua::Error::RuntimeError)
@@ -390,6 +415,7 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         let c = with_dm(lua, |dm| dm.clone_instance(this.0))?;
         opt_handle(lua, c)
     });
+    // Children whose Parent is locked (the Terrain) stay (`DataModel::destroy`).
     method!(lua, t, "ClearAllChildren", |lua, this: LInst| {
         with_dm(lua, |dm| dm.clear_all_children(this.0))?;
         Ok(())
@@ -513,42 +539,53 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     });
 
     // ── PVInstance: pivots ───────────────────────────────────────────────
+    // Every length these take and give is in the caller's units: studs for a
+    // script written for Roblox (see `studs`), metres for a native one.
     method!(lua, t, "GetPivot", |lua, this: LInst| {
+        let k = scale(lua)?;
         let cf = with_dm(lua, |dm| pivot_of(dm, this.0))?;
-        Ok(LuaCFrameOut(cf))
+        Ok(LuaCFrameOut(super::studs::scale_frame(cf, 1.0 / k)))
     });
     method!(lua, t, "PivotTo", |lua, (this, cf): (LInst, LuauCFrame)| {
-        with_dm(lua, |dm| pivot_to(dm, this.0, cf.0))?.map_err(mlua::Error::RuntimeError)
+        let k = scale(lua)?;
+        with_dm(lua, |dm| pivot_to(dm, this.0, super::studs::scale_frame(cf.0, k)))?.map_err(mlua::Error::RuntimeError)
     });
     method!(lua, t, "SetPrimaryPartCFrame", |lua, (this, cf): (LInst, LuauCFrame)| {
-        with_dm(lua, |dm| pivot_to(dm, this.0, cf.0))?.map_err(mlua::Error::RuntimeError)
+        let k = scale(lua)?;
+        with_dm(lua, |dm| pivot_to(dm, this.0, super::studs::scale_frame(cf.0, k)))?.map_err(mlua::Error::RuntimeError)
     });
     method!(lua, t, "GetPrimaryPartCFrame", |lua, this: LInst| {
+        let k = scale(lua)?;
         let cf = with_dm(lua, |dm| pivot_of(dm, this.0))?;
-        Ok(LuaCFrameOut(cf))
+        Ok(LuaCFrameOut(super::studs::scale_frame(cf, 1.0 / k)))
     });
     method!(lua, t, "GetModelCFrame", |lua, this: LInst| {
+        let k = scale(lua)?;
         let cf = with_dm(lua, |dm| pivot_of(dm, this.0))?;
-        Ok(LuaCFrameOut(cf))
+        Ok(LuaCFrameOut(super::studs::scale_frame(cf, 1.0 / k)))
     });
     method!(lua, t, "TranslateBy", |lua, (this, v): (LInst, LuauVector3)| {
+        let k = scale(lua)?;
         with_dm(lua, |dm| {
             let cf = pivot_of(dm, this.0);
-            pivot_to(dm, this.0, cf + v.0)
+            pivot_to(dm, this.0, cf + v.0 * k)
         })?
         .map_err(mlua::Error::RuntimeError)
     });
     method!(lua, t, "GetBoundingBox", |lua, this: LInst| {
+        let k = scale(lua)?;
         let (center, size) = with_dm(lua, |dm| bounding_box(dm, this.0))?;
-        Ok((LuauCFrame(CFrame::from_position(center)), LuauVector3(size)))
+        Ok((LuauCFrame(CFrame::from_position(center * (1.0 / k))), LuauVector3(size * (1.0 / k))))
     });
     method!(lua, t, "GetExtentsSize", |lua, this: LInst| {
+        let k = scale(lua)?;
         let (_, size) = with_dm(lua, |dm| bounding_box(dm, this.0))?;
-        Ok(LuauVector3(size))
+        Ok(LuauVector3(size * (1.0 / k)))
     });
 
     // `MoveTo` is shared by Model (teleport the pivot) and Humanoid (walk).
     method!(lua, t, "MoveTo", |lua, (this, target, _part): (LInst, LuauVector3, Option<Value>)| {
+        let target = LuauVector3(target.0 * scale(lua)?);
         with_dm(lua, |dm| {
             if dm.class_of(this.0) == Some("Humanoid") {
                 dm.humanoid_commands.push(HumanoidCommand::MoveTo { humanoid: this.0, target: target.0 });
@@ -576,15 +613,7 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         with_dm(lua, |dm| dm.physics_commands.push(PhysicsCommand::ApplyAngularImpulse { part: this.0, impulse: v.0 }))?;
         Ok(())
     });
-    method!(lua, t, "GetMass", |lua, this: LInst| {
-        with_dm(lua, |dm| {
-            if let Some(m) = dm.get_prop(this.0, "Mass").and_then(|v| v.as_number()) {
-                return m;
-            }
-            let size = dm.get_prop(this.0, "Size").and_then(|v| v.as_vector3()).unwrap_or(Vector3::ONE);
-            900.0 * size.x * size.y * size.z
-        })
-    });
+    method!(lua, t, "GetMass", |lua, this: LInst| with_dm(lua, |dm| part_mass(dm, this.0)));
     method!(lua, t, "SetNetworkOwner", |_, _args: Variadic<Value>| Ok(()));
     method!(lua, t, "SetNetworkOwnershipAuto", |_, _args: Variadic<Value>| Ok(()));
     method!(lua, t, "GetNetworkOwner", |_, _this: LInst| Ok(Value::Nil));
@@ -595,6 +624,22 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     method!(lua, t, "GetTouchingParts", |lua, _this: LInst| lua.create_table());
 
     // ── Humanoid ─────────────────────────────────────────────────────────
+    // ── Seat, VehicleSeat ────────────────────────────────────────────────
+    // A request for the host's seat system, which checks it as it would a
+    // touch. A client's Sit does nothing, as in Roblox.
+    method!(lua, t, "Sit", |lua, (this, humanoid): (LInst, LInst)| {
+        with_dm(lua, |dm| {
+            if !dm.exists(humanoid.0) || dm.class_of(humanoid.0) != Some("Humanoid") {
+                return Err("Sit expects a Humanoid".to_string());
+            }
+            if dm.is_server {
+                dm.sit_requests.push(crate::datamodel::SitRequest { seat: this.0, humanoid: humanoid.0 });
+            }
+            Ok(())
+        })?
+        .map_err(mlua::Error::RuntimeError)
+    });
+
     method!(lua, t, "TakeDamage", |lua, (this, amount): (LInst, f64)| {
         with_dm(lua, |dm| {
             let hp = dm.get_prop(this.0, "Health").and_then(|v| v.as_number()).unwrap_or(0.0);
@@ -618,9 +663,19 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         })?
         .map_err(mlua::Error::RuntimeError)
     });
+    // The state the engine last reported for this Humanoid's character, and
+    // Dead once its Health is gone.
     method!(lua, t, "GetState", |lua, this: LInst| {
-        let dead = with_dm(lua, |dm| dm.get_prop(this.0, "Health").and_then(|v| v.as_number()).unwrap_or(1.0) <= 0.0)?;
-        enum_item(lua, &EnumItem::new("HumanoidStateType", if dead { "Dead" } else { "Running" }))
+        let state = with_dm(lua, |dm| {
+            if dm.get_prop(this.0, "Health").and_then(|v| v.as_number()).unwrap_or(1.0) <= 0.0 {
+                return "Dead".to_string();
+            }
+            match dm.get_prop(this.0, crate::animation::humanoid::STATE_PROPERTY) {
+                Some(DmValue::String(s)) if !s.is_empty() => s,
+                _ => "Running".to_string(),
+            }
+        })?;
+        enum_item(lua, &EnumItem::new("HumanoidStateType", state))
     });
     // Jumping and Climbing switch the character's movement verbs (the same
     // JumpEnabled / ClimbingEnabled properties a script can set directly);
@@ -636,25 +691,72 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     });
     method!(lua, t, "UnequipTools", |_, _this: LInst| Ok(()));
     method!(lua, t, "EquipTool", |_, _args: Variadic<Value>| Ok(()));
-    method!(lua, t, "GetPlayingAnimationTracks", |lua, _this: LInst| lua.create_table());
-    method!(lua, t, "LoadAnimation", |lua, (_this, _anim): (LInst, Value)| {
-        // Rig animation is not exposed to scripts yet; a track that accepts
-        // the calls keeps ported scripts running.
-        let host = host_table(lua)?;
-        let f: Function = host.raw_get("stubAnimationTrack")?;
-        f.call::<Value>(())
+
+    // ── Animator, and its Humanoid and AnimationController proxies ─────
+    method!(lua, t, "GetPlayingAnimationTracks", |lua, this: LInst| {
+        let ids = with_dm(lua, |dm| dm.playing_tracks(this.0))?;
+        handle_list(lua, &ids)
+    });
+    method!(lua, t, "LoadAnimation", |lua, (this, animation): (LInst, LInst)| {
+        let track = with_dm(lua, |dm| dm.load_animation(this.0, animation.0))?.map_err(mlua::Error::RuntimeError)?;
+        handle(lua, track)
     });
 
-    // ── Sound / ParticleEmitter ──────────────────────────────────────────
-    method!(lua, t, "Play", |lua, this: LInst| sound(lua, this.0, SoundAction::Play));
-    method!(lua, t, "Stop", |lua, this: LInst| sound(lua, this.0, SoundAction::Stop));
+    // ── AnimationTrack ───────────────────────────────────────────────────
+    // Roblox's fade for Play, Stop and AdjustWeight.
+    const FADE: f64 = crate::datamodel::animation::DEFAULT_FADE as f64;
+    method!(lua, t, "AdjustSpeed", |lua, (this, speed): (LInst, Option<f64>)| {
+        with_dm(lua, |dm| dm.adjust_track_speed(this.0, speed.unwrap_or(1.0) as f32))?
+            .map_err(mlua::Error::RuntimeError)
+    });
+    method!(lua, t, "AdjustWeight", |lua, (this, weight, fade): (LInst, Option<f64>, Option<f64>)| {
+        with_dm(lua, |dm| dm.adjust_track_weight(this.0, weight.unwrap_or(1.0) as f32, fade.unwrap_or(FADE) as f32))?
+            .map_err(mlua::Error::RuntimeError)
+    });
+    // A marker's signal is the track's signal named "Marker:<name>", which
+    // the track model raises with the marker's Value.
+    method!(lua, t, "GetMarkerReachedSignal", |lua, (this, name): (LInst, String)| {
+        let host = host_table(lua)?;
+        let get: Function = host.raw_get("getSignal")?;
+        get.call::<Value>((id_key(this.0), format!("Marker:{name}")))
+    });
+    method!(lua, t, "GetTimeOfKeyframe", |lua, (this, name): (LInst, String)| {
+        with_dm(lua, |dm| dm.time_of_keyframe(this.0, &name))
+    });
+
+    // ── Sound / AnimationTrack / ParticleEmitter ─────────────────────────
+    // A track takes Play(fadeTime, weight, speed) and Stop(fadeTime); a Sound
+    // ignores the arguments.
+    method!(lua, t, "Play", |lua, (this, fade, weight, speed): (LInst, Option<f64>, Option<f64>, Option<f64>)| {
+        if with_dm(lua, |dm| dm.class_of(this.0) == Some("AnimationTrack"))? {
+            return with_dm(lua, |dm| {
+                dm.play_track(this.0, fade.unwrap_or(FADE) as f32, weight.unwrap_or(1.0) as f32, speed.unwrap_or(1.0) as f32)
+            })?
+            .map_err(mlua::Error::RuntimeError);
+        }
+        sound(lua, this.0, SoundAction::Play)
+    });
+    method!(lua, t, "Stop", |lua, (this, fade): (LInst, Option<f64>)| {
+        if with_dm(lua, |dm| dm.class_of(this.0) == Some("AnimationTrack"))? {
+            return with_dm(lua, |dm| dm.stop_track(this.0, fade.unwrap_or(FADE) as f32))?
+                .map_err(mlua::Error::RuntimeError);
+        }
+        sound(lua, this.0, SoundAction::Stop)
+    });
     method!(lua, t, "Pause", |lua, this: LInst| sound(lua, this.0, SoundAction::Pause));
     method!(lua, t, "Resume", |lua, this: LInst| sound(lua, this.0, SoundAction::Resume));
     method!(lua, t, "Emit", |lua, (this, n): (LInst, Option<f64>)| {
         with_dm(lua, |dm| dm.particle_emits.push((this.0, n.unwrap_or(16.0).max(0.0) as u32)))?;
         Ok(())
     });
-    method!(lua, t, "Clear", |_, _this: LInst| Ok(()));
+    // Terrain:Clear empties the terrain; ParticleEmitter:Clear has no live
+    // particles here to drop.
+    method!(lua, t, "Clear", |lua, this: LInst| {
+        if with_dm(lua, |dm| dm.class_of(this.0) == Some("Terrain"))? {
+            return terrain::clear(lua);
+        }
+        Ok(())
+    });
 
     // ── Players / Player ─────────────────────────────────────────────────
     method!(lua, t, "GetPlayers", |lua, this: LInst| {
@@ -699,48 +801,59 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         Ok(())
     });
     method!(lua, t, "DistanceFromCharacter", |lua, (this, p): (LInst, LuauVector3)| {
-        with_dm(lua, |dm| {
+        let k = scale(lua)?;
+        let metres = with_dm(lua, |dm| {
             let ch = dm.get_prop(this.0, "Character").and_then(|v| v.as_instance());
             let root = ch.and_then(|c| dm.find_first_child(c, "HumanoidRootPart", false));
             match root.and_then(|r| dm.get(r).and_then(|i| i.cframe())) {
-                Some(cf) => (cf.position - p.0).magnitude(),
+                Some(cf) => (cf.position - p.0 * k).magnitude(),
                 None => 0.0,
             }
-        })
+        })?;
+        Ok(metres / k)
     });
     method!(lua, t, "GetRankInGroup", |_, _args: Variadic<Value>| Ok(0));
     method!(lua, t, "IsInGroup", |_, _args: Variadic<Value>| Ok(false));
 
     // ── Camera ───────────────────────────────────────────────────────────
+    // A camera ray's origin is a position; its direction is a unit vector. A
+    // viewport point is pixels, and its depth a length.
     method!(lua, t, "ViewportPointToRay", |lua, (_this, x, y, _depth): (LInst, f64, f64, Option<f64>)| {
+        let k = scale(lua)?;
         let (o, d) = with_dm(lua, |dm| dm.viewport_point_to_ray(x, y))?;
-        Ok(LuauRay { origin: o, direction: d })
+        Ok(LuauRay { origin: o * (1.0 / k), direction: d })
     });
     method!(lua, t, "ScreenPointToRay", |lua, (_this, x, y, _depth): (LInst, f64, f64, Option<f64>)| {
+        let k = scale(lua)?;
         let (o, d) = with_dm(lua, |dm| dm.viewport_point_to_ray(x, y))?;
-        Ok(LuauRay { origin: o, direction: d })
+        Ok(LuauRay { origin: o * (1.0 / k), direction: d })
     });
     method!(lua, t, "WorldToViewportPoint", |lua, (_this, p): (LInst, LuauVector3)| {
-        let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0))?;
-        Ok((LuauVector3(v), on))
+        let k = scale(lua)?;
+        let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0 * k))?;
+        Ok((LuauVector3(Vector3::new(v.x, v.y, v.z / k)), on))
     });
     method!(lua, t, "WorldToScreenPoint", |lua, (_this, p): (LInst, LuauVector3)| {
-        let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0))?;
-        Ok((LuauVector3(v), on))
+        let k = scale(lua)?;
+        let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0 * k))?;
+        Ok((LuauVector3(Vector3::new(v.x, v.y, v.z / k)), on))
     });
 
     // ── Workspace ────────────────────────────────────────────────────────
     method!(lua, t, "Raycast", |lua, (_this, origin, direction, params): (LInst, LuauVector3, LuauVector3, Option<LuauRaycastParams>)| {
-        raycast(lua, origin.0, direction.0, params.unwrap_or_default())
+        let k = scale(lua)?;
+        raycast(lua, origin.0 * k, direction.0 * k, params.unwrap_or_default(), k)
     });
     method!(lua, t, "GetServerTimeNow", |lua, _this: LInst| with_dm(lua, |dm| dm.frame.time));
     method!(lua, t, "GetRealPhysicsFPS", |_, _this: LInst| Ok(60.0));
     method!(lua, t, "GetPartBoundsInRadius", |lua, (_this, center, radius, params): (LInst, LuauVector3, f64, Option<LuauRaycastParams>)| {
-        let hits = with_dm(lua, |dm| parts_in_radius(dm, center.0, radius, params.as_ref()))?;
+        let k = scale(lua)?;
+        let hits = with_dm(lua, |dm| parts_in_radius(dm, center.0 * k, radius * k, params.as_ref()))?;
         handle_list(lua, &hits)
     });
     method!(lua, t, "GetPartBoundsInBox", |lua, (_this, cf, size, params): (LInst, LuauCFrame, LuauVector3, Option<LuauRaycastParams>)| {
-        let hits = with_dm(lua, |dm| parts_in_box(dm, cf.0, size.0, params.as_ref()))?;
+        let k = scale(lua)?;
+        let hits = with_dm(lua, |dm| parts_in_box(dm, super::studs::scale_frame(cf.0, k), size.0 * k, params.as_ref()))?;
         handle_list(lua, &hits)
     });
     method!(lua, t, "FindPartOnRay", |lua, (_this, ray, ignore): (LInst, LuauRay, Option<LInst>)| {
@@ -748,7 +861,8 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         if let Some(i) = ignore {
             params.filter.push(i.0);
         }
-        legacy_find_part(lua, ray, params)
+        let k = scale(lua)?;
+        legacy_find_part(lua, ray, params, k)
     });
     method!(lua, t, "FindPartOnRayWithIgnoreList", |lua, (_this, ray, ignore): (LInst, LuauRay, Option<Table>)| {
         let mut params = LuauRaycastParams::default();
@@ -761,7 +875,8 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
                 }
             }
         }
-        legacy_find_part(lua, ray, params)
+        let k = scale(lua)?;
+        legacy_find_part(lua, ray, params, k)
     });
 
     // ── DataModel (game) ─────────────────────────────────────────────────
@@ -779,14 +894,14 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     method!(lua, t, "IsLoaded", |_, _this: LInst| Ok(true));
     method!(lua, t, "BindToClose", |_, _args: Variadic<Value>| Ok(()));
 
-    // ── UserInputService ─────────────────────────────────────────────────
-    method!(lua, t, "IsKeyDown", |lua, (_this, key): (LInst, Value)| {
+    // ── UserInputService (and a Player's own input) ──────────────────────
+    method!(lua, t, "IsKeyDown", |lua, (this, key): (LInst, Value)| {
         let name = enum_name_arg(&key).unwrap_or_default();
-        with_dm(lua, |dm| dm.input.keys.contains(&name))
+        with_dm(lua, |dm| held(dm, this.0, |i| i.keys.contains(&name)))
     });
-    method!(lua, t, "IsMouseButtonPressed", |lua, (_this, b): (LInst, Value)| {
+    method!(lua, t, "IsMouseButtonPressed", |lua, (this, b): (LInst, Value)| {
         let name = enum_name_arg(&b).unwrap_or_default();
-        with_dm(lua, |dm| dm.input.buttons.contains(&name))
+        with_dm(lua, |dm| held(dm, this.0, |i| i.buttons.contains(&name)))
     });
     method!(lua, t, "GetMouseLocation", |lua, _this: LInst| {
         let (x, y) = with_dm(lua, |dm| (dm.input.mouse_x, dm.input.mouse_y))?;
@@ -820,13 +935,42 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     method!(lua, t, "GetLastInputType", |lua, _this: LInst| {
         enum_item(lua, &EnumItem::new("UserInputType", "Keyboard"))
     });
-    method!(lua, t, "GetFocusedTextBox", |_, _this: LInst| Ok(Value::Nil));
+    // The box the GUI hit test gave focus to. A box destroyed since reads as
+    // nil rather than a dead handle.
+    method!(lua, t, "GetFocusedTextBox", |lua, _this: LInst| {
+        match with_dm(lua, |dm| dm.focused_textbox.filter(|id| dm.exists(*id)))? {
+            Some(id) => handle(lua, id),
+            None => Ok(Value::Nil),
+        }
+    });
+
+    // ── TextBox ──────────────────────────────────────────────────────────
+    // Focus belongs to the GUI hit test, the one writer of it, which drains
+    // `DataModel::focus_requests` at the start of each frame, before it reads
+    // the keyboard. So `box:CaptureFocus(); box:IsFocused()` reads false
+    // within the same frame. The queue is bounded (see `push_focus_request`),
+    // so a shell that does not run the hit test never piles requests up.
+    method!(lua, t, "CaptureFocus", |lua, this: LInst| {
+        with_dm(lua, |dm| push_focus_request(dm, crate::datamodel::FocusRequest::Capture { textbox: this.0 }))
+    });
+    // `submitted` becomes FocusLost's enterPressed, as in Roblox.
+    method!(lua, t, "ReleaseFocus", |lua, (this, submitted): (LInst, Option<bool>)| {
+        with_dm(lua, |dm| {
+            push_focus_request(
+                dm,
+                crate::datamodel::FocusRequest::Release { textbox: this.0, submitted: submitted.unwrap_or(false) },
+            )
+        })
+    });
+    method!(lua, t, "IsFocused", |lua, this: LInst| with_dm(lua, |dm| dm.focused_textbox == Some(this.0)));
     method!(lua, t, "IsGamepadButtonDown", |_, _args: Variadic<Value>| Ok(false));
     method!(lua, t, "GetConnectedGamepads", |lua, _this: LInst| lua.create_table());
 
     // ── RunService ───────────────────────────────────────────────────────
     method!(lua, t, "IsClient", |_, _this: LInst| Ok(true));
-    method!(lua, t, "IsServer", |_, _this: LInst| Ok(true));
+    // False on a Player, where the server Scripts run on the host
+    // instead. True on the host and in a Space playing on its own.
+    method!(lua, t, "IsServer", |lua, _this: LInst| Ok(shared(lua)?.lock().is_server));
     method!(lua, t, "IsStudio", |_, _this: LInst| Ok(true));
     method!(lua, t, "IsRunning", |_, _this: LInst| Ok(true));
     method!(lua, t, "IsRunMode", |_, _this: LInst| Ok(false));
@@ -921,8 +1065,53 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     // ── SoundService ─────────────────────────────────────────────────────
     method!(lua, t, "PlayLocalSound", |lua, (_this, s): (LInst, LInst)| sound(lua, s.0, SoundAction::Play));
 
+    // ── KeyframeSequence, Keyframe, Pose ─────────────────────────────────
+    method!(lua, t, "GetKeyframes", |lua, this: LInst| children_of_class(lua, this.0, "Keyframe"));
+    method!(lua, t, "AddKeyframe", |lua, (this, k): (LInst, LInst)| adopt(lua, this.0, k.0, "Keyframe", "AddKeyframe"));
+    method!(lua, t, "RemoveKeyframe", |lua, (this, k): (LInst, LInst)| release(lua, this.0, k.0));
+    method!(lua, t, "GetPoses", |lua, this: LInst| children_of_class(lua, this.0, "Pose"));
+    method!(lua, t, "AddPose", |lua, (this, p): (LInst, LInst)| adopt(lua, this.0, p.0, "Pose", "AddPose"));
+    method!(lua, t, "RemovePose", |lua, (this, p): (LInst, LInst)| release(lua, this.0, p.0));
+    method!(lua, t, "GetSubPoses", |lua, this: LInst| children_of_class(lua, this.0, "Pose"));
+    method!(lua, t, "AddSubPose", |lua, (this, p): (LInst, LInst)| adopt(lua, this.0, p.0, "Pose", "AddSubPose"));
+    method!(lua, t, "RemoveSubPose", |lua, (this, p): (LInst, LInst)| release(lua, this.0, p.0));
+    method!(lua, t, "GetMarkers", |lua, this: LInst| children_of_class(lua, this.0, "KeyframeMarker"));
+    method!(lua, t, "AddMarker", |lua, (this, m): (LInst, LInst)| {
+        adopt(lua, this.0, m.0, "KeyframeMarker", "AddMarker")
+    });
+    method!(lua, t, "RemoveMarker", |lua, (this, m): (LInst, LInst)| release(lua, this.0, m.0));
+
+    // ── KeyframeSequenceProvider ─────────────────────────────────────────
+    // A registered sequence plays by the active:// id this returns.
+    method!(lua, t, "RegisterKeyframeSequence", |lua, (_this, ks): (LInst, LInst)| {
+        with_dm(lua, |dm| dm.register_keyframe_sequence(ks.0))?.map_err(mlua::Error::RuntimeError)
+    });
+    method!(lua, t, "RegisterActiveKeyframeSequence", |lua, (_this, ks): (LInst, LInst)| {
+        with_dm(lua, |dm| dm.register_keyframe_sequence(ks.0))?.map_err(mlua::Error::RuntimeError)
+    });
+    // A new, unparented copy of the sequence an AnimationId names.
+    method!(lua, t, "GetKeyframeSequenceAsync", |lua, (_this, content): (LInst, String)| {
+        let ks = with_dm(lua, |dm| crate::animation::tree::fetch_sequence(dm, &content))?
+            .map_err(mlua::Error::RuntimeError)?;
+        handle(lua, ks)
+    });
+
+    // ── Terrain ──────────────────────────────────────────────────────────
+    terrain::install_methods(lua, &t)?;
+
     lua.set_named_registry_value(METHODS, t)?;
     Ok(())
+}
+
+/// Roblox's refusal to destroy an instance whose Parent is locked while it
+/// is alive (the Terrain); `None` for every other instance.
+fn locked_parent(dm: &DataModel, id: InstanceId) -> Option<String> {
+    let inst = dm.get(id)?;
+    if !inst.parent_locked || inst.destroyed {
+        return None;
+    }
+    let parent = inst.parent.and_then(|p| dm.name_of(p)).unwrap_or("NULL");
+    Some(format!("The Parent property of {} is locked, current parent: {}, new parent NULL", inst.name, parent))
 }
 
 /// Wrapper so methods can return a CFrame without naming the userdata type.
@@ -945,9 +1134,63 @@ fn sound(lua: &Lua, id: InstanceId, action: SoundAction) -> LuaResult<()> {
     })
 }
 
+/// Most focus requests a tree holds at once. Where the GUI hit test runs it
+/// empties the queue every frame, so the cap never binds there. Where it does
+/// not run, the oldest request gives way to the newest, so the queue stays
+/// bounded instead of growing with every call.
+const MAX_FOCUS_REQUESTS: usize = 64;
+
+fn push_focus_request(dm: &mut DataModel, request: crate::datamodel::FocusRequest) {
+    if dm.focus_requests.len() >= MAX_FOCUS_REQUESTS {
+        dm.focus_requests.remove(0);
+        // Said once per process: a full queue means this app runs no GUI hit
+        // test, and repeating it on every call would flood the log.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("focus_requests full: nothing drains focus on this app");
+        }
+    }
+    dm.focus_requests.push(request);
+}
+
+/// `GetKeyframes`, `GetPoses`, `GetSubPoses`, `GetMarkers`: the children of
+/// one class, in order.
+fn children_of_class(lua: &Lua, id: InstanceId, class: &str) -> LuaResult<Table> {
+    let ids: Vec<InstanceId> =
+        with_dm(lua, |dm| dm.children(id).iter().copied().filter(|c| dm.class_of(*c) == Some(class)).collect())?;
+    handle_list(lua, &ids)
+}
+
+/// `AddKeyframe`, `AddPose`, `AddSubPose`, `AddMarker`: parent `child`, which
+/// must be a `class`, to `parent`.
+fn adopt(lua: &Lua, parent: InstanceId, child: InstanceId, class: &str, method: &str) -> LuaResult<()> {
+    with_dm(lua, |dm| {
+        let found = dm.class_of(child).map(str::to_string);
+        match found.as_deref() {
+            Some(c) if c == class => dm.set_parent(child, Some(parent)),
+            Some(c) => Err(format!("{method} expects a {class}, got {c}")),
+            None => Err(format!("{method} expects a {class}, got a destroyed instance")),
+        }
+    })?
+    .map_err(mlua::Error::RuntimeError)
+}
+
+/// `RemoveKeyframe`, `RemovePose`, `RemoveSubPose`, `RemoveMarker`:
+/// unparent `child` when `parent` holds it.
+fn release(lua: &Lua, parent: InstanceId, child: InstanceId) -> LuaResult<()> {
+    with_dm(lua, |dm| if dm.parent(child) == Some(parent) { dm.set_parent(child, None) } else { Ok(()) })?
+        .map_err(mlua::Error::RuntimeError)
+}
+
 // ============================================================================
 // Pivots and bounds
 // ============================================================================
+
+/// A part with a pose and a box of its own: every BasePart but the Terrain,
+/// whose ground is the Space's terrain root, not a box at its CFrame.
+fn is_physical_part(class: &str) -> bool {
+    is_base_part(class) && class != "Terrain"
+}
 
 /// `GetPivot`: a part's CFrame; a model's PrimaryPart CFrame, else the
 /// centre of its parts' bounds.
@@ -975,11 +1218,11 @@ pub fn pivot_to(dm: &mut DataModel, id: InstanceId, target: CFrame) -> Result<()
     let current = pivot_of(dm, id);
     let delta = target * current.inverse();
     let mut parts: Vec<InstanceId> = Vec::new();
-    if dm.get(id).map_or(false, |i| is_base_part(&i.class_name)) {
+    if dm.get(id).map_or(false, |i| is_physical_part(&i.class_name)) {
         parts.push(id);
     }
     for d in dm.descendants(id) {
-        if dm.get(d).map_or(false, |i| is_base_part(&i.class_name)) {
+        if dm.get(d).map_or(false, |i| is_physical_part(&i.class_name)) {
             parts.push(d);
         }
     }
@@ -1001,7 +1244,7 @@ pub fn bounding_box(dm: &DataModel, id: InstanceId) -> (Vector3, Vector3) {
     let mut any = false;
     let mut visit = |inst: InstanceId| {
         let Some(i) = dm.get(inst) else { return };
-        if !is_base_part(&i.class_name) {
+        if !is_physical_part(&i.class_name) {
             return;
         }
         let Some(cf) = i.cframe() else { return };
@@ -1045,7 +1288,7 @@ fn parts_in_radius(dm: &DataModel, center: Vector3, radius: f64, params: Option<
         .into_iter()
         .filter(|d| {
             let Some(i) = dm.get(*d) else { return false };
-            if !is_base_part(&i.class_name) || filter_rejects(dm, *d, params) {
+            if !is_physical_part(&i.class_name) || filter_rejects(dm, *d, params) {
                 return false;
             }
             let Some(cf) = i.cframe() else { return false };
@@ -1063,7 +1306,7 @@ fn parts_in_box(dm: &DataModel, cf: CFrame, size: Vector3, params: Option<&LuauR
         .into_iter()
         .filter(|d| {
             let Some(i) = dm.get(*d) else { return false };
-            if !is_base_part(&i.class_name) || filter_rejects(dm, *d, params) {
+            if !is_physical_part(&i.class_name) || filter_rejects(dm, *d, params) {
                 return false;
             }
             let Some(pcf) = i.cframe() else { return false };
@@ -1090,6 +1333,9 @@ pub struct RayQuery {
     /// Entity bits of the filter instances and all their descendants.
     pub filter: Vec<u64>,
     pub respect_can_collide: bool,
+    /// The filter lists the Terrain (or an ancestor of it). The terrain's
+    /// chunk colliders have no instance, so the filter names them as one.
+    pub terrain_listed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1098,6 +1344,8 @@ pub struct RayHit {
     pub position: Vector3,
     pub normal: Vector3,
     pub distance: f64,
+    /// The hit is on a terrain chunk collider, which reports as the Terrain.
+    pub terrain: bool,
 }
 
 /// The engine's ray caster for the current frame. It borrows the frame's
@@ -1136,7 +1384,9 @@ fn cast(query: &RayQuery) -> Option<RayHit> {
     })
 }
 
-fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastParams) -> LuaResult<Value> {
+/// `origin` and `direction` in metres; the result's Position and Distance in
+/// the caller's units, metres divided by `k` (see `studs::script_scale`).
+fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastParams, k: f64) -> LuaResult<Value> {
     let query = with_dm(lua, |dm| {
         let mut filter = Vec::new();
         for f in &params.filter {
@@ -1149,27 +1399,35 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastPa
                 }
             }
         }
+        let terrain_listed = terrain::terrain_instance(dm)
+            .map_or(false, |t| params.filter.iter().any(|f| *f == t || dm.is_descendant_of(t, *f)));
         RayQuery {
             origin,
             direction,
             include: params.include,
             filter,
             respect_can_collide: params.respect_can_collide,
+            terrain_listed,
         }
     })?;
     let Some(hit) = cast(&query) else { return Ok(Value::Nil) };
-    let (inst, material) = with_dm(lua, |dm| {
-        let inst = dm.by_entity(hit.entity);
-        let material = inst
-            .and_then(|i| dm.get_prop(i, "Material"))
-            .unwrap_or(DmValue::Enum(EnumItem::new("Material", "Plastic")));
-        (inst, material)
-    })?;
+    let (inst, material) = if hit.terrain {
+        // The ground is the Terrain's, and made of whatever is there.
+        (with_dm(lua, |dm| terrain::terrain_instance(dm))?, terrain::ground_material(hit.position))
+    } else {
+        with_dm(lua, |dm| {
+            let inst = dm.by_entity(hit.entity);
+            let material = inst
+                .and_then(|i| dm.get_prop(i, "Material"))
+                .unwrap_or(DmValue::Enum(EnumItem::new("Material", "Plastic")));
+            (inst, material)
+        })?
+    };
     let result = lua.create_table()?;
     result.raw_set("Instance", opt_handle(lua, inst)?)?;
-    result.raw_set("Position", LuauVector3(hit.position))?;
+    result.raw_set("Position", LuauVector3(hit.position * (1.0 / k)))?;
     result.raw_set("Normal", LuauVector3(hit.normal))?;
-    result.raw_set("Distance", hit.distance)?;
+    result.raw_set("Distance", hit.distance / k)?;
     result.raw_set("Material", to_lua(lua, &material)?)?;
     let meta = lua.create_table()?;
     meta.raw_set("__type", "RaycastResult")?;
@@ -1177,9 +1435,10 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastPa
     Ok(Value::Table(result))
 }
 
-fn legacy_find_part(lua: &Lua, ray: LuauRay, params: LuauRaycastParams) -> LuaResult<(Value, LuauVector3, LuauVector3)> {
+/// `ray` in the caller's units, `k` metres each.
+fn legacy_find_part(lua: &Lua, ray: LuauRay, params: LuauRaycastParams, k: f64) -> LuaResult<(Value, LuauVector3, LuauVector3)> {
     let end = ray.origin + ray.direction;
-    let hit = raycast(lua, ray.origin, ray.direction, params)?;
+    let hit = raycast(lua, ray.origin * k, ray.direction * k, params, k)?;
     if let Value::Table(t) = hit {
         let inst: Value = t.raw_get("Instance")?;
         let pos: LuauVector3 = t.raw_get("Position")?;
@@ -1195,6 +1454,10 @@ pub fn install_instance_global(lua: &Lua, globals: &Table) -> LuaResult<()> {
     instance.raw_set(
         "new",
         lua.create_function(|lua, (class, parent): (String, Option<LInst>)| {
+            // Workspace has its one Terrain from the start (see `terrain`).
+            if class == "Terrain" {
+                return Err(mlua::Error::RuntimeError(format!("Unable to create an Instance of type \"{}\"", class)));
+            }
             let id = with_dm(lua, |dm| {
                 let id = dm.create(&class);
                 if let Some(p) = parent {

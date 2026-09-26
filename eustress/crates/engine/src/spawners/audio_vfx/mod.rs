@@ -98,6 +98,10 @@ impl Plugin for AudioVfxSpawnerPlugin {
             .register_class::<ParticleEmitterSpawner>()
             .register_class::<BeamSpawner>();
 
+        // The shared Sound player: Studio's Edit preview. It stands down
+        // while a Play session runs.
+        app.add_plugins(eustress_play_runtime::sound_player::SoundPlayerPlugin);
+
         // The sync system BeamSegmentLink's doc comment always promised —
         // keeps every Beam taut between its two attachments every frame, so
         // dragging a mind-map node carries its edges with it.

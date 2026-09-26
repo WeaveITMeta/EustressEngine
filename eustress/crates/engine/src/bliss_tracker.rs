@@ -637,8 +637,6 @@ fn drain_net_events(
     net: Res<BlissNet>,
     mut display: ResMut<BlissNodeState>,
     mut auth: Option<ResMut<AuthState>>,
-    // NOTE: two `OutputConsole` types exist (ui/mod.rs legacy vs
-    // ui/slint_ui.rs live) — the slint_ui one is the registered resource.
     output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
 ) {
     let events: Vec<NetEvent> = match net.inbox.lock() {
@@ -812,16 +810,15 @@ impl Drop for BlissTracker {
 // Plugin
 // ---------------------------------------------------------------------------
 
-/// Witness base URL. The Worker serves both registration and co-signing.
-const WITNESS_URL: &str = "https://api.eustress.dev";
-
 pub struct BlissTrackerPlugin;
 
 impl Plugin for BlissTrackerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BlissTracker>()
             .insert_resource(BlissNet::spawn(
-                WITNESS_URL.to_string(),
+                // The witness: the API in use, whose Worker serves both
+                // registration and co-signing (`eustress_common::api_base`).
+                eustress_common::api_base::api_base().to_string(),
                 "eustress.dev".to_string(),
             ))
             .add_systems(

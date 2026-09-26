@@ -429,7 +429,7 @@ pub fn process_ownership_requests(
                 entity,
                 net_id: request.net_id,
                 client_id: request.client_id,
-                reason: format!("Too far: {:.1} > {:.1} studs", distance, config.max_request_distance),
+                reason: format!("Too far: {:.1} > {:.1} m", distance, config.max_request_distance),
             });
             continue;
         }

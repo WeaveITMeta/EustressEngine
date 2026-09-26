@@ -1,13 +1,14 @@
 // =============================================================================
 // Eustress Web - Download Player Page (Industrial Design)
 // =============================================================================
-// Eustress Player is the lightweight client for playing experiences.
-// Separate from the Engine (creation tool), the Player is optimized
-// for fast loading, low resource usage, and seamless multiplayer.
+// Eustress Player plays published simulations and joins multiplayer sessions;
+// Eustress Engine is what makes them. The download buttons and the version
+// come from the Player's release manifest, player/latest.json.
 // =============================================================================
 
 use leptos::prelude::*;
-use crate::components::{CentralNav, Footer};
+use crate::api::releases::ReleaseState;
+use crate::components::{use_player_release, CentralNav, Footer, PlayerPlatformButtons};
 
 // -----------------------------------------------------------------------------
 // Main Component
@@ -16,6 +17,8 @@ use crate::components::{CentralNav, Footer};
 /// Download Eustress Player page — play experiences without the full engine.
 #[component]
 pub fn DownloadPlayerPage() -> impl IntoView {
+    let release = use_player_release();
+
     view! {
         <div class="page page-download-industrial">
             <CentralNav active="".to_string() />
@@ -35,11 +38,16 @@ pub fn DownloadPlayerPage() -> impl IntoView {
                     <div class="header-line"></div>
                 </div>
                 <h1 class="download-title">"Eustress Player"</h1>
-                <p class="download-tagline">"Play thousands of community-created experiences. Free, fast, and lightweight."</p>
+                <p class="download-tagline">"Play published simulations and join multiplayer sessions. Free."</p>
 
-                // Version Info
+                // Version Info: the badge appears once a release exists.
                 <div class="version-info">
-                    <span class="version-badge">"v0.16.1"</span>
+                    {move || match release.get() {
+                        ReleaseState::Released(manifest) => Some(view! {
+                            <span class="version-badge">{format!("v{}", manifest.version)}</span>
+                        }),
+                        _ => None,
+                    }}
                     <span class="version-label">"Public Alpha"</span>
                 </div>
             </section>
@@ -52,60 +60,71 @@ pub fn DownloadPlayerPage() -> impl IntoView {
                     </div>
 
                     <h2>"Download for Your Platform"</h2>
-                    <p class="download-desc">"Eustress Player is available for Windows, macOS, Linux, and mobile"</p>
+                    <p class="download-desc">"For Windows, macOS and Linux."</p>
 
-                    // Platform Buttons
-                    <div class="platform-buttons">
-                        <a href="https://downloads.eustress.dev/player/windows/EustressPlayer-Setup.exe" class="platform-btn windows">
-                            <img src="/assets/icons/windows.svg" alt="Windows" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"Windows"</span>
-                            </div>
-                            <span class="btn-size">"~85 MB"</span>
-                        </a>
-
-                        <a href="https://downloads.eustress.dev/player/mac/EustressPlayer.dmg" class="platform-btn macos">
-                            <img src="/assets/icons/macos.svg" alt="macOS" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"macOS"</span>
-                            </div>
-                            <span class="btn-size">"~90 MB"</span>
-                        </a>
-
-                        <a href="https://downloads.eustress.dev/player/linux/EustressPlayer.AppImage" class="platform-btn linux">
-                            <img src="/assets/icons/linux.svg" alt="Linux" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"Linux"</span>
-                            </div>
-                            <span class="btn-size">"~80 MB"</span>
-                        </a>
-                    </div>
-
-                    // Mobile links
-                    <div class="mobile-links">
-                        <span class="mobile-label">"Also available on"</span>
-                        <div class="mobile-badges">
-                            <a href="https://apps.apple.com/app/eustress-player" class="store-badge">
-                                <img src="/assets/icons/ios.svg" alt="iOS" />
-                                "App Store"
-                            </a>
-                            <a href="https://play.google.com/store/apps/details?id=dev.eustress.player" class="store-badge">
-                                <img src="/assets/icons/android.svg" alt="Android" />
-                                "Google Play"
-                            </a>
-                        </div>
-                    </div>
+                    // Buttons from player/latest.json, so each release updates
+                    // them without a site change.
+                    <PlayerPlatformButtons release=release />
                 </div>
             </section>
+
+            // Installing. The builds are not signed yet, so Windows and macOS
+            // each ask once before the first run. Shown when there is a
+            // release to install, since the Linux command names its version.
+            {move || match release.get() {
+                ReleaseState::Released(manifest) => Some(view! {
+                    <section class="requirements-section">
+                        <div class="section-header-industrial">
+                            <img src="/assets/icons/download.svg" alt="" class="section-icon" />
+                            <h2>"Installing"</h2>
+                        </div>
+
+                        <div
+                            class="requirements-row"
+                            style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));"
+                        >
+                            <div class="req-card">
+                                <h3>"Windows"</h3>
+                                <ul>
+                                    <li>"Installs for your account with no administrator prompt, and opens eustress-player:// links from the gallery."</li>
+                                    <li>"The installer is not signed yet, so SmartScreen may stop it. Choose More info, then Run anyway."</li>
+                                </ul>
+                            </div>
+
+                            <div class="req-card">
+                                <h3>"macOS (Apple Silicon)"</h3>
+                                <ul>
+                                    <li>"Open the disk image and drag Eustress Player to Applications."</li>
+                                    <li>"The app is not signed or notarized yet, so macOS blocks the first open. In System Settings, open Privacy & Security and choose Open Anyway."</li>
+                                </ul>
+                            </div>
+
+                            <div class="req-card">
+                                <h3>"Linux"</h3>
+                                <ul>
+                                    <li>"Unpack the archive and run its installer, which also opens eustress-player:// links:"</li>
+                                    <li>
+                                        <code>
+                                            {format!(
+                                                "tar xzf eustress-player-v{}-linux-x64.tar.gz && ./eustress-player/install.sh",
+                                                manifest.version
+                                            )}
+                                        </code>
+                                    </li>
+                                    <li>"To remove it: " <code>"./eustress-player/install.sh --uninstall"</code></li>
+                                </ul>
+                            </div>
+                        </div>
+                    </section>
+                }),
+                _ => None,
+            }}
 
             // Player vs Engine comparison
             <section class="player-comparison">
                 <div class="section-header-industrial">
-                    <img src="/assets/icons/info.svg" alt="Info" class="section-icon" />
-                    <h2>"Player vs Engine — What is the Difference?"</h2>
+                    <img src="/assets/icons/help.svg" alt="Info" class="section-icon" />
+                    <h2>"Player or Engine: Which Do You Need?"</h2>
                 </div>
 
                 <div class="comparison-row">
@@ -117,7 +136,7 @@ pub fn DownloadPlayerPage() -> impl IntoView {
                         <p class="card-tagline">"For playing experiences"</p>
                         <ul>
                             <li>"Browse and join community experiences"</li>
-                            <li>"Lightweight (~85 MB)"</li>
+                            <li>"Opens simulations straight from the gallery"</li>
                             <li>"Auto-updates silently"</li>
                             <li>"Optimized for fast loading"</li>
                             <li>"Friends list and chat"</li>
@@ -189,7 +208,7 @@ pub fn DownloadPlayerPage() -> impl IntoView {
 
                 <div class="features-highlight">
                     <div class="feature-item">
-                        <img src="/assets/icons/globe.svg" alt="Browse" />
+                        <img src="/assets/icons/web.svg" alt="Browse" />
                         <div>
                             <h4>"Browse Experiences"</h4>
                             <p>"Discover thousands of games, simulations, and creative worlds built by the community"</p>

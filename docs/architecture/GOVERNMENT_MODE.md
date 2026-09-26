@@ -745,33 +745,49 @@ as part of this document. §4.5 and §U10 are written to be executable as-is on 
 
 `scripts/gen_tucson_universe.py` generates a Universe named **Tucson** under
 `Documents/Eustress/`: a hub Space called `Temple` plus one Space per simulation, wired together with
-portals. Re-runnable with `--force`; refuses to clobber an existing Space otherwise, and only ever
-removes the authored `Workspace/` tree, never the engine's own `world.fjalldb` / `header.bin` state.
+portals. Re-runnable with `--force`; refuses to overwrite hand edits without `--clobber`, and only
+ever touches the authored `Workspace/` tree, never the engine's own `world.fjalldb` / `header.bin`
+state. `--sync` applies a rebuild to a Space the engine has open as a diff (changed files only, and
+only instances the generator created), so the running engine hot-reloads it; `--only Temple` limits a
+run to one Space.
 
 ### 10.1 The idea
 
-The government is not a separate building sitting next to the needs it serves — **the wings ARE the
-disciplines**. A central rotunda holds the public record; twelve radial wings each embody one basic
-need a municipality actually provides for; each wing's colonnade ends in a portal arch that opens
-into the simulation measuring whether the city is meeting that need. §4.2's need → discipline mapping
+The government is not a separate building sitting next to the needs it serves: **the halls ARE the
+disciplines**. At the centre is the council chamber where the city decides things; twelve radial
+halls each embody one basic need a municipality actually provides for, and each hall ends in a portal
+into the simulation measuring whether the city is meeting that need. §4.2's need-to-discipline mapping
 and this floor plan are the same mapping read at two altitudes.
 
-The reading order along a wing is deliberate:
+**The centre.** The Mayor and the six Ward members sit at a horseshoe table with the **Public Ledger**
+open on a pedestal in its middle (attributes: *"The record is public. Every number answers to its
+source."*). The horseshoe opens toward the Voice hall, where a public-comment lectern faces the Mayor
+across the ledger, with the public gallery behind the speaker. Each seat has a vote light on the table
+carrying `seat` / `vote` attributes for a script or simulation to drive. A column of light rises from
+the ledger to **THE PEOPLE** at the top of the mind map: the record answers to them. Twelve beacons
+ring the dais, one per need, each on its hall's bearing, and a glowing runner in the need's colour
+leads from each beacon down its hall to the portal. The rotunda around the chamber is an open ring of
+twelve Corinthian columns placed *between* the hall axes, so every hall is visible from the centre.
 
-| Position | What is carved there |
+The reading order along a hall is deliberate:
+
+| Position | What is there |
 |---|---|
-| Wing mouth (r≈30) | The **obligation** the need creates — *"Water reaches every tap. Every gallon is accounted."* |
-| Along the colonnade | Four **provisions** — the concrete things government supplies toward it |
-| Wing end (r≈79) | The **failure mode** — how a city visibly fails at this need |
-| The arch (r=88) | The **portal** into the simulation that measures exactly that failure |
+| Name arch (r=88) | The **need**, on the keystone, in the hall's colour |
+| Obligation stele (r=101) | The **obligation** the need creates: *"Water reaches every tap. Every gallon is accounted."* |
+| Hall front (r=108) | The **discipline** that answers for it, on the pediment |
+| Service counters | Four **provisions**: the concrete things government supplies toward the need |
+| Notice board(s) | The **simulation** that measures it, and its **falsifier** |
+| Failure stele (r=240) | The **failure mode**: how a city visibly fails at this need |
+| Portal front (r=258) | The **portal** into the simulation that measures exactly that failure |
 
-So you walk out past what you owe, past what you provide, past what failure looks like, and step
-through into the model that can tell you which one you are living in. The rotunda at the centre is
-`The Ledger`, inscribed *"The record is public. Every number answers to its source."* — the citizen
-stands at the middle and can see every wing at once, which is the whole architectural argument.
+So you walk out past what you owe, who owes it, what is provided, how it is measured and what would
+prove the platform wrong, and what failure looks like, then step through into the model that can
+tell you which one you are living in. Sonoran desert courtyards (a saguaro, barrel cacti, boulders)
+sit between the halls.
 
-Twelve wings at 30° intervals, each with a maximally-separated accent hue: under radial symmetry
-colour is the only wayfinding cue that tells you which wing you are standing in.
+Twelve halls at 30° intervals, each with a maximally-separated accent hue: under radial symmetry
+colour is the only wayfinding cue that tells you which hall you are standing in.
 
 ### 10.2 The mind-map canopy
 
@@ -779,7 +795,8 @@ Four rings float above the rotunda: **THE PEOPLE** at the apex → the twelve **
 **disciplines** that serve them → the **simulations** that measure them. Shared disciplines converge
 rather than duplicate (Health & Human Services serves both Food and Health, so it is one node placed
 at the mean bearing of the needs it serves). Each simulation node drops a thin strand to its own
-portal arch below, so the graph visibly anchors into the architecture. Built on the same
+portal's pediment below, and the root sits directly over the Public Ledger's column of light, so the
+graph visibly anchors into the architecture. Built on the same
 `Part`+`ball.glb` node / `cylinder.glb` edge / `BillboardGui`→`TextLabel` pattern as the existing
 MindMaps in `Universe1`.
 
@@ -808,7 +825,7 @@ the destination's return portal: the trigger arms only once the camera is clear 
 volume (1.6× hysteresis, and state starts **disarmed** so a camera spawning inside a volume cannot
 fire on frame one), plus a 1.25 s cooldown covering the reload. The arrival pose is re-asserted for
 eight frames so a space-load path that resets the camera cannot clobber it. Return portals land the
-camera at its need's wing mouth, facing back down the wing toward the rotunda.
+camera just inside its need's name arch (r=96, kept clear of geometry), facing along the hall.
 
 Space names resolve Universe-locally first, then fall back to a workspace-wide search with a warning,
 so a cross-Universe portal degrades to a warning rather than silently doing nothing. An unresolvable

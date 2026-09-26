@@ -1081,8 +1081,7 @@ fn commit_select_drag(
         for (entity, transform, ..) in selected_query.iter() {
             if let Ok(inst_file) = instance_files.get(entity) {
                 if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                    def.transform.position = transform.translation.to_array();
-                    def.transform.rotation = transform.rotation.to_array();
+                    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, None);
                     def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
                     let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
                 }
@@ -1170,6 +1169,7 @@ fn rotate_tilt_shortcuts(
     parent_query: Query<&ChildOf>,
     parent_globals: Query<&GlobalTransform, Without<Selected>>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
+    numeric: Option<Res<crate::numeric_input::NumericInputState>>,
 ) {
     use crate::keybindings::Action;
     let quarter = std::f32::consts::FRAC_PI_2;
@@ -1199,7 +1199,10 @@ fn rotate_tilt_shortcuts(
         KeyCode::ShiftLeft, KeyCode::ShiftRight,
         KeyCode::SuperLeft, KeyCode::SuperRight,
     ]);
-    if (select_dragging || move_dragging) && !typing && !modifier_held {
+    // Letters typed into the floating numeric input ("2ft") are its unit,
+    // not a turn.
+    let numeric_entry = numeric.is_some_and(|n| n.active);
+    if (select_dragging || move_dragging) && !typing && !modifier_held && !numeric_entry {
         if keys.just_pressed(KeyCode::KeyR) {
             turn = Quat::from_rotation_y(quarter) * turn;
             verb = "Rotate";

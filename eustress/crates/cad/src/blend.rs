@@ -247,12 +247,16 @@ fn cutter_blend(
                     current.face_seq = q;
                     done += 1;
                 }
-                None => failed.push(format!(
-                    "'{}': the kernel could not subtract the {} cutter (truck's booleans are weakest where surfaces \
-                     are tangent, which every fillet is)",
-                    e.name,
-                    kind.label()
-                )),
+                None => failed.push(match kind {
+                    BlendKind::Fillet { .. } => format!(
+                        "'{}': the kernel could not subtract the fillet cutter (truck's booleans are weakest where \
+                         surfaces are tangent, which every fillet is)",
+                        e.name
+                    ),
+                    BlendKind::Chamfer { .. } => {
+                        format!("'{}': the kernel could not subtract the chamfer cutter", e.name)
+                    }
+                }),
             },
         }
     }
@@ -358,9 +362,19 @@ fn cutter_for(body: &Body, e: &EdgeInfo, k: usize, feature: &str, kind: BlendKin
             if !(d2 > 0.0) {
                 return Err("the chamfer's second distance must be positive".into());
             }
+            // The chamfer line, run on past both faces into the air, and one
+            // point beyond the corner. Ending the section ON the faces laid
+            // two cutter edges in the body's own face planes, a contact
+            // truck-shapeops cannot divide ("This wire is not simple").
+            // Past them, the cutter meets the body only through the chamfer
+            // plane, which crosses both faces cleanly. A triangle stays
+            // simple at every corner angle, where the old pentagon folded
+            // over itself at sharp, unequal chamfers; the material it removes
+            // is exactly the corner triangle either way.
             let qa = base + da * d;
             let qb = base + db * d2;
-            (vec![qa, qa + na * m, base + (na + nb) * m, qb + nb * m, qb], None)
+            let u = (qa - qb).normalize();
+            (vec![qa + u * m, base + (na + nb) * m, qb - u * m], None)
         }
         BlendKind::Fillet { r } => {
             let t = r / (phi * 0.5).tan();
@@ -387,8 +401,10 @@ fn cutter_for(body: &Body, e: &EdgeInfo, k: usize, feature: &str, kind: BlendKin
     let wire: Wire = edges.into();
     let face = builder::try_attach_plane(&[wire]).map_err(|e| format!("could not build the cutter section: {e}"))?;
     let solid = builder::tsweep(&face, ev * (len + 2.0 * m));
+    // One side face per section edge except the closing one, which is the
+    // blend face itself.
     let mut names = vec![format!("{feature}.cutter.{k}.end0")];
-    names.extend((0..4).map(|i| format!("{feature}.cutter.{k}.s{i}")));
+    names.extend((0..pts.len() - 1).map(|i| format!("{feature}.cutter.{k}.s{i}")));
     names.push(format!("{feature}.face.{k}"));
     names.push(format!("{feature}.cutter.{k}.end1"));
     if solid.face_iter().count() != names.len() {

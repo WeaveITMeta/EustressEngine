@@ -466,6 +466,7 @@ type CensusLights<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         Option<&'static PointLight>,
         Option<&'static SpotLight>,
         &'static ViewVisibility,
@@ -474,9 +475,13 @@ type CensusLights<'w, 's> = Query<
     Or<(With<PointLight>, With<SpotLight>)>,
 >;
 
+/// Parent links and names, to find the service of a light that carries no
+/// `LoadedFromFile` (instances loaded from a Space's database may not).
+type CensusTree<'w, 's> = Query<'w, 's, (Option<&'static ChildOf>, Option<&'static Name>)>;
+
 /// Runs after `phase_last`: close the `Last` phase, record the frame period,
 /// and dump on a window boundary.
-fn phase_frame_end(mut clock: ResMut<PhaseClock>, lights: CensusLights) {
+fn phase_frame_end(mut clock: ResMut<PhaseClock>, lights: CensusLights, tree: CensusTree) {
     if !phase_armed() {
         return;
     }
@@ -493,7 +498,7 @@ fn phase_frame_end(mut clock: ResMut<PhaseClock>, lights: CensusLights) {
     clock.prev_frame_end_cycles = cycles;
     clock.frames += 1;
     if clock.frames >= clock.window {
-        let census = shadow_light_census(&lights);
+        let census = shadow_light_census(&lights, &tree);
         dump_phases(&mut clock, &census);
     }
 }
@@ -501,11 +506,14 @@ fn phase_frame_end(mut clock: ResMut<PhaseClock>, lights: CensusLights) {
 /// Shadow-casting point and spot lights drawn this frame, by the service
 /// their file loaded under. Every such point light costs six shadow views a
 /// frame and every spot light one, whether or not its light reaches anything
-/// the camera sees.
-fn shadow_light_census(lights: &CensusLights) -> String {
-    let mut by_service: std::collections::BTreeMap<&str, (u32, u32)> =
+/// the camera sees. A light without `LoadedFromFile` is counted under its
+/// topmost ancestor's name, marked "by parent": storage services hide what
+/// they hold only through `LoadedFromFile`, so a storage service listed that
+/// way is content that escaped the hiding.
+fn shadow_light_census(lights: &CensusLights, tree: &CensusTree) -> String {
+    let mut by_service: std::collections::BTreeMap<String, (u32, u32)> =
         std::collections::BTreeMap::new();
-    for (point, spot, visibility, loaded) in lights.iter() {
+    for (entity, point, spot, visibility, loaded) in lights.iter() {
         if !visibility.get() {
             continue;
         }
@@ -514,7 +522,10 @@ fn shadow_light_census(lights: &CensusLights) -> String {
         if !point_shadows && !spot_shadows {
             continue;
         }
-        let service = loaded.map_or("(not from a file)", |l| l.service.as_str());
+        let service = match loaded {
+            Some(l) => l.service.clone(),
+            None => format!("{} (by parent)", root_name(tree, entity)),
+        };
         let entry = by_service.entry(service).or_insert((0, 0));
         entry.0 += point_shadows as u32;
         entry.1 += spot_shadows as u32;
@@ -527,6 +538,21 @@ fn shadow_light_census(lights: &CensusLights) -> String {
         .map(|(service, (points, spots))| format!("{service}: {points} point, {spots} spot"))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Name of `entity`'s topmost ancestor: the service, for a loaded instance.
+fn root_name(tree: &CensusTree, entity: Entity) -> String {
+    let mut current = entity;
+    for _ in 0..256 {
+        match tree.get(current) {
+            Ok((Some(child_of), _)) => current = child_of.parent(),
+            Ok((None, name)) => {
+                return name.map_or_else(|| "(unnamed root)".to_string(), |n| n.as_str().to_string());
+            }
+            Err(_) => break,
+        }
+    }
+    "(unknown)".to_string()
 }
 
 /// Write `eustress_profile_phases.txt` (ranked phases) + echo to the log,
@@ -691,6 +717,10 @@ impl Plugin for ProfilerPlugin {
             .add_systems(PostUpdate, phase_postupdate)
             .add_systems(Last, (phase_last, phase_frame_end).chain());
 
+        // Log any system the stall watchdog caught running long (see
+        // `stall_watch`). Always on; a no-op frame costs one mutex check.
+        app.add_systems(Last, stall_watch::report_stalls);
+
         // LOAD-PHASE milestone 7: one-shot first-rendered-frame marker.
         // Always-added, env-gated on EUSTRESS_PROFILE like the phase
         // profiler; self-latches so it logs once per load.
@@ -728,7 +758,152 @@ impl Plugin for ProfilerPlugin {
 /// `LogPlugin { custom_layer: profiler::custom_layer, .. }` unconditionally.
 #[cfg(not(feature = "profiling"))]
 pub fn custom_layer(_app: &mut App) -> Option<bevy::log::BoxedLayer> {
-    None
+    stall_watch::layer()
+}
+
+// ─────────────────────────── stall watchdog ────────────────────────────
+/// Names the system behind a long frame.
+///
+/// `frame_diagnostics` reports that a frame took seven seconds; it cannot say
+/// which system took them, and a one-off stall is gone by the time a
+/// profiling build is running. This layer watches every Bevy system span,
+/// main and render world alike, and queues any single run longer than
+/// `EUSTRESS_STALL_MS` (default 250; `0` turns it off) for
+/// [`stall_watch::report_stalls`] to log as `STALL: system <name> ran N ms`.
+///
+/// Cheap enough to leave on: the name is captured once per system (its span
+/// is created once), and each run costs two `Instant::now()` calls and a
+/// push and pop on a thread-local stack. No span lock is taken unless a run
+/// is actually slow. The report is logged from an ordinary system rather
+/// than from inside the layer, because emitting an event from a tracing
+/// callback re-enters the subscriber.
+pub mod stall_watch {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use bevy::log::tracing_subscriber::{
+        filter::filter_fn,
+        layer::{Context, Layer},
+        registry::LookupSpan,
+    };
+    use bevy::log::BoxedLayer;
+    use tracing::field::{Field, Visit};
+    use tracing::span;
+
+    /// Slow runs waiting to be logged, capped so a pathological frame cannot
+    /// grow it without bound.
+    static SLOW: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
+    const MAX_QUEUED: usize = 64;
+
+    thread_local! {
+        /// Open system spans on this thread and when each was entered. A
+        /// stack, not a slot: an exclusive system that runs a schedule
+        /// (`FixedUpdate` inside `RunFixedMainLoop`) nests system spans.
+        static OPEN: RefCell<Vec<(u64, Instant)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// `EUSTRESS_STALL_MS`, read once. `None` switches the watchdog off.
+    pub fn threshold() -> Option<Duration> {
+        static V: OnceLock<Option<Duration>> = OnceLock::new();
+        *V.get_or_init(|| {
+            let ms = std::env::var("EUSTRESS_STALL_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(250);
+            (ms > 0).then(|| Duration::from_millis(ms))
+        })
+    }
+
+    struct SystemName(String);
+
+    #[derive(Default)]
+    struct NameVisitor {
+        name: Option<String>,
+    }
+
+    impl Visit for NameVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "name" {
+                self.name = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "name" && self.name.is_none() {
+                self.name = Some(format!("{value:?}").trim_matches('"').to_owned());
+            }
+        }
+    }
+
+    struct StallLayer {
+        threshold: Duration,
+    }
+
+    impl<S> Layer<S> for StallLayer
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+            let Some(span) = ctx.span(id) else { return };
+            let mut visitor = NameVisitor::default();
+            attrs.record(&mut visitor);
+            let name = visitor.name.unwrap_or_else(|| span.metadata().name().to_owned());
+            span.extensions_mut().insert(SystemName(name));
+        }
+
+        fn on_enter(&self, id: &span::Id, _ctx: Context<'_, S>) {
+            let entered = (id.into_u64(), Instant::now());
+            OPEN.with(|open| open.borrow_mut().push(entered));
+        }
+
+        fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+            let now = Instant::now();
+            let key = id.into_u64();
+            let started = OPEN.with(|open| {
+                let mut open = open.borrow_mut();
+                let at = open.iter().rposition(|(open_id, _)| *open_id == key)?;
+                Some(open.remove(at).1)
+            });
+            let Some(started) = started else { return };
+            let elapsed = now.saturating_duration_since(started);
+            if elapsed < self.threshold {
+                return;
+            }
+            let name = ctx
+                .span(id)
+                .and_then(|span| span.extensions().get::<SystemName>().map(|n| n.0.clone()))
+                .unwrap_or_else(|| "<unnamed system>".to_owned());
+            if let Ok(mut slow) = SLOW.lock() {
+                if slow.len() < MAX_QUEUED {
+                    slow.push((name, elapsed));
+                }
+            }
+        }
+    }
+
+    /// The layer for `LogPlugin::custom_layer`, filtered to Bevy's `system`
+    /// spans so every other span and event bypasses it.
+    pub fn layer() -> Option<BoxedLayer> {
+        let threshold = threshold()?;
+        let layer = StallLayer { threshold }
+            .with_filter(filter_fn(|meta| meta.is_span() && meta.name() == "system"));
+        Some(Box::new(layer))
+    }
+
+    /// Log what the watchdog caught since the last frame.
+    pub fn report_stalls() {
+        let caught = match SLOW.lock() {
+            Ok(mut slow) if !slow.is_empty() => std::mem::take(&mut *slow),
+            _ => return,
+        };
+        for (name, elapsed) in caught {
+            tracing::warn!(
+                "🐢 STALL: system {name} ran {:.0} ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+    }
 }
 
 // ────────────────────────────── feature ON ──────────────────────────────

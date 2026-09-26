@@ -333,7 +333,9 @@ pub fn attribute_value_to_lua(
         | A::Font { .. }
         | A::NumberRange { .. }
         | A::NumberSequence(_)
-        | A::ColorSequence(_) => mlua::Value::Nil,
+        | A::ColorSequence(_)
+        | A::UDim { .. }
+        | A::EnumItem { .. } => mlua::Value::Nil,
     })
 }
 
@@ -1290,7 +1292,7 @@ impl LuauRuntime {
         // workspace table with Gravity property
         let workspace_table = lua.create_table()
             .map_err(|error| format!("Failed to create workspace table: {}", error))?;
-        workspace_table.set("Gravity", 9.80665f64)
+        workspace_table.set("Gravity", crate::units::STANDARD_GRAVITY)
             .map_err(|error| format!("Failed to set workspace.Gravity: {}", error))?;
         globals.set("workspace", workspace_table)
             .map_err(|error| format!("Failed to set workspace: {}", error))?;
@@ -1439,9 +1441,9 @@ Enum = setmetatable({}, {
                 "Humanoid" => {
                     instance.set("Health", 100.0f64)?;
                     instance.set("MaxHealth", 100.0f64)?;
-                    instance.set("WalkSpeed", 16.0f64)?;
-                    instance.set("JumpPower", 50.0f64)?;
-                    instance.set("JumpHeight", 7.2f64)?;
+                    for key in ["WalkSpeed", "JumpPower", "JumpHeight"] {
+                        instance.set(key, humanoid_default(key))?;
+                    }
                 }
                 "Animation" => {
                     instance.set("AnimationId", "")?;
@@ -3742,14 +3744,10 @@ Enum = setmetatable({}, {
             .map_err(|e| format!("Failed to set Health: {}", e))?;
         humanoid_proto.set("MaxHealth", 100.0f64)
             .map_err(|e| format!("Failed to set MaxHealth: {}", e))?;
-        humanoid_proto.set("WalkSpeed", 16.0f64)
-            .map_err(|e| format!("Failed to set WalkSpeed: {}", e))?;
-        humanoid_proto.set("JumpPower", 50.0f64)
-            .map_err(|e| format!("Failed to set JumpPower: {}", e))?;
-        humanoid_proto.set("JumpHeight", 7.2f64)
-            .map_err(|e| format!("Failed to set JumpHeight: {}", e))?;
-        humanoid_proto.set("HipHeight", 2.0f64)
-            .map_err(|e| format!("Failed to set HipHeight: {}", e))?;
+        for key in ["WalkSpeed", "JumpPower", "JumpHeight", "HipHeight"] {
+            humanoid_proto.set(key, humanoid_default(key))
+                .map_err(|e| format!("Failed to set {}: {}", key, e))?;
+        }
         humanoid_proto.set("AutoRotate", true)
             .map_err(|e| format!("Failed to set AutoRotate: {}", e))?;
         humanoid_proto.set("AutoJumpEnabled", true)
@@ -5298,4 +5296,14 @@ pub struct LuauScriptErrorEvent {
     pub error: String,
     /// Line number (if available)
     pub line: Option<u32>,
+}
+
+/// A Humanoid default from the DataModel's class defaults, in metres: native
+/// Eustress Luau is metres, so this runtime starts a Humanoid where Play does.
+fn humanoid_default(key: &str) -> f64 {
+    crate::datamodel::default_properties("Humanoid")
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, v)| v.as_number())
+        .unwrap_or(0.0)
 }

@@ -113,7 +113,7 @@ pub struct ScriptPluginCallbacks {
     by_action_id: HashMap<String, CallbackHandle>,
 }
 
-/// One-shot latch, mirroring `InsertClassesInitialized`'s pattern exactly —
+/// One-shot latch, the same pattern as `ThemeInitialized` in `ui/slint_ui.rs`:
 /// discovery can't run at `Startup` (the Luau runtime itself only
 /// initializes on the first `Update` tick, per `LuauPlugin::build`), so this
 /// gates a `Update`-schedule system to run its real work exactly once, as

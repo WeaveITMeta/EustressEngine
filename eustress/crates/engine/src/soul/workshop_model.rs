@@ -1,62 +1,57 @@
 //! # Workshop Model Selection
 //!
-//! Which model answers Workshop's conversational agentic loop — a distinct
+//! Which model answers Workshop's conversational agentic loop: a distinct
 //! axis from [`eustress_common::soul::ModelTier`], which drives the Soul
 //! *build pipeline*'s complexity-derived Haiku/Sonnet/Opus selection (English
-//! → Rune codegen) and the Workshop session-title Haiku helper. Those stay
+//! to Rune codegen) and the Workshop session-title Haiku helper. Those stay
 //! untouched; `WorkshopModel` is purely "which model the user picked to chat
 //! with in Workshop."
 //!
-//! ## The list is data, not code
+//! ## Where the list comes from
 //!
-//! This used to be a hardcoded enum with one variant per model, which meant a
-//! frontier release nobody could use until someone edited Rust, recompiled and
-//! shipped a build. The list now comes from a catalog: a JSON document that
-//! `api.eustress.dev` recompiles nightly (Grok 4.6 with live search, validated
-//! against a provider whitelist — see the MODEL CATALOG section in
-//! `infrastructure/cloudflare/api/src/index.js`).
+//! Two sources, and only two, both of them the user's or Eustress's own:
 //!
-//! Three properties are deliberate:
+//! * **The curated table** ([`Catalog::curated`]), compiled into the engine:
+//!   the models Eustress knows, with a display name, a tagline and the list
+//!   price from each provider's published pricing.
+//! * **The provider's own model list**, fetched with the user's own API key
+//!   by [`super::model_catalog`]. A curated model is offered only if its
+//!   provider lists it for that key, and a model the table does not know
+//!   appears only if its provider lists it.
 //!
-//! * **The seed is compiled in.** [`Catalog::seed`] is a byte-for-byte match
-//!   for the worker's `SEED_CATALOG`. An engine that has never reached the
-//!   network, or is running behind a firewall, still gets a full picker. The
-//!   catalog only ever *widens* the list.
-//! * **A refresh lands at the next launch, not mid-session.** The fetch writes
-//!   a cache file; startup reads it. A model list that reshuffles under a user
-//!   halfway through a turn is a bug, not freshness.
-//! * **`WorkshopModel` is still `Copy`.** It is a `&'static ModelSpec` into a
-//!   catalog leaked once at startup, so it still crosses a thread boundary
-//!   into the agentic worker by value, exactly as the enum did.
+//! No language model, web page or Eustress server decides what is offered.
+//! That is deliberate: the list used to be compiled nightly by Grok reading
+//! live web search, which could only ever be as honest as the pages it read.
+//! It published an alias moving everyone on Claude Opus 5 to Opus 5.5 while
+//! Opus 5 was still served, and a page planting a convincing fake id would
+//! have passed every shape and range check. A provider's authenticated
+//! `/v1/models` cannot be planted.
+//!
+//! `WorkshopModel` stays `Copy`: it is a `&'static ModelSpec` into a catalog
+//! leaked when it is installed, so it crosses into the agentic worker thread
+//! by value exactly as the old enum did, and a turn already running keeps its
+//! model even if a fresh list is installed underneath it.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
-
-/// The catalog shape this build understands. A document declaring anything
-/// else is refused outright rather than half-read: an engine that guesses at a
-/// schema it was not built for will guess wrong about prices.
-pub const CATALOG_SCHEMA: u32 = 1;
+use std::sync::{OnceLock, RwLock};
 
 /// Which backend a [`WorkshopModel`] talks to.
 ///
-/// This is the whitelist, and it is closed on purpose. Every provider needs a
-/// wire-format client and a key to be routable, so a vendor that is not a
-/// variant here is not merely unsupported — there is nowhere to send it. The
-/// worker drops unknown providers before they are ever published, and
-/// [`Provider::from_id`] drops any that slip through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Closed on purpose. Every provider needs a wire-format client and a key to
+/// be routable, so a vendor that is not a variant here has nowhere to send a
+/// request, and [`Provider::from_id`] refuses anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
     Anthropic,
     Xai,
-    #[serde(rename = "openai")]
     OpenAi,
 }
 
 impl Provider {
-    /// Resolve the catalog's provider id. `None` for anything off the
-    /// whitelist, which drops the entry.
+    /// Every provider, in the order the picker groups them.
+    pub const ALL: [Provider; 3] = [Provider::Anthropic, Provider::Xai, Provider::OpenAi];
+
+    /// Resolve a provider id. `None` for anything off the list.
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
             "anthropic" => Some(Provider::Anthropic),
@@ -87,135 +82,116 @@ impl Provider {
     }
 }
 
+/// How a model came to be in the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOrigin {
+    /// In the compiled-in table.
+    Curated,
+    /// Not in the table: the provider listed it for the user's key, and it is
+    /// newer than anything curated from that provider. Shown as new.
+    Discovered,
+}
+
 /// One model the user can select to power Workshop's conversational loop.
-///
-/// Owned `String`s rather than `&'static str`: these arrive from a JSON
-/// document at runtime. The whole catalog is leaked once at startup so
-/// [`WorkshopModel`] can stay a `Copy` reference into it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelSpec {
     /// The exact wire model id sent to the provider's API. Also what's
     /// persisted in `GlobalSoulSettings::workshop_model`.
     pub id: String,
-    /// Human-readable label — what the Workshop toolbar pill shows.
+    /// Human-readable label: what the Workshop toolbar pill shows.
     pub display_name: String,
     pub provider: Provider,
     /// One short sentence on what this model is FOR, shown under the name in
     /// the picker. May be empty; the menu lays out without it.
-    #[serde(default)]
     pub tagline: String,
-    /// USD per million input tokens, standard rate.
-    pub input_price_per_mtok: f64,
-    /// USD per million output tokens, standard rate.
-    pub output_price_per_mtok: f64,
+    /// USD per million input tokens, standard rate. `None` when no trusted
+    /// source states it: a discovered model from a provider whose model list
+    /// carries no prices. Unknown is shown as unknown, never guessed.
+    pub input_price_per_mtok: Option<f64>,
+    /// USD per million output tokens, standard rate. `None` as above.
+    pub output_price_per_mtok: Option<f64>,
     /// Per-request output token cap. Reasoning models whose thinking shares
     /// the budget get more headroom.
     pub max_tokens: u32,
     /// HTTP request timeout. Advisor calls on hard questions can run minutes.
     pub timeout_secs: u64,
-    #[serde(default = "default_true")]
     pub vision: bool,
-}
-
-fn default_true() -> bool {
-    true
+    pub origin: ModelOrigin,
 }
 
 /// The full model list, plus the two roles the bridge needs to resolve.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Catalog {
-    #[serde(default)]
-    pub schema: u32,
-    #[serde(default)]
-    pub version: u32,
-    #[serde(default)]
-    pub updated_at: String,
-    /// What produced this list: `"seed"`, a model id, or `"rollback:{date}"`.
-    #[serde(default)]
-    pub source: String,
     pub models: Vec<ModelSpec>,
     /// Selected when the user has never chosen, or when their stored id
     /// resolves to nothing at all.
     pub default_model: String,
     /// The model the `consult_advisor` tool targets. Kept as a *role* rather
-    /// than a hardcoded variant so retiring the advisor is a catalog edit.
+    /// than a hardcoded identity so changing the advisor is a table edit.
+    /// Empty when the advisor is not available to this user's key, which
+    /// withholds the tool.
     pub advisor_model: String,
-    /// Retired id → its replacement. A user whose settings still hold a
-    /// retired id must be UPGRADED, never silently reassigned to the default:
-    /// that would move them to another provider, at another price, with no
-    /// notice. Retiring a model must upgrade its users.
-    #[serde(default)]
+    /// Retired or superseded id to its replacement, so a user whose settings
+    /// hold an old id is upgraded rather than silently reassigned to the
+    /// default (another provider, another price, no notice). Written only by
+    /// a person editing [`Catalog::curated`], or declared by a provider's own
+    /// model list; never inferred.
     pub aliases: HashMap<String, String>,
 }
 
+/// A curated table entry, kept short so the table below reads as a table.
+fn curated(
+    id: &str,
+    display_name: &str,
+    provider: Provider,
+    tagline: &str,
+    (input, output): (f64, f64),
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> ModelSpec {
+    ModelSpec {
+        id: id.into(),
+        display_name: display_name.into(),
+        provider,
+        tagline: tagline.into(),
+        input_price_per_mtok: Some(input),
+        output_price_per_mtok: Some(output),
+        max_tokens,
+        timeout_secs,
+        vision: true,
+        origin: ModelOrigin::Curated,
+    }
+}
+
 impl Catalog {
-    /// The compiled-in list. Byte-for-byte the worker's `SEED_CATALOG`; the
-    /// two must not drift.
+    /// The compiled-in table.
     ///
-    /// This is what an engine uses offline, on first run before any fetch has
-    /// landed, and whenever a downloaded catalog fails to parse. It is a
-    /// floor, never a ceiling.
-    pub fn seed() -> Self {
+    /// What an engine offers before the providers answer, when offline, and
+    /// for any provider whose key is not set. Prices are each provider's
+    /// published standard rate (Anthropic's as of 2026-09-25, where Sonnet 5's
+    /// launch price of $2/$10 became its standard price). Ordered cheapest
+    /// first within each provider: the picker renders this order.
+    pub fn curated() -> Self {
+        use Provider::*;
         let models = vec![
-            ModelSpec {
-                id: "claude-sonnet-5".into(),
-                display_name: "Sonnet 5".into(),
-                provider: Provider::Anthropic,
-                tagline: "Balanced speed and depth. The everyday driver.".into(),
-                input_price_per_mtok: 3.0,
-                output_price_per_mtok: 15.0,
-                max_tokens: 16384,
-                timeout_secs: 180,
-                vision: true,
-            },
-            ModelSpec {
-                id: "claude-opus-5".into(),
-                display_name: "Opus 5".into(),
-                provider: Provider::Anthropic,
-                tagline: "Deeper reasoning for work that has to be right.".into(),
-                input_price_per_mtok: 5.0,
-                output_price_per_mtok: 25.0,
-                max_tokens: 32000,
-                timeout_secs: 300,
-                vision: true,
-            },
-            ModelSpec {
-                id: "claude-fable-5-1".into(),
-                display_name: "Fable 5.1".into(),
-                provider: Provider::Anthropic,
-                tagline: "Always-on thinking. The advisor on hard calls.".into(),
-                input_price_per_mtok: 10.0,
-                output_price_per_mtok: 50.0,
-                max_tokens: 32000,
-                timeout_secs: 360,
-                vision: true,
-            },
-            ModelSpec {
-                id: "grok-4.6".into(),
-                display_name: "Grok 4.6".into(),
-                provider: Provider::Xai,
-                tagline: "Fast and cheap, with live search built in.".into(),
-                input_price_per_mtok: 2.0,
-                output_price_per_mtok: 6.0,
-                max_tokens: 16384,
-                timeout_secs: 180,
-                vision: true,
-            },
-            ModelSpec {
-                id: "gpt-6-astra".into(),
-                display_name: "GPT-6 Astra".into(),
-                provider: Provider::OpenAi,
-                tagline: "OpenAI flagship. Long context, agentic reasoning.".into(),
-                input_price_per_mtok: 10.0,
-                output_price_per_mtok: 50.0,
-                max_tokens: 32000,
-                timeout_secs: 300,
-                vision: true,
-            },
+            curated("claude-sonnet-5", "Sonnet 5", Anthropic,
+                "Balanced speed and depth. The everyday driver.", (2.0, 10.0), 16384, 180),
+            curated("claude-opus-5-5", "Opus 5.5", Anthropic,
+                "The newest Opus. Deep reasoning at a lower price.", (4.0, 20.0), 32000, 300),
+            curated("claude-opus-5", "Opus 5", Anthropic,
+                "Deeper reasoning for work that has to be right.", (5.0, 25.0), 32000, 300),
+            curated("claude-fable-5-1", "Fable 5.1", Anthropic,
+                "Always-on thinking. The advisor on hard calls.", (10.0, 50.0), 32000, 360),
+            curated("grok-4.6", "Grok 4.6", Xai,
+                "Fast and cheap, with live search built in.", (2.0, 6.0), 16384, 180),
+            curated("gpt-6-astra", "GPT-6 Astra", OpenAi,
+                "OpenAI flagship. Long context, agentic reasoning.", (10.0, 50.0), 32000, 300),
         ];
 
         let aliases = [
             ("grok-4.5", "grok-4.6"),
+            // Asked for by the user: Fable 5 conversations move to 5.1, the
+            // same tier at the same price.
             ("claude-fable-5", "claude-fable-5-1"),
         ]
         .into_iter()
@@ -223,10 +199,6 @@ impl Catalog {
         .collect();
 
         Self {
-            schema: CATALOG_SCHEMA,
-            version: 1,
-            updated_at: "2026-09-07T00:00:00Z".into(),
-            source: "seed".into(),
             models,
             default_model: "claude-sonnet-5".into(),
             advisor_model: "claude-fable-5-1".into(),
@@ -234,19 +206,10 @@ impl Catalog {
         }
     }
 
-    /// Reject a downloaded catalog that could not serve a picker.
-    ///
-    /// The worker validates far more thoroughly before publishing; this is the
-    /// client's own floor, because "the server checked it" is not a property
-    /// this side can verify. Cheap, and it means a truncated or half-written
-    /// cache file falls back to the seed instead of emptying the menu.
-    fn is_usable(&self) -> Result<(), String> {
-        if self.schema != CATALOG_SCHEMA {
-            return Err(format!(
-                "catalog schema {} but this build understands {CATALOG_SCHEMA}",
-                self.schema
-            ));
-        }
+    /// Refuse a catalog that could not serve a picker. Cheap insurance on
+    /// every install: a resolution bug must degrade to the curated table, not
+    /// an empty menu or a cost estimate built on a NaN.
+    pub(crate) fn is_usable(&self) -> Result<(), String> {
         if self.models.is_empty() {
             return Err("catalog has no models".to_string());
         }
@@ -254,57 +217,58 @@ impl Catalog {
             if m.id.trim().is_empty() || m.display_name.trim().is_empty() {
                 return Err("catalog has a model with no id or no display name".to_string());
             }
-            if !(m.input_price_per_mtok.is_finite() && m.output_price_per_mtok.is_finite()) {
-                return Err(format!("model {} has a non-finite price", m.id));
+            let prices = [m.input_price_per_mtok, m.output_price_per_mtok];
+            if prices.iter().flatten().any(|p| !p.is_finite() || *p < 0.0) {
+                return Err(format!("model {} has an invalid price", m.id));
             }
             if m.max_tokens == 0 || m.timeout_secs == 0 {
                 return Err(format!("model {} has a zero token cap or timeout", m.id));
             }
         }
         if !self.models.iter().any(|m| m.id == self.default_model) {
-            return Err(format!(
-                "default_model {} is not in the catalog",
-                self.default_model
-            ));
+            return Err(format!("default_model {} is not in the catalog", self.default_model));
         }
         Ok(())
     }
 }
 
-/// The process-wide catalog. Leaked once so [`WorkshopModel`] can be a `Copy`
-/// borrow of it for the life of the process.
-static CATALOG: OnceLock<&'static Catalog> = OnceLock::new();
+/// The compiled-in table, leaked once on first use.
+static CURATED: OnceLock<&'static Catalog> = OnceLock::new();
 
-/// Install a catalog read from the on-disk cache. Call once during startup,
-/// BEFORE anything reads the model list.
+/// The catalog resolved against the user's provider lists, once one has been
+/// installed. `None` until then, which reads as the curated table.
+static INSTALLED: RwLock<Option<&'static Catalog>> = RwLock::new(None);
+
+/// Install a catalog resolved against the providers' own lists.
 ///
-/// Returns `false` if a catalog is already in place, which means something
-/// resolved a model before startup finished. The installed list then stands
-/// for the rest of the session — deliberately: swapping the list mid-session
-/// would change the picker, and possibly the price, under a running turn.
+/// Each install leaks one catalog (a few kilobytes). That is what lets
+/// [`WorkshopModel`] stay a `Copy` reference: a turn already running holds a
+/// model from the previous catalog, and that reference must stay valid. It
+/// happens at launch and when a key changes, so the total stays small.
+///
+/// Returns `false`, keeping the current list, if the catalog is unusable.
 pub fn install_catalog(catalog: Catalog) -> bool {
     if let Err(why) = catalog.is_usable() {
-        tracing::warn!("Workshop: ignoring unusable model catalog ({why}); keeping the built-in list");
+        tracing::warn!("Workshop: ignoring an unusable model catalog ({why}); keeping the current list");
         return false;
     }
-    let version = catalog.version;
     let count = catalog.models.len();
-    if CATALOG.set(Box::leak(Box::new(catalog))).is_err() {
-        tracing::warn!("Workshop: model catalog already resolved, keeping it for this session");
-        return false;
-    }
-    tracing::info!("Workshop: model catalog v{version} installed ({count} models)");
+    let leaked: &'static Catalog = Box::leak(Box::new(catalog));
+    *INSTALLED.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(leaked);
+    tracing::info!("Workshop: model list installed ({count} models)");
     true
 }
 
-/// The active catalog, falling back to the compiled-in seed.
+/// The active catalog: the installed one, or the curated table before any
+/// provider has answered.
 pub fn catalog() -> &'static Catalog {
-    CATALOG.get_or_init(|| Box::leak(Box::new(Catalog::seed())))
+    let installed = *INSTALLED.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    installed.unwrap_or_else(|| *CURATED.get_or_init(|| Box::leak(Box::new(Catalog::curated()))))
 }
 
 /// A model the user can select to power Workshop's conversational loop.
 ///
-/// A `Copy` handle into the leaked [`Catalog`], so it keeps the ergonomics the
+/// A `Copy` handle into a leaked [`Catalog`], so it keeps the ergonomics the
 /// enum had: passed by value, moved into the agentic thread, stored in
 /// `AgenticInFlight`.
 #[derive(Debug, Clone, Copy)]
@@ -321,7 +285,7 @@ impl Eq for WorkshopModel {}
 
 impl WorkshopModel {
     /// Every selectable model, in the catalog's own order: grouped by
-    /// provider, cheapest first inside each group.
+    /// provider, cheapest first inside each group, unknown prices last.
     pub fn all() -> Vec<WorkshopModel> {
         catalog().models.iter().map(WorkshopModel).collect()
     }
@@ -340,7 +304,7 @@ impl WorkshopModel {
         &self.0.id
     }
 
-    /// Human-readable label — what the Workshop toolbar pill shows.
+    /// Human-readable label: what the Workshop toolbar pill shows.
     pub fn display_name(&self) -> &'static str {
         &self.0.display_name
     }
@@ -360,13 +324,13 @@ impl WorkshopModel {
         self.0.timeout_secs
     }
 
-    /// USD per million input tokens, standard rate.
-    pub fn input_price_per_mtok(&self) -> f64 {
+    /// USD per million input tokens, standard rate, when known.
+    pub fn input_price_per_mtok(&self) -> Option<f64> {
         self.0.input_price_per_mtok
     }
 
-    /// USD per million output tokens, standard rate.
-    pub fn output_price_per_mtok(&self) -> f64 {
+    /// USD per million output tokens, standard rate, when known.
+    pub fn output_price_per_mtok(&self) -> Option<f64> {
         self.0.output_price_per_mtok
     }
 
@@ -375,29 +339,34 @@ impl WorkshopModel {
         self.0.vision
     }
 
+    /// Listed by the provider but not in the curated table.
+    pub fn is_discovered(&self) -> bool {
+        self.0.origin == ModelOrigin::Discovered
+    }
+
     /// True for the model the `consult_advisor` tool targets. A role read from
-    /// the catalog, not a hardcoded identity, so retiring the advisor is a
-    /// catalog edit rather than a code change.
+    /// the catalog, not a hardcoded identity.
     pub fn is_advisor(&self) -> bool {
         self.0.id == catalog().advisor_model
     }
 
-    /// The advisor itself, for the bridge's out-of-band consult call.
+    /// The advisor itself, for the bridge's out-of-band consult call. `None`
+    /// when the user's key cannot reach it.
     pub fn advisor() -> Option<WorkshopModel> {
         Self::from_api_id(&catalog().advisor_model)
     }
 
     /// The cheapest model from one specific provider.
     ///
-    /// For call sites pinned to a single vendor's endpoint — the code-summary
+    /// For call sites pinned to a single vendor's endpoint: the code-summary
     /// helper posts straight to `api.anthropic.com`, so it needs an Anthropic
     /// id specifically. Using [`WorkshopModel::default`] there would break the
-    /// day the catalog's default became another vendor's model, by sending
-    /// that vendor's id to Anthropic.
+    /// day the default became another vendor's model, by sending that vendor's
+    /// id to Anthropic.
     ///
-    /// Relies on the catalog being sorted cheapest-first within a provider,
-    /// which `seed_is_grouped_by_provider_then_cheapest_first` pins and the
-    /// worker enforces on every published catalog.
+    /// Relies on the catalog order (cheapest first within a provider, unknown
+    /// prices last), which `curated_is_grouped_by_provider_then_cheapest_first`
+    /// pins and `model_catalog::resolve` keeps.
     pub fn cheapest_for(provider: Provider) -> Option<WorkshopModel> {
         catalog()
             .models
@@ -406,10 +375,13 @@ impl WorkshopModel {
             .map(WorkshopModel)
     }
 
-    /// Estimate the USD cost of one call using this model's token usage.
-    pub fn estimate_cost(&self, input_tokens: u32, output_tokens: u32) -> f64 {
-        (input_tokens as f64 / 1_000_000.0) * self.input_price_per_mtok()
-            + (output_tokens as f64 / 1_000_000.0) * self.output_price_per_mtok()
+    /// Estimate the USD cost of one call from its token usage. `None` for a
+    /// model whose price no trusted source states.
+    pub fn estimate_cost(&self, input_tokens: u32, output_tokens: u32) -> Option<f64> {
+        Some(
+            (input_tokens as f64 / 1_000_000.0) * self.input_price_per_mtok()?
+                + (output_tokens as f64 / 1_000_000.0) * self.output_price_per_mtok()?,
+        )
     }
 
     /// Resolve a stored API id (from `GlobalSoulSettings::workshop_model`)
@@ -418,9 +390,8 @@ impl WorkshopModel {
     /// Also follows the catalog's alias table for superseded models. Without
     /// it, a user whose settings still hold a retired id would fail the
     /// lookup, fall through `effective_workshop_model`'s `unwrap_or_default()`
-    /// and be silently moved to the default — a different provider at a
-    /// different price, with no notice. Retiring a model must upgrade its
-    /// users, not quietly reassign them.
+    /// and be silently moved to the default: a different provider at a
+    /// different price, with no notice.
     pub fn from_api_id(id: &str) -> Option<Self> {
         let cat = catalog();
         if let Some(m) = cat.models.iter().find(|m| m.id == id) {
@@ -445,9 +416,8 @@ impl WorkshopModel {
 
 impl Default for WorkshopModel {
     /// The catalog's nominated default, or its first entry if that id is
-    /// somehow absent. Never panics: the picker must always resolve to
-    /// something, and [`Catalog::is_usable`] already refused any downloaded
-    /// catalog that could not.
+    /// somehow absent. Never panics: [`Catalog::is_usable`] refuses any
+    /// catalog without models before it can be installed.
     fn default() -> Self {
         let cat = catalog();
         cat.models
@@ -455,7 +425,7 @@ impl Default for WorkshopModel {
             .find(|m| m.id == cat.default_model)
             .or_else(|| cat.models.first())
             .map(WorkshopModel)
-            .expect("the seed catalog is never empty")
+            .expect("an installed catalog is never empty")
     }
 }
 
@@ -477,7 +447,7 @@ mod tests {
     #[test]
     fn retired_ids_upgrade_rather_than_silently_reverting() {
         // A settings file written before a rename must land on the successor,
-        // not fall through to the default — that would move a user to another
+        // not fall through to the default: that would move a user to another
         // provider, at another price, without telling them.
         let grok = WorkshopModel::from_api_id("grok-4.5").expect("grok-4.5 aliases forward");
         assert_eq!(grok.api_id(), "grok-4.6");
@@ -489,6 +459,18 @@ mod tests {
     }
 
     #[test]
+    fn a_still_served_model_is_never_aliased_away() {
+        // The Grok-compiled list aliased claude-opus-5 to claude-opus-5-5
+        // while Opus 5 was still served, moving its users to a different model
+        // without asking. The curated table offers both.
+        assert_eq!(
+            WorkshopModel::from_api_id("claude-opus-5").map(|m| m.api_id()),
+            Some("claude-opus-5")
+        );
+        assert!(!Catalog::curated().aliases.contains_key("claude-opus-5"));
+    }
+
+    #[test]
     fn unknown_ids_still_reject() {
         // The alias table must not turn into a catch-all that hides typos.
         assert_eq!(WorkshopModel::from_api_id("gpt-4"), None);
@@ -496,33 +478,33 @@ mod tests {
     }
 
     #[test]
-    fn seed_covers_every_whitelisted_provider() {
+    fn curated_covers_every_provider() {
         // Every provider the engine can route to needs a model in the offline
         // list, or a user with only that vendor's key has an empty picker.
-        let seed = Catalog::seed();
-        for provider in [Provider::Anthropic, Provider::Xai, Provider::OpenAi] {
+        let curated = Catalog::curated();
+        for provider in Provider::ALL {
             assert!(
-                seed.models.iter().any(|m| m.provider == provider),
-                "seed catalog has no {} model",
+                curated.models.iter().any(|m| m.provider == provider),
+                "curated table has no {} model",
                 provider.label()
             );
         }
     }
 
     #[test]
-    fn seed_is_grouped_by_provider_then_cheapest_first() {
+    fn curated_is_grouped_by_provider_then_cheapest_first() {
         // The picker renders catalog order directly, so the order IS the
         // contract: sections stay put and the cheapest option reads first.
-        let seed = Catalog::seed();
+        let curated = Catalog::curated();
         let mut seen: Vec<Provider> = Vec::new();
-        for group in seed.models.chunk_by(|a, b| a.provider == b.provider) {
+        for group in curated.models.chunk_by(|a, b| a.provider == b.provider) {
             assert!(
                 !seen.contains(&group[0].provider),
                 "{} models are split across the list instead of grouped",
                 group[0].provider.label()
             );
             seen.push(group[0].provider);
-            let prices: Vec<f64> = group.iter().map(|m| m.input_price_per_mtok).collect();
+            let prices: Vec<f64> = group.iter().filter_map(|m| m.input_price_per_mtok).collect();
             assert!(
                 prices.windows(2).all(|w| w[0] <= w[1]),
                 "{} models are not cheapest-first: {prices:?}",
@@ -532,28 +514,37 @@ mod tests {
     }
 
     #[test]
-    fn seed_names_a_default_and_an_advisor_that_exist() {
-        let seed = Catalog::seed();
-        seed.is_usable().expect("the seed catalog must be usable");
+    fn curated_names_a_default_and_an_advisor_that_exist() {
+        let curated = Catalog::curated();
+        curated.is_usable().expect("the curated table must be usable");
         assert!(
-            seed.models.iter().any(|m| m.id == seed.advisor_model),
-            "advisor_model {} is not in the seed catalog",
-            seed.advisor_model
+            curated.models.iter().any(|m| m.id == curated.advisor_model),
+            "advisor_model {} is not in the curated table",
+            curated.advisor_model
         );
     }
 
     #[test]
-    fn seed_aliases_all_point_at_live_models() {
+    fn curated_prices_are_all_known() {
+        // Unknown is for models a provider lists that Eustress has never seen.
+        // Everything in the table carries its published price.
+        for m in Catalog::curated().models {
+            assert!(m.input_price_per_mtok.is_some() && m.output_price_per_mtok.is_some(), "{}", m.id);
+        }
+    }
+
+    #[test]
+    fn curated_aliases_all_point_at_live_models() {
         // An alias to a model that no longer exists strands the very user it
         // was written to rescue.
-        let seed = Catalog::seed();
-        for (from, to) in &seed.aliases {
+        let curated = Catalog::curated();
+        for (from, to) in &curated.aliases {
             assert!(
-                seed.models.iter().any(|m| &m.id == to),
-                "alias {from} -> {to} points at a model not in the catalog"
+                curated.models.iter().any(|m| &m.id == to),
+                "alias {from} -> {to} points at a model not in the table"
             );
             assert!(
-                !seed.models.iter().any(|m| &m.id == from),
+                !curated.models.iter().any(|m| &m.id == from),
                 "alias {from} shadows a model that is still live"
             );
         }
@@ -562,34 +553,31 @@ mod tests {
     #[test]
     fn unusable_catalogs_are_refused() {
         // Each of these would have produced a broken or empty picker.
-        let mut empty = Catalog::seed();
+        let mut empty = Catalog::curated();
         empty.models.clear();
         assert!(empty.is_usable().is_err(), "an empty catalog must be refused");
 
-        let mut wrong_schema = Catalog::seed();
-        wrong_schema.schema = CATALOG_SCHEMA + 1;
-        assert!(
-            wrong_schema.is_usable().is_err(),
-            "a future schema must be refused, not half-read"
-        );
-
-        let mut dangling_default = Catalog::seed();
+        let mut dangling_default = Catalog::curated();
         dangling_default.default_model = "nonexistent-model".into();
         assert!(
             dangling_default.is_usable().is_err(),
             "a default naming no model must be refused"
         );
 
-        let mut nan_price = Catalog::seed();
-        nan_price.models[0].input_price_per_mtok = f64::NAN;
+        let mut nan_price = Catalog::curated();
+        nan_price.models[0].input_price_per_mtok = Some(f64::NAN);
         assert!(
             nan_price.is_usable().is_err(),
             "a non-finite price must be refused before it reaches a cost estimate"
         );
+
+        let mut unknown_price = Catalog::curated();
+        unknown_price.models[0].input_price_per_mtok = None;
+        assert!(unknown_price.is_usable().is_ok(), "an unknown price is allowed, not invalid");
     }
 
     #[test]
-    fn provider_whitelist_rejects_unknown_vendors() {
+    fn provider_ids_reject_unknown_vendors() {
         assert_eq!(Provider::from_id("anthropic"), Some(Provider::Anthropic));
         assert_eq!(Provider::from_id("xai"), Some(Provider::Xai));
         assert_eq!(Provider::from_id("openai"), Some(Provider::OpenAi));
@@ -601,24 +589,24 @@ mod tests {
     fn cheapest_for_stays_inside_its_provider() {
         // The code-summary helper posts to a vendor-specific endpoint, so a
         // lookup that ever returned another vendor's id would 404 there.
-        for provider in [Provider::Anthropic, Provider::Xai, Provider::OpenAi] {
+        for provider in Provider::ALL {
             let model = WorkshopModel::cheapest_for(provider)
-                .unwrap_or_else(|| panic!("seed has no {} model", provider.label()));
+                .unwrap_or_else(|| panic!("no {} model", provider.label()));
             assert_eq!(model.provider(), provider);
             let cheapest = WorkshopModel::all()
                 .into_iter()
                 .filter(|m| m.provider() == provider)
-                .map(|m| m.input_price_per_mtok())
+                .filter_map(|m| m.input_price_per_mtok())
                 .fold(f64::INFINITY, f64::min);
-            assert_eq!(model.input_price_per_mtok(), cheapest);
+            assert_eq!(model.input_price_per_mtok(), Some(cheapest));
         }
     }
 
     #[test]
     fn cost_estimate_uses_both_rates() {
-        let model = WorkshopModel::from_api_id("claude-sonnet-5").expect("seed has sonnet");
-        // 1M in at $3 + 1M out at $15.
-        let cost = model.estimate_cost(1_000_000, 1_000_000);
-        assert!((cost - 18.0).abs() < 1e-9, "expected $18.00, got {cost}");
+        let model = WorkshopModel::from_api_id("claude-sonnet-5").expect("table has sonnet");
+        // 1M in at $2 + 1M out at $10.
+        let cost = model.estimate_cost(1_000_000, 1_000_000).expect("sonnet has a price");
+        assert!((cost - 12.0).abs() < 1e-9, "expected $12.00, got {cost}");
     }
 }

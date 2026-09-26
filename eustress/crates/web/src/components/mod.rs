@@ -16,6 +16,8 @@ pub mod nav;
 pub mod bliss_kpi;
 pub mod qr;
 pub mod tilt;
+pub mod player_download;
+pub mod pass_store;
 
 pub use layout::Layout;
 pub use common::{Button, ButtonVariant, Card, LoadingSpinner, InlineLoader, ErrorDisplay};
@@ -25,3 +27,5 @@ pub use nav::CentralNav;
 pub use bliss_kpi::BlissKpiModal;
 pub use qr::QrCodeSvg;
 pub use tilt::{on_tilt_move, on_tilt_leave};
+pub use player_download::{use_player_release, PlayerPlatformButtons};
+pub use pass_store::PassStore;

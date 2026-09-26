@@ -208,8 +208,8 @@ pub fn write_stream_port_file(handle: Res<StreamNodeHandle>) {
 /// folder — calling `dirs::document_dir()` directly (the old code) put the
 /// port file in `OneDrive\Documents`, where no sibling looks. A bare
 /// `first_universe_root()` would also misfire here: the workspace holds
-/// several universe dirs, and the loaded one (`Universe1`) is not the
-/// alphabetically-first (`ARC-AGI-3`).
+/// several universe dirs, and the loaded one (`Universe1`) is not always
+/// the alphabetically-first.
 fn default_universe_root() -> std::path::PathBuf {
     if let Ok(env_path) = std::env::var("EUSTRESS_UNIVERSE_ROOT") {
         return std::path::PathBuf::from(env_path);
@@ -284,7 +284,9 @@ fn start_stream_nodes(
 
     if !config.bind_addr.is_loopback() {
         warn!(
-            "StreamNodePlugin: bound to {} — the node is UNAUTHENTICATED. Any              host that can route here may publish into and read every topic,              including scene_deltas and agent_commands.",
+            "StreamNodePlugin: bound to {}. The node is UNAUTHENTICATED: any host \
+that can route here may publish into and read every topic, including \
+scene_deltas and agent_commands.",
             config.bind_addr
         );
     }

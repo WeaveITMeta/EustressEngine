@@ -78,6 +78,16 @@ pub struct LightingService {
     pub cycle_enabled: bool,
     /// Length of one full day in real minutes (default 24 = 1 game-hour per real-minute)
     pub day_length_minutes: f32,
+
+    // --- Colour shift ---
+    /// Roblox's `ColorShift_Top`: a hue the sun's and the moon's light takes
+    /// on. sRGB, black for none.
+    #[serde(default)]
+    pub color_shift_top: [f32; 4],
+    /// Roblox's `ColorShift_Bottom`: a hue the shadowed side, the sky's
+    /// fill, takes on. sRGB, black for none.
+    #[serde(default)]
+    pub color_shift_bottom: [f32; 4],
 }
 
 impl Default for LightingService {
@@ -132,6 +142,10 @@ impl Default for LightingService {
             // Day/Night Cycle
             cycle_enabled: false, // Off by default — manual time control
             day_length_minutes: 24.0, // 1 game-hour per real-minute
+
+            // Colour shift: none.
+            color_shift_top: [0.0, 0.0, 0.0, 1.0],
+            color_shift_bottom: [0.0, 0.0, 0.0, 1.0],
         }
     }
 }

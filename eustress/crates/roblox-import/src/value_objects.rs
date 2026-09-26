@@ -32,9 +32,13 @@
 //! | `CFrameValue`                    | `{ CFrame = [px, py, pz, qx, qy, qz, qw] }`         |
 //! | `BrickColorValue`                | `{ BrickColor = N }` (palette index integer)        |
 //! | `ObjectValue`                    | bare string holding the resolved Eustress UUID hex  |
-//! | `IntConstrainedValue`            | bare integer (the range is not kept)                |
-//! | `DoubleConstrainedValue`         | bare float (the range is not kept)                  |
+//! | `IntConstrainedValue`            | bare integer, its range beside it (below)           |
+//! | `DoubleConstrainedValue`         | bare float, its range beside it (below)             |
 //! | `RayValue`                       | dropped (`None`)                                    |
+//!
+//! A constrained value's range folds beside its value as two more
+//! attributes, `<Name>_MinValue` and `<Name>_MaxValue`, typed as the value
+//! ([`constrained_range`]).
 
 use rbx_dom_weak::types::{Ref, Variant};
 use rbx_dom_weak::UstrMap;
@@ -263,6 +267,42 @@ pub fn encode_value_object(
     }
 }
 
+/// A constrained value's range, `(MinValue, MaxValue)`, typed as its value:
+/// integers for an `IntConstrainedValue`, floats for a
+/// `DoubleConstrainedValue`. The materializer folds it beside the value as
+/// `<Name>_MinValue` and `<Name>_MaxValue`; Vehicle Simulator keeps a car's
+/// nitro capacity as `NitroAmount.MaxValue`. A bound the file leaves out is
+/// Roblox's default (0 to 10 for an integer, 0 to 1 for a double). `None`
+/// for every other class.
+pub fn constrained_range(roblox_class: &str, props: &UstrMap<Variant>) -> Option<(toml::Value, toml::Value)> {
+    let read = |key: &str| props.get(&rbx_dom_weak::ustr(key));
+    let int = |v: Option<&Variant>| match v {
+        Some(Variant::Int64(i)) => Some(*i),
+        Some(Variant::Int32(i)) => Some(*i as i64),
+        Some(Variant::Float64(f)) => Some(*f as i64),
+        Some(Variant::Float32(f)) => Some(*f as i64),
+        _ => None,
+    };
+    let float = |v: Option<&Variant>| match v {
+        Some(Variant::Float64(f)) => Some(*f),
+        Some(Variant::Float32(f)) => Some(*f as f64),
+        Some(Variant::Int64(i)) => Some(*i as f64),
+        Some(Variant::Int32(i)) => Some(*i as f64),
+        _ => None,
+    };
+    match roblox_class {
+        "IntConstrainedValue" => Some((
+            toml::Value::Integer(int(read("MinValue")).unwrap_or(0)),
+            toml::Value::Integer(int(read("MaxValue")).unwrap_or(10)),
+        )),
+        "DoubleConstrainedValue" => Some((
+            toml::Value::Float(float(read("MinValue")).unwrap_or(0.0)),
+            toml::Value::Float(float(read("MaxValue")).unwrap_or(1.0)),
+        )),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -313,6 +353,34 @@ mod tests {
 
     fn no_ref(_: Ref) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn a_constrained_value_keeps_its_range() {
+        let nitro = props_with(vec![
+            ("value", Variant::Int64(100)),
+            ("MinValue", Variant::Int64(0)),
+            ("MaxValue", Variant::Int64(100)),
+        ]);
+        assert_eq!(
+            constrained_range("IntConstrainedValue", &nitro),
+            Some((toml::Value::Integer(0), toml::Value::Integer(100)))
+        );
+        let steer = props_with(vec![
+            ("value", Variant::Float64(0.67)),
+            ("MinValue", Variant::Float64(-0.5)),
+            ("MaxValue", Variant::Float64(1.0)),
+        ]);
+        assert_eq!(
+            constrained_range("DoubleConstrainedValue", &steer),
+            Some((toml::Value::Float(-0.5), toml::Value::Float(1.0)))
+        );
+        // A bound the file leaves out is Roblox's default.
+        assert_eq!(
+            constrained_range("IntConstrainedValue", &props_with(vec![])),
+            Some((toml::Value::Integer(0), toml::Value::Integer(10)))
+        );
+        assert_eq!(constrained_range("NumberValue", &steer), None);
     }
 
     #[test]

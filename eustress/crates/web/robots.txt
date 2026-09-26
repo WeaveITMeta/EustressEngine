@@ -9,6 +9,7 @@
 User-agent: *
 Allow: /
 Disallow: /admin
+Disallow: /creator
 Disallow: /dashboard
 Disallow: /friends
 Disallow: /kyc

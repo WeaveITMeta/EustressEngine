@@ -65,6 +65,9 @@ pub fn class_ancestry(class: &str) -> &'static [&'static str] {
         "Decal" => &["Decal", "FaceInstance", "Instance"],
         "Texture" => &["Texture", "Decal", "FaceInstance", "Instance"],
         "SpecialMesh" => &["SpecialMesh", "FileMesh", "DataModelMesh", "Instance"],
+        "FileMesh" => &["FileMesh", "DataModelMesh", "Instance"],
+        "BlockMesh" => &["BlockMesh", "BevelMesh", "DataModelMesh", "Instance"],
+        "CylinderMesh" => &["CylinderMesh", "BevelMesh", "DataModelMesh", "Instance"],
         "WeldConstraint" => &["WeldConstraint", "Instance"],
         "Weld" => &["Weld", "JointInstance", "Instance"],
         "Motor6D" => &["Motor6D", "Motor", "JointInstance", "Instance"],
@@ -79,9 +82,27 @@ pub fn class_ancestry(class: &str) -> &'static [&'static str] {
         "ProximityPrompt" => &["ProximityPrompt", "Instance"],
         "Animator" => &["Animator", "Instance"],
         "Animation" => &["Animation", "Instance"],
+        "AnimationController" => &["AnimationController", "Instance"],
+        "AnimationTrack" => &["AnimationTrack", "Instance"],
+        "KeyframeSequence" => &["KeyframeSequence", "AnimationClip", "Instance"],
+        "Keyframe" => &["Keyframe", "Instance"],
+        "Pose" => &["Pose", "PoseBase", "Instance"],
+        "NumberPose" => &["NumberPose", "PoseBase", "Instance"],
+        "KeyframeMarker" => &["KeyframeMarker", "Instance"],
+        "KeyframeSequenceProvider" => &["KeyframeSequenceProvider", "Instance"],
         "Sky" => &["Sky", "Instance"],
         "Atmosphere" => &["Atmosphere", "Instance"],
         "Terrain" => &["Terrain", "BasePart", "PVInstance", "Instance"],
+        "HingeConstraint" => &["HingeConstraint", "Constraint", "Instance"],
+        "PrismaticConstraint" => &["PrismaticConstraint", "SlidingBallConstraint", "Constraint", "Instance"],
+        "CylindricalConstraint" => &["CylindricalConstraint", "SlidingBallConstraint", "Constraint", "Instance"],
+        "SpringConstraint" => &["SpringConstraint", "Constraint", "Instance"],
+        "BallSocketConstraint" => &["BallSocketConstraint", "Constraint", "Instance"],
+        "RopeConstraint" => &["RopeConstraint", "Constraint", "Instance"],
+        "RodConstraint" => &["RodConstraint", "Constraint", "Instance"],
+        "VectorForce" => &["VectorForce", "Constraint", "Instance"],
+        "NoCollisionConstraint" => &["NoCollisionConstraint", "Instance"],
+        "ManualWeld" => &["ManualWeld", "JointInstance", "Instance"],
         _ => &["Instance"],
     }
 }
@@ -156,7 +177,7 @@ pub fn is_storage_service(class: &str) -> bool {
 pub fn is_service_class(class: &str) -> bool {
     SERVICE_CLASSES.contains(&class)
         || matches!(class, "StarterPlayerScripts" | "StarterCharacterScripts" | "Website" | "DataService"
-            | "ExperimentService" | "AdornmentService" | "CustomService")
+            | "ExperimentService" | "AdornmentService" | "CustomService" | "KeyframeSequenceProvider")
 }
 
 /// Properties an `Instance.new(class)` starts with. Engine-seeded instances
@@ -198,6 +219,20 @@ pub fn default_properties(class: &str) -> Vec<(&'static str, DmValue)> {
             props.push(("Neutral", DmValue::Bool(true)));
             props.push(("Duration", DmValue::Number(0.0)));
             props.push(("Anchored", DmValue::Bool(true)));
+        }
+        if class == "Seat" || class == "VehicleSeat" {
+            props.push(("Disabled", DmValue::Bool(false)));
+            props.push(("Occupant", DmValue::Nil));
+        }
+        if class == "VehicleSeat" {
+            // Roblox's 25 studs a second.
+            props.push(("MaxSpeed", DmValue::Number(7.62)));
+            props.push(("Torque", DmValue::Number(10.0)));
+            props.push(("TurnSpeed", DmValue::Number(1.0)));
+            props.push(("HeadsUpDisplay", DmValue::Bool(true)));
+            for name in ["Throttle", "ThrottleFloat", "Steer", "SteerFloat"] {
+                props.push((name, DmValue::Number(0.0)));
+            }
         }
         return props;
     }
@@ -355,6 +390,122 @@ pub fn default_properties(class: &str) -> Vec<(&'static str, DmValue)> {
             props.push(("BlastPressure", DmValue::Number(500000.0)));
             props.push(("Visible", DmValue::Bool(true)));
         }
+        // Constraints join two Attachments. Lengths are metres (Roblox's
+        // stud defaults converted); angles in degrees, angular speeds in rad/s.
+        "HingeConstraint" | "PrismaticConstraint" | "CylindricalConstraint" | "SpringConstraint"
+        | "BallSocketConstraint" | "RopeConstraint" | "RodConstraint" => {
+            props.push(("Enabled", DmValue::Bool(true)));
+            props.push(("Visible", DmValue::Bool(false)));
+            props.push(("Attachment0", DmValue::Nil));
+            props.push(("Attachment1", DmValue::Nil));
+            match class {
+                "HingeConstraint" => {
+                    props.push(("ActuatorType", DmValue::Enum(EnumItem::new("ActuatorType", "None"))));
+                    props.push(("AngularVelocity", DmValue::Number(0.0)));
+                    props.push(("MotorMaxTorque", DmValue::Number(0.0)));
+                    props.push(("MotorMaxAcceleration", DmValue::Number(f64::INFINITY)));
+                    props.push(("TargetAngle", DmValue::Number(0.0)));
+                    props.push(("AngularSpeed", DmValue::Number(0.0)));
+                    props.push(("ServoMaxTorque", DmValue::Number(0.0)));
+                    props.push(("LimitsEnabled", DmValue::Bool(false)));
+                    props.push(("LowerAngle", DmValue::Number(-45.0)));
+                    props.push(("UpperAngle", DmValue::Number(45.0)));
+                    props.push(("CurrentAngle", DmValue::Number(0.0)));
+                }
+                "PrismaticConstraint" | "CylindricalConstraint" => {
+                    props.push(("ActuatorType", DmValue::Enum(EnumItem::new("ActuatorType", "None"))));
+                    props.push(("Velocity", DmValue::Number(0.0)));
+                    props.push(("MotorMaxForce", DmValue::Number(0.0)));
+                    props.push(("MotorMaxAcceleration", DmValue::Number(f64::INFINITY)));
+                    props.push(("TargetPosition", DmValue::Number(0.0)));
+                    props.push(("Speed", DmValue::Number(0.0)));
+                    props.push(("ServoMaxForce", DmValue::Number(0.0)));
+                    props.push(("LimitsEnabled", DmValue::Bool(false)));
+                    props.push(("LowerLimit", DmValue::Number(0.0)));
+                    props.push(("UpperLimit", DmValue::Number(1.524)));
+                    props.push(("CurrentPosition", DmValue::Number(0.0)));
+                    if class == "CylindricalConstraint" {
+                        props.push(("AngularActuatorType", DmValue::Enum(EnumItem::new("ActuatorType", "None"))));
+                        props.push(("AngularVelocity", DmValue::Number(0.0)));
+                        props.push(("MotorMaxTorque", DmValue::Number(0.0)));
+                        props.push(("TargetAngle", DmValue::Number(0.0)));
+                        props.push(("AngularSpeed", DmValue::Number(0.0)));
+                        props.push(("ServoMaxTorque", DmValue::Number(0.0)));
+                        props.push(("AngularLimitsEnabled", DmValue::Bool(false)));
+                        props.push(("LowerAngle", DmValue::Number(-45.0)));
+                        props.push(("UpperAngle", DmValue::Number(45.0)));
+                        props.push(("CurrentAngle", DmValue::Number(0.0)));
+                    }
+                }
+                "SpringConstraint" => {
+                    props.push(("FreeLength", DmValue::Number(0.3048)));
+                    props.push(("Stiffness", DmValue::Number(0.0)));
+                    props.push(("Damping", DmValue::Number(0.0)));
+                    props.push(("LimitsEnabled", DmValue::Bool(false)));
+                    props.push(("MinLength", DmValue::Number(0.0)));
+                    props.push(("MaxLength", DmValue::Number(1.524)));
+                    props.push(("CurrentLength", DmValue::Number(0.0)));
+                }
+                "RopeConstraint" | "RodConstraint" => {
+                    props.push(("Length", DmValue::Number(1.524)));
+                    props.push(("CurrentDistance", DmValue::Number(0.0)));
+                }
+                _ => {}
+            }
+        }
+        "VectorForce" => {
+            props.push(("Enabled", DmValue::Bool(true)));
+            props.push(("Visible", DmValue::Bool(false)));
+            props.push(("Attachment0", DmValue::Nil));
+            props.push(("Attachment1", DmValue::Nil));
+            props.push(("Force", DmValue::Vector3(Vector3::ZERO)));
+            props.push(("RelativeTo", DmValue::Enum(EnumItem::new("ActuatorRelativeTo", "Attachment0"))));
+            props.push(("ApplyAtCenterOfMass", DmValue::Bool(false)));
+        }
+        // Part-to-part joints. A Weld holds Part1 at Part0 * C0 * C1:Inverse().
+        "WeldConstraint" | "NoCollisionConstraint" => {
+            props.push(("Enabled", DmValue::Bool(true)));
+            props.push(("Part0", DmValue::Nil));
+            props.push(("Part1", DmValue::Nil));
+        }
+        "Weld" | "ManualWeld" => {
+            props.push(("Enabled", DmValue::Bool(true)));
+            props.push(("Part0", DmValue::Nil));
+            props.push(("Part1", DmValue::Nil));
+            props.push(("C0", DmValue::CFrame(CFrame::IDENTITY)));
+            props.push(("C1", DmValue::CFrame(CFrame::IDENTITY)));
+        }
+        // A DataMesh changes what its part draws (common::data_mesh).
+        // Roblox's defaults; a SpecialMesh starts as a Head.
+        "SpecialMesh" | "FileMesh" | "BlockMesh" | "CylinderMesh" => {
+            if class == "SpecialMesh" {
+                props.push(("MeshType", DmValue::Enum(EnumItem::new("MeshType", "Head"))));
+            }
+            if matches!(class, "SpecialMesh" | "FileMesh") {
+                props.push(("MeshId", DmValue::String(String::new())));
+                props.push(("TextureId", DmValue::String(String::new())));
+            }
+            props.push(("Scale", DmValue::Vector3(Vector3::new(1.0, 1.0, 1.0))));
+            props.push(("Offset", DmValue::Vector3(Vector3::ZERO)));
+            props.push(("VertexColor", DmValue::Vector3(Vector3::new(1.0, 1.0, 1.0))));
+        }
+        "Animation" => props.push(("AnimationId", DmValue::String(String::new()))),
+        "KeyframeSequence" => {
+            props.push(("Loop", DmValue::Bool(true)));
+            props.push(("Priority", DmValue::Enum(EnumItem::new("AnimationPriority", "Action"))));
+        }
+        "Keyframe" => props.push(("Time", DmValue::Number(0.0))),
+        "Pose" | "NumberPose" => {
+            if class == "Pose" {
+                props.push(("CFrame", DmValue::CFrame(CFrame::IDENTITY)));
+            } else {
+                props.push(("Value", DmValue::Number(0.0)));
+            }
+            props.push(("EasingStyle", DmValue::Enum(EnumItem::new("PoseEasingStyle", "Linear"))));
+            props.push(("EasingDirection", DmValue::Enum(EnumItem::new("PoseEasingDirection", "In"))));
+            props.push(("Weight", DmValue::Number(1.0)));
+        }
+        "KeyframeMarker" => props.push(("Value", DmValue::String(String::new()))),
         _ => {}
     }
     props
@@ -381,6 +532,10 @@ pub fn enum_type_of(prop: &str) -> Option<&'static str> {
         "SortOrder" => "SortOrder",
         "EasingStyle" => "EasingStyle",
         "EasingDirection" => "EasingDirection",
+        "ActuatorType" | "AngularActuatorType" => "ActuatorType",
+        "RelativeTo" => "ActuatorRelativeTo",
+        "Priority" => "AnimationPriority",
+        "MeshType" => "MeshType",
         _ => return None,
     })
 }

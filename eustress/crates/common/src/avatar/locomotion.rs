@@ -27,13 +27,25 @@
 //! stutter and makes the animation state flicker. A sphere cast slightly
 //! narrower than the capsule tracks the surface the capsule is actually resting
 //! on.
+//!
+//! ## Gravity is the live value
+//!
+//! The body is kinematic, so Avian's gravity never acts on it; the controller
+//! integrates gravity itself, from Avian's `Gravity` as it stands that frame,
+//! which `Workspace.gravity` drives. A Space set to the Moon, or a script that
+//! changes gravity mid-game, moves the player the way it moves every falling
+//! part. A jump follows Roblox's rules, so an imported game tuned for
+//! Roblox's gravity jumps as it was tuned: a launch speed (JumpPower under
+//! UseJumpPower) takes off at that speed, and a height (JumpHeight) takes off
+//! at the speed that peaks there under that gravity. Weightless, a height
+//! needs no take-off, so only a launch speed leaves the ground.
 
 use bevy::prelude::*;
 use avian3d::prelude::*;
 
 use super::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use super::{AvatarControl, AvatarSystems, SpawnedByAvatarRuntime};
-use eustress_avatar_schema::GRAVITY_MPS2;
+use crate::units::STANDARD_GRAVITY_F32;
 
 /// Grace period after leaving ground during which a jump still works.
 const COYOTE_TIME: f32 = 0.12;
@@ -57,29 +69,60 @@ const GROUND_SNAP_TOLERANCE: f32 = 0.12;
 /// How long the body may be airborne and motionless before it is treated as
 /// wedged, seconds.
 const STUCK_GRACE: f32 = 0.30;
-/// Distance below which a frame's movement counts as "did not move", metres.
-const STUCK_EPSILON: f32 = 0.004;
+/// Speed below which an airborne body counts as not moving, m/s, at standard
+/// gravity. The controller scales it by the live gravity.
+///
+/// A jump spends `2 · speed / g` seconds below a given speed around its apex,
+/// so a threshold fixed for Earth would hold a standing jump on the Moon under
+/// it for the whole grace period. Scaled, every apex passes through it in
+/// about 0.05 s, and a weightless body, which nothing presses into a wedge, is
+/// never counted as one. Being a speed rather than a distance per frame, it
+/// means the same at every frame rate.
+const STUCK_SPEED: f32 = 0.24;
 
-/// Is there room for the body at `pos`?
+/// The downward pull the controller integrates, m/s², from the live gravity.
+///
+/// The controller stands on a world-up floor: it probes for ground along −Y
+/// and measures slopes against +Y. So it takes gravity's downward component
+/// and ignores the rest, and a gravity pointing up leaves the body weightless
+/// rather than pinning it to a ceiling it cannot stand on. With no `Gravity`
+/// resource it is standard gravity.
+pub fn downward_gravity(gravity: Option<&Gravity>) -> f32 {
+    gravity.map_or(STANDARD_GRAVITY_F32, |g| (-g.0.y).max(0.0))
+}
+
+/// Is there room for the body at `pos`, counting only the colliders `solid`
+/// accepts?
 ///
 /// Uses the OVERLAP query, not a shape cast. A zero-distance cast does not
 /// reliably report a starting penetration — it reported solid rock as free
 /// space, and the wedge recovery duly teleported the body inside a wall.
 /// `shape_intersections` asks the question directly.
-pub(crate) fn capsule_fits(
+///
+/// The climb passes its surface rules as `solid`, so a trigger volume the
+/// body is standing in never reads as the body being buried in a wall.
+pub(crate) fn capsule_fits_where(
     spatial: &SpatialQuery,
     collider: &Collider,
     pos: Vec3,
     rot: Quat,
     filter: &SpatialQueryFilter,
+    solid: &dyn Fn(Entity) -> bool,
 ) -> bool {
     if !pos.is_finite() {
         return false;
     }
-    spatial.shape_intersections(collider, pos, rot, filter).is_empty()
+    let mut clear = true;
+    spatial.shape_intersections_callback(collider, pos, rot, filter, |e| {
+        clear = !solid(e);
+        // Keep looking only while nothing solid has been found.
+        clear
+    });
+    clear
 }
 
-/// Find somewhere near `from` the body actually fits.
+/// Find somewhere near `from` the body actually fits, counting only the
+/// colliders `solid` accepts.
 ///
 /// Wedging between two colliders is a dead end the controller cannot escape on
 /// its own: collide-and-slide blocks every horizontal direction, gravity is
@@ -90,13 +133,14 @@ pub(crate) fn capsule_fits(
 /// Tries straight up first (the way out of a V-shaped wedge), then progressively
 /// wider offsets. Returns `None` if the body is buried too deeply to rescue,
 /// which is preferable to teleporting it somewhere arbitrary.
-pub(crate) fn unwedge(
+pub(crate) fn unwedge_where(
     spatial: &SpatialQuery,
     collider: &Collider,
     from: Vec3,
     rot: Quat,
     filter: &SpatialQueryFilter,
     radius: f32,
+    solid: &dyn Fn(Entity) -> bool,
 ) -> Option<Vec3> {
     const RINGS: [f32; 5] = [0.6, 1.2, 2.0, 3.2, 5.0];
     for scale in RINGS {
@@ -115,7 +159,7 @@ pub(crate) fn unwedge(
         ];
         for off in candidates {
             let p = from + off;
-            if capsule_fits(spatial, collider, p, rot, filter) {
+            if capsule_fits_where(spatial, collider, p, rot, filter, solid) {
                 return Some(p);
             }
         }
@@ -185,6 +229,16 @@ pub struct AvatarTimers {
     /// Seconds spent airborne while gravity is being applied but the body is
     /// not actually moving — the signature of being wedged.
     pub stuck_time: f32,
+    /// Whether a non-finite move on this avatar has been reported yet.
+    pub non_finite_reported: bool,
+    /// Whether this stuck spell has been reported; cleared once the body
+    /// moves or lands again.
+    pub stuck_reported: bool,
+    /// How long a jump pressed while seated has been waiting.
+    pub seated_jump_age: f32,
+    /// The collider the avatar last stood on, for the ground line in the log.
+    /// Kept through jumps, so only a NEW surface is reported.
+    pub last_ground: Option<Entity>,
 }
 
 impl Default for AvatarTimers {
@@ -196,9 +250,17 @@ impl Default for AvatarTimers {
             // Nothing to consume until a real press clears this.
             jump_consumed: true,
             stuck_time: 0.0,
+            non_finite_reported: false,
+            stuck_reported: false,
+            seated_jump_age: 0.0,
+            last_ground: None,
         }
     }
 }
+
+/// How long a jump pressed while seated stays pending, seconds: a joined
+/// player's press reaches the host a round trip later.
+const SEATED_JUMP_HOLD: f32 = 0.5;
 
 pub(crate) struct AvatarLocomotionPlugin;
 
@@ -229,8 +291,10 @@ fn attach_timers(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_locomotion(
     time: Res<Time>,
+    gravity: Option<Res<Gravity>>,
     spatial: SpatialQuery,
     move_and_slide: MoveAndSlide,
+    names: Query<&Name>,
     mut q: Query<
         (
             Entity,
@@ -244,6 +308,7 @@ pub(crate) fn drive_locomotion(
             Option<&super::climb::AvatarClimb>,
             Option<&super::landing::AvatarLanding>,
             Option<&super::abilities::AvatarAbilities>,
+            Option<&super::seat::AvatarSeated>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -252,11 +317,43 @@ pub(crate) fn drive_locomotion(
     if dt <= 0.0 {
         return;
     }
+    let g = downward_gravity(gravity.as_deref());
+    // Below this much movement in a frame, an airborne body has stopped.
+    let stuck_below = STUCK_SPEED * (g / STANDARD_GRAVITY_F32) * dt;
+    // Solid colliders only, the set `move_and_slide` itself moves against. A
+    // sensor (a trigger volume, a touch zone) is walked through, so it is
+    // never ground, never a wall, and never a step.
+    let solid = |e: Entity| move_and_slide.colliders.contains(e);
 
-    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing, abilities)
+    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing, abilities, seated)
         in q.iter_mut()
     {
         let abilities = abilities.copied().unwrap_or_default();
+        // A seat owns the body outright too: it rides the seat
+        // (`seat::ride_seats`). A jump pressed while seated stays pending for
+        // `SEATED_JUMP_HOLD`, long enough to reach the host and be spent on
+        // getting up; an older one expires, so a press that meant something
+        // else in the seat (a handbrake) never fires when the rider leaves
+        // another way.
+        loco.seated = seated.is_some();
+        if loco.seated {
+            loco.grounded = true;
+            loco.planar_speed = 0.0;
+            loco.speed_norm = 0.0;
+            loco.vertical_velocity = 0.0;
+            loco.air_time = 0.0;
+            vel.0 = Vec3::ZERO;
+            if intent.jump_pressed {
+                timers.seated_jump_age += dt;
+                if timers.seated_jump_age > SEATED_JUMP_HOLD {
+                    intent.jump_pressed = false;
+                }
+            }
+            if !intent.jump_pressed {
+                timers.seated_jump_age = 0.0;
+            }
+            continue;
+        }
         // A climb owns the body outright. Letting the controller integrate at
         // the same time makes the two fight over position and the character
         // jitters off the ledge.
@@ -295,21 +392,36 @@ pub(crate) fn drive_locomotion(
             probe_origin,
             gap_to_feet + GROUND_PROBE,
             &filter,
+            &solid,
         )
         // Ground only counts if the surface is within reach of the feet;
         // a hit further away means the character is genuinely airborne.
-        .filter(|(_, dist)| *dist <= gap_to_feet + GROUND_SNAP_TOLERANCE);
+        .filter(|(_, dist, _)| *dist <= gap_to_feet + GROUND_SNAP_TOLERANCE);
 
         let was_grounded = loco.grounded;
         let (grounded, normal) = match hit {
-            Some((n, _)) if n.angle_between(Vec3::Y).to_degrees() <= MAX_SLOPE_DEG => (true, n),
+            Some((n, _, _)) if n.angle_between(Vec3::Y).to_degrees() <= MAX_SLOPE_DEG => (true, n),
             // A hit on a too-steep face is a wall: not ground, but also not
             // free air. Keep the normal for slide projection.
-            Some((n, _)) => (false, n),
+            Some((n, _, _)) => (false, n),
             None => (false, Vec3::Y),
         };
 
         loco.ground_normal = normal;
+
+        // Each new surface the avatar stands on is named once, so a character
+        // held up by something unseen has an answer in the log: the collider,
+        // and its gap to the feet (below zero, the feet are inside it).
+        if let (true, Some((_, dist, ground))) = (grounded, hit) {
+            if timers.last_ground != Some(ground) {
+                timers.last_ground = Some(ground);
+                let name = names.get(ground).map_or("unnamed", |n| n.as_str());
+                tracing::info!(
+                    "avatar: standing on {name} ({ground}), gap to the feet {:.3} m",
+                    dist - gap_to_feet
+                );
+            }
+        }
 
         // Landing edge: latch impact strength before vertical velocity resets.
         //
@@ -362,8 +474,9 @@ pub(crate) fn drive_locomotion(
         dir.y = 0.0;
         let dir = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::ZERO };
 
+        // A sprint stops at a person's top speed; a walk is never capped.
         let target_speed = if intent.sprint && abilities.sprint {
-            motion.run_speed * motion.sprint_multiplier
+            motion.capped_run_and_sprint().1
         } else if dir != Vec3::ZERO {
             motion.walk_speed
         } else {
@@ -401,7 +514,7 @@ pub(crate) fn drive_locomotion(
             && !timers.jump_consumed;
 
         if can_jump {
-            v.y = motion.jump_velocity();
+            v.y = motion.jump_velocity_under(g);
             timers.jump_consumed = true;
             timers.since_grounded = COYOTE_TIME + 1.0; // consume coyote window
         } else if grounded && v.y <= 0.0 {
@@ -436,7 +549,7 @@ pub(crate) fn drive_locomotion(
                 v.y = target.y.min(0.0);
             }
         } else {
-            v.y -= GRAVITY_MPS2 * dt;
+            v.y -= g * dt;
             // Terminal velocity, so a long fall cannot tunnel.
             v.y = v.y.max(-55.0);
         }
@@ -484,7 +597,7 @@ pub(crate) fn drive_locomotion(
                 // only ever fire on the first frame of contact.
                 cfg.ignore_origin_penetration = true;
                 if let Some(hit) =
-                    spatial.cast_shape(collider, tf.translation, tf.rotation, dir3, &cfg, &filter)
+                    spatial.cast_shape_predicate(collider, tf.translation, tf.rotation, dir3, &cfg, &filter, &solid)
                 {
                     let n = Vec3::from(hit.normal1).with_y(0.0).normalize_or_zero();
                     // Only a surface too steep to walk up is a wall.
@@ -517,8 +630,13 @@ pub(crate) fn drive_locomotion(
             |_hit| MoveAndSlideHitResponse::Accept,
         );
 
-        let mut new_pos = out.position;
-        let mut new_vel = out.projected_velocity;
+        // A collide-and-slide that begins inside geometry (a body snapped
+        // into overlap, as a replica can be) can hand back a non-finite
+        // result. Whatever is written below is permanent: the velocity feeds
+        // the next frame, the gait signal and, through the animation, every
+        // bone. Stay put for this frame instead.
+        let mut new_pos = if out.position.is_finite() { out.position } else { tf.translation };
+        let mut new_vel = if out.projected_velocity.is_finite() { out.projected_velocity } else { Vec3::ZERO };
 
         // ── Running into a wall should STOP you ─────────────────────────────
         //
@@ -618,12 +736,13 @@ pub(crate) fn drive_locomotion(
         if grounded && !can_jump && new_vel.y <= 0.0 && new_pos.is_finite() {
             let probe_radius = m.capsule_radius * 0.9;
             let gap = m.capsule_half_extent() - probe_radius;
-            if let Some((n, dist)) = move_and_slide_ground_probe(
+            if let Some((n, dist, _)) = move_and_slide_ground_probe(
                 &spatial,
                 &Collider::sphere(probe_radius),
                 new_pos,
                 gap + STEP_HEIGHT,
                 &filter,
+                &solid,
             ) {
                 let drop = dist - gap;
                 // Only snap to something we could have walked down, and only
@@ -662,15 +781,16 @@ pub(crate) fn drive_locomotion(
         // pinned between colliders. Left alone this never resolves — the fall
         // animation plays forever and no input helps.
         let moved_this_frame = (new_pos - tf.translation).length();
-        if !grounded && moved_this_frame < STUCK_EPSILON && !can_jump {
+        if !grounded && moved_this_frame < stuck_below && !can_jump {
             timers.stuck_time += dt;
         } else {
             timers.stuck_time = 0.0;
+            timers.stuck_reported = false;
         }
 
         if timers.stuck_time > STUCK_GRACE {
             if let Some(free) =
-                unwedge(&spatial, collider, new_pos, tf.rotation, &filter, m.capsule_radius)
+                unwedge_where(&spatial, collider, new_pos, tf.rotation, &filter, m.capsule_radius, &solid)
             {
                 warn!(
                     "avatar: wedged for {:.2}s — freeing to {:?}",
@@ -678,8 +798,52 @@ pub(crate) fn drive_locomotion(
                 );
                 new_pos = free;
                 new_vel = Vec3::ZERO;
+            } else if !timers.stuck_reported {
+                // No room anywhere near: say what holds the body, once per
+                // spell, so a character hanging in the air has an answer.
+                timers.stuck_reported = true;
+                let mut inside = Vec::new();
+                spatial.shape_intersections_callback(collider, new_pos, tf.rotation, &filter, |e| {
+                    inside.push(e);
+                    inside.len() < 8
+                });
+                let inside: Vec<String> = inside
+                    .iter()
+                    .map(|&e| {
+                        let name = names.get(e).map_or("unnamed", |n| n.as_str());
+                        format!("{name} ({e}, {})", if solid(e) { "solid" } else { "sensor" })
+                    })
+                    .collect();
+                let probe = hit.map(|(_, dist, ground)| {
+                    let name = names.get(ground).map_or("unnamed", |n| n.as_str());
+                    format!("{name} ({ground}), gap to the feet {:.3} m", dist - gap_to_feet)
+                });
+                tracing::warn!(
+                    "avatar: stuck in the air at {new_pos:?}, vertical speed {:.2} m/s, no free space nearby; \
+                     overlapping [{}]; ground probe: {}",
+                    new_vel.y,
+                    inside.join(", "),
+                    probe.as_deref().unwrap_or("nothing within reach")
+                );
             }
             timers.stuck_time = 0.0;
+        }
+
+        // Last line of defence before the state is kept: nothing non-finite is
+        // written, whatever above produced it. Said once per avatar, naming
+        // it, so the source can be found.
+        if !new_pos.is_finite() || !new_vel.is_finite() {
+            if !timers.non_finite_reported {
+                timers.non_finite_reported = true;
+                warn!(
+                    "avatar: non-finite move on {entity:?} ({:?}): pos {new_pos:?} vel {new_vel:?}, kept in place",
+                    body.control
+                );
+            }
+            if !new_pos.is_finite() {
+                new_pos = tf.translation;
+            }
+            new_vel = Vec3::ZERO;
         }
 
         tf.translation = new_pos;
@@ -688,29 +852,39 @@ pub(crate) fn drive_locomotion(
         // ── The gait signal ─────────────────────────────────────────────────
         let planar = Vec3::new(new_vel.x, 0.0, new_vel.z);
         loco.planar_speed = planar.length();
-        loco.speed_norm =
-            if motion.run_speed > 1e-3 { (loco.planar_speed / motion.run_speed).min(2.0) } else { 0.0 };
+        // Against the pace the body actually runs at, so a capped sprint
+        // reads as a run and not as a jog toward an unreachable pace.
+        let run = motion.capped_run_and_sprint().0;
+        loco.speed_norm = if run > 1e-3 { (loco.planar_speed / run).min(2.0) } else { 0.0 };
         loco.vertical_velocity = new_vel.y;
     }
 }
 
-/// Sphere-cast downward; return the surface normal and distance.
+/// Sphere-cast downward against the colliders `solid` admits; return the
+/// surface normal, the distance, and the collider hit.
 fn move_and_slide_ground_probe(
     spatial: &SpatialQuery,
     probe: &Collider,
     origin: Vec3,
     max_dist: f32,
     filter: &SpatialQueryFilter,
-) -> Option<(Vec3, f32)> {
-    let hit = spatial.cast_shape(
+    solid: &dyn Fn(Entity) -> bool,
+) -> Option<(Vec3, f32, Entity)> {
+    let hit = spatial.cast_shape_predicate(
         probe,
         origin,
         Quat::IDENTITY,
         Dir3::NEG_Y,
         &ShapeCastConfig::from_max_distance(max_dist),
         filter,
+        solid,
     )?;
-    Some((Vec3::from(hit.normal1), hit.distance))
+    let normal = Vec3::from(hit.normal1);
+    // A cast that starts overlapping can report a zero normal. That is no
+    // surface to stand on or walk along, and stored as the ground normal it
+    // turns every angle measured against it into NaN, so it counts as no hit.
+    (normal.is_finite() && normal.length_squared() > 0.25 && hit.distance.is_finite())
+        .then_some((normal, hit.distance, hit.entity))
 }
 
 /// Lift, move, and drop — a position correction, never an impulse.
@@ -726,6 +900,9 @@ fn try_step_up(
     filter: &SpatialQueryFilter,
     half_extent: f32,
 ) -> Option<Vec3> {
+    // Solid colliders only, as in `drive_locomotion`.
+    let solid = |e: Entity| move_and_slide.colliders.contains(e);
+
     // 1. Is there headroom to lift into?
     let lifted = from + Vec3::Y * STEP_HEIGHT;
     // `ignore_origin_penetration` MUST be set.
@@ -737,7 +914,7 @@ fn try_step_up(
     // ever tried anything. Step-up has never worked.
     let mut headroom = ShapeCastConfig::from_max_distance(STEP_HEIGHT);
     headroom.ignore_origin_penetration = true;
-    if spatial.cast_shape(collider, from, rot, Dir3::Y, &headroom, filter).is_some() {
+    if spatial.cast_shape_predicate(collider, from, rot, Dir3::Y, &headroom, filter, &solid).is_some() {
         return None;
     }
 
@@ -776,7 +953,7 @@ fn try_step_up(
     // side, and a zero-distance hit would "land" the character in mid-air.
     let mut down = ShapeCastConfig::from_max_distance(STEP_HEIGHT + 0.05);
     down.ignore_origin_penetration = true;
-    let Some(drop) = spatial.cast_shape(collider, moved.position, rot, Dir3::NEG_Y, &down, filter)
+    let Some(drop) = spatial.cast_shape_predicate(collider, moved.position, rot, Dir3::NEG_Y, &down, filter, &solid)
     else {
         return None;
     };

@@ -13,8 +13,9 @@
 //! average), where in the cell it stands, its scale, turn, variant and tint. Every draw is taken whatever
 //! the rules decide, so one cell's outcome never shifts another's. A
 //! candidate is kept when the ground passes the layer's rules there, read
-//! from the SURFACE the meshers draw (`surface_data`): the footprint, the
-//! height, the slope from the normal, the material weights, and, with
+//! from the SURFACE the meshers draw (`surface_data`): the footprint, ground
+//! under it at all (no hole of a sparse surface), the height, the slope from
+//! the normal, the material weights, and, with
 //! AvoidRoads, the corridors of the Road and Path splines the bake laid.
 //! Nothing placed is stored: an edit, a bake or a layer change places the
 //! affected tiles again, and the same inputs place the same instances on
@@ -64,6 +65,7 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::height_query::{height_at_world, material_weights_at_world};
+use super::mesh::ground_at_world;
 use super::layer_instances::{compose_world_pose, layer_id, TerrainScatter};
 use super::layers::{rects_overlap, rotated_rect_bounds, surface_data, PreparedLayers, SplineMode, TerrainBaked};
 use super::material::TerrainMaterial;
@@ -332,8 +334,7 @@ impl ScatterLayer {
         if !(self.density > 0.0) || (self.kind == ScatterKind::Custom && self.mesh_asset.trim().is_empty()) {
             return false;
         }
-        let (extent_x, extent_z) = (config.chunks_x as i32, config.chunks_z as i32);
-        if chunk.x < -extent_x || chunk.x > extent_x || chunk.y < -extent_z || chunk.y > extent_z {
+        if !config.contains_chunk(chunk) {
             return false;
         }
         match self.footprint.and_then(|footprint| footprint.bounds()) {
@@ -529,6 +530,11 @@ pub fn place_tile(
             }
             let p = origin + Vec2::new((column as f32 + x_draw) * cell, (row as f32 + z_draw) * cell);
             if layer.footprint.is_some_and(|footprint| !footprint.contains(p)) {
+                continue;
+            }
+            // Nothing stands over a hole of a sparse surface, where no ground
+            // is drawn.
+            if !ground_at_world(config, ground, p.x, p.y) {
                 continue;
             }
             let h = height_at_world(config, ground, p.x, p.y);
@@ -1174,15 +1180,18 @@ pub fn update_terrain_scatter(
     // Tiles come into range without a batch, and stale batches. A tile whose
     // chunk the layer cannot place on is settled here without a build.
     let mut wanted: Vec<Wanted> = Vec::new();
-    let (extent_x, extent_z) = (config.chunks_x as i32, config.chunks_z as i32);
+    let (grid_min, grid_max) = (config.chunk_min(), config.chunk_max());
     for layer in layers.values() {
         let tpc = tiles_per_chunk(layer, config.chunk_size);
         let tile_size = size / tpc as f32;
         let lo = ((viewer - Vec2::splat(layer.radius)) / tile_size).floor();
         let hi = ((viewer + Vec2::splat(layer.radius)) / tile_size).floor();
-        let x_range = (lo.x as i32).max(-extent_x * tpc)..=(hi.x as i32).min(extent_x * tpc + tpc - 1);
+        // The grid's first tile, and the last tile of its last chunk.
+        let first = grid_min.saturating_mul(IVec2::splat(tpc));
+        let last = grid_max.saturating_mul(IVec2::splat(tpc)).saturating_add(IVec2::splat(tpc - 1));
+        let x_range = (lo.x as i32).max(first.x)..=(hi.x as i32).min(last.x);
         for x in x_range {
-            for z in (lo.y as i32).max(-extent_z * tpc)..=(hi.y as i32).min(extent_z * tpc + tpc - 1) {
+            for z in (lo.y as i32).max(first.y)..=(hi.y as i32).min(last.y) {
                 let tile = IVec2::new(x, z);
                 if batches.contains_key(&(layer.id, tile)) {
                     continue;
@@ -1340,8 +1349,7 @@ mod tests {
     }
 
     fn every_chunk(config: &TerrainConfig) -> impl Iterator<Item = IVec2> {
-        let (x, z) = (config.chunks_x as i32, config.chunks_z as i32);
-        (-x..=x).flat_map(move |cx| (-z..=z).map(move |cz| IVec2::new(cx, cz)))
+        config.grid_chunks()
     }
 
     #[test]
@@ -1513,6 +1521,33 @@ mod tests {
         let placed = place(&strip, IVec2::new(-2, 2), &config, &bare);
         assert!(!placed.is_empty());
         assert!(placed.iter().all(|i| (i.position.x + 48.0).abs() <= 5.0));
+    }
+
+    #[test]
+    fn nothing_is_placed_over_a_hole() {
+        use crate::terrain::material::MATERIAL_SLOT_NONE;
+
+        let config = config();
+        let grass = |_: Vec2| TerrainMaterial::Grass;
+        let mut data = ground(&config, |_| 0.0, Some(&grass));
+        // The west half of chunk (0, 0)'s tile (cells 32..48 on both axes)
+        // holds no material, which on a sparse surface makes it holes.
+        let w = data.cache_width as usize;
+        for z in 32..48 {
+            for x in 32..40 {
+                data.material_cache[z * w + x] = [MATERIAL_SLOT_NONE; 4];
+            }
+        }
+        let layer = ScatterLayer::default();
+        let full = place(&layer, IVec2::ZERO, &config, &data);
+        data.sparse_surface = true;
+        let sparse = place(&layer, IVec2::ZERO, &config, &data);
+        assert!(!sparse.is_empty() && sparse.len() < full.len(), "{} of {} kept", sparse.len(), full.len());
+        // A cell's draws do not depend on the ground, so the holes take away
+        // exactly the instances over them.
+        let over_ground: Vec<ScatterInstance> =
+            full.iter().copied().filter(|i| ground_at_world(&config, &data, i.position.x, i.position.z)).collect();
+        assert_eq!(sparse, over_ground);
     }
 
     fn road(mode: SplineMode) -> LayerDesc {

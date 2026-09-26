@@ -324,9 +324,11 @@ pub enum SlintAction {
     SketchCanvasClose,
 
     /// Status-bar display unit dropdown picked a new symbol.
-    /// Carries the canonical symbol ("m" / "cm" / "mm" / "ft" / "in" /
-    /// "studs"); the drain handler validates it via `Unit::from_symbol`
-    /// and rejects unknown values so a typo doesn't poison state.
+    /// Carries the symbol ("m" / "cm" / "mm" / "ft" / "in" / "stud"); the
+    /// drain handler parses it with `Unit::from_any`, so any spelling picks
+    /// the current stud (never the legacy one, which only a file's own
+    /// unit can name), and rejects unknown values so a typo doesn't poison
+    /// state.
     SetDisplayUnit(String),
 
     // (PickWheel removed: the BrickColor wheel drill is now local to the Slint
@@ -393,6 +395,11 @@ pub enum SlintAction {
     // History panel
     HistoryJumpTo(i32),
     HistoryClear,
+    // History panel, Restore points view (`restore_points.rs`).
+    RestorePointsShown,
+    RestorePointSave(String),
+    RestorePointRevert(String),
+    RestorePointCancelPending,
 
     // Procurement — RFQ Builder and Purchase Order Tracker. Every mutation
     // routes through the Odoo state machine in `manufacturing::purchase` and is
@@ -453,6 +460,12 @@ pub enum SlintAction {
     /// Execute a script from the command bar: (language, source_code)
     ExecuteScript(String, String),
     ClearScriptOutput,
+    /// Output: copy one line and its stack (by entry id).
+    CopyOutputLine(i32),
+    /// Output: copy every line the filters show.
+    CopyOutputVisible,
+    /// Output: show or hide a line's stack (by entry id).
+    ToggleOutputStack(i32),
     
     // Bottom panel mode (Output / Timeline tab switch)
     SetBottomPanel(String),
@@ -488,9 +501,6 @@ pub enum SlintAction {
     /// into the open Space, named by the text field (empty picks a name),
     /// starting from the material currently picked for painting.
     AddTerrainMaterial(String),
-    BrushSizeChanged(f32),
-    BrushStrengthChanged(f32),
-    BrushFalloffChanged(String),
     ImportHeightmap,
     ExportHeightmap,
     
@@ -527,6 +537,8 @@ pub enum SlintAction {
     /// A control whose backend is not built yet: "server" | "network-panel"
     /// | "collaboration" | "stress-test". Answered with a notification.
     UnbuiltFeature(String),
+    /// Fold the Ribbon's tool rows away (true) or bring them back (false).
+    SetRibbonCollapsed(bool),
     SpawnSyntheticClients(i32),
     DisconnectAllClients,
     
@@ -727,6 +739,23 @@ pub enum SlintAction {
     /// Caret moved in the code editor, 1-based (line, column). Drives the
     /// completion list.
     ScriptCaretMoved(i32, i32),
+    /// Save the active script or code tab: the Save button, or Ctrl+S while
+    /// the editor has focus.
+    ScriptSave,
+    /// The unsaved-changes prompt's three answers.
+    UnsavedChangesSave,
+    UnsavedChangesDiscard,
+    UnsavedChangesCancel,
+    /// An editing key the engine applies (script_editor::editing): the key,
+    /// then the selection's anchor and cursor as byte offsets.
+    ScriptEditorKey(String, i32, i32),
+    /// The find bar: a query with its case sensitivity, a step, a replace.
+    ScriptFind(String, bool),
+    ScriptFindStep(bool),
+    ScriptReplace(String),
+    ScriptReplaceAll(String),
+    ScriptFindClose,
+    ScriptGoToLine(i32),
     /// Accept completion item at this index.
     ScriptCompletionAccept(i32),
     /// Move the selection by a delta (-1/+1 arrows, -10/+10 page keys).
@@ -825,6 +854,10 @@ pub struct OutputConsole {
     pub max_entries: usize,
     pub auto_scroll: bool,
     pub filter_level: LogLevel,
+    /// Bumped on every change to `entries`. The panel rebuilds its text when
+    /// this moves; the entry count alone stops moving once the buffer is full
+    /// and every push trims one line.
+    pub revision: u64,
 }
 
 impl OutputConsole {
@@ -850,8 +883,36 @@ impl OutputConsole {
 
     /// Push with an explicit source tag for filtering (e.g. "rune", "luau")
     pub fn push_with_source(&mut self, level: LogLevel, message: String, source: &str) {
+        self.push_script(level, source, message, "", "", 0, Vec::new());
+    }
+
+    /// Push a line a script produced, with where it came from: the script's
+    /// instance path (`script`, e.g. "Workspace.Zombie.AI"), its source file
+    /// and line (the Output row opens that line), and the stack frames, top
+    /// first. Empty strings and line 0 mean unknown.
+    pub fn push_script(
+        &mut self,
+        level: LogLevel,
+        source: &str,
+        message: String,
+        script: &str,
+        file: &str,
+        line: u32,
+        stack: Vec<String>,
+    ) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.entries.push(LogEntry { level, message, timestamp, source: source.to_string() });
+        self.revision = self.revision.wrapping_add(1);
+        self.entries.push(LogEntry {
+            id: self.revision,
+            level,
+            message,
+            timestamp,
+            source: source.to_string(),
+            script: script.to_string(),
+            file: file.to_string(),
+            line,
+            stack,
+        });
 
         // Default cap bumped from 1k → 10k so hot-reload diagnostics
         // and flood-style per-frame logging stay visible long enough
@@ -867,6 +928,7 @@ impl OutputConsole {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Persist the current buffer to `<space_root>/.eustress/output.log`.
@@ -891,6 +953,10 @@ impl OutputConsole {
                 message: e.message.clone(),
                 timestamp: e.timestamp.clone(),
                 source: e.source.clone(),
+                script: e.script.clone(),
+                file: e.file.clone(),
+                line: e.line,
+                stack: e.stack.clone(),
             })
             .collect();
         match serde_json::to_string(&serializable) {
@@ -907,11 +973,15 @@ impl OutputConsole {
     /// Replaces the current entries. Missing file = empty buffer (first open).
     pub fn load_from_space(&mut self, space_root: &std::path::Path) {
         self.entries.clear();
+        self.revision = self.revision.wrapping_add(1);
         let path = space_root.join(".eustress").join("output.log");
         let Ok(text) = std::fs::read_to_string(&path) else { return };
         let Ok(entries): Result<Vec<SerializableLogEntry>, _> = serde_json::from_str(&text)
             else { return };
-        self.entries = entries.into_iter().map(|e| LogEntry {
+        let first_id = self.revision;
+        self.revision = self.revision.wrapping_add(entries.len() as u64);
+        self.entries = entries.into_iter().enumerate().map(|(i, e)| LogEntry {
+            id: first_id.wrapping_add(1 + i as u64),
             level: match e.level.as_str() {
                 "warn" => LogLevel::Warn,
                 "error" => LogLevel::Error,
@@ -921,6 +991,10 @@ impl OutputConsole {
             message: e.message,
             timestamp: e.timestamp,
             source: e.source,
+            script: e.script,
+            file: e.file,
+            line: e.line,
+            stack: e.stack,
         }).collect();
     }
 }
@@ -933,16 +1007,36 @@ struct SerializableLogEntry {
     message: String,
     timestamp: String,
     source: String,
+    // Absent from logs saved before these fields existed.
+    #[serde(default)]
+    script: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: u32,
+    #[serde(default)]
+    stack: Vec<String>,
 }
 
 /// Log entry
 #[derive(Clone, Debug)]
 pub struct LogEntry {
+    /// Unique and increasing within a session, so a row keeps its identity
+    /// when the buffer trims from the front.
+    pub id: u64,
     pub level: LogLevel,
     pub message: String,
     pub timestamp: String,
-    /// Source tag for filtering: "rune", "luau", "system", etc.
+    /// Source tag for filtering: "rune", "luau", "play", "system", etc.
     pub source: String,
+    /// The script's instance path ("Workspace.Zombie.AI"), or "".
+    pub script: String,
+    /// The script's source file (absolute), or "".
+    pub file: String,
+    /// The line in `file`, or 0.
+    pub line: u32,
+    /// Stack frames, top first; empty when there is none.
+    pub stack: Vec<String>,
 }
 
 /// Log level
@@ -1266,9 +1360,22 @@ pub fn handle_window_close_request(
     windows: Query<(&Window, Has<bevy::window::PrimaryWindow>)>,
     mut floating: Option<ResMut<super::floating_windows::FloatingWindowManager>>,
     mut commands: Commands,
+    mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
 ) {
     let Some(mut state) = state else { return };
-    fn request_exit(state: &mut StudioState, exit_events: &mut MessageWriter<bevy::app::AppExit>) {
+    fn request_exit(
+        state: &mut StudioState,
+        exit_events: &mut MessageWriter<bevy::app::AppExit>,
+        tabs: Option<&mut super::center_tabs::CenterTabManager>,
+    ) {
+        // Unsaved script edits ask first; the answer continues the exit.
+        if let Some(tabs) = tabs {
+            let exit = super::center_tabs::TabCloseRequest::AppExit;
+            if !tabs.dirty_tabs_closed_by(exit).is_empty() {
+                tabs.pending_close = Some(exit);
+                return;
+            }
+        }
         if state.has_unsaved_changes {
             state.show_exit_confirmation = true;
         } else {
@@ -1281,7 +1388,7 @@ pub fn handle_window_close_request(
     // request the OS sends for it, handled below.
     let primary_focused = windows.iter().any(|(window, primary)| primary && window.focused);
     if primary_focused && keyboard.just_pressed(KeyCode::F4) && keyboard.pressed(KeyCode::AltLeft) {
-        request_exit(&mut state, &mut exit_events);
+        request_exit(&mut state, &mut exit_events, tab_manager.as_deref_mut());
     }
 
     // A window's X button. Studio's own window quits; a detached panel's
@@ -1290,7 +1397,7 @@ pub fn handle_window_close_request(
     for event in close_events.read() {
         let is_primary = windows.get(event.window).map_or(false, |(_, primary)| primary);
         if is_primary {
-            request_exit(&mut state, &mut exit_events);
+            request_exit(&mut state, &mut exit_events, tab_manager.as_deref_mut());
             continue;
         }
         let panel = floating.as_ref().and_then(|manager| {
@@ -1513,6 +1620,8 @@ impl Plugin for SlintUiPlugin {
         ));
 
         app
+            // Play start, pause, resume and stop, in the Output panel.
+            .add_systems(Update, log_play_state_to_output)
             // UI state resources
             .init_resource::<StudioState>()
             .init_resource::<OutputConsole>()
@@ -1559,9 +1668,9 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_data_sources_dialog.after(SlintSystems::Drain))
             // Services Browser: one-shot init pushed to Slint on first frame
             .init_resource::<ServicesBrowserInitialized>()
-            // Insert menu: one-shot push of the data-driven class catalog
-            // (ClassRegistry → grouped descriptors) to Slint.
-            .init_resource::<InsertClassesInitialized>()
+            // Insert menu: the catalog last pushed to Slint, rebuilt from the
+            // class templates on disk each time the menu or dialog opens.
+            .init_resource::<InsertMenuState>()
             // Theme: one-shot push of the persisted active theme into the
             // Theme global on first frame + signature-gated list re-push.
             .init_resource::<ThemeInitialized>()
@@ -1661,6 +1770,7 @@ impl Plugin for SlintUiPlugin {
             // Axis orientation gizmo (bottom-right of viewport)
             // History panel sync
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
+            .add_plugins(super::restore_points::RestorePointsPlugin)
             .init_resource::<super::procurement_bridge::ProcurementFocus>()
             .add_systems(Update, sync_procurement_to_slint.after(SlintSystems::Drain))
             // Dialog visibility mirror (camera blocking) + Forge dialog status
@@ -1729,10 +1839,17 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Services Browser: one-shot push of static catalog to Slint
             .add_systems(Update, init_services_browser_to_slint.after(SlintSystems::Drain))
-            // Insert menu: one-shot push of the data-driven class catalog.
-            // Runs after Drain (like the other one-shot Slint feeds) and
-            // self-gates until the ClassRegistry is populated.
-            .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
+            // Insert menu: rebuilds the catalog and the context rows when the
+            // menu or the Insert Object dialog opens. After the UI sync, which
+            // opens the dialog, and before the frame renders, so the first
+            // frame of either surface already shows the fresh rows.
+            .add_systems(
+                Update,
+                refresh_insert_menu
+                    .after(SlintSystems::Drain)
+                    .after(sync_bevy_to_slint)
+                    .before(render_slint_to_texture),
+            )
             // Theme: one-shot push of the active theme + list sync to Slint.
             .add_systems(Update, init_theme_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_theme_list_to_slint.after(SlintSystems::Drain))
@@ -1752,6 +1869,7 @@ impl Plugin for SlintUiPlugin {
                 .after(SlintSystems::Drain)
                 .before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_unsaved_changes_dialog.after(SlintSystems::Drain))
             .add_systems(Update, drain_pending_build.after(SlintSystems::Drain))
             .init_resource::<super::file_event_handler::PendingFileActions>()
             .init_resource::<super::file_event_handler::PendingUniversePath>()
@@ -1970,6 +2088,14 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_history_clear(move || q.push(SlintAction::HistoryClear));
     let q = queue.clone();
+    ui.on_restore_points_shown(move || q.push(SlintAction::RestorePointsShown));
+    let q = queue.clone();
+    ui.on_restore_point_save(move |label| q.push(SlintAction::RestorePointSave(label.to_string())));
+    let q = queue.clone();
+    ui.on_restore_point_revert(move |id| q.push(SlintAction::RestorePointRevert(id.to_string())));
+    let q = queue.clone();
+    ui.on_restore_point_cancel_pending(move || q.push(SlintAction::RestorePointCancelPending));
+    let q = queue.clone();
     ui.on_copy(move || q.push(SlintAction::Copy));
     let q = queue.clone();
     ui.on_cut(move || q.push(SlintAction::Cut));
@@ -2037,6 +2163,7 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_insert_into(move |id, node_type| q.push(SlintAction::InsertInto(id, node_type.to_string())));
     let q = queue.clone();
     ui.on_insert_object_request(move || q.push(SlintAction::OpenInsertObject));
+    ui.on_insert_menu_opened(|| INSERT_MENU_REFRESH.store(true, std::sync::atomic::Ordering::Relaxed));
     let q = queue.clone();
     ui.on_apply_keymap_preset(move |id| q.push(SlintAction::ApplyKeymapPreset(id.to_string())));
     let q = queue.clone();
@@ -2226,6 +2353,12 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_execute_script(move |lang, script| q.push(SlintAction::ExecuteScript(lang.to_string(), script.to_string())));
     let q = queue.clone();
     ui.on_clear_script_output(move || q.push(SlintAction::ClearScriptOutput));
+    let q = queue.clone();
+    ui.on_copy_output_line(move |id| q.push(SlintAction::CopyOutputLine(id)));
+    let q = queue.clone();
+    ui.on_copy_output_visible(move || q.push(SlintAction::CopyOutputVisible));
+    let q = queue.clone();
+    ui.on_toggle_output_stack(move |id| q.push(SlintAction::ToggleOutputStack(id)));
     
     // Bottom panel mode (Output ↔ Timeline tab switch)
     let q = queue.clone();
@@ -2323,12 +2456,6 @@ fn setup_slint_overlay(world: &mut World) {
         seed: seed.to_string(),
         preset: preset.to_string(),
     }));
-    let q = queue.clone();
-    ui.on_brush_size_changed(move |size| q.push(SlintAction::BrushSizeChanged(size)));
-    let q = queue.clone();
-    ui.on_brush_strength_changed(move |strength| q.push(SlintAction::BrushStrengthChanged(strength)));
-    let q = queue.clone();
-    ui.on_brush_falloff_changed(move |falloff| q.push(SlintAction::BrushFalloffChanged(falloff.to_string())));
     let q = queue.clone();
     ui.on_import_heightmap(move || q.push(SlintAction::ImportHeightmap));
     let q = queue.clone();
@@ -2477,6 +2604,30 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_script_caret_moved(move |line, col| q.push(SlintAction::ScriptCaretMoved(line, col)));
     let q = queue.clone();
+    ui.on_script_save(move || q.push(SlintAction::ScriptSave));
+    let q = queue.clone();
+    ui.on_unsaved_changes_save(move || q.push(SlintAction::UnsavedChangesSave));
+    let q = queue.clone();
+    ui.on_unsaved_changes_discard(move || q.push(SlintAction::UnsavedChangesDiscard));
+    let q = queue.clone();
+    ui.on_unsaved_changes_cancel(move || q.push(SlintAction::UnsavedChangesCancel));
+    let q = queue.clone();
+    ui.on_script_editor_key(move |key, anchor, cursor| {
+        q.push(SlintAction::ScriptEditorKey(key.to_string(), anchor, cursor))
+    });
+    let q = queue.clone();
+    ui.on_script_find(move |query, match_case| q.push(SlintAction::ScriptFind(query.to_string(), match_case)));
+    let q = queue.clone();
+    ui.on_script_find_step(move |forward| q.push(SlintAction::ScriptFindStep(forward)));
+    let q = queue.clone();
+    ui.on_script_replace(move |with| q.push(SlintAction::ScriptReplace(with.to_string())));
+    let q = queue.clone();
+    ui.on_script_replace_all(move |with| q.push(SlintAction::ScriptReplaceAll(with.to_string())));
+    let q = queue.clone();
+    ui.on_script_find_close(move || q.push(SlintAction::ScriptFindClose));
+    let q = queue.clone();
+    ui.on_script_go_to_line(move |line| q.push(SlintAction::ScriptGoToLine(line)));
+    let q = queue.clone();
     ui.on_script_completion_accept(move |idx| q.push(SlintAction::ScriptCompletionAccept(idx)));
     let q = queue.clone();
     ui.on_script_completion_move(move |delta| q.push(SlintAction::ScriptCompletionMove(delta)));
@@ -2498,6 +2649,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_sort_center_tabs(move |by| q.push(SlintAction::SortCenterTabs(by.to_string())));
     let q = queue.clone();
     ui.on_unbuilt_feature(move |id| q.push(SlintAction::UnbuiltFeature(id.to_string())));
+    let q = queue.clone();
+    ui.on_set_ribbon_collapsed(move |c| q.push(SlintAction::SetRibbonCollapsed(c)));
     let q = queue.clone();
     ui.on_soul_test_connection(move || q.push(SlintAction::SoulTestConnection));
 
@@ -3138,11 +3291,20 @@ fn sync_gui_elements_to_slint(
     service_q: Query<&crate::space::service_loader::ServiceComponent>,
     // Set by `probe_gui_element_changes` off the main thread (see its doc).
     mut gui_latch: ResMut<GuiElementsChanged>,
+    // In Play the shared HUD draws the ScreenGuis; the overlay previews them
+    // in Edit only.
+    play: Option<Res<crate::play_datamodel::PlayDataModel>>,
+    // The UI Builder's live preview (`ui_builder/mod.rs`): drawn after the
+    // Space's own ScreenGuis, so it sits on top. Empty unless Preview is on.
+    ui_builder_preview: Option<Res<crate::ui_builder::UiBuilderPreview>>,
 ) {
     let Some(slint_context) = slint_context else { return };
 
-    // Skip sync if nothing changed — major FPS optimization
-    if !std::mem::take(&mut gui_latch.bypass_change_detection().0) {
+    // Skip sync if nothing changed — major FPS optimization. A change to the
+    // UI Builder's preview counts as a change.
+    let latched = std::mem::take(&mut gui_latch.bypass_change_detection().0);
+    let preview_changed = ui_builder_preview.as_ref().is_some_and(|p| p.is_changed());
+    if !latched && !preview_changed {
         return;
     }
 
@@ -3268,6 +3430,9 @@ fn sync_gui_elements_to_slint(
     for (e, ct, x, y) in leaked.iter().take(20) {
         debug!("👻 [gui-overlay] accepted: entity={:?} class={} pos=({:.0},{:.0})", e, ct, x, y);
     }
+    if play.is_some() {
+        elements.clear();
+    }
     elements.sort_by_key(|(_, e)| e.z_order);
 
     // Viewport extent in LOGICAL px — the same space the Slint overlay lays
@@ -3280,7 +3445,7 @@ fn sync_gui_elements_to_slint(
     let mut rect_cache: std::collections::HashMap<Entity, (f32, f32, f32, f32)> =
         std::collections::HashMap::new();
 
-    let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
+    let mut slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
         let (rx, ry, rw, rh) =
             resolve_gui_rect(*entity, &lookup, viewport_extent, &mut rect_cache);
 
@@ -3326,7 +3491,11 @@ fn sync_gui_elements_to_slint(
             text_b: e.text_color[2],
             text_a: e.text_color[3],
             font_size: e.font_size,
-            text_align: e.text_align.as_str().into(),
+            font_weight: e.font_weight,
+            // main.slint compares lowercase names; the display carries the
+            // enum's ("Left", "Top").
+            text_align: e.text_align.to_ascii_lowercase().into(),
+            text_y_align: e.text_y_align.to_ascii_lowercase().into(),
             image_source,
             has_image,
             class_type: e.class_type.as_str().into(),
@@ -3336,6 +3505,10 @@ fn sync_gui_elements_to_slint(
     // Update the live model row by row. Replacing it rebuilt and repainted
     // every overlay element whenever any one of them changed, and a HUD that
     // a script updates every frame changes one every frame.
+    if let Some(preview) = ui_builder_preview.as_deref() {
+        slint_elements.extend(crate::ui_builder::preview_rows(preview, viewport_extent));
+    }
+
     let current = ui.get_gui_elements();
     if let Some(live) = current.as_any().downcast_ref::<slint::VecModel<GuiElementData>>() {
         let old_len = live.row_count();
@@ -3647,7 +3820,17 @@ pub fn update_slint_ui_focus(
     frames: Res<bevy::diagnostic::FrameCount>,
     // Cursor + button signature of the last GUI hit-test (see below).
     mut hit_sig: Local<Option<(i32, i32, u8)>>,
+    // What held the keyboard last frame, for the change log below.
+    mut keyboard_holders: Local<Vec<&'static str>>,
+    // In Play the shared HUD hit test answers for ScreenGuis, and learns
+    // from here when Studio's own UI has the input.
+    hud: (
+        Option<Res<crate::play_datamodel::PlayDataModel>>,
+        Option<Res<eustress_play_runtime::hud_input::HudPointer>>,
+        Option<ResMut<eustress_play_runtime::hud_input::GuiInputBlocked>>,
+    ),
 ) {
+    let (play, hud_pointer, mut gui_blocked) = hud;
     // Block engine keyboard handling whenever ANY Slint modal is open
     // or a text input has focus. The atomic this feeds is what the
     // camera controller + keybindings module read each frame before
@@ -3655,66 +3838,116 @@ pub fn update_slint_ui_focus(
     // through the modal backdrop to the 3D viewport and the user's
     // typing also moves the camera.
     //
-    // Every `show-*-dialog` property on the root StudioWindow goes
-    // here. Missing one means that modal's dialog backdrop absorbs
-    // mouse clicks but keyboard events still escape — the bug the
-    // Simulation Settings modal reproduced.
-    let any_focus = slint_context.as_ref()
-        .map(|ctx| {
-            let w = &ctx.window;
-            w.get_any_input_has_focus()
-                || w.get_command_bar_has_focus()
-                // Properties-panel filter box. Deliberately NOT folded into
-                // `any-input-has-focus`: that flag also pauses the properties
-                // sync, and the filter needs the sync to run in order to
-                // re-filter. This only stops keystrokes reaching the camera.
-                || w.get_property_search_has_focus()
-                // Explorer inline rename (F2): a TreeItem TextInput has
-                // keyboard focus while the node id is >= 0. Without this
-                // the rename field types into the void and WASD leaks to
-                // the camera ("F2 moves me around" — 2026-05-22).
-                || w.get_explorer_renaming_node_id() >= 0
-                // Dialogs — every one must be listed here.
-                || w.get_show_settings_dialog()
-                || w.get_show_exit_confirmation()
-                || w.get_show_publish_dialog()
-                || w.get_show_login_dialog()
-                || w.get_show_keybindings_dialog()
-                || w.get_show_about_dialog()
-                || w.get_show_find_dialog()
-                || w.get_show_forge_connect_dialog()
-                || w.get_show_stress_test_dialog()
-                || w.get_show_sync_domain_dialog()
-                || w.get_show_simulation_settings_dialog()
-                // Add-Attribute modal — without this, scrolling its type list
-                // leaked to the camera and zoomed the 3D viewport.
-                || w.get_show_attribute_dialog()
-                || w.get_show_rename_tag_dialog()
-                || w.get_show_edit_label_dialog()
-                // New Universe / New Space two-step creation modals. Without
-                // these, typing the universe/space name leaked WASD + shortcut
-                // keys to the 3D camera ("it moves me around" — 2026-06-02).
-                || w.get_show_new_universe_dialog()
-                || w.get_show_new_space_dialog()
-                // Insert Object's class search, the feedback and API-key
-                // forms, and the Data menu's three dialogs (typing a source
-                // name or endpoint used to fly the camera and hit Delete).
-                || w.get_show_insert_object_dialog()
-                || w.get_show_feedback_dialog()
-                || w.get_show_api_key_dialog()
-                || w.get_show_global_sources_window()
-                || w.get_show_domains_window()
-                || w.get_show_global_variables_window()
-        })
-        .unwrap_or(false);
+    // Full-window modals: each draws the modal backdrop over the whole window,
+    // viewport included. The backdrop only stops Slint widgets behind it; the
+    // world reads the pointer from the viewport rectangle, so while a modal is
+    // up it takes neither keys nor pointer input (a click on a dialog button
+    // must not also select the part behind it). Every `show-*` dialog whose
+    // component draws that backdrop goes here; one missing lets its clicks
+    // and keys reach the world.
+    //
+    // Every term is named, so the log below can say which one holds the
+    // keyboard ("WASD stopped moving the camera" was a flag left true by a
+    // field that no longer existed, and nothing said which).
+    let mut holders: Vec<&'static str> = Vec::new();
+    let mut modal_open = false;
+    if let Some(ctx) = slint_context.as_ref() {
+        let w = &ctx.window;
+        let modals: [(&'static str, bool); 23] = [
+            ("the unsaved-changes dialog", w.get_show_unsaved_changes_dialog()),
+            ("Settings", w.get_show_settings_dialog()),
+            ("the exit confirmation", w.get_show_exit_confirmation()),
+            ("Publish", w.get_show_publish_dialog()),
+            ("Login", w.get_show_login_dialog()),
+            ("Keyboard shortcuts", w.get_show_keybindings_dialog()),
+            ("About", w.get_show_about_dialog()),
+            ("Forge connect", w.get_show_forge_connect_dialog()),
+            ("the stress test", w.get_show_stress_test_dialog()),
+            ("Sync domain", w.get_show_sync_domain_dialog()),
+            ("Simulation settings", w.get_show_simulation_settings_dialog()),
+            // Add-Attribute modal: without it, scrolling its type list
+            // leaked to the camera and zoomed the 3D viewport.
+            ("Add Attribute", w.get_show_attribute_dialog()),
+            ("Rename tag", w.get_show_rename_tag_dialog()),
+            ("Edit label", w.get_show_edit_label_dialog()),
+            // Typing a new universe's or space's name leaked WASD and
+            // shortcut keys to the 3D camera ("it moves me around").
+            ("New Universe", w.get_show_new_universe_dialog()),
+            ("New Space", w.get_show_new_space_dialog()),
+            // Insert Object's class search, the feedback and API-key forms,
+            // and the Data menu's three dialogs (typing a source name or
+            // endpoint used to fly the camera and hit Delete).
+            ("Insert Object", w.get_show_insert_object_dialog()),
+            ("Feedback", w.get_show_feedback_dialog()),
+            ("the API key dialog", w.get_show_api_key_dialog()),
+            ("Data sources", w.get_show_global_sources_window()),
+            ("Domains", w.get_show_domains_window()),
+            ("Global variables", w.get_show_global_variables_window()),
+            // History's revert confirm.
+            ("the revert confirm", w.get_show_revert_confirm()),
+        ];
+        for (name, open) in modals {
+            if open {
+                holders.push(name);
+                modal_open = true;
+            }
+        }
+        let script_tab = {
+            let tab = w.get_active_tab_type();
+            tab == "script" || tab == "code"
+        };
+        let inputs: [(&'static str, bool); 7] = [
+            // Properties fields and the Workshop chat report here.
+            ("a Properties or Workshop field (any-input-has-focus)", w.get_any_input_has_focus()),
+            ("the command bar", w.get_command_bar_has_focus()),
+            // Properties-panel filter box. Deliberately NOT folded into
+            // `any-input-has-focus`: that flag also pauses the properties
+            // sync, and the filter needs the sync to run in order to
+            // re-filter. This only stops keystrokes reaching the camera.
+            ("the Properties filter", w.get_property_search_has_focus()),
+            // Script editor. Honoured only while a script or code tab is
+            // showing: the editor is destroyed when the tab changes, and a
+            // flag a destroyed editor left true must never hold the
+            // engine's keyboard shut.
+            ("the script editor", w.get_script_editor_has_focus() && script_tab),
+            // Explorer inline rename (F2): a TreeItem TextInput has keyboard
+            // focus while the node id is >= 0.
+            ("an Explorer rename", w.get_explorer_renaming_node_id() >= 0),
+            // Find & Replace floats beside the viewport without a backdrop:
+            // it takes the keyboard, the world keeps the pointer.
+            ("Find & Replace", w.get_show_find_dialog()),
+            // A script's purchase prompt in Play: Enter buys and Escape
+            // cancels it, so neither may reach the game or stop Play.
+            ("a purchase prompt", w.get_show_purchase_prompt()),
+        ];
+        for (name, on) in inputs {
+            if on {
+                holders.push(name);
+            }
+        }
+    }
     // In-viewport billboard text editing captures the keyboard exactly like
     // a Slint text input: while typing into a double-clicked billboard,
     // WASD/Q/E must not fly the camera and Delete must not delete parts.
-    let any_focus = any_focus
-        || billboard_edit
-            .as_deref()
-            .map(|b| b.editing.is_some())
-            .unwrap_or(false);
+    if billboard_edit.as_deref().is_some_and(|b| b.editing.is_some()) {
+        holders.push("a billboard text edit");
+    }
+    // The frame a purchase prompt closes on: the Escape that cancelled it
+    // must not also stop Play.
+    if super::purchase_prompt::holds_keys(frames.0) {
+        holders.push("the frame a purchase prompt closed");
+    }
+    let any_focus = !holders.is_empty();
+    // Say when the keyboard is taken from the viewport or given back, and by
+    // what, so a held keyboard is never a mystery again.
+    if *keyboard_holders != holders {
+        if holders.is_empty() {
+            info!("⌨️ keyboard back to the viewport");
+        } else {
+            info!("⌨️ keyboard held by: {}", holders.join(", "));
+        }
+        *keyboard_holders = holders;
+    }
     ui_focus.text_input_focused = any_focus;
     OVERLAY_INPUT_FOCUSED.store(any_focus, std::sync::atomic::Ordering::Relaxed);
 
@@ -3803,17 +4036,73 @@ pub fn update_slint_ui_focus(
         })
         .unwrap_or(false);
 
+    // The purchase prompt covers the whole window: a click on Buy is not a
+    // click in the game behind it.
+    let purchase_prompt_open = slint_context
+        .as_ref()
+        .map(|ctx| ctx.window.get_show_purchase_prompt())
+        .unwrap_or(false);
+
     // Check if cursor is inside the 3D viewport bounds (logical pixels)
+    // The UI Builder panel floats over the viewport's left edge (main.slint
+    // places it at `ui_builder::PANEL_X/Y`): the cursor on it is on UI, not
+    // on the world, so a click there never selects the part behind it.
+    let over_ui_builder = slint_context.as_ref().is_some_and(|ctx| {
+        crate::ui_builder::panel_contains(&ctx.window, (cursor_pos.x, cursor_pos.y), (vb_x, vb_y, vb_w, vb_h))
+    });
+    // Likewise the terrain tool bar at the viewport's top left: a click on
+    // it must not sculpt the ground behind it.
+    let over_terrain_bar = slint_context.as_ref().is_some_and(|ctx| {
+        crate::terrain_tools_ui::tool_bar_contains(&ctx.window, (cursor_pos.x, cursor_pos.y), (vb_x, vb_y, vb_w, vb_h))
+    });
     let in_viewport = scene_tab_active
         && !popup_open
+        && !modal_open
+        && !purchase_prompt_open
+        && !over_ui_builder
+        && !over_terrain_bar
         && cursor_pos.x >= vb_x
         && cursor_pos.x <= vb_x + vb_w
         && cursor_pos.y >= vb_y
         && cursor_pos.y <= vb_y + vb_h;
 
     // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
+    // The HUD takes no input while another tab, a menu, the purchase prompt
+    // or a Studio text field has it.
+    if let Some(blocked) = gui_blocked.as_deref_mut() {
+        let now = !scene_tab_active || popup_open || purchase_prompt_open || over_ui_builder || ui_focus.text_input_focused;
+        if blocked.0 != now {
+            blocked.0 = now;
+        }
+    }
     ui_focus.has_focus = !in_viewport;
     ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
+
+    // A press in the 3D viewport leaves whatever text field had the
+    // keyboard: Slint's focus moves to the content area's shortcut scope (so
+    // a live field's own focus-out runs), and the flags fields report about
+    // themselves are cleared, since a field destroyed while focused never
+    // clears its own. Without this, one such flag held WASD shut for the
+    // rest of the session while clicks still worked.
+    if in_viewport
+        && (mouse.just_pressed(MouseButton::Left)
+            || mouse.just_pressed(MouseButton::Right)
+            || mouse.just_pressed(MouseButton::Middle))
+    {
+        if let Some(ctx) = slint_context.as_ref() {
+            let w = &ctx.window;
+            w.invoke_release_keyboard_focus();
+            if w.get_any_input_has_focus() {
+                w.set_any_input_has_focus(false);
+            }
+            if w.get_property_search_has_focus() {
+                w.set_property_search_has_focus(false);
+            }
+            if w.get_script_editor_has_focus() {
+                w.set_script_editor_has_focus(false);
+            }
+        }
+    }
 
     // The hit-test below walks every GUI element. On a MindSpace Space that
     // is tens of thousands of billboard labels: 50 ms per frame measured on
@@ -3842,6 +4131,21 @@ pub fn update_slint_ui_focus(
             ui_focus.gui_clicked_entity = None;
             return;
         }
+    }
+
+    // In Play the HUD drew the ScreenGuis and its hit test took this frame's
+    // clicks (it runs in PreUpdate), so its answer stands in for the rect
+    // test below: `gui_element_hit` for the pull, the clicked button for
+    // Rune's `on_button_click`.
+    if play.is_some() {
+        let pointer = hud_pointer.as_deref();
+        ui_focus.gui_element_hit = in_viewport && pointer.is_some_and(|p| p.over_gui);
+        ui_focus.gui_clicked_entity = pointer.and_then(|p| p.activated.first().copied());
+        ui_focus.gui_clicked_button = ui_focus
+            .gui_clicked_entity
+            .and_then(|e| gui_elements.get(e).ok())
+            .and_then(|(_, _, instance, ..)| instance.map(|i| i.name.clone()));
+        return;
     }
 
     // Check if cursor is over any visible ScreenGui element (buttons, labels, frames)
@@ -4180,30 +4484,6 @@ struct DrainEventWriters<'w> {
     paste_events: MessageWriter<'w, crate::clipboard::PasteEvent>,
 }
 
-/// Radius range of the terrain brush settings popup: the same bounds the
-/// `[` / `]` keys in `terrain_plugin` stop at.
-const TERRAIN_BRUSH_RADIUS: std::ops::RangeInclusive<f32> = 1.0..=50.0;
-
-/// Falloff presets offered by the terrain brush settings popup. The sculpt
-/// weight is `1 - t^(1 / falloff)`, with `t` the distance from the centre
-/// over the radius: 1.0 is a straight linear ramp, 0.5 (the `TerrainBrush`
-/// default) eases out as `1 - t^2`, and 0.15 holds near full strength almost
-/// to the rim before dropping, a sharp edge.
-const TERRAIN_FALLOFF_PRESETS: [(&str, f32); 3] = [("linear", 1.0), ("smooth", 0.5), ("sharp", 0.15)];
-
-fn terrain_falloff_from_preset(name: &str) -> Option<f32> {
-    TERRAIN_FALLOFF_PRESETS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
-}
-
-/// The preset nearest a brush's falloff, for the popup's highlight.
-fn terrain_falloff_preset(falloff: f32) -> &'static str {
-    TERRAIN_FALLOFF_PRESETS
-        .iter()
-        .min_by(|a, b| (a.1 - falloff).abs().total_cmp(&(b.1 - falloff).abs()))
-        .map(|(n, _)| *n)
-        .unwrap_or("smooth")
-}
-
 /// Map a `Generate` preset id to a flat-plate spec, or `None` when the id
 /// names one of the procedural worldgen presets instead.
 ///
@@ -4248,6 +4528,25 @@ pub struct TerrainVisibility {
 impl Default for TerrainVisibility {
     fn default() -> Self {
         Self { visible: true }
+    }
+}
+
+/// Put Output text on the clipboard; a failure is a line in the Output.
+fn copy_output_text(text: Option<String>, output: Option<&mut OutputConsole>) {
+    let Some(text) = text.filter(|t| !t.is_empty()) else { return };
+    #[cfg(feature = "clipboard")]
+    let copied = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "clipboard"))]
+    let copied: Result<(), String> = {
+        let _ = text;
+        Err("this build has no clipboard support".to_string())
+    };
+    if let Err(e) = copied {
+        if let Some(out) = output {
+            out.warn(format!("Output: could not copy to the clipboard: {e}"));
+        }
     }
 }
 
@@ -4332,9 +4631,8 @@ struct DrainResources<'w> {
     /// Option, like the other terrain resources here, so a host without the
     /// terrain plugin cannot fail the drain's param validation.
     terrain_brush: Option<ResMut<'w, eustress_common::terrain::TerrainBrush>>,
-    /// Terrain edit mode: a material pick must re-arm Paint when edit mode
-    /// was switched off after painting, since toggling edit mode leaves
-    /// brush.mode at PaintTexture and only SetTerrainBrushEvent turns it on.
+    /// Whether the terrain tools are on: a material pick turns them back on
+    /// (through SetTerrainBrushEvent) when they were left after painting.
     terrain_mode: Option<Res<'w, eustress_common::terrain::TerrainMode>>,
     /// Terrain material slot table: validates a picked slot, and names the
     /// base a new material starts from.
@@ -4421,7 +4719,7 @@ struct DrainResources<'w> {
 fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<(String, String), String> {
     use ed25519_dalek::{SigningKey, Signer};
 
-    let api_url = "https://api.eustress.dev";
+    let api_url = eustress_common::api_base::api_base();
 
     // Bounded timeouts: this runs on the Bevy main thread, so an unreachable
     // or blackholed witness (captive portal, offline) would otherwise stall
@@ -4839,6 +5137,13 @@ fn announce_unbuilt_actions(
 struct DrainActionQueries<'w, 's> {
     /// ParticleSimulation / ParticleSpecies field edits from Properties.
     particle_sim_edit: super::particle_sim_panel::EditQueries<'w, 's>,
+    /// PointLight / SpotLight / SurfaceLight / DirectionalLight field edits
+    /// from Properties.
+    light_edit: super::light_panel::EditQueries<'w, 's>,
+    /// Sun / Moon / Sky / Atmosphere / Clouds field edits from Properties.
+    celestial_edit: super::celestial_panel::EditQueries<'w, 's>,
+    /// Sound field edits (and Preview) from Properties.
+    sound_edit: super::sound_panel::EditQueries<'w, 's>,
     instances: Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>,
     transforms: Query<'w, 's, &'static mut Transform>,
     base_parts: Query<'w, 's, &'static mut eustress_common::classes::BasePart>,
@@ -6117,6 +6422,72 @@ fn finish_template_insert(
     }
 }
 
+/// Insert a light class (PointLight, SpotLight, SurfaceLight or
+/// DirectionalLight) where `light_panel::plan_insert` puts it, then select
+/// it and record the undo step like every template insert. The one path for
+/// the ribbon, the Insert dialog and the Toolbox, which used to disagree:
+/// the Toolbox wrote a bare stub into `Lighting/` with no `[light]` section,
+/// and all three left the light at the world origin.
+///
+/// Returns false when `class_name` is not a light class.
+fn insert_light_instance(
+    class_name: &str,
+    res: &mut DrainResources,
+    queries: &DrainActionQueries,
+    pending: &mut PendingInsertSelection,
+) -> bool {
+    use eustress_common::classes::ClassName;
+    let Ok(class) = ClassName::from_str(class_name) else { return false };
+    if !super::light_panel::is_light_class(class) {
+        return false;
+    }
+    let space_root = crate::space::open_space_root(res.space_root.as_deref());
+    let selected: Option<Entity> = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    });
+    let selected_folder = selected
+        .and_then(|e| queries.loaded_from_file.get(e).ok())
+        .and_then(|(_, lff)| lff.path.is_dir().then(|| lff.path.clone()));
+    let selected_class = selected
+        .and_then(|e| queries.instances.get(e).ok())
+        .map(|(_, inst)| inst.class_name);
+    let ctx = super::light_panel::InsertContext {
+        space_root,
+        selected_folder,
+        selected_is_part: selected.is_some_and(|e| queries.base_parts.get(e).is_ok()),
+        selected_is_container: matches!(selected_class, Some(ClassName::Folder | ClassName::Model)),
+        selected_position: selected
+            .and_then(|e| queries.transforms.get(e).ok())
+            .map(|t| t.translation),
+        camera: queries
+            .camera_query
+            .iter()
+            .find(|(c, _)| c.order == 0)
+            .map(|(_, gt)| *gt),
+    };
+    let plan = super::light_panel::plan_insert(class, &ctx);
+    match crate::space::instance_create::create_instance(&plan.dir, class_name, None, plan.overrides) {
+        Ok(created) => {
+            if let Some(ref mut out) = res.output {
+                out.info(format!(
+                    "Inserted {} '{}' in {}",
+                    class_name,
+                    created.folder_name,
+                    plan.dir.display(),
+                ));
+            }
+            finish_template_insert(&created.folder_path, &format!("Insert {}", class_name), res, pending);
+        }
+        Err(e) => {
+            if let Some(ref mut out) = res.output {
+                out.error(format!("Insert {} failed: {}", class_name, e));
+            }
+        }
+    }
+    true
+}
+
 /// Create + spawn one primitive Part instance, then finish it properly.
 ///
 /// This is the single body behind BOTH the ribbon/Insert-menu primitives and
@@ -6339,6 +6710,91 @@ fn route_publish_shortcuts(
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 #[inline(never)]
+/// Property commits queued behind a selection change in the same batch belong
+/// to the object the Properties panel was showing. A field commits when it
+/// loses focus, and Slint runs that handler after the click that moved the
+/// focus has queued the new selection, so in queue order the edit would land
+/// on the newly selected object. Moving the commits ahead of the first
+/// selection change (each group keeping its order) applies every edit to the
+/// object it was typed for; nothing else moves. The new object's fields do not
+/// exist until Rust pushes its rows after this drain, so no commit in the batch
+/// can be meant for it.
+fn commits_before_selection(actions: Vec<SlintAction>) -> Vec<SlintAction> {
+    let is_selection = |a: &SlintAction| matches!(a, SlintAction::SelectNode(..) | SlintAction::Deselect);
+    if !actions.iter().any(is_selection) {
+        return actions;
+    }
+    let mut ordered = Vec::with_capacity(actions.len());
+    let mut commits = Vec::new();
+    let mut rest = Vec::new();
+    let mut after_selection = false;
+    for action in actions {
+        after_selection |= is_selection(&action);
+        if !after_selection {
+            ordered.push(action);
+        } else if matches!(action, SlintAction::PropertyChanged(..)) {
+            commits.push(action);
+        } else {
+            rest.push(action);
+        }
+    }
+    ordered.extend(commits);
+    ordered.extend(rest);
+    ordered
+}
+
+#[cfg(test)]
+mod commit_order_tests {
+    use super::{commits_before_selection, SlintAction};
+
+    fn kinds(actions: &[SlintAction]) -> Vec<&'static str> {
+        actions
+            .iter()
+            .map(|a| match a {
+                SlintAction::SelectNode(..) => "select",
+                SlintAction::Deselect => "deselect",
+                SlintAction::PropertyChanged(key, _) if key == "Name" => "commit:Name",
+                SlintAction::PropertyChanged(..) => "commit",
+                SlintAction::ExplorerNavigateUp => "up",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    fn select() -> SlintAction {
+        SlintAction::SelectNode(7, "entity".to_string(), false, false)
+    }
+
+    fn commit(key: &str) -> SlintAction {
+        SlintAction::PropertyChanged(key.to_string(), "typed".to_string())
+    }
+
+    /// The reported case: edit a field, then click another row.
+    #[test]
+    fn a_focus_loss_commit_lands_before_the_new_selection() {
+        let out = commits_before_selection(vec![select(), commit("Name")]);
+        assert_eq!(kinds(&out), ["commit:Name", "select"]);
+    }
+
+    #[test]
+    fn a_batch_without_a_selection_is_untouched() {
+        let out = commits_before_selection(vec![commit("Name"), SlintAction::ExplorerNavigateUp, commit("Size")]);
+        assert_eq!(kinds(&out), ["commit:Name", "up", "commit"]);
+    }
+
+    #[test]
+    fn actions_before_the_selection_keep_their_place() {
+        let out = commits_before_selection(vec![
+            commit("Name"),
+            SlintAction::ExplorerNavigateUp,
+            SlintAction::Deselect,
+            SlintAction::ExplorerNavigateUp,
+            commit("Size"),
+        ]);
+        assert_eq!(kinds(&out), ["commit:Name", "up", "commit", "deselect", "up"]);
+    }
+}
+
 fn drain_slint_actions(
     queue: Option<Res<SlintActionQueue>>,
     slint_context: Option<NonSend<SlintUiState>>,
@@ -6358,7 +6814,7 @@ fn drain_slint_actions(
         warn!("⚠ drain_slint_actions: SlintActionQueue resource not found!");
         return;
     };
-    let actions = queue.drain();
+    let actions = commits_before_selection(queue.drain());
     if actions.is_empty() { return; }
     // Debug logging removed — was firing every frame, killing FPS
     let ui = slint_context.as_ref().map(|context| &context.window);
@@ -6538,7 +6994,7 @@ fn drain_slint_actions(
             // UndoStack index, which scrambled the selection and reverted
             // nothing.
             SlintAction::HistoryJumpTo(id) => {
-                events.history_jump_events.write(crate::undo::HistoryJumpEvent { target: id.max(0) as usize });
+                events.history_jump_events.write(crate::undo::HistoryJumpEvent::to_row(id));
             }
 
             // ---- Procurement ----------------------------------------------
@@ -6671,6 +7127,20 @@ fn drain_slint_actions(
                 }
                 events.history_events.write(crate::commands::HistoryActionEvent::Clear);
             }
+            // Restore points. Each runs with `&mut World` as a queued
+            // command, so the drain gains no parameter for them.
+            SlintAction::RestorePointsShown => {
+                commands.queue(|world: &mut World| super::restore_points::request_refresh(world));
+            }
+            SlintAction::RestorePointSave(label) => {
+                commands.queue(move |world: &mut World| super::restore_points::save(world, label));
+            }
+            SlintAction::RestorePointRevert(id) => {
+                commands.queue(move |world: &mut World| super::restore_points::revert(world, id));
+            }
+            SlintAction::RestorePointCancelPending => {
+                commands.queue(|world: &mut World| super::restore_points::cancel_pending(world));
+            }
             SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
             SlintAction::Cut => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
@@ -6799,7 +7269,9 @@ fn drain_slint_actions(
             }
 
             SlintAction::SetDisplayUnit(sym) => {
-                match eustress_common::units::Unit::from_symbol(&sym) {
+                // Lenient, so every spelling (and a setting saved as
+                // "studs") picks the current stud, never the legacy one.
+                match eustress_common::units::Unit::from_any(&sym) {
                     Some(u) => {
                         if let Some(ref mut du) = res.display_unit {
                             if du.0 != u {
@@ -7000,19 +7472,12 @@ fn drain_slint_actions(
             }
             SlintAction::InsertInto(id, node_type) => {
                 // The row becomes the selection first (the insert handler
-                // writes under the selected entity's folder), then the
-                // dialog opens on the next UI sync.
-                let target = res
-                    .explorer_state
-                    .as_ref()
-                    .and_then(|es| es.entity_id_cache.get(&id).copied())
-                    .and_then(|e| queries.instances.get(e).ok().map(|(_, inst)| inst.name.clone()))
-                    .unwrap_or_else(|| "Workspace".to_string());
+                // writes under it), then the dialog opens. Both go through
+                // the queue, which runs them next frame in this order, so the
+                // dialog's target and suggestions come from the row, service
+                // rows included.
                 queue.push(SlintAction::SelectNode(id, node_type, false, false));
-                if let Some(ref mut s) = res.state {
-                    s.insert_target_name = target;
-                    s.show_insert_object_dialog = true;
-                }
+                queue.push(SlintAction::OpenInsertObject);
             }
             SlintAction::OpenInsertObject => {
                 let target = res
@@ -7477,6 +7942,16 @@ fn drain_slint_actions(
                 events.notification.write(note);
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Soul connection test: {summary}"));
+                }
+            }
+            SlintAction::SetRibbonCollapsed(collapsed) => {
+                // Saved at once, like the other layout choices, and pushed
+                // back to Slint by the EditorSettings sync.
+                if let Some(ref mut s) = res.editor_settings {
+                    if s.ribbon_collapsed != collapsed {
+                        s.ribbon_collapsed = collapsed;
+                        let _ = s.save();
+                    }
                 }
             }
             SlintAction::UnbuiltFeature(id) => {
@@ -7997,9 +8472,12 @@ fn drain_slint_actions(
             SlintAction::CloseCenterTab(idx) => {
                 // Slint sends 0-based index into the non-scene tabs list.
                 // CenterTabManager uses Scene at index 0, so mgr_idx = idx + 1.
+                // A tab with unsaved edits waits on the unsaved-changes prompt.
                 if let Some(ref mut mgr) = res.tab_manager {
                     let mgr_idx = (idx as usize) + 1;
-                    mgr.close_tab(mgr_idx);
+                    if let Some(id) = mgr.tabs.get(mgr_idx).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::One(id));
+                    }
                 } else if let Some(ref mut s) = res.state {
                     s.pending_close_tab = Some(idx);
                 }
@@ -8316,6 +8794,7 @@ fn drain_slint_actions(
                 // Update the correct field based on current mode (Summary / Markdown / Code)
                 if let Some(ref mut mgr) = res.tab_manager {
                     let idx = mgr.active_tab;
+                    let mut code_edit = false;
                     if let Some(active) = mgr.tabs.get_mut(idx) {
                         let is_summary = matches!(&active.tab_type,
                             super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
@@ -8353,14 +8832,246 @@ fn drain_slint_actions(
                             }
                         } else {
                             active.content = text.clone();
+                            code_edit = true;
+                        }
+                    }
+                    // Code and plain code views save on request, so an edit
+                    // there leaves the tab dirty until Save writes it.
+                    if code_edit && mgr.mark_dirty(idx) {
+                        if let (Some(ui), Some(s)) = (ui, res.state.as_mut()) {
+                            patch_center_tab_dirty(ui, s, idx, true);
                         }
                     }
                 }
                 // Store updated script content and mark dirty so
                 // sync_center_tabs_to_slint pushes fresh line numbers this frame.
+                let tab_id = res.tab_manager.as_ref().and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id);
                 if let Some(ref mut s) = res.state {
+                    // A typed edit joins the tab's undo history. An edit the
+                    // engine made is recorded where it was made, and arrives
+                    // here with the text already equal.
+                    if let Some(id) = tab_id.filter(|_| s.script_source_path.is_some()) {
+                        if s.script_editor_content != text {
+                            let before = s.script_editor_content.clone();
+                            let cursor = crate::script_editor::editing::first_difference(&before, &text);
+                            // More than a keystroke's worth of change (a paste,
+                            // a cut, a selection deleted) is its own step.
+                            let whole_step = before.len().abs_diff(text.len()) > 4;
+                            let history = s.script_history.entry(id).or_default();
+                            if whole_step {
+                                history.break_group();
+                            }
+                            history.record(&before, cursor, std::time::Instant::now());
+                            if whole_step {
+                                history.break_group();
+                            }
+                        }
+                    }
                     s.script_editor_content = text;
                     s.script_content_dirty = true;
+                }
+            }
+            SlintAction::ScriptSave => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let idx = mgr.active_tab;
+                let Some(tab) = mgr.tabs.get(idx) else { continue; };
+                let entity_source = tab.entity
+                    .and_then(|e| queries.loaded_from_file.get(e).ok())
+                    .map(|(_, loaded)| loaded.path.clone());
+                match super::center_tabs::save_code_tab(tab, entity_source.as_deref()) {
+                    Ok(Some(path)) => {
+                        if mgr.mark_clean(idx) {
+                            if let (Some(ui), Some(s)) = (ui, res.state.as_mut()) {
+                                patch_center_tab_dirty(ui, s, idx, false);
+                            }
+                        }
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Saved {}", path.display()));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            SlintAction::UnsavedChangesSave => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let Some(req) = mgr.pending_close.take() else { continue; };
+                let covered: Vec<bool> = (0..mgr.tabs.len()).map(|i| mgr.close_covers(req, i)).collect();
+                let saved = save_dirty_tabs_before_close(
+                    mgr,
+                    |e| queries.loaded_from_file.get(e).ok().map(|(_, l)| l.path.clone()),
+                    |i, _| covered[i],
+                );
+                // A failed save cancels the close, so no unsaved edit is lost.
+                if report_close_saves(&saved, res.output.as_deref_mut()) {
+                    finish_tab_close(mgr, req, res.state.as_deref_mut(), &mut events.exit_events);
+                }
+            }
+            SlintAction::UnsavedChangesDiscard => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let Some(req) = mgr.pending_close.take() else { continue; };
+                finish_tab_close(mgr, req, res.state.as_deref_mut(), &mut events.exit_events);
+            }
+            SlintAction::UnsavedChangesCancel => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    mgr.pending_close = None;
+                }
+            }
+            SlintAction::ScriptEditorKey(key, anchor, cursor) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let Some(tab_id) = res.tab_manager.as_ref().and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id)
+                else { continue; };
+                let text = state.script_editor_content.clone();
+                let sel = Selection { anchor: anchor.max(0) as usize, cursor: cursor.max(0) as usize }.clamp(&text);
+                let service = active_code_service(state, res.script_analysis.as_deref());
+                // Hover: what the file's service knows about the identifier at
+                // the caret, from the latest analysis. No edit.
+                if key == "hover" || key == "hover-close" {
+                    let hover = match (&service, res.script_analysis.as_ref().and_then(|a| a.analysis.as_ref())) {
+                        (Some(s), Some(result)) if key == "hover" => s
+                            .hover(&text, sel.cursor, result)
+                            .map(|h| editing::markdown_to_plain(&h.markdown))
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    if let Some(ui) = ui {
+                        let (line0, col0) = line_col0(&text, sel.cursor);
+                        ui.set_script_hover_line(line0 + 1);
+                        ui.set_script_hover_col(col0 + 1);
+                        ui.set_script_hover_text(hover.into());
+                    }
+                    continue;
+                }
+                let history = state.script_history.entry(tab_id).or_default();
+                let edit = match key.as_str() {
+                    "undo" | "redo" => {
+                        let step = if key == "undo" {
+                            history.undo(&text, sel.cursor)
+                        } else {
+                            history.redo(&text, sel.cursor)
+                        };
+                        let Some(step) = step else { continue; };
+                        let selection = Selection::caret(step.cursor).clamp(&step.text);
+                        editing::Edit { text: step.text, selection }
+                    }
+                    command => {
+                        let is_command = matches!(command, "indent" | "outdent" | "newline" | "comment");
+                        let edit = match command {
+                            "indent" => editing::indent(&text, sel),
+                            "outdent" => editing::outdent(&text, sel),
+                            "newline" => editing::newline(&text, sel, |line| match &service {
+                                Some(s) => s.indent_after(line),
+                                None => line.trim_end().ends_with(['{', '(', '[']),
+                            }),
+                            "comment" => {
+                                let marker = service.as_ref().and_then(|s| s.line_comment()).unwrap_or("//");
+                                editing::toggle_comment(&text, sel, marker)
+                            }
+                            typed => {
+                                let Some(ch) = typed.chars().next() else { continue; };
+                                let pairs = service.as_ref().map_or(DEFAULT_EDITOR_PAIRS, |s| s.auto_close_pairs());
+                                editing::type_char(&text, sel, ch, pairs)
+                            }
+                        };
+                        // A command is its own undo step; typing joins the
+                        // burst around it.
+                        if is_command {
+                            history.break_group();
+                        }
+                        if edit.text != text {
+                            history.record(&text, sel.cursor, std::time::Instant::now());
+                        }
+                        if is_command {
+                            history.break_group();
+                        }
+                        edit
+                    }
+                };
+                apply_script_edit(state, edit, &queue);
+            }
+            SlintAction::ScriptFind(query, match_case) => {
+                let Some(ref mut state) = res.state else { continue; };
+                state.find_query = query;
+                state.find_match_case = match_case;
+                let caret = caret_byte_offset(&state.script_editor_content, state.completion_line, state.completion_col);
+                let matches = crate::script_editor::editing::find_all(
+                    &state.script_editor_content, &state.find_query, state.find_match_case,
+                );
+                state.find_index = matches.iter().position(|&(a, _)| a >= caret).unwrap_or(0);
+                select_find_match(state, &matches, ui);
+            }
+            SlintAction::ScriptFindStep(forward) => {
+                let Some(ref mut state) = res.state else { continue; };
+                let matches = crate::script_editor::editing::find_all(
+                    &state.script_editor_content, &state.find_query, state.find_match_case,
+                );
+                let n = matches.len();
+                if n > 0 {
+                    state.find_index = if forward {
+                        (state.find_index + 1) % n
+                    } else {
+                        (state.find_index + n - 1) % n
+                    };
+                }
+                select_find_match(state, &matches, ui);
+            }
+            SlintAction::ScriptReplace(with) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let text = state.script_editor_content.clone();
+                let matches = editing::find_all(&text, &state.find_query, state.find_match_case);
+                if matches.is_empty() {
+                    select_find_match(state, &matches, ui);
+                    continue;
+                }
+                let range = matches[state.find_index.min(matches.len() - 1)];
+                let edit = editing::replace_ranges(&text, &[range], &with, Selection::caret(range.0));
+                record_script_step(state, res.tab_manager.as_deref(), &text, range.0);
+                apply_script_edit(state, edit, &queue);
+                // On to the next match, in the new text.
+                let next = editing::find_all(&state.script_editor_content, &state.find_query, state.find_match_case);
+                let after = range.0 + with.len();
+                state.find_index = next.iter().position(|&(a, _)| a >= after).unwrap_or(0);
+                select_find_match(state, &next, ui);
+            }
+            SlintAction::ScriptReplaceAll(with) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let text = state.script_editor_content.clone();
+                let matches = editing::find_all(&text, &state.find_query, state.find_match_case);
+                if matches.is_empty() {
+                    select_find_match(state, &matches, ui);
+                    continue;
+                }
+                let caret = caret_byte_offset(&text, state.completion_line, state.completion_col);
+                let edit = editing::replace_ranges(&text, &matches, &with, Selection::caret(caret));
+                record_script_step(state, res.tab_manager.as_deref(), &text, caret);
+                apply_script_edit(state, edit, &queue);
+                state.find_index = 0;
+                if let Some(ui) = ui {
+                    ui.set_script_find_status(format!("Replaced {}", matches.len()).into());
+                }
+            }
+            SlintAction::ScriptFindClose => {
+                let Some(ref mut state) = res.state else { continue; };
+                state.find_query.clear();
+                state.find_index = 0;
+                if let Some(ui) = ui {
+                    ui.set_script_find_status("".into());
+                }
+            }
+            SlintAction::ScriptGoToLine(line) => {
+                let Some(ref mut state) = res.state else { continue; };
+                let line = line.max(1);
+                let at = crate::script_editor::editing::line_start_offset(&state.script_editor_content, line as usize);
+                state.pending_external_edit = Some((at as u32, at as u32));
+                if let Some(ui) = ui {
+                    ui.set_script_scroll_to_line(line);
                 }
             }
             SlintAction::ReorderCenterTab(from, slot) => {
@@ -8378,17 +9089,23 @@ fn drain_slint_actions(
             }
             SlintAction::CloseOtherTabs(idx) => {
                 if let Some(ref mut mgr) = res.tab_manager {
-                    mgr.close_others((idx + 1).max(0) as usize);
+                    let keep = (idx + 1).max(0) as usize;
+                    if let Some(id) = mgr.tabs.get(keep).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::Others(id));
+                    }
                 }
             }
             SlintAction::CloseTabsToRight(idx) => {
                 if let Some(ref mut mgr) = res.tab_manager {
-                    mgr.close_to_right((idx + 1).max(0) as usize);
+                    let from = (idx + 1).max(0) as usize;
+                    if let Some(id) = mgr.tabs.get(from).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::ToRight(id));
+                    }
                 }
             }
             SlintAction::CloseAllTabs => {
                 if let Some(ref mut mgr) = res.tab_manager {
-                    mgr.close_all_unpinned();
+                    mgr.request_close(super::center_tabs::TabCloseRequest::All);
                 }
             }
             SlintAction::RevealTabInExplorer(idx) => {
@@ -8593,26 +9310,35 @@ fn drain_slint_actions(
                 events.terrain_toggle.write(super::spawn_events::ToggleTerrainEditEvent);
             }
             SlintAction::SetTerrainBrush(brush) => {
-                use eustress_common::terrain::BrushMode;
-                let mode = match brush.to_lowercase().as_str() {
-                    "raise" => Some(BrushMode::Raise),
-                    "lower" => Some(BrushMode::Lower),
-                    "smooth" => Some(BrushMode::Smooth),
-                    "flatten" => Some(BrushMode::Flatten),
-                    "paint" | "painttexture" => Some(BrushMode::PaintTexture),
-                    "voxeladd" => Some(BrushMode::VoxelAdd),
-                    "voxelremove" => Some(BrushMode::VoxelRemove),
-                    "voxelsmooth" => Some(BrushMode::VoxelSmooth),
-                    "region" => Some(BrushMode::Region),
-                    "fill" => Some(BrushMode::Fill),
-                    _ => None,
+                use eustress_common::terrain::TerrainTool;
+                let id = brush.to_lowercase();
+                // "leave" comes from the lit tool's own ribbon button: the
+                // terrain tools are on, so the toggle leaves them.
+                if id == "leave" {
+                    events.terrain_toggle.write(super::spawn_events::ToggleTerrainEditEvent);
+                    continue;
+                }
+                // The brush ids from before the seven tools, as a tool and
+                // its mode, so older callers (menus, scripts) still land.
+                let (tool, mode) = match id.as_str() {
+                    "raise" => (Some(TerrainTool::Sculpt), Some(0)),
+                    "lower" => (Some(TerrainTool::Sculpt), Some(1)),
+                    "voxeladd" => (Some(TerrainTool::Draw), Some(0)),
+                    "voxelremove" => (Some(TerrainTool::Draw), Some(1)),
+                    "voxelsmooth" => (Some(TerrainTool::Smooth), None),
+                    "painttexture" => (Some(TerrainTool::Paint), Some(0)),
+                    "fill" => (Some(TerrainTool::Region), Some(2)),
+                    other => (TerrainTool::from_id(other), None),
                 };
-                if let Some(m) = mode {
-                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { mode: m });
+                match tool {
+                    Some(tool) => {
+                        events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { tool, mode });
+                    }
+                    None => warn!("Terrain tools: unknown tool id {id:?}"),
                 }
             }
             SlintAction::SetTerrainPaintMaterial(slot) => {
-                use eustress_common::terrain::{BrushMode, TerrainMaterial, TerrainMode, MATERIAL_SLOT_NONE};
+                use eustress_common::terrain::{TerrainMaterial, TerrainMode, TerrainTool, MATERIAL_SLOT_NONE};
                 let Some(slot) = u8::try_from(slot).ok().filter(|slot| *slot != MATERIAL_SLOT_NONE) else {
                     warn!("Terrain paint material: {slot} is not a material slot");
                     continue;
@@ -8627,26 +9353,22 @@ fn drain_slint_actions(
                     warn!("Terrain paint material: slot {slot} is not defined in this Space");
                     continue;
                 }
-                let edit_off = res.terrain_mode.as_deref().is_some_and(|mode| *mode != TerrainMode::Editor);
+                let tools_off = res.terrain_mode.as_deref().is_some_and(|mode| *mode != TerrainMode::Editor);
                 let Some(ref mut brush) = res.terrain_brush else { continue };
                 brush.paint_material = slot;
-                // Picking what to paint arms the Paint brush, through the same
-                // event as the ribbon's Paint button (which also turns on
-                // terrain edit mode and says so), so the next stroke lays the
-                // picked material down instead of sculpting. It also turns
-                // edit mode back on when it was off: switching edit mode off
-                // leaves the brush on Paint, so the brush mode alone cannot
-                // tell. Gated, so a swatch click while painting raises no
-                // notification.
-                if brush.mode != BrushMode::PaintTexture || edit_off {
-                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent {
-                        mode: BrushMode::PaintTexture,
-                    });
+                // Picking a material makes the next stroke lay it: a tool
+                // that uses one (Draw, Paint) keeps it; any other tool gives
+                // way to Paint. Either way the terrain tools come on, through
+                // the same event as the ribbon's buttons, when they were off.
+                let uses_material = matches!(brush.tool, TerrainTool::Draw | TerrainTool::Paint);
+                if !uses_material || tools_off {
+                    let tool = if uses_material { brush.tool } else { TerrainTool::Paint };
+                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { tool, mode: None });
                 }
             }
             SlintAction::AddTerrainMaterial(name) => {
                 use eustress_common::terrain::{
-                    write_custom_material_toml, BrushMode, MaterialCell, TerrainMaterial, TerrainMode,
+                    write_custom_material_toml, MaterialCell, TerrainMaterial, TerrainMode, TerrainTool,
                 };
                 let Some(terrain_dir) = res
                     .terrain_material_source
@@ -8704,16 +9426,18 @@ fn drain_slint_actions(
                         if let Some(ref mut source) = res.terrain_material_source {
                             source.request_reload();
                         }
-                        // As with a pick: arm Paint, and turn edit mode back
-                        // on when it was switched off after painting.
-                        let edit_off =
+                        // As with a pick: the new material is the one the
+                        // next stroke lays, with Paint armed unless Draw is.
+                        let tools_off =
                             res.terrain_mode.as_deref().is_some_and(|mode| *mode != TerrainMode::Editor);
                         if let Some(ref mut brush) = res.terrain_brush {
                             brush.paint_material = slot;
-                            if brush.mode != BrushMode::PaintTexture || edit_off {
-                                events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent {
-                                    mode: BrushMode::PaintTexture,
-                                });
+                            let uses_material = matches!(brush.tool, TerrainTool::Draw | TerrainTool::Paint);
+                            if !uses_material || tools_off {
+                                let tool = if uses_material { brush.tool } else { TerrainTool::Paint };
+                                events
+                                    .terrain_brush
+                                    .write(super::spawn_events::SetTerrainBrushEvent { tool, mode: None });
                             }
                         }
                         if let Some(ref mut out) = res.output {
@@ -8731,27 +9455,6 @@ fn drain_slint_actions(
                         }
                         warn!("Add terrain material failed: {error}");
                     }
-                }
-            }
-            // Brush settings popup: size, strength and falloff go straight to
-            // the live `TerrainBrush` the sculpt and paint systems read.
-            SlintAction::BrushSizeChanged(size) => {
-                if let Some(ref mut brush) = res.terrain_brush {
-                    brush.radius = size.clamp(*TERRAIN_BRUSH_RADIUS.start(), *TERRAIN_BRUSH_RADIUS.end());
-                }
-            }
-            SlintAction::BrushStrengthChanged(strength) => {
-                if let Some(ref mut brush) = res.terrain_brush {
-                    brush.strength = strength.clamp(0.0, 1.0);
-                }
-            }
-            SlintAction::BrushFalloffChanged(falloff) => {
-                let Some(falloff) = terrain_falloff_from_preset(&falloff) else {
-                    warn!("Terrain brush: unknown falloff preset '{falloff}'");
-                    continue;
-                };
-                if let Some(ref mut brush) = res.terrain_brush {
-                    brush.falloff = falloff;
                 }
             }
             SlintAction::ImportHeightmap => {
@@ -10542,6 +11245,121 @@ fn drain_slint_actions(
                         }
                         continue;
                     }
+                    // Light classes: their Light rows write the class
+                    // component (which relights live), the file's `[light]`
+                    // section and the undo stack. Keys that are not light
+                    // fields (Name, Position, Rotation) fall through.
+                    if let Some(outcome) = super::light_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        res.display_unit
+                            .as_deref()
+                            .map_or(eustress_common::units::ENGINE_NATIVE_UNIT, |u| u.0),
+                        toml_path.as_deref(),
+                        &mut queries.light_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
+                    // Sounds: their Sound rows write the component (a
+                    // previewing Sound follows it the same frame), the
+                    // file's `[sound]` section and the undo stack. A Sound
+                    // in folder form has no InstanceFile; its file is its
+                    // folder's `_instance.toml`.
+                    let sound_path = super::sound_panel::sound_file(
+                        toml_path.as_deref(),
+                        queries.loaded_from_file.get(entity).ok().map(|(_, l)| l),
+                    );
+                    if let Some(outcome) = super::sound_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        res.display_unit
+                            .as_deref()
+                            .map_or(eustress_common::units::ENGINE_NATIVE_UNIT, |u| u.0),
+                        sound_path.as_deref(),
+                        &mut queries.sound_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
+                    // Sun, Moon, Sky, Atmosphere and Clouds: their rows
+                    // write the class component (the renderer follows it
+                    // the same frame), the file's own section and the undo
+                    // stack. A
+                    // Sun's Color is its light's, not a Part colour, so this
+                    // runs before the generic Color/Enabled handling.
+                    if let Some(outcome) = super::celestial_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        toml_path.as_deref(),
+                        &mut queries.celestial_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
                 }
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
                 // Emitted by RotationVec3Row +/- buttons to avoid Slint float-to-string conversion.
@@ -12067,10 +12885,11 @@ fn drain_slint_actions(
                                                 crate::space::service_loader::PropertyValue::Vec3([x as f64, y as f64, z as f64])
                                             })
                                         }
+                                        // A service's four-number values are colours,
+                                        // shown 0-255; stored 0-1.
                                         crate::space::service_loader::PropertyValue::Vec4(_) => {
-                                            parse_color4_value(&val).map(|(r, g, b, a)| {
-                                                crate::space::service_loader::PropertyValue::Vec4([r as f64, g as f64, b as f64, a as f64])
-                                            })
+                                            service_color_from_panel(&val)
+                                                .map(crate::space::service_loader::PropertyValue::Vec4)
                                         }
                                     };
                                     
@@ -12307,7 +13126,15 @@ fn drain_slint_actions(
                             entity,
                             name: inst.name.clone(),
                             class_name: inst.class_name.as_str().to_string(),
-                            parent: queries.hierarchy_parents.get(entity).ok().map(|c| c.0),
+                            // A pose anchor is not an instance: its part is
+                            // the parent.
+                            parent: queries.hierarchy_parents.get(entity).ok().map(|c| c.0).map(|p| {
+                                if queries.instances.get(p).is_err() {
+                                    queries.hierarchy_parents.get(p).map(|c| c.0).unwrap_or(p)
+                                } else {
+                                    p
+                                }
+                            }),
                         }
                     }).collect();
 
@@ -12664,12 +13491,26 @@ fn drain_slint_actions(
                         };
 
                         let now = chrono::Utc::now().to_rfc3339();
+                        // A light class is a light, not a block with a
+                        // light's name: no mesh, no size, and a `[light]`
+                        // section (the class defaults; this drain carries
+                        // part fields only) that `spawn_instance` turns into
+                        // its class component.
+                        let light_class = eustress_common::classes::ClassName::from_str(&inst.class_name)
+                            .ok()
+                            .filter(|c| eustress_common::plugins::light_classes::is_light_class(*c));
+                        let mut extra = std::collections::HashMap::new();
+                        if let Some(class) = light_class {
+                            if let Some(light) = eustress_common::plugins::light_classes::LightComponent::from_section(
+                                class,
+                                &eustress_common::plugins::light_classes::LightSection::default(),
+                            ) {
+                                extra.insert("light".to_string(), toml::Value::Table(light.to_section()));
+                            }
+                        }
                         let instance_def = crate::space::instance_loader::InstanceDefinition {
-                            // Parallel nuclear session added this field; generic
-                            // builders carry no reactor state.
-                            nuclear: None,
                             plasma: None,
-                            asset: Some(crate::space::instance_loader::AssetReference {
+                            asset: light_class.is_none().then(|| crate::space::instance_loader::AssetReference {
                                 mesh: mesh_path.to_string(),
                                 scene: "Scene0".to_string(),
                             }),
@@ -12682,7 +13523,7 @@ fn drain_slint_actions(
                                 // scene came out axis-aligned regardless of
                                 // script intent.
                                 rotation: inst.rotation,
-                                scale: inst.size,
+                                scale: if light_class.is_some() { [1.0, 1.0, 1.0] } else { inst.size },
                             },
                             properties: crate::space::instance_loader::InstanceProperties {
                                 color: inst.color,
@@ -12716,7 +13557,7 @@ fn drain_slint_actions(
                             // entities.
                             tags: if inst.tags.is_empty() { None } else { Some(inst.tags.clone()) },
                             parameters: None,
-                            extra: std::collections::HashMap::new(),
+                            extra,
                         };
 
                         let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
@@ -13042,6 +13883,38 @@ fn drain_slint_actions(
                 if let Some(ref mut out) = res.output {
                     out.clear();
                 }
+            }
+            SlintAction::ToggleOutputStack(id) => {
+                super::output_rows::toggle_expanded(id as u32 as u64);
+            }
+            SlintAction::CopyOutputLine(id) => {
+                let text = res.output.as_deref().and_then(|out| {
+                    out.entries.iter()
+                        .find(|e| e.id as u32 == id as u32)
+                        .map(super::output_rows::copy_text)
+                });
+                copy_output_text(text, res.output.as_deref_mut());
+            }
+            SlintAction::CopyOutputVisible => {
+                let text = match (ui, res.output.as_deref()) {
+                    (Some(ui), Some(out)) => {
+                        let source: String = ui.get_output_source_filter().into();
+                        let search: String = ui.get_output_filter_text().into();
+                        let filters = super::output_rows::Filters {
+                            source: &source,
+                            search: &search,
+                            levels: [
+                                ui.get_output_show_info(),
+                                ui.get_output_show_warnings(),
+                                ui.get_output_show_errors(),
+                                ui.get_output_show_debug(),
+                            ],
+                        };
+                        Some(super::output_rows::visible_text(&out.entries, &filters))
+                    }
+                    _ => None,
+                };
+                copy_output_text(text, res.output.as_deref_mut());
             }
 
             SlintAction::SetBottomPanel(mode) => {
@@ -13590,50 +14463,62 @@ fn drain_slint_actions(
                 state.completion_line = line;
                 state.completion_col = column;
                 let source = state.script_editor_content.clone();
+                let offset = caret_byte_offset(&source, line, column);
+                let service = active_code_service(state, res.script_analysis.as_deref());
 
                 // Signature help first: whether the caret sits inside a call's
                 // argument list is independent of whether an identifier prefix
                 // is being typed, so it must not sit behind the completion
                 // early-returns below.
-                let (sig_label, sig_active) =
-                    match crate::script_editor::analyzer::signature_help_at(
-                        &source, line as u32, column as u32,
-                    ) {
-                        Some((entry, param_idx)) => {
-                            let params = entry
-                                .params
-                                .iter()
-                                .map(|p| format!("{}: {}", p.name, p.typ))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let label = if entry.return_type.is_empty() || entry.return_type == "()" {
-                                format!("{}({})", entry.name, params)
-                            } else {
-                                format!("{}({}) -> {}", entry.name, params, entry.return_type)
-                            };
-                            let active = entry
-                                .params
-                                .get(param_idx as usize)
-                                .map(|p| format!("{}: {}", p.name, p.typ))
-                                .unwrap_or_default();
-                            (label, active)
-                        }
-                        None => (String::new(), String::new()),
-                    };
+                let (sig_label, sig_active) = service
+                    .as_ref()
+                    .and_then(|s| s.signature_help(&source, offset))
+                    .map(|help| {
+                        let active = help
+                            .parameters
+                            .get(help.active_parameter as usize)
+                            .and_then(|&(a, b)| help.label.get(a as usize..b as usize))
+                            .unwrap_or_default()
+                            .to_string();
+                        (help.label, active)
+                    })
+                    .unwrap_or_default();
                 if sig_label != state.signature_label || sig_active != state.signature_active_param {
                     state.signature_label = sig_label;
                     state.signature_active_param = sig_active;
                     state.signature_dirty = true;
                 }
 
-                let (prefix, start) = crate::script_editor::analyzer::prefix_at(
-                    &source, line as u32, column as u32,
-                );
+                // The bracket pair around the caret; a caret move also closes
+                // the hover.
+                if let Some(ui) = ui {
+                    if !ui.get_script_hover_text().is_empty() {
+                        ui.set_script_hover_text("".into());
+                    }
+                    let ((al, ac), (bl, bc)) = crate::script_editor::editing::matching_bracket(&source, offset)
+                        .map(|(a, b)| (line_col0(&source, a), line_col0(&source, b)))
+                        .unwrap_or(((-1, 0), (-1, 0)));
+                    ui.set_script_bracket_a_line(al);
+                    ui.set_script_bracket_a_col(ac);
+                    ui.set_script_bracket_b_line(bl);
+                    ui.set_script_bracket_b_col(bc);
+                }
+
+                let script_class = state
+                    .script_source_path
+                    .as_deref()
+                    .and_then(crate::script_editor::language::script_class_for_path);
+                let cx = completion_context(&source, offset, script_class);
+                let prefix = cx.prefix.to_string();
+                let start = (offset - cx.prefix.len()) as u32;
+                // A member access or a string argument opens the list with
+                // nothing typed yet; otherwise it needs an identifier prefix.
+                let triggered = !prefix.is_empty() || cx.access.is_some() || cx.in_string.is_some();
                 // Escape keeps the popup shut until the caret lands on a
                 // different identifier — otherwise every subsequent keystroke
                 // would pop it straight back open.
                 if state.completion_dismissed {
-                    if prefix.is_empty() || start != state.completion_prefix_start {
+                    if !triggered || start != state.completion_prefix_start {
                         state.completion_dismissed = false;
                     } else {
                         continue;
@@ -13642,7 +14527,7 @@ fn drain_slint_actions(
                 // Nothing being typed: close. Ctrl+Space is the way to get an
                 // unfiltered list, so an empty prefix never auto-opens a
                 // several-hundred-entry catalog.
-                if prefix.is_empty() {
+                if !triggered {
                     if !state.completion_items.is_empty() {
                         state.completion_items.clear();
                         state.completion_dirty = true;
@@ -13651,12 +14536,8 @@ fn drain_slint_actions(
                     state.completion_prefix_start = start;
                     continue;
                 }
-                let symbols = res
-                    .script_analysis
-                    .as_ref()
-                    .map(|a| a.result.symbols.clone())
-                    .unwrap_or_default();
-                let items = crate::script_editor::analyzer::complete(&prefix, &symbols, 60);
+                let mut items = service.map(|s| s.complete(&cx)).unwrap_or_default();
+                items.truncate(60);
                 state.completion_items = items;
                 state.completion_selected = 0;
                 state.completion_prefix = prefix;
@@ -13667,16 +14548,18 @@ fn drain_slint_actions(
             SlintAction::ScriptCompletionRequest => {
                 let Some(ref mut state) = res.state else { continue; };
                 let source = state.script_editor_content.clone();
-                let (prefix, start) = crate::script_editor::analyzer::prefix_at(
-                    &source, state.completion_line as u32, state.completion_col as u32,
-                );
-                let symbols = res
-                    .script_analysis
-                    .as_ref()
-                    .map(|a| a.result.symbols.clone())
-                    .unwrap_or_default();
-                state.completion_items =
-                    crate::script_editor::analyzer::complete(&prefix, &symbols, 200);
+                let offset = caret_byte_offset(&source, state.completion_line, state.completion_col);
+                let service = active_code_service(state, res.script_analysis.as_deref());
+                let script_class = state
+                    .script_source_path
+                    .as_deref()
+                    .and_then(crate::script_editor::language::script_class_for_path);
+                let cx = completion_context(&source, offset, script_class);
+                let prefix = cx.prefix.to_string();
+                let start = (offset - cx.prefix.len()) as u32;
+                let mut items = service.map(|s| s.complete(&cx)).unwrap_or_default();
+                items.truncate(200);
+                state.completion_items = items;
                 state.completion_selected = 0;
                 state.completion_prefix = prefix;
                 state.completion_prefix_start = start;
@@ -13716,10 +14599,7 @@ fn drain_slint_actions(
                 else { continue; };
 
                 let source = state.script_editor_content.clone();
-                let caret = crate::script_editor::analyzer::line_col_to_offset(
-                    &source, state.completion_line as u32, state.completion_col as u32,
-                )
-                .unwrap_or(state.completion_prefix_start);
+                let caret = caret_byte_offset(&source, state.completion_line, state.completion_col) as u32;
                 let start = floor_char_boundary(
                     &source,
                     state.completion_prefix_start.min(caret) as usize,
@@ -13734,15 +14614,16 @@ fn drain_slint_actions(
                 let takes_args = item.detail.contains('(') && !item.detail.contains("()");
                 let is_callable = matches!(
                     item.kind,
-                    crate::script_editor::CompletionKind::Function
+                    crate::script_editor::language::CompletionKind::Function
+                        | crate::script_editor::language::CompletionKind::Method
                 );
                 let insert = if is_callable {
-                    format!("{}()", item.label)
+                    format!("{}()", item.insert_text)
                 } else {
-                    item.label.clone()
+                    item.insert_text.clone()
                 };
                 let caret_after = if is_callable && takes_args {
-                    start + item.label.len() + 1
+                    start + item.insert_text.len() + 1
                 } else {
                     start + insert.len()
                 };
@@ -13752,12 +14633,13 @@ fn drain_slint_actions(
                 next.push_str(&insert);
                 next.push_str(&source[end..]);
 
+                record_script_step(state, res.tab_manager.as_deref(), &source, caret as usize);
                 state.script_editor_content = next.clone();
                 state.script_content_dirty = true;
                 state.completion_items.clear();
                 state.completion_prefix.clear();
                 state.completion_dirty = true;
-                state.pending_caret_offset = Some(caret_after as u32);
+                state.pending_external_edit = Some((caret_after as u32, caret_after as u32));
 
                 // Persist through the same path a typed edit takes, so the
                 // insert is saved and re-analyzed like any other change.
@@ -13767,32 +14649,51 @@ fn drain_slint_actions(
             SlintAction::ScriptGoToDefinition(line, column) => {
                 let Some(ref analysis) = res.script_analysis else { continue; };
                 let source = analysis.source.clone();
-                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
-                    &source, line as u32, column as u32,
-                ) else {
+                let offset = caret_byte_offset(&source, line, column);
+                let Some(ident) = identifier_around(&source, offset) else {
                     if let Some(ref mut out) = res.output {
                         out.info("Go to Definition: no identifier under cursor".to_string());
                     }
                     continue;
                 };
-                let defs = analysis.result.symbols.resolve(&ident);
-                if defs.is_empty() {
+                // The file's language service first (it knows scopes and, for
+                // Luau, locals); the name index of this file after that.
+                let from_service = match (&analysis.service, &analysis.analysis) {
+                    (Some(service), Some(result)) => service.definition(&source, offset, result),
+                    _ => None,
+                };
+                let target = from_service.or_else(|| {
+                    analysis.result.symbols.resolve(ident).first().map(|s| {
+                        crate::script_editor::language::Location {
+                            path: None,
+                            range: s.range,
+                            byte_range: s.byte_range,
+                        }
+                    })
+                });
+                let Some(target) = target else {
                     if let Some(ref mut out) = res.output {
-                        out.info(format!("Go to Definition: '{}' — no definition in this file", ident));
+                        out.info(format!("Go to Definition: no definition of '{}' in this file", ident));
+                    }
+                    continue;
+                };
+                if let Some(path) = &target.path {
+                    // Another file: say where. Opening it at the line is the
+                    // cross-file step that follows.
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!(
+                            "Go to Definition: '{}' is defined in {} at line {}",
+                            ident, path.display(), target.range.start_line,
+                        ));
                     }
                     continue;
                 }
-                let target = &defs[0];
                 if let Some(ui) = ui {
-                    // `script-scroll-to-line` was set here from the start, but
-                    // nothing in the editor read it — Go-to-Definition resolved
-                    // the symbol, reported it, and left the view where it was.
-                    // `ScriptEditor` now consumes this and scrolls.
                     ui.set_script_scroll_to_line(target.range.start_line as i32);
                 }
                 if let Some(ref mut out) = res.output {
                     out.info(format!(
-                        "Go to Definition: '{}' → line {}:{}",
+                        "Go to Definition: '{}' at line {}:{}",
                         ident, target.range.start_line, target.range.start_column,
                     ));
                 }
@@ -13803,15 +14704,14 @@ fn drain_slint_actions(
             SlintAction::ScriptFindReferences(line, column) => {
                 let Some(ref analysis) = res.script_analysis else { continue; };
                 let source = analysis.source.clone();
-                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
-                    &source, line as u32, column as u32,
-                ) else {
+                let offset = caret_byte_offset(&source, line, column);
+                let Some(ident) = identifier_around(&source, offset) else {
                     if let Some(ref mut out) = res.output {
                         out.info("Find References: no identifier under cursor".to_string());
                     }
                     continue;
                 };
-                let refs = analysis.result.symbols.resolve(&ident);
+                let refs = analysis.result.symbols.resolve(ident);
                 if let Some(ref mut out) = res.output {
                     if refs.is_empty() {
                         out.info(format!("Find References: no matches for '{}'", ident));
@@ -14044,9 +14944,14 @@ fn drain_slint_actions(
                 // and anything else stays in the user's currently-
                 // selected folder (or `Workspace/` as fallback).
                 if mesh_id.is_none() {
+                    // Lights take the same path as the ribbon's: their class
+                    // template, inside the selected part or in front of the
+                    // camera, selected and undoable.
+                    if insert_light_instance(&part_type_str, &mut res, &queries, &mut pending_insert) {
+                        continue;
+                    }
                     let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let canonical_service = match part_type_str.as_str() {
-                        "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight" => "Lighting",
                         "Sound"                       => "SoundService",
                         "BillboardGui"                => "StarterGui",
                         "SoulScript"                  => "SoulService",
@@ -14912,6 +15817,18 @@ fn drain_slint_actions(
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
 
+                // Every insert arrives here as `insert:<id>`, whichever
+                // surface it came from (menu bar, ribbon tabs, Insert Object
+                // dialog, Explorer plus button). Remember it for the Insert
+                // menu's Recent section; ids the menu cannot show are left out.
+                if let Some(id) = action.strip_prefix("insert:") {
+                    if let Some(ref mut settings) = res.editor_settings {
+                        if let Some(recent) = super::insert_classes::recent_after_insert(&settings.recent_inserts, id) {
+                            settings.recent_inserts = recent;
+                        }
+                    }
+                }
+
                 // ── Discipline-tool interest capture ────────────────────
                 // Every custom-tab (mode manifest) button funnels through
                 // here, so one hook covers all ~1,400 without touching them
@@ -15183,6 +16100,27 @@ fn drain_slint_actions(
                             });
                         } else if let Some(ref mut out) = res.output {
                             out.warn("Export GLB: select a CadPart first");
+                        }
+                        continue;
+                    }
+                    "cad:open_sketch" => {
+                        // The ribbon's Sketch > Edit: the same panel a
+                        // double-click on a CadPart opens, and the way back
+                        // after closing it.
+                        let selected = res
+                            .explorer_state
+                            .as_ref()
+                            .is_some_and(|es| matches!(es.selected, SelectedItem::Entity(_)));
+                        if selected {
+                            events.cad_sketch_canvas_visible.write(
+                                crate::cad_plugin::CadSketchCanvasSetVisibleEvent { visible: true },
+                            );
+                        } else {
+                            events.notification.write(super::notifications::NotificationEvent::warning(
+                                super::notifications::NotificationCategory::General,
+                                "Edit sketch",
+                                "Select a CadPart first",
+                            ));
                         }
                         continue;
                     }
@@ -15830,13 +16768,13 @@ fn drain_slint_actions(
                     };
                     let is_soul = class_name == "SoulScript";
 
-                    // Determine parent directory from selected Explorer item
-                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Parent: the selected instance or service row.
+                    let selected_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
+                    let script_service = insert_service_for(selected_entity, &queries.loaded_from_file, "SoulService");
 
                     let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let write_dir = selected_entity
@@ -15911,7 +16849,7 @@ fn drain_slint_actions(
                         crate::space::file_loader::LoadedFromFile {
                             path: script_dir.clone(),
                             file_type: crate::space::FileType::Directory,
-                            service: "SoulService".to_string(),
+                            service: script_service.clone(),
                         },
                         Name::new(script_name.clone()),
                     ));
@@ -15934,7 +16872,7 @@ fn drain_slint_actions(
                         registry.register(script_dir.join("_instance.toml"), entity, crate::space::FileMetadata {
                             path: script_dir.clone(),
                             file_type: crate::space::FileType::Directory,
-                            service: "SoulService".to_string(),
+                            service: script_service.clone(),
                             name: script_name.clone(),
                             size: 0,
                             modified: std::time::SystemTime::now(),
@@ -15952,13 +16890,14 @@ fn drain_slint_actions(
                 if action == "insert:model" || action == "insert:folder" {
                     let part_type_str = if action == "insert:model" { "Model" } else { "Folder" };
 
-                    // Resolve parent: selected entity's directory, or Workspace root
-                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Resolve parent: the selected instance or service row, or
+                    // the Workspace root.
+                    let selected_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
+                    let container_service = insert_service_for(selected_entity, &queries.loaded_from_file, "Workspace");
 
                     let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let write_dir = selected_entity
@@ -16009,7 +16948,7 @@ fn drain_slint_actions(
                                 crate::space::file_loader::LoadedFromFile {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                 },
                                 Name::new(dir_name.clone()),
                                 Transform::default(),
@@ -16026,7 +16965,7 @@ fn drain_slint_actions(
                                 registry.register(dir_path.join("_instance.toml"), entity, crate::space::FileMetadata {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                     name: dir_name.clone(),
                                     size: 0,
                                     modified: std::time::SystemTime::now(),
@@ -16036,7 +16975,7 @@ fn drain_slint_actions(
                                 registry.register(dir_path.clone(), entity, crate::space::FileMetadata {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                     name: dir_name.clone(),
                                     size: 0,
                                     modified: std::time::SystemTime::now(),
@@ -16083,13 +17022,13 @@ fn drain_slint_actions(
                         [0.0, 0.5, 0.0]
                     };
 
-                    // Parent entity: any selected entity (unrestricted hierarchy)
-                    let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Parent entity: the selected instance or service row
+                    // (unrestricted hierarchy), else the Workspace below.
+                    let parent_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
 
                     let parent_entity = parent_entity.or_else(|| {
                         queries.loaded_from_file.iter().find_map(|(lff_entity, lff)| {
@@ -16363,44 +17302,36 @@ fn drain_slint_actions(
                             let terrain_dir = space_root.join("Workspace").join("Terrain");
 
                             // Delete the raster export (chunks, matmap, volume,
-                            // materials, _terrain.toml) but keep the `Layers`
-                            // folder: it holds the authored layer instances
-                            // (splines, roads, stamps, pads, noise, fills), which
-                            // re-bake onto the next terrain root and must not be
-                            // lost to a delete that has no undo.
-                            if terrain_dir.exists() {
-                                let layers_name = eustress_common::terrain::layer_instances::LAYERS_FOLDER;
-                                let mut failed: Vec<String> = Vec::new();
-                                match std::fs::read_dir(&terrain_dir) {
-                                    Ok(entries) => {
-                                        for entry in entries.flatten() {
-                                            if entry.file_name() == std::ffi::OsStr::new(layers_name) {
-                                                continue;
-                                            }
-                                            let path = entry.path();
-                                            let result = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                                                std::fs::remove_dir_all(&path)
-                                            } else {
-                                                std::fs::remove_file(&path)
-                                            };
-                                            if let Err(e) = result {
-                                                failed.push(format!("{}: {}", path.display(), e));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => failed.push(format!("{}: {}", terrain_dir.display(), e)),
+                            // materials, _terrain.toml, imported voxel chunks)
+                            // but keep the `Layers` folder: it holds the authored
+                            // layer instances (splines, roads, stamps, pads,
+                            // noise, fills), which re-bake onto the next terrain
+                            // root and must not be lost to a delete that has no
+                            // undo. The Terrain instance's own `_instance.toml`
+                            // stays too, marked `[terrain] source = "none"`: a
+                            // converted Space keeps its imported voxels in the
+                            // world database, which cannot delete them, and the
+                            // mark keeps the voxel loader from bringing them
+                            // back. The same helpers serve the bridge's
+                            // `terrain.clear`, staging the files for a worker
+                            // thread to delete so a large import does not stall
+                            // the frame. Both run without the folder on disk
+                            // too: a converted Space whose loose files live only
+                            // in its world database is marked there.
+                            let files = crate::engine_bridge::terrain::clear_terrain_files(&space_root, false);
+                            let instance = crate::engine_bridge::terrain::mark_terrain_instance_cleared(&space_root);
+                            let mut failed = files.failed;
+                            failed.extend(instance.error);
+                            if !failed.is_empty() {
+                                error!("Failed to delete terrain files: {}", failed.join("; "));
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Failed to delete terrain files: {}", failed.join("; ")));
                                 }
-                                if failed.is_empty() {
-                                    if let Some(ref mut out) = res.output {
-                                        out.info("Deleted the terrain raster files (layers kept)");
-                                    }
-                                    info!("Deleted terrain raster files under {:?} (Layers kept)", terrain_dir);
-                                } else {
-                                    error!("Failed to delete terrain files: {}", failed.join("; "));
-                                    if let Some(ref mut out) = res.output {
-                                        out.error(format!("Failed to delete terrain files: {}", failed.join("; ")));
-                                    }
+                            } else if !files.removed.is_empty() {
+                                if let Some(ref mut out) = res.output {
+                                    out.info("Deleted the terrain raster files (layers kept)");
                                 }
+                                info!("Deleted terrain raster files under {:?} (Layers kept)", terrain_dir);
                             }
 
                             // Despawn all terrain entities (TerrainRoot and Chunks)
@@ -16530,14 +17461,17 @@ fn drain_slint_actions(
                             | "insert:particleemitter" => Some(("ParticleEmitter",     "Workspace")),
                             "insert:decal"             => Some(("Decal",               "Workspace")),
                             "insert:sound"             => Some(("Sound",               "SoundService")),
-                            // Lighting
-                            "insert:pointlight"        => Some(("PointLight",          "Workspace")),
-                            "insert:spotlight"         => Some(("SpotLight",           "Workspace")),
-                            "insert:surfacelight"      => Some(("SurfaceLight",        "Workspace")),
+                            // Lights take `insert_light_instance` below.
                             _ => None,
                         };
 
-                        if let Some((class_name, service_name)) = class_and_service {
+                        if let Some(light_class) = super::light_panel::insert_action_class(action) {
+                            // PointLight / SpotLight / SurfaceLight /
+                            // DirectionalLight, from the ribbon or the
+                            // Insert dialog: inside the selected part, else
+                            // in front of the camera (never the origin).
+                            insert_light_instance(light_class, &mut res, &queries, &mut pending_insert);
+                        } else if let Some((class_name, service_name)) = class_and_service {
                             // The OPEN Space. `default_space_root()` re-reads
                             // the last-opened path from settings, which names
                             // another Space when this one was opened with
@@ -16549,12 +17483,11 @@ fn drain_slint_actions(
                             // Part selected plants it as a child of that
                             // part. Falls back to the class's canonical
                             // service when nothing is selected.
-                            let selected_entity: Option<Entity> = res.explorer_state
-                                .as_ref()
-                                .and_then(|es| match &es.selected {
-                                    SelectedItem::Entity(e) => Some(*e),
-                                    _ => None,
-                                });
+                            let selected_entity: Option<Entity> = insert_parent_entity(
+                                res.explorer_state.as_deref().map(|es| &es.selected),
+                                &queries.loaded_from_file,
+                                &queries.hierarchy_parents,
+                            );
                             let fallback_dir = space_root.join(service_name);
                             let write_dir = selected_entity
                                 .and_then(|pe| queries.loaded_from_file.get(pe).ok())
@@ -16597,8 +17530,8 @@ fn drain_slint_actions(
                             }
                         } else if let Some(class_name) = action.strip_prefix("insert:") {
                             // Generic data-driven Insert path. The
-                            // dynamic dropdown (fed from the ClassRegistry,
-                            // see `init_insert_classes_to_slint`) emits the
+                            // dynamic dropdown (rebuilt from the class
+                            // templates on disk, see `refresh_insert_menu`) emits the
                             // canonical PascalCase `insert:<ClassName>` for
                             // every creatable class that isn't handled by a
                             // bespoke arm above. We route it straight
@@ -16623,12 +17556,11 @@ fn drain_slint_actions(
                             // The OPEN Space, as in the template branch above.
                             let space_root = res.space_root.as_ref().map(|sr| sr.0.clone())
                                 .unwrap_or_else(crate::space::default_space_root);
-                            let selected_entity: Option<Entity> = res.explorer_state
-                                .as_ref()
-                                .and_then(|es| match &es.selected {
-                                    SelectedItem::Entity(e) => Some(*e),
-                                    _ => None,
-                                });
+                            let selected_entity: Option<Entity> = insert_parent_entity(
+                                res.explorer_state.as_deref().map(|es| &es.selected),
+                                &queries.loaded_from_file,
+                                &queries.hierarchy_parents,
+                            );
                             let fallback_dir = space_root.join(service_name);
                             let write_dir = selected_entity
                                 .and_then(|pe| queries.loaded_from_file.get(pe).ok())
@@ -16889,6 +17821,14 @@ fn drain_slint_actions(
 
             // Close
             SlintAction::CloseRequested => {
+                // Unsaved script edits ask first; the answer continues the exit.
+                if let Some(ref mut mgr) = res.tab_manager {
+                    let exit = super::center_tabs::TabCloseRequest::AppExit;
+                    if !mgr.dirty_tabs_closed_by(exit).is_empty() {
+                        mgr.pending_close = Some(exit);
+                        continue;
+                    }
+                }
                 if let Some(ref mut s) = res.state {
                     if s.has_unsaved_changes {
                         s.show_exit_confirmation = true;
@@ -17140,10 +18080,11 @@ fn sync_selection_summary_to_slint(
     }
 }
 
-/// Reflect `CadSketchUiState` onto the docked SketchCanvasPanel.
+/// Reflect `CadSketchUiState` onto the Sketch panel.
 fn sync_sketch_canvas_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     state: Option<Res<crate::cad_plugin::CadSketchUiState>>,
+    mut pushed_rev: Local<Option<u64>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(state) = state else { return };
@@ -17165,32 +18106,48 @@ fn sync_sketch_canvas_to_slint(
     if cur_sk != state.sketch_name {
         ui.set_sketch_canvas_sketch_name(state.sketch_name.as_str().into());
     }
-    let cur_status: String = ui.get_sketch_canvas_solve_status().into();
-    if cur_status != state.solve_status {
-        ui.set_sketch_canvas_solve_status(state.solve_status.as_str().into());
+    let cur_solve: String = ui.get_sketch_canvas_solve_state().into();
+    if cur_solve != state.solve_state {
+        ui.set_sketch_canvas_solve_state(state.solve_state.as_str().into());
+    }
+    if ui.get_sketch_canvas_free_dof() != state.free_dof {
+        ui.set_sketch_canvas_free_dof(state.free_dof);
+    }
+    let cur_detail: String = ui.get_sketch_canvas_status_detail().into();
+    if cur_detail != state.status_detail {
+        ui.set_sketch_canvas_status_detail(state.status_detail.as_str().into());
     }
 
-    let entities: Vec<SketchEntityRow> = state
-        .entities
-        .iter()
-        .map(|(i, kind, summary)| SketchEntityRow {
-            index: *i as i32,
-            kind: kind.as_str().into(),
-            summary: summary.as_str().into(),
-        })
-        .collect();
-    ui.set_sketch_canvas_entities(slint::ModelRc::new(slint::VecModel::from(entities)));
+    // The row models only when their content changed. Replacing a model
+    // rebuilds every row, which resets its hover and swallows a click that
+    // lands mid-rebuild; doing it every frame made the rows unusable.
+    if *pushed_rev != Some(state.rev) {
+        *pushed_rev = Some(state.rev);
+        let entities: Vec<SketchEntityRow> = state
+            .entities
+            .iter()
+            .map(|e| SketchEntityRow {
+                index: e.index as i32,
+                kind: e.kind.into(),
+                label: e.label.into(),
+                summary: e.summary.as_str().into(),
+                state: e.state.into(),
+            })
+            .collect();
+        ui.set_sketch_canvas_entities(slint::ModelRc::new(slint::VecModel::from(entities)));
 
-    let constraints: Vec<SketchConstraintRow> = state
-        .constraints
-        .iter()
-        .map(|(i, kind, detail)| SketchConstraintRow {
-            index: *i as i32,
-            kind: kind.as_str().into(),
-            detail: detail.as_str().into(),
-        })
-        .collect();
-    ui.set_sketch_canvas_constraints(slint::ModelRc::new(slint::VecModel::from(constraints)));
+        let constraints: Vec<SketchConstraintRow> = state
+            .constraints
+            .iter()
+            .map(|c| SketchConstraintRow {
+                index: c.index as i32,
+                kind: c.kind.into(),
+                label: c.label.as_str().into(),
+                detail: c.detail.as_str().into(),
+            })
+            .collect();
+        ui.set_sketch_canvas_constraints(slint::ModelRc::new(slint::VecModel::from(constraints)));
+    }
 
     let a = state.selected_a.map(|i| i as i32).unwrap_or(-1);
     if ui.get_sketch_canvas_selected_a() != a {
@@ -17232,7 +18189,7 @@ fn sync_numeric_input_to_slint(
         ui.set_numeric_input_axis_label(axis_label.as_str().into());
     }
 
-    let unit = numeric.owner.map(|o| o.unit()).unwrap_or("");
+    let unit = numeric.unit_label();
     let current_unit: String = ui.get_numeric_input_unit().into();
     if current_unit != unit {
         ui.set_numeric_input_unit(unit.into());
@@ -17395,26 +18352,101 @@ fn recent_space_label(path: &str) -> String {
     }
 }
 
-/// The Insert Object dialog's rows: the ribbon catalog filtered by `query`
-/// (case-insensitive, on class name, label and category), headers dropped.
+/// The Insert Object dialog's rows. With `query` empty: the context rows the
+/// ribbon menu shows (suggested for the selection, recent), the shapes, then
+/// the catalog by category, each group under its heading. Otherwise every
+/// shape and class that matches, best first (`insert_classes::match_rank`:
+/// exact, prefix, word start, anywhere, category), without headings.
 fn insert_results_model(ui: &StudioWindow, query: &str) -> slint::ModelRc<InsertClassData> {
     use slint::Model;
     let q = query.trim().to_lowercase();
-    let rows: Vec<InsertClassData> = ui
-        .get_insert_classes()
-        .iter()
-        .filter(|row| {
-            q.is_empty()
-                || row.class_name.to_lowercase().contains(&q)
-                || row.display.to_lowercase().contains(&q)
-                || row.category.to_lowercase().contains(&q)
-        })
-        .map(|mut row| {
-            row.show_header = false;
-            row
-        })
-        .collect();
+    let shapes = super::insert_classes::shape_rows().iter().map(insert_row).collect::<Vec<_>>();
+    let rows: Vec<InsertClassData> = if q.is_empty() {
+        ui.get_insert_context()
+            .iter()
+            .chain(shapes)
+            .chain(ui.get_insert_classes().iter())
+            .collect()
+    } else {
+        let mut ranked: Vec<(u8, usize, InsertClassData)> = shapes
+            .into_iter()
+            .chain(ui.get_insert_classes().iter())
+            .enumerate()
+            .filter_map(|(order, row)| {
+                super::insert_classes::match_rank(&q, &row.class_name, &row.display, &row.category)
+                    .map(|rank| (rank, order, row))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, order, _)| (*rank, *order));
+        ranked
+            .into_iter()
+            .map(|(_, _, mut row)| {
+                row.show_header = false;
+                row.section = slint::SharedString::default();
+                row
+            })
+            .collect()
+    };
     slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
+}
+
+/// The entity a new instance goes under, from the Explorer selection: a
+/// folder-backed instance itself; a single-file instance's parent, since the
+/// insert is written into the folder that file sits in; a service row's
+/// service entity, whose `_service.toml` sits in the service folder. `None`
+/// with nothing selected, which leaves each insert handler to its class's
+/// usual service. `insert_menu_target` resolves the same way for the Insert
+/// menu's "Inserts into" line.
+fn insert_parent_entity(
+    selected: Option<&SelectedItem>,
+    loaded_from_file: &Query<(Entity, &mut crate::space::LoadedFromFile)>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    match selected? {
+        SelectedItem::Entity(e) => {
+            let single_file = loaded_from_file.get(*e).ok().is_some_and(|(_, file)| {
+                !file.path.is_dir()
+                    && file.path.file_name().map_or(true, |n| n.to_string_lossy() != "_service.toml")
+            });
+            if single_file {
+                if let Ok(parent) = parents.get(*e) {
+                    return Some(parent.parent());
+                }
+            }
+            Some(*e)
+        }
+        SelectedItem::Service(name) => loaded_from_file.iter().find_map(|(entity, file)| {
+            let marker = file.path.file_name().is_some_and(|n| n.to_string_lossy() == "_service.toml");
+            (marker && file.service == *name).then_some(entity)
+        }),
+        _ => None,
+    }
+}
+
+/// The service an instance inserted under `parent` belongs to: the parent's
+/// own, or `fallback` for a top-level insert. What the loader stamps on the
+/// same folder at the next load; storage services hide their content by it.
+fn insert_service_for(
+    parent: Option<Entity>,
+    loaded_from_file: &Query<(Entity, &mut crate::space::LoadedFromFile)>,
+    fallback: &str,
+) -> String {
+    parent
+        .and_then(|p| loaded_from_file.get(p).ok())
+        .map(|(_, file)| file.service.clone())
+        .filter(|service| !service.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// One Insert row as the Slint struct.
+fn insert_row(row: &super::insert_classes::InsertClassDescriptor) -> InsertClassData {
+    InsertClassData {
+        class_name: row.class_name.as_str().into(),
+        category: row.category.as_str().into(),
+        display: row.display.as_str().into(),
+        show_header: row.show_header,
+        section: row.section.as_str().into(),
+    }
 }
 
 fn sync_bevy_to_slint(
@@ -17571,13 +18603,17 @@ fn sync_bevy_to_slint(
         ui.set_snapshot_status(state.snapshot_status.as_str().into());
     }
 
-    // ── Insert Object dialog: one-shot open with the full class list ──
+    // ── Insert Object dialog: open with an empty search ──
+    // `refresh_insert_menu` runs next, this frame: it rebuilds the catalog
+    // from disk and pushes the target, the suggested and recent rows and the
+    // dialog's results.
     if state.show_insert_object_dialog {
         state.show_insert_object_dialog = false;
         ui.set_insert_target_name(state.insert_target_name.as_str().into());
         ui.set_insert_search_query(slint::SharedString::default());
         ui.set_insert_results(insert_results_model(ui, ""));
         ui.set_show_insert_object_dialog(true);
+        INSERT_MENU_REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Focus requests (Ctrl+Shift+X / Ctrl+Shift+E) ──
@@ -17670,35 +18706,13 @@ fn sync_bevy_to_slint(
             ui.set_terrain_edit_mode(terrain_edit);
         }
     }
-    // Terrain brush
+    // The active terrain tool, for the ribbon's lit button and the Terrain
+    // panel's label. Its settings go to the `TerrainToolsUi` global
+    // (`terrain_tools_ui`), every frame they change.
     if let Some(ref tb) = terrain.brush {
-        let brush_str = match tb.mode {
-            eustress_common::terrain::BrushMode::Raise => "raise",
-            eustress_common::terrain::BrushMode::Lower => "lower",
-            eustress_common::terrain::BrushMode::Smooth => "smooth",
-            eustress_common::terrain::BrushMode::Flatten => "flatten",
-            eustress_common::terrain::BrushMode::PaintTexture => "paint",
-            eustress_common::terrain::BrushMode::VoxelAdd => "voxeladd",
-            eustress_common::terrain::BrushMode::VoxelRemove => "voxelremove",
-            eustress_common::terrain::BrushMode::VoxelSmooth => "voxelsmooth",
-            eustress_common::terrain::BrushMode::Region => "region",
-            eustress_common::terrain::BrushMode::Fill => "fill",
-        };
-        let current_brush: String = ui.get_terrain_brush().into();
-        if current_brush != brush_str {
-            ui.set_terrain_brush(brush_str.into());
-        }
-        // Size, strength and falloff change from the settings popup AND from
-        // the `[` / `]` keys, so the popup always reads the live brush back.
-        if (ui.get_terrain_brush_size() - tb.radius).abs() > 0.001 {
-            ui.set_terrain_brush_size(tb.radius);
-        }
-        if (ui.get_terrain_brush_strength() - tb.strength).abs() > 0.001 {
-            ui.set_terrain_brush_strength(tb.strength);
-        }
-        let falloff = terrain_falloff_preset(tb.falloff);
-        if ui.get_terrain_brush_falloff().as_str() != falloff {
-            ui.set_terrain_brush_falloff(falloff.into());
+        let tool = tb.tool.id();
+        if ui.get_terrain_brush().as_str() != tool {
+            ui.set_terrain_brush(tool.into());
         }
     }
     // Terrain config - only sync when values change
@@ -17752,6 +18766,9 @@ fn sync_bevy_to_slint(
         // about what the engine is actually doing.
         if ui.get_usage_telemetry_enabled() != es.usage_telemetry_enabled {
             ui.set_usage_telemetry_enabled(es.usage_telemetry_enabled);
+        }
+        if ui.get_ribbon_collapsed() != es.ribbon_collapsed {
+            ui.set_ribbon_collapsed(es.ribbon_collapsed);
         }
     }
 
@@ -17870,69 +18887,114 @@ fn sync_bevy_to_slint(
         ui.set_current_entity_count(entity_count as i32);
     }
     
-    // Output panel text. Rebuilt when the log count or a filter changes.
+    // Output rows (ui/output_rows.rs). Rebuilt at once when a filter, the
+    // search or a shown stack changes, and on the status tick when the log
+    // moved, so a flood of prints costs four rebuilds a second, not one a
+    // frame.
     if let Some(ref output) = output {
-        let new_log_count = output.entries.len();
-        let filter_hash = {
-            let sf: String = ui.get_output_source_filter().into();
-            let si = ui.get_output_show_info();
-            let sw = ui.get_output_show_warnings();
-            let se = ui.get_output_show_errors();
-            let sd = ui.get_output_show_debug();
-            format!("{}{}{}{}{}", sf, si, sw, se, sd)
-        };
-        let prev_filter = state.last_output_filter.clone();
-        let needs_rebuild = new_log_count != state.last_log_count || filter_hash != prev_filter;
-        if needs_rebuild {
-            state.last_log_count = new_log_count;
+        let source_filter: String = ui.get_output_source_filter().into();
+        let search: String = ui.get_output_filter_text().into();
+        let levels = [
+            ui.get_output_show_info(),
+            ui.get_output_show_warnings(),
+            ui.get_output_show_errors(),
+            ui.get_output_show_debug(),
+        ];
+        let filter_hash = format!(
+            "{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
+            source_filter, search, levels, super::output_rows::expand_epoch()
+        );
+        let filters_changed = filter_hash != state.last_output_filter;
+        let log_changed = output.revision != state.last_output_revision;
+        if filters_changed || (log_changed && status_tick) {
+            state.last_output_revision = output.revision;
             state.last_output_filter = filter_hash;
-            // Build all-text for the selectable output area — respects source + level filters
-            let source_filter = ui.get_output_source_filter().to_string();
-            let show_info = ui.get_output_show_info();
-            let show_warn = ui.get_output_show_warnings();
-            let show_err = ui.get_output_show_errors();
-            let show_dbg = ui.get_output_show_debug();
-            let all_text: String = output.entries.iter().filter(|e| {
-                // Source filter semantics:
-                //   "" or "all" → every source passes (default)
-                //   "rune"       → rune entries only
-                //   "luau"       → luau entries only
-                //   any other    → entries whose source exactly matches
-                //
-                // The prior version hid rune/luau entries whenever the
-                // filter wasn't explicitly "all" or that exact source —
-                // which is why script errors landed in OutputConsole but
-                // never rendered in the Output panel for the default
-                // filter state (empty string). Errors now show up
-                // regardless of whether the user has touched the
-                // Rune/Luau filter toggles.
-                let source_ok = match source_filter.as_str() {
-                    "" | "all" => true,
-                    f          => e.source == f,
-                };
-                // Level filter
-                let level_ok = match e.level {
-                    LogLevel::Info => show_info,
-                    LogLevel::Warn => show_warn,
-                    LogLevel::Error => show_err,
-                    LogLevel::Debug => show_dbg,
-                };
-                source_ok && level_ok
-            }).map(|e| {
-                let level_tag = match e.level {
-                    LogLevel::Info => "ℹ",
-                    LogLevel::Warn => "⚠",
-                    LogLevel::Error => "✗",
-                    LogLevel::Debug => "⚙",
-                };
-                format!("{} {} {}", e.timestamp, level_tag, e.message)
-            }).collect::<Vec<_>>().join("\n");
-            ui.set_output_all_text(slint::SharedString::from(all_text));
+            let filters = super::output_rows::Filters { source: &source_filter, search: &search, levels };
+            let built = super::output_rows::build(&output.entries, &filters, &super::output_rows::expanded_ids());
+            let rows: Vec<OutputRow> = built.rows.into_iter().map(|r| OutputRow {
+                id: r.id as i32,
+                kind: r.kind.into(),
+                level: r.level,
+                source: r.source.into(),
+                badge: r.badge.into(),
+                time: r.time.into(),
+                text: r.text.into(),
+                count: r.count,
+                script: r.script.into(),
+                script_label: r.script_label.into(),
+                file: r.file.into(),
+                line: r.line,
+                stack: r.stack.into(),
+                expanded: r.expanded,
+            }).collect();
+            ui.set_output_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+            ui.set_output_count_info(built.counts[0]);
+            ui.set_output_count_warnings(built.counts[1]);
+            ui.set_output_count_errors(built.counts[2]);
+            ui.set_output_count_debug(built.counts[3]);
+            ui.set_output_total_lines(i32::try_from(output.entries.len()).unwrap_or(i32::MAX));
+            ui.set_output_rows_revision(ui.get_output_rows_revision().wrapping_add(1));
         }
     }
-    
+
     // Workshop Panel sync is handled by the dedicated sync_workshop_to_slint system
     // (runs on its own schedule to avoid adding workshop as a parameter here)
+}
+
+/// Writes Play's lifecycle to the Output panel: started, paused, resumed and
+/// stopped, so a session's script output reads between its own start and stop
+/// lines.
+fn log_play_state_to_output(
+    state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut last: Local<Option<crate::play_mode::PlayModeState>>,
+    output: Option<ResMut<OutputConsole>>,
+) {
+    use crate::play_mode::PlayModeState;
+    let Some(state) = state else { return };
+    let now = *state.get();
+    let before = last.replace(now);
+    let Some(before) = before else { return };
+    if before == now {
+        return;
+    }
+    let line = match (before, now) {
+        (PlayModeState::Editing, PlayModeState::Playing) => "▶ Play started",
+        (PlayModeState::Paused, PlayModeState::Playing) => "▶ Play resumed",
+        (_, PlayModeState::Paused) => "⏸ Play paused",
+        (_, PlayModeState::Editing) => "■ Play stopped; the Space is back to its state before Play",
+        _ => return,
+    };
+    if let Some(mut out) = output {
+        // A script's last lines, printed in the frame Play ended or paused,
+        // land above the lifecycle line rather than in the next session.
+        crate::soul::rune_api::forward_script_logs(&mut out);
+        out.push_with_source(LogLevel::Info, line.to_string(), "play");
+    }
+}
+
+/// Forget what the editor holds about the entities of a Space being unloaded.
+/// Called by `space_ops::open_space` on every switch or reopen (the Universe
+/// browser, File > Open Recent, a snapshot revert), so a despawned entity is
+/// never selected, expanded, behind a clickable row, or the target of an undo.
+/// Expansion is keyed by entity, so a reloaded tree opens collapsed below its
+/// services (whose expansion is kept, by name).
+pub fn reset_explorer_for_space_reload(world: &mut World) {
+    // The undo history's steps name the unloaded Space's entities; undoing
+    // one after the reload would act on objects that no longer exist. The
+    // History panel empties with it.
+    if let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() {
+        undo.clear();
+    }
+    if let Some(sm) = world.get_resource::<BevySelectionManager>() {
+        sm.0.write().clear();
+    }
+    if let Some(mut es) = world.get_resource_mut::<UnifiedExplorerState>() {
+        es.selected = SelectedItem::None;
+        es.entity_id_cache.clear();
+        es.expanded_entities.clear();
+        es.dirty = true;
+        es.needs_immediate_sync = true;
+    }
 }
 
 /// Persist the Output console buffer to `<space>/.eustress/output.log` when
@@ -18014,20 +19076,26 @@ fn push_model_picker_rows(
         let section_start = previous_provider != Some(provider);
         previous_provider = Some(provider);
 
+        // A model its provider lists without a price reads as exactly that.
+        // Nothing invents one: the price used to come from a web search, and
+        // a wrong price there is a wrong cost estimate on every turn.
+        let price = match (model.input_price_per_mtok(), model.output_price_per_mtok()) {
+            (Some(input), Some(output)) => {
+                format!("{} / {} per Mtok", format_price(input), format_price(output))
+            }
+            _ => "price not published".to_string(),
+        };
+
         rows.push(WorkshopModelEntry {
             name: model.display_name().into(),
             provider: provider.label().into(),
             tagline: model.tagline().into(),
-            price: format!(
-                "{} / {} per Mtok",
-                format_price(model.input_price_per_mtok()),
-                format_price(model.output_price_per_mtok())
-            )
-            .into(),
+            price: price.into(),
             section_start,
             key_missing: global_settings
                 .map(|g| g.key_for_provider(provider).is_none())
                 .unwrap_or(true),
+            is_new: model.is_discovered(),
         });
     }
 
@@ -18124,6 +19192,7 @@ fn sync_workshop_to_slint(
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     claude_tasks: Option<Res<crate::workshop::claude_bridge::WorkshopClaudeTasks>>,
+    catalog_revision: Option<Res<crate::soul::model_catalog::ModelCatalogRevision>>,
     mut models_pushed: Local<bool>,
     mut last_status: Local<Option<WorkshopAgentStatus>>,
 ) {
@@ -18142,8 +19211,11 @@ fn sync_workshop_to_slint(
         *last_status = Some(status);
     }
 
+    // A key change, or a model list the providers just confirmed, both change
+    // what the picker should show.
     let soul_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
-        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
+        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false)
+        || catalog_revision.as_ref().is_some_and(|r| r.is_changed());
     // The model rows have to reach Slint at least once even if nothing ever
     // changes, because `main.slint` binds the picker straight to them: without
     // this first push the menu would render empty on a session where the user
@@ -19266,103 +20338,149 @@ fn init_services_browser_to_slint(
 }
 
 // ============================================================================
-// Insert menu — data-driven catalog from the ClassRegistry
+// Insert menu: catalog and context, rebuilt each time the menu opens
 // ============================================================================
 
-/// Whether the Insert-menu class catalog has been pushed to Slint yet.
-/// The registry is fully populated by spawner-plugin build (all
-/// `register_class` calls run before the first frame), and the set of
-/// creatable templates is static for a session, so a one-shot push is
-/// enough — mirrors `ServicesBrowserInitialized`.
+/// Set when the menu bar's Insert dropdown or the Insert Object dialog opens:
+/// `refresh_insert_menu` rebuilds the catalog from disk and recomputes the
+/// target, the suggestions and the recent inserts. An atomic because the
+/// dropdown's open callback runs inside Slint, outside any system.
+static INSERT_MENU_REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Insert catalog as last pushed to Slint. An unchanged catalog is not
+/// pushed again: replacing the model rebuilds every row of an open menu.
 #[derive(Resource, Default)]
-struct InsertClassesInitialized(bool);
+struct InsertMenuState {
+    catalog: Vec<super::insert_classes::InsertClassDescriptor>,
+    pushed: bool,
+}
 
-/// One-shot system: enumerate every registered `ClassName` that also has a
-/// creatable `class_schema/<Class>/_instance.toml` template, group it by
-/// category, and push the list to Slint as the Insert dropdown's model.
+/// Where the next insert lands, as the Insert menu names it.
+enum InsertMenuTarget {
+    /// Nothing selected: each class goes to its usual service.
+    Default,
+    /// A service row, or the service's own entity.
+    Service(String),
+    /// A folder-backed instance, which takes the insert inside it.
+    Instance {
+        name: String,
+        class: eustress_common::classes::ClassName,
+        service: String,
+    },
+}
+
+/// Resolve the Explorer selection the way the insert handlers do (see
+/// `insert_parent_entity`): a folder-backed instance takes the insert inside
+/// it; a single-file instance puts it next to itself, in its parent; a
+/// service row, or the service's own entity, puts it in the service; an
+/// instance with no file behind it, or no selection, leaves each class to
+/// its usual service.
+fn insert_menu_target(
+    selected: Option<&SelectedItem>,
+    entries: &Query<(
+        &eustress_common::classes::Instance,
+        Option<&crate::space::LoadedFromFile>,
+        Option<&ChildOf>,
+    )>,
+) -> InsertMenuTarget {
+    let mut entity = match selected {
+        Some(SelectedItem::Service(name)) => return InsertMenuTarget::Service(name.clone()),
+        Some(SelectedItem::Entity(e)) => *e,
+        _ => return InsertMenuTarget::Default,
+    };
+    // One hop at most: from a single-file instance to its parent.
+    for _ in 0..2 {
+        let Ok((instance, file, parent)) = entries.get(entity) else { break };
+        let Some(file) = file else { break };
+        if file.path.file_name().is_some_and(|n| n.to_string_lossy() == "_service.toml") {
+            return InsertMenuTarget::Service(file.service.clone());
+        }
+        if file.path.is_dir() {
+            return InsertMenuTarget::Instance {
+                name: instance.name.clone(),
+                class: instance.class_name,
+                service: file.service.clone(),
+            };
+        }
+        match parent {
+            Some(parent) => entity = parent.parent(),
+            None => return InsertMenuTarget::Service(file.service.clone()),
+        }
+    }
+    InsertMenuTarget::Default
+}
+
+/// Keeps the Insert menu and the Insert Object dialog current.
 ///
-/// Filtering to template-having classes is deliberate (CLASS_REGISTRY.md +
-/// task spec): every row, when clicked, routes through `create_instance`
-/// and succeeds. Registered-but-template-less classes (most Wave 7
-/// data/audio/character structs, created as children or via script) are
-/// omitted so the menu never offers a click that errors.
-///
-/// Logs the registry size, the template-having count, and the final
-/// listed count so the enumerate-vs-registry sanity check is visible at
-/// startup.
-fn init_insert_classes_to_slint(
+/// On the first frame, and whenever either surface opens
+/// (`INSERT_MENU_REFRESH`): rebuild the catalog from the class templates on
+/// disk (`insert_classes::live_catalog`), so a template folder added while
+/// Studio runs is insertable the next time the menu opens; then push the
+/// "Inserts into" target, the classes suggested for the selection and the
+/// recent inserts (`insert_classes::context_rows`), and refresh an open
+/// dialog whose search is empty.
+fn refresh_insert_menu(
     slint_context: Option<NonSend<SlintUiState>>,
-    registry: Option<Res<eustress_common::class_registry::ClassRegistry>>,
-    mut initialized: ResMut<InsertClassesInitialized>,
+    explorer_state: Option<Res<UnifiedExplorerState>>,
+    editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    entries: Query<(
+        &eustress_common::classes::Instance,
+        Option<&crate::space::LoadedFromFile>,
+        Option<&ChildOf>,
+    )>,
+    mut menu: ResMut<InsertMenuState>,
 ) {
-    if initialized.0 {
-        return;
-    }
     let Some(ref ctx) = slint_context else { return };
-    let Some(registry) = registry else { return };
-    // Wait until spawner plugins have registered (registry boots empty).
-    if registry.is_empty() {
+    let requested = INSERT_MENU_REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if menu.pushed && !requested {
         return;
     }
-    initialized.0 = true;
+    let ui = &ctx.window;
 
-    let registry_count = registry.len();
-    // Data Platform classes (Dataset/Series/Column/Run) have creatable
-    // class_schema templates + ClassName variants but no registered spawner
-    // yet — Insert creates via `create_instance`/template, not the registry
-    // spawn path, so a template is all a successful click needs. Chain them
-    // onto the registered set; `.filter(!contains)` keeps the row de-duped if
-    // one of them later gains a real spawner.
-    // Particle simulations and terrain layers likewise: template-backed,
-    // created through the same canonical path.
-    let data_platform = [
-        eustress_common::classes::ClassName::Dataset,
-        eustress_common::classes::ClassName::Series,
-        eustress_common::classes::ClassName::Column,
-        eustress_common::classes::ClassName::Run,
-        eustress_common::classes::ClassName::ParticleSimulation,
-        eustress_common::classes::ClassName::ParticleSpecies,
-        eustress_common::classes::ClassName::TerrainSpline,
-        eustress_common::classes::ClassName::TerrainSplinePoint,
-        eustress_common::classes::ClassName::TerrainStamp,
-        eustress_common::classes::ClassName::TerrainFlattenPad,
-        eustress_common::classes::ClassName::TerrainNoise,
-        eustress_common::classes::ClassName::TerrainMaterialFill,
-        eustress_common::classes::ClassName::TerrainScatter,
-        eustress_common::classes::ClassName::TerrainWaterBody,
-    ]
-    .into_iter()
-    .filter(|c| !registry.contains(*c));
-    let descriptors = super::insert_classes::build_catalog(
-        registry.registered_classes().chain(data_platform),
-        super::insert_classes::template_exists,
-    );
+    let catalog = super::insert_classes::live_catalog(&eustress_common::class_schema_dir());
+    if !menu.pushed || catalog != menu.catalog {
+        let rows: Vec<InsertClassData> = catalog.iter().map(insert_row).collect();
+        ui.set_insert_classes(slint::ModelRc::new(slint::VecModel::from(rows)));
+        info!("Insert menu: {} classes with a creatable template", catalog.len());
+        menu.catalog = catalog;
+        menu.pushed = true;
+    }
+    if !requested {
+        return;
+    }
 
-    let listed_count = descriptors.len();
-    let slint_rows: Vec<InsertClassData> = descriptors
-        .into_iter()
-        .map(|d| InsertClassData {
-            class_name: d.class_name.into(),
-            category: d.category.into(),
-            display: d.display.into(),
-            show_header: d.show_header,
-        })
-        .collect();
-
-    let model = std::rc::Rc::new(slint::VecModel::from(slint_rows));
-    ctx.window.set_insert_classes(slint::ModelRc::from(model));
-
-    info!(
-        "Insert menu: {} classes listed (of {} registered spawners; \
-         filtered to those with a creatable class_schema template)",
-        listed_count, registry_count,
-    );
+    let target = insert_menu_target(explorer_state.as_deref().map(|es| &es.selected), &entries);
+    let (label, title, suggest_for) = match &target {
+        InsertMenuTarget::Default => (
+            "its usual service".to_string(),
+            String::new(),
+            super::insert_classes::InsertTarget::Default,
+        ),
+        InsertMenuTarget::Service(name) => (
+            name.clone(),
+            name.clone(),
+            super::insert_classes::InsertTarget::Service(name.as_str()),
+        ),
+        InsertMenuTarget::Instance { name, class, service } => (
+            name.clone(),
+            class.as_str().to_string(),
+            super::insert_classes::InsertTarget::Instance { class: *class, service: service.as_str() },
+        ),
+    };
+    let recent: &[String] = editor_settings.as_ref().map(|s| s.recent_inserts.as_slice()).unwrap_or(&[]);
+    let context = super::insert_classes::context_rows(suggest_for, &title, &menu.catalog, recent);
+    let rows: Vec<InsertClassData> = context.iter().map(insert_row).collect();
+    ui.set_insert_context(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_insert_target_name(label.into());
+    if ui.get_show_insert_object_dialog() && ui.get_insert_search_query().trim().is_empty() {
+        ui.set_insert_results(insert_results_model(ui, ""));
+    }
 }
 
 /// Whether the persisted active-theme choice has been pushed into the `Theme`
 /// global yet. One-shot: after the first push, `Theme.data` is the live source
 /// of truth (swapped by `SlintAction::SelectTheme`), so this never needs to run
-/// again — mirrors `InsertClassesInitialized`.
+/// again.
 #[derive(Resource, Default)]
 struct ThemeInitialized(bool);
 
@@ -20082,7 +21200,7 @@ fn menu_action_display_label(action_id: &str) -> slint::SharedString {
 /// Last-pushed button count for the Plugins tab, so `sync_plugin_tabs_to_slint`
 /// only touches the Slint model when the content actually changed (cheap
 /// per-frame check; avoids marking Slint dirty every frame for a static
-/// list). Unlike `InsertClassesInitialized` this ISN'T a one-shot latch —
+/// list). It is not a one-shot latch:
 /// `TabRegistry` is genuinely mutable at runtime once a script-authored
 /// plugin host (Phase 2, not yet built) can enable/disable plugins after
 /// startup; a length comparison keeps this system forward-compatible with
@@ -20099,9 +21217,9 @@ struct PluginTabSignature(String);
 /// Push the "plugins" `TabRegistry` entry (populated by `sync_plugin_tabs`
 /// in `studio_plugins/mod.rs` from real `StudioPlugin`s via `PluginApi` —
 /// see `road_tool.rs` for the first one) to the Slint ribbon's
-/// `plugin-sections`/`plugin-buttons` list-properties. Mirrors
-/// `init_insert_classes_to_slint`'s flatten-and-push shape; unlike that
-/// one-shot system this re-checks every frame (see `PluginTabSignature`).
+/// `plugin-sections`/`plugin-buttons` list-properties, in the same
+/// flatten-and-push shape as `refresh_insert_menu`; this one re-checks every
+/// frame (see `PluginTabSignature`).
 fn sync_plugin_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     tab_registry: Option<Res<crate::studio_plugins::tab_api::TabRegistry>>,
@@ -21959,20 +23077,26 @@ fn sync_procurement_to_slint(
 fn sync_history_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     undo_stack: Option<Res<crate::undo::UndoStack>>,
+    mut shown: Local<bool>,
+    mut rebuilt_at: Local<Option<u64>>,
 ) {
     let Some(ref context) = slint_context else { return };
     let Some(ref undo_stack) = undo_stack else { return };
 
-    if !undo_stack.is_changed() {
-        return;
-    }
-
     let ui = &context.window;
 
-    let right_tab = ui.get_right_tab_index();
-    if right_tab != 1 {
+    // Rebuilt when the history has changed since the last rebuild (its
+    // revision moves whenever the entries or the undo position change) while
+    // the tab shows, and when the tab opens, so a change made while another tab
+    // showed is listed the moment History opens.
+    let visible = ui.get_right_tab_index() == 1;
+    let just_opened = visible && !*shown;
+    *shown = visible;
+    let revision = undo_stack.revision();
+    if !visible || !(just_opened || *rebuilt_at != Some(revision)) {
         return;
     }
+    *rebuilt_at = Some(revision);
 
     let current_index = undo_stack.current_index();
     let actions = undo_stack.history();
@@ -21989,7 +23113,8 @@ fn sync_history_to_slint(
             action: structural.into(),
             description: shown.into(),
             timestamp: slint::SharedString::default(),
-            is_current: i == current_index.saturating_sub(1),
+            // Nothing is current once every step is undone (index 0).
+            is_current: current_index > 0 && i == current_index - 1,
             can_undo: i < current_index,
             // Stable topic string matching the Eustress-Stream topic
             // (`history.<kind>`). Drives the right-click menu label
@@ -22000,7 +23125,8 @@ fn sync_history_to_slint(
 
     let model = slint::ModelRc::new(slint::VecModel::from(slint_entries));
     ui.set_history_entries(model);
-    ui.set_history_current_index(current_index.saturating_sub(1) as i32);
+    // -1 when every step is undone, so every row reads as undone.
+    ui.set_history_current_index(current_index as i32 - 1);
 }
 
 /// Sync simulation clock display to the Slint ribbon.
@@ -22248,11 +23374,23 @@ fn sync_unified_explorer_to_slint(
         Query<&eustress_common::classes::TextLabel>,
         Query<&eustress_common::attributes::Tags>,
         Query<&eustress_common::classes::BasePart>,
+        // Pose anchors (`space::pose_anchor`): not instances; their children
+        // are listed as their part's.
+        Query<(), With<crate::space::pose_anchor::PoseAnchor>>,
     ),
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
     selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    // The tree's index, read straight from the ECS so a rebuild builds no
+    // entity set or child map: instances with no parent, instances with one,
+    // and the service entities. One tuple param, because this system is at
+    // Bevy's 16-param ceiling.
+    index_queries: (
+        Query<(Entity, &eustress_common::classes::Instance), Without<ChildOf>>,
+        Query<(Entity, &eustress_common::classes::Instance, &ChildOf)>,
+        Query<Entity, (With<crate::space::service_loader::ServiceComponent>, With<eustress_common::classes::Instance>)>,
+    ),
     // Structure latch (AAA perf audit): the tree only reflects the Instance
     // SET, names/classes, and parenting. `PanelDirtyFlags.explorer` is far
     // coarser — streaming/residency ticks set it nearly every frame in big
@@ -22462,58 +23600,68 @@ fn sync_unified_explorer_to_slint(
     explorer_state.entity_id_cache.clear();
     explorer_state.next_entity_node_id = 1;
     
-    // SINGLE-PASS preamble. Previously this iterated the full ~110K instance
-    // set three times (instance_entities, children_of_parent, roots) plus a 4th
-    // pass below for service-children. Fold into two tight passes and pre-collect
-    // service_entities so that loop no longer needs its own instances.iter().
-    let mut instance_entities: std::collections::HashSet<Entity> =
-        std::collections::HashSet::new();
-    let mut children_of_parent: std::collections::HashMap<Entity, Vec<Entity>> =
-        std::collections::HashMap::new();
-    let mut roots: Vec<Entity> = Vec::new();
-    let mut service_entities: Vec<Entity> = Vec::new();
-
-    // Pass 1a: membership + child map. Membership must be complete before roots
-    // are decided (a ChildOf may point to an entity not yet visited).
-    for (entity, _) in instances.iter() {
-        instance_entities.insert(entity);
-        if let Ok(child_of) = child_of_query.get(entity) {
-            children_of_parent.entry(child_of.0).or_default().push(entity);
-        }
-    }
-    // Pass 1b: roots + service entities (membership set now complete).
-    for (entity, instance) in instances.iter() {
-        if service_components.get(entity).is_ok() {
-            service_entities.push(entity);
-        }
-        // Skip adornment classes (meta entities hidden from Explorer)
-        if instance.class_name.is_adornment() {
-            continue;
-        }
-        match child_of_query.get(entity) {
-            Ok(child_of) => {
-                if !instance_entities.contains(&child_of.0) {
-                    roots.push(entity);
+    // Roots: instances with no parent, plus instances whose parent is not an
+    // instance. Adornment classes (meta entities) are hidden from the tree.
+    // Children come from Bevy's `Children`, which the `ChildOf` relationship
+    // hooks keep in step at insertion, so the tree needs no child map of its
+    // own.
+    let (unparented_instances, parented_instances, service_entity_query) = &index_queries;
+    let service_entities: Vec<Entity> = service_entity_query.iter().collect();
+    let mut roots: Vec<Entity> = unparented_instances
+        .iter()
+        .filter(|(_, instance)| !instance.class_name.is_adornment())
+        .map(|(entity, _)| entity)
+        .collect();
+    roots.extend(
+        parented_instances
+            .iter()
+            .filter(|(_, instance, child_of)| {
+                !instance.class_name.is_adornment() && !instances.contains(child_of.parent())
+            })
+            .map(|(entity, _, _)| entity),
+    );
+    // Whether a `Children` entry is shown in the tree: an instance, and not an
+    // adornment. `Children` also lists helper entities that are not instances.
+    let is_tree_child = |child: Entity| {
+        instances
+            .get(child)
+            .map(|(_, i)| !i.class_name.is_adornment())
+            .unwrap_or(false)
+    };
+    // An entity's rows in the tree: its instance children, with a pose
+    // anchor's children (the placed children a sized part hangs from its
+    // unscaled anchor) in the anchor's place.
+    let pose_anchors = &search_facts.3;
+    let tree_children = |entity: Entity| -> Vec<Entity> {
+        let mut out = Vec::new();
+        if let Ok(children) = children_query.get(entity) {
+            for child in children.iter() {
+                if pose_anchors.contains(child) {
+                    if let Ok(grand) = children_query.get(child) {
+                        out.extend(grand.iter().filter(|g| is_tree_child(*g)));
+                    }
+                } else if is_tree_child(child) {
+                    out.push(child);
                 }
             }
-            Err(_) => {
-                roots.push(entity);
-            }
         }
-    }
+        out
+    };
     
-    roots.sort_by(|a, b| {
-        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-
-        // Pin Camera at the top, tiebreak by entity index for stable ordering
-        match (a_name, b_name) {
-            ("Camera", _) => std::cmp::Ordering::Less,
-            (_, "Camera") => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name)
-                .then_with(|| a.index().cmp(&b.index())),
-        }
-    });
+    // The one order for every child list in the tree: Camera first, then by
+    // name, then by entity index. The lists here come out of ECS storage and
+    // `Children`, and neither order is stable: selecting an entity adds a
+    // component that moves it to the end of storage, and re-parenting appends
+    // to `Children`, so an unsorted list reshuffles. As a key it is a total order, which a sort
+    // requires (the old comparators called two Cameras each less than the
+    // other).
+    let explorer_key = |e: &Entity| {
+        let (class, name) = instances.get(*e)
+            .map(|(_, i)| (i.class_name, i.name.as_str()))
+            .unwrap_or((eustress_common::classes::ClassName::Part, ""));
+        (class != eustress_common::classes::ClassName::Camera, name, e.index())
+    };
+    roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
     
     last_rebuild_frame.mark(0, rebuild_t0);
 
@@ -22555,11 +23703,8 @@ fn sync_unified_explorer_to_slint(
         "StarterCharacterScripts", "StarterPlayerScripts",
     ].into_iter().collect();
     
-    // Find service entities and populate their children buckets directly
-    // This is more reliable than using roots, since children of services have ChildOf
-    // pointing to the service entity, so they're not in roots.
-    // Reuses service_entities collected in the single-pass preamble above
-    // instead of re-iterating all ~110K instances.
+    // Each service's children go straight into its bucket: they have a
+    // `ChildOf` pointing at the service, so they are not roots.
     for entity in service_entities.iter().copied() {
         // A service folder nested in another (StarterPlayer/StarterPlayerScripts)
         // is drawn with its children by the tree walk under its parent; listing
@@ -22568,27 +23713,23 @@ fn sync_unified_explorer_to_slint(
             continue;
         }
         if let Ok(service) = service_components.get(entity) {
-            // Get children of this service entity from the children_of_parent map
-            if let Some(children) = children_of_parent.get(&entity) {
-                for child in children {
-                    // Skip adornments
-                    if let Ok((_, inst)) = instances.get(*child) {
-                        if inst.class_name.is_adornment() {
-                            continue;
-                        }
+            if let Ok(children) = children_query.get(entity) {
+                for child in children.iter() {
+                    if !is_tree_child(child) {
+                        continue;
                     }
                     match service.class_name.as_str() {
-                        "Workspace" => workspace_roots.push(*child),
-                        "Lighting" => lighting_roots.push(*child),
-                        "StarterGui" => starter_gui_roots.push(*child),
-                        "SoulService" => soul_service_roots.push(*child),
-                        "MaterialService" => material_service_roots.push(*child),
-                        "AdornmentService" => adornment_service_roots.push(*child),
+                        "Workspace" => workspace_roots.push(child),
+                        "Lighting" => lighting_roots.push(child),
+                        "StarterGui" => starter_gui_roots.push(child),
+                        "SoulService" => soul_service_roots.push(child),
+                        "MaterialService" => material_service_roots.push(child),
+                        "AdornmentService" => adornment_service_roots.push(child),
                         // Every other service lists its children too: scripts,
                         // modules, remotes and templates in ServerScriptService,
                         // ReplicatedStorage, StarterPlayer and the rest.
                         other => {
-                            dynamic_service_roots.entry(explorer_service_row(other).to_string()).or_default().push(*child);
+                            dynamic_service_roots.entry(explorer_service_row(other).to_string()).or_default().push(child);
                         }
                     }
                 }
@@ -22638,6 +23779,8 @@ fn sync_unified_explorer_to_slint(
                 // classes into Workspace so any imported root still surfaces.
                 if is_lighting_child(&instance.class_name) {
                     lighting_roots.push(*entity);
+                } else if instance.class_name == eustress_common::classes::ClassName::Material {
+                    material_service_roots.push(*entity);
                 } else if is_ui_child(&instance.class_name) {
                     starter_gui_roots.push(*entity);
                 } else if is_script(&instance.class_name) {
@@ -22649,6 +23792,17 @@ fn sync_unified_explorer_to_slint(
         }
     }
     
+    // Service children in the same order as everything else. SoulService keeps
+    // its own sort below (Workshop pinned first); Workspace is sorted where it
+    // is paged.
+    lighting_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    starter_gui_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    material_service_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    adornment_service_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    for list in dynamic_service_roots.values_mut() {
+        list.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    }
+
     last_rebuild_frame.mark(1, rebuild_t0);
 
     // Snapshot borrow-free copies of what the DFS closure needs from explorer_state
@@ -22752,14 +23906,7 @@ fn sync_unified_explorer_to_slint(
                 continue;
             }
 
-            // Use children_of_parent map (built from ChildOf components) instead of Children query
-            // This is more reliable since Children may not be populated yet after ChildOf insertion
-            let has_children = children_of_parent.get(&entity)
-                .map(|children| children.iter().any(|c| {
-                    instance_entities.contains(c) && 
-                    instances.get(*c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
-                }))
-                .unwrap_or(false);
+            let has_children = !tree_children(entity).is_empty();
 
             // Stable entity ID: derive from entity bits so IDs survive tree rebuilds.
             // This prevents double-click race conditions where the first click triggers
@@ -22818,28 +23965,10 @@ fn sync_unified_explorer_to_slint(
             });
 
             if is_expanded && has_children {
-                if let Some(children) = children_of_parent.get(&entity) {
-                    let mut child_instances: Vec<Entity> = children.iter()
-                        .filter(|c| {
-                            instance_entities.contains(c) &&
-                            instances.get(**c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
-                        })
-                        .copied()
-                        .collect();
-                    child_instances.sort_by(|a, b| {
-                        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        match (a_name, b_name) {
-                            ("Camera", _) => std::cmp::Ordering::Less,
-                            (_, "Camera") => std::cmp::Ordering::Greater,
-                            _ => a_name.cmp(b_name)
-                                // Tiebreaker: entity index for deterministic order with same names
-                                .then_with(|| a.index().cmp(&b.index())),
-                        }
-                    });
-                    for child in child_instances.into_iter().rev() {
-                        stack.push((child, depth + 1));
-                    }
+                let mut child_instances: Vec<Entity> = tree_children(entity);
+                child_instances.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+                for child in child_instances.into_iter().rev() {
+                    stack.push((child, depth + 1));
                 }
             }
         }
@@ -22876,29 +24005,19 @@ fn sync_unified_explorer_to_slint(
         });
     }
     let ws_has = !workspace_roots.is_empty() || has_terrain;
-    // Bound the Workspace bucket BEFORE sorting/building: a flat list of ~110K
-    // parts (Vehicle Simulator) would otherwise spend seconds sorting + building
-    // TreeNodes every rebuild. Truncate to Workspace's current paging window;
-    // the pager row below loads the next page on click. (Truncation happens
-    // pre-sort so the sort itself is also bounded.)
+    // Bound the Workspace bucket BEFORE building: a flat list of ~110K parts
+    // (Vehicle Simulator) would otherwise spend seconds building TreeNodes
+    // every rebuild. The window is the first N in sorted order, found with a
+    // linear-time selection, so only the window itself is fully sorted and a
+    // click never swaps which parts are on the page. The pager row below
+    // loads the next page on click.
     let workspace_total = workspace_roots.len();
     let ws_window = page_windows.get("Workspace").copied().unwrap_or(page_size);
     if workspace_total > ws_window {
+        workspace_roots.select_nth_unstable_by(ws_window, |a, b| explorer_key(a).cmp(&explorer_key(b)));
         workspace_roots.truncate(ws_window);
     }
-    // Sort workspace children: Camera first, then alphabetical
-    workspace_roots.sort_by(|a, b| {
-        let a_class = instances.get(*a).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
-        let b_class = instances.get(*b).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
-        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        match (a_class, b_class) {
-            (eustress_common::classes::ClassName::Camera, _) => std::cmp::Ordering::Less,
-            (_, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name)
-                .then_with(|| a.index().cmp(&b.index())),
-        }
-    });
+    workspace_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
 
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Workspace") {
@@ -23684,7 +24803,7 @@ fn probe_explorer_structure(
 ) {
     let any_removed = !removed.is_empty();
     removed.clear();
-    if any_removed || !probe.is_empty() {
+    if any_removed || eustress_common::utils::probe_any(&probe) {
         latch.0 = true;
     }
 }
@@ -23706,7 +24825,7 @@ fn probe_tag_changes(
     >,
     mut latch: ResMut<TagsChanged>,
 ) {
-    if !changed.is_empty() {
+    if eustress_common::utils::probe_any(&changed) {
         latch.0 = true;
     }
 }
@@ -23722,7 +24841,8 @@ fn probe_gui_element_changes(
     mut last_count: Local<Option<usize>>,
     mut latch: ResMut<GuiElementsChanged>,
 ) {
-    let count = elements.iter().count();
+    // Summed over tables; `iter().count()` visited every element.
+    let count = eustress_common::utils::count_matching(&elements);
     if *last_count != Some(count) || !changed.is_empty() {
         *last_count = Some(count);
         latch.0 = true;
@@ -24535,6 +25655,102 @@ struct PropertyExtraQueries<'w, 's> {
     color_picks: Option<Res<'w, eustress_common::color_wheels::BrickColorPicks>>,
     /// ParticleSimulation / ParticleSpecies components and live runtimes.
     particle_sim: super::particle_sim_panel::PanelQueries<'w, 's>,
+    /// The post effects the renderer honours, so their rows show the live
+    /// component rather than a Part's Appearance/Physics.
+    lighting_fx: Query<'w, 's, (
+        Option<&'static eustress_common::classes::BloomEffect>,
+        Option<&'static eustress_common::classes::SunRaysEffect>,
+    )>,
+    /// The light classes' live components, for their Light rows.
+    lights: super::light_panel::PanelQueries<'w, 's>,
+    /// The Sun's, Moon's, Sky's, Atmosphere's and Clouds' live components.
+    celestial: super::celestial_panel::PanelQueries<'w, 's>,
+    /// Sounds' live components, for their Sound rows.
+    sounds: super::sound_panel::PanelQueries<'w, 's>,
+}
+
+/// Property rows for a Bloom or SunRays object, from its live component
+/// (defaults while it has none). `None` for any other class. A Clouds
+/// object's rows are `celestial_panel`'s.
+///
+/// Every row writes back through `route_lighting_fx_property` into the
+/// object's own TOML section, and `lighting_plugin::reload_lighting_fx`
+/// re-reads the file, so an edit takes effect a moment after it is made.
+fn lighting_fx_rows(
+    class: eustress_common::classes::ClassName,
+    entity: Entity,
+    extra_q: &PropertyExtraQueries,
+) -> Option<Vec<(&'static str, &'static str, String, &'static str)>> {
+    use eustress_common::classes::ClassName;
+    let (bloom, rays) = extra_q.lighting_fx.get(entity).ok()?;
+    match class {
+        ClassName::BloomEffect => {
+            let b = bloom.cloned().unwrap_or_default();
+            Some(vec![
+                ("Bloom", "Enabled", b.enabled.to_string(), "bool"),
+                ("Bloom", "Intensity", format!("{:.3}", b.intensity), "float"),
+                ("Bloom", "Size", format!("{:.1}", b.size), "float"),
+                ("Bloom", "Threshold", format!("{:.3}", b.threshold), "float"),
+            ])
+        }
+        ClassName::SunRaysEffect => {
+            let r = rays.cloned().unwrap_or_default();
+            Some(vec![
+                ("SunRays", "Enabled", r.enabled.to_string(), "bool"),
+                ("SunRays", "Intensity", format!("{:.3}", r.intensity), "float"),
+                ("SunRays", "Spread", format!("{:.3}", r.spread), "float"),
+            ])
+        }
+        _ => None,
+    }
+}
+
+/// Where a Clouds, Bloom or SunRays write lands in the object's TOML: its own
+/// section (`[clouds]`, `[bloom]`, `[sun_rays]`), ahead of the class-blind
+/// `route_property`, whose `Enabled`, `Color` and `Size` mean a GUI or a
+/// Part's fields. The Properties panel edits a Clouds object through
+/// `celestial_panel`; these arms persist a script's writes (Clouds'
+/// `Coverage` is the script name for the panel's Cover).
+fn route_lighting_fx_property(
+    class_name: &str,
+    key: &str,
+    val: &str,
+) -> Option<(&'static str, &'static str, toml::Value)> {
+    use toml::Value;
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let flag = |s: &str| {
+        Value::Boolean(matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+    };
+    let unit = |s: &str| num(s).map(|v| Value::Float(v.clamp(0.0, 1.0)));
+    let non_negative = |s: &str| num(s).map(|v| Value::Float(v.max(0.0)));
+    match (class_name, key) {
+        ("Clouds", "Enabled") => Some(("clouds", "enabled", flag(val))),
+        ("Clouds", "Cover" | "Coverage") => unit(val).map(|v| ("clouds", "cover", v)),
+        ("Clouds", "Density") => unit(val).map(|v| ("clouds", "density", v)),
+        ("Clouds", "Color") => {
+            let channels: Vec<i64> = val
+                .split(',')
+                .filter_map(|s| num(s))
+                .map(|v| v.round().clamp(0.0, 255.0) as i64)
+                .collect();
+            (channels.len() >= 3).then(|| {
+                ("clouds", "color", Value::Array(channels[..3].iter().map(|c| Value::Integer(*c)).collect()))
+            })
+        }
+        ("Clouds", "LayerType") => Some(("clouds", "layer_type", Value::String(val.trim().to_string()))),
+        ("Clouds", "Altitude") => non_negative(val).map(|v| ("clouds", "altitude", v)),
+        ("Clouds", "Thickness") => non_negative(val).map(|v| ("clouds", "thickness", v)),
+        ("Clouds", "WindSpeed") => non_negative(val).map(|v| ("clouds", "wind_speed", v)),
+        ("Clouds", "WindDirection") => num(val).map(|v| ("clouds", "wind_direction", Value::Float(v.rem_euclid(360.0)))),
+        ("BloomEffect", "Enabled") => Some(("bloom", "enabled", flag(val))),
+        ("BloomEffect", "Intensity") => non_negative(val).map(|v| ("bloom", "intensity", v)),
+        ("BloomEffect", "Size") => non_negative(val).map(|v| ("bloom", "size", v)),
+        ("BloomEffect", "Threshold") => non_negative(val).map(|v| ("bloom", "threshold", v)),
+        ("SunRaysEffect", "Enabled") => Some(("sun_rays", "enabled", flag(val))),
+        ("SunRaysEffect", "Intensity") => non_negative(val).map(|v| ("sun_rays", "intensity", v)),
+        ("SunRaysEffect", "Spread") => unit(val).map(|v| ("sun_rays", "spread", v)),
+        _ => None,
+    }
 }
 
 /// Rows of the Camera section: `(name, value, type, editable)`.
@@ -24792,23 +26008,6 @@ fn sync_properties_to_slint(
     let Some(ref explorer_state) = explorer_state else { return };
     let ui = &slint_context.window;
 
-    // Skip sync entirely if user is actively editing an input field
-    // This prevents overwriting user input while they're typing
-    if ui.get_any_input_has_focus() {
-        return;
-    }
-
-    // EustressStream change-detection: if a BasePart or Transform changed,
-    // force an immediate properties rebuild regardless of frame throttling.
-    if let Some(ref mut d) = panel_dirty {
-        if d.properties {
-            d.properties = false;
-            studio_state.last_properties_hash = 0;
-            studio_state.last_selection_hash = 0;
-            studio_state.frames_since_selection_change = 0;
-        }
-    }
-
     // Detect selection changes to trigger immediate sync.
     // Hash ALL selection variants (Entity, Service, File, None) so switching
     // between any two always triggers a rebuild.
@@ -24834,6 +26033,30 @@ fn sync_properties_to_slint(
         }
         SelectedItem::None => 0,
     };
+
+    // A field being typed in holds off every refresh except a new selection,
+    // so the rows never re-bind under the cursor. A new selection always
+    // shows: the field belonged to the previous object and its value is
+    // already committed (see `commits_before_selection`). A field destroyed
+    // while focused never clears the flag, so the new selection clears it;
+    // before, one edit left the panel on its object until a viewport click.
+    if ui.get_any_input_has_focus() {
+        if selection_hash == studio_state.last_selection_hash {
+            return;
+        }
+        ui.set_any_input_has_focus(false);
+    }
+
+    // EustressStream change-detection: if a BasePart or Transform changed,
+    // force an immediate properties rebuild regardless of frame throttling.
+    if let Some(ref mut d) = panel_dirty {
+        if d.properties {
+            d.properties = false;
+            studio_state.last_properties_hash = 0;
+            studio_state.last_selection_hash = 0;
+            studio_state.frames_since_selection_change = 0;
+        }
+    }
 
     let selection_changed = selection_hash != studio_state.last_selection_hash;
     if selection_changed {
@@ -24895,7 +26118,18 @@ fn sync_properties_to_slint(
         }
     };
     
-    let Ok((_, instance)) = instances.get(selected_entity) else { return };
+    let Ok((_, instance)) = instances.get(selected_entity) else {
+        // Not an Instance: the Terrain root and its chunks are Explorer rows
+        // without one, and an entity can gain its Instance a frame after it is
+        // selected. Clear the panel rather than leave the previous object's
+        // rows up, and look once more on the next frame.
+        ui.set_selected_count(0);
+        ui.set_selected_class(slint::SharedString::default());
+        ui.set_selected_icon(slint::Image::default());
+        push_property_rows(ui, Vec::new());
+        studio_state.frames_since_selection_change = 299;
+        return;
+    };
 
     ui.set_selected_count(1);
     ui.set_selected_class(format!("{:?}", instance.class_name).into());
@@ -25040,7 +26274,6 @@ fn sync_properties_to_slint(
             // know from the Instance component.
             if !is_ui_class_outer { return None; }
             Some(crate::space::instance_loader::InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: None,
                 transform: crate::space::instance_loader::TransformData::default(),
@@ -25128,6 +26361,14 @@ fn sync_properties_to_slint(
                 // its own Transform — same reasoning as the UI classes above.
                 CN::Beam
             );
+            // Lighting's children have no place to edit: the Sun and Moon
+            // stand where Lighting's clock puts them, and the sky, the
+            // atmosphere, the cloud layer and the post effects surround the
+            // camera. Position/Rotation/Scale rows did nothing on them.
+            let is_placeless_lighting_child = matches!(instance.class_name,
+                CN::Star | CN::Moon | CN::Sky | CN::Atmosphere | CN::Clouds
+                    | CN::BloomEffect | CN::SunRaysEffect
+            );
 
             // Read from the LIVE ECS Transform / BasePart, not the
             // on-disk TOML. The TOML only updates after
@@ -25167,7 +26408,7 @@ fn sync_properties_to_slint(
                 .map(|bp| bp.size)
                 .or_else(|_| transforms.get(selected_entity).map(|t| t.scale))
                 .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.scale));
-            if !is_ui_class_for_transform {
+            if !is_ui_class_for_transform && !is_placeless_lighting_child {
                 // Project meter values into the user's chosen DisplayUnit
                 // for the panel. The writer side parses these back as
                 // the same unit and converts to meters before reaching
@@ -25187,8 +26428,12 @@ fn sync_properties_to_slint(
                 let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
                 add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
                     rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
-                add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
-                    size_d[0], size_d[1], size_d[2]), "vec3", true);
+                // A light has no size: Range is its extent, and its loader
+                // forces scale 1.
+                if !super::light_panel::is_light_class(instance.class_name) {
+                    add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
+                        size_d[0], size_d[1], size_d[2]), "vec3", true);
+                }
             } else {
                 // For UI classes the live_*/transform reads still need to
                 // be evaluated so any downstream code that uses them
@@ -25302,6 +26547,45 @@ fn sync_properties_to_slint(
                             add_prop(&desc.category, &desc.name, val_str, prop_type, !desc.read_only);
                         }
                     }
+                }
+            } else if let Some(rows) =
+                super::celestial_panel::celestial_rows(instance.class_name, selected_entity, &extra_q.celestial)
+            {
+                // Sun, Moon, Sky, Atmosphere and Clouds: their own fields
+                // from the live component. Edits go through
+                // `celestial_panel::handle_edit`.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
+                }
+            } else if let Some(rows) = lighting_fx_rows(instance.class_name, selected_entity, &extra_q) {
+                // The post effects: their own fields, not a Part's
+                // Appearance/Physics, which they have no use for.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
+                }
+            } else if let Some(rows) =
+                super::light_panel::light_rows(
+                    instance.class_name,
+                    selected_entity,
+                    display_unit.0,
+                    &extra_q.lights,
+                )
+            {
+                // Lights: Enabled, Brightness, Color, Range, Shadows and, per
+                // class, Angle, Face and Radius, from the live component.
+                // Edits go through `light_panel::handle_edit`.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
+                }
+            } else if let Some(rows) =
+                super::sound_panel::sound_rows(instance.class_name, selected_entity, display_unit.0, &extra_q.sounds)
+            {
+                // Sounds: Preview, SoundId, Volume, PlaybackSpeed, Looped,
+                // Playing, TimePosition, SoundGroup and the roll-off, from
+                // the live component, not a Part's rows. Edits go through
+                // `sound_panel::handle_edit`.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
                 }
             } else {
             // -- Properties section (BasePart / non-UI) --
@@ -25683,6 +26967,16 @@ fn sync_properties_to_slint(
             }
         }
 
+        // A Sound in folder form has no InstanceFile: its Sound rows, as
+        // in the branch above.
+        if let Some(rows) =
+            super::sound_panel::sound_rows(instance.class_name, selected_entity, display_unit.0, &extra_q.sounds)
+        {
+            for (category, name, value, kind) in rows {
+                add_prop(category, name, value, kind, true);
+            }
+        }
+
         // BasePart properties
         use eustress_common::classes::PropertyAccess;
         let transform_props = ["Position", "Orientation", "Size", "Rotation", "Scale"];
@@ -26056,14 +27350,13 @@ fn sync_properties_to_slint(
         }
     }
 
-    // Populate unit dropdown options. Six canonical symbols matching
-    // `eustress_common::units::Unit::symbol`; the panel's writer side
-    // re-validates via `Unit::from_symbol` before any disk write, so
-    // a stale model can't corrupt state.
+    // Populate unit dropdown options: the six units a user can pick. The
+    // panel's writer side parses the choice with `Unit::from_any` and
+    // writes `Unit::symbol`, so "stud" always means the current stud.
     {
         let unit_options: Vec<slint::SharedString> = vec![
             "m".into(), "cm".into(), "mm".into(),
-            "ft".into(), "in".into(), "studs".into(),
+            "ft".into(), "in".into(), "stud".into(),
         ];
         let options_model = slint::ModelRc::new(slint::VecModel::from(unit_options));
         for prop in &mut flat_props {
@@ -26081,6 +27374,20 @@ fn sync_properties_to_slint(
             vec!["Perspective".into(), "Orthographic".into()];
         let view_modes = slint::ModelRc::new(slint::VecModel::from(view_modes));
         let projections = slint::ModelRc::new(slint::VecModel::from(projections));
+        // A SpotLight's or SurfaceLight's Face (`light_panel`).
+        let faces = slint::ModelRc::new(slint::VecModel::from(super::light_panel::face_options()));
+        // An Atmosphere's RenderingMode, a Clouds object's LayerType and
+        // CoverageMode, and the Moon's Phase (`celestial_panel`).
+        let rendering_modes =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::rendering_mode_options()));
+        let layer_types =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_layer_type_options()));
+        let coverage_modes =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_coverage_options()));
+        let moon_phases = slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::moon_phase_options()));
+        // A Sound's RollOffMode and SoundGroup (`sound_panel`).
+        let rolloff_modes = slint::ModelRc::new(slint::VecModel::from(super::sound_panel::rolloff_mode_options()));
+        let sound_groups = slint::ModelRc::new(slint::VecModel::from(super::sound_panel::sound_group_options()));
         for prop in &mut flat_props {
             if prop.property_type.as_str() != "choice" {
                 continue;
@@ -26088,6 +27395,13 @@ fn sync_properties_to_slint(
             match prop.name.as_str() {
                 "ViewMode" => prop.options = view_modes.clone(),
                 "Projection" => prop.options = projections.clone(),
+                "Face" => prop.options = faces.clone(),
+                "RenderingMode" => prop.options = rendering_modes.clone(),
+                "LayerType" => prop.options = layer_types.clone(),
+                "CoverageMode" => prop.options = coverage_modes.clone(),
+                "Phase" => prop.options = moon_phases.clone(),
+                "RollOffMode" => prop.options = rolloff_modes.clone(),
+                "SoundGroup" => prop.options = sound_groups.clone(),
                 _ => {}
             }
         }
@@ -26541,6 +27855,10 @@ pub fn apply_property_to_toml_value(
     let mut doc: toml::Value = raw
         .parse()
         .map_err(|e| format!("parse {}: {}", toml_path.display(), e))?;
+    // An imported light whose values still sit in the importer's legacy
+    // `light_*` extras: fold them into `[light]` first, or the extras (which
+    // the loader prefers) would undo the key written below on the next load.
+    eustress_common::class_schema::migrate_legacy_light_extras(&mut doc);
     let root = match doc.as_table_mut() {
         Some(t) => t,
         None => return Err(format!("{}: top-level is not a table", toml_path.display())),
@@ -26584,7 +27902,9 @@ pub fn apply_property_to_toml_value(
     // to engine-native meters, then to the NEW unit. Falls through to
     // the standard route_property arm at the end to stamp the symbol.
     if key == "Unit" {
-        let Some(new_unit) = eustress_common::units::Unit::from_symbol(val) else {
+        // The user's choice, so any spelling picks the current stud; the
+        // file's own unit above is read strictly (`from_symbol`).
+        let Some(new_unit) = eustress_common::units::Unit::from_any(val) else {
             // Reject unknown symbols early; don't touch any other field.
             return Ok(false);
         };
@@ -26595,9 +27915,10 @@ pub fn apply_property_to_toml_value(
                     if let Some(arr) = tf.get(key).cloned() {
                         // Same shape as convert_toml_vec3_engine_to_authored
                         // but from `authored_unit` rather than ENGINE_NATIVE.
+                        // Integers count: `[4, 1, 2]` converts like `[4.0, 1.0, 2.0]`.
                         if let toml::Value::Array(items) = &arr {
                             if items.len() == 3 {
-                                if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                                if let Some(nums) = items.iter().map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect::<Option<Vec<f64>>>() {
                                     let converted = eustress_common::units::convert_vec3_f64(
                                         [nums[0], nums[1], nums[2]], authored_unit, new_unit,
                                     );
@@ -26619,7 +27940,7 @@ pub fn apply_property_to_toml_value(
                 for key in ["units_offset", "units_offset_world_space"] {
                     if let Some(toml::Value::Array(items)) = g.get(key).cloned() {
                         if items.len() == 3 {
-                            if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                            if let Some(nums) = items.iter().map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect::<Option<Vec<f64>>>() {
                                 let converted = eustress_common::units::convert_vec3_f64(
                                     [nums[0], nums[1], nums[2]], authored_unit, new_unit,
                                 );
@@ -26634,7 +27955,7 @@ pub fn apply_property_to_toml_value(
                 }
                 for key in ["max_distance", "distance_lower_limit",
                             "distance_upper_limit", "distance_step"] {
-                    if let Some(n) = g.get(key).and_then(|v| v.as_float()) {
+                    if let Some(n) = g.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) {
                         let c = eustress_common::units::convert(n, authored_unit, new_unit);
                         g.insert(key.into(), toml::Value::Float(c));
                     }
@@ -26646,7 +27967,19 @@ pub fn apply_property_to_toml_value(
     // Route the key → (section, field). If route_property returns None
     // the key isn't persistable through this writer (the live ECS
     // mutation still happened in the match arm — no harm done).
-    let Some((section, field, value)) = route_property(key, val) else {
+    // Clouds and the post effects route first, by class: their `Enabled`,
+    // `Color` and `Size` are not the GUI/Part fields of the same names.
+    let class_name = root
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let routed = class_name
+        .as_deref()
+        .and_then(|class| route_light_class_property(class, key, val))
+        .or_else(|| class_name.as_deref().and_then(|class| route_lighting_fx_property(class, key, val)))
+        .or_else(|| route_property(key, val));
+    let Some((section, field, value)) = routed else {
         return Ok(false);
     };
 
@@ -26691,6 +28024,57 @@ pub fn apply_property_to_toml_value(
     crate::space::gui_loader::write_atomic(toml_path, serialised.as_bytes())
         .map_err(|e| format!("write {}: {}", toml_path.display(), e))?;
     Ok(true)
+}
+
+/// Where a light-class property lands: the light's `[light]` section, in the
+/// class template's keys (Range and Radius in metres, Color as 0-255
+/// channels, Face as its label). Ahead of the class-blind `route_property`,
+/// whose Brightness, Enabled and Color mean GUI and Part fields: a script's
+/// `Brightness` used to be saved into `[gui]`, where no light reads it.
+fn route_light_class_property(
+    class_name: &str,
+    key: &str,
+    val: &str,
+) -> Option<(&'static str, &'static str, toml::Value)> {
+    use toml::Value;
+    if !matches!(class_name, "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight") {
+        return None;
+    }
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let flag = |s: &str| {
+        Value::Boolean(matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+    };
+    let non_negative = |s: &str| num(s).map(|v| Value::Float(v.max(0.0)));
+    let face_light = matches!(class_name, "SpotLight" | "SurfaceLight");
+    match key {
+        "Brightness" => non_negative(val).map(|v| ("light", "brightness", v)),
+        "Range" if class_name != "DirectionalLight" => non_negative(val).map(|v| ("light", "range", v)),
+        "Radius" if class_name == "PointLight" => non_negative(val).map(|v| ("light", "radius", v)),
+        "Angle" if face_light => num(val).map(|v| ("light", "angle", Value::Float(v.clamp(0.0, 180.0)))),
+        "Face" if face_light => Some((
+            "light",
+            "face",
+            Value::String(eustress_common::plugins::light_classes::normalize_face(val).to_string()),
+        )),
+        "Shadows" => Some(("light", "shadows", flag(val))),
+        "Enabled" => Some(("light", "enabled", flag(val))),
+        "Color" => {
+            let parts: Vec<&str> = val.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let channels: Vec<f64> = parts.iter().take(3).filter_map(|s| num(s)).collect();
+            if channels.len() < 3 {
+                return None;
+            }
+            // `r, g, b` in 0-255, or 0-1 when every channel is a fraction
+            // written with a decimal point.
+            let fractions = parts.iter().take(3).all(|p| p.contains('.')) && channels.iter().all(|c| *c <= 1.0);
+            let to_255 = |c: f64| {
+                let c = if fractions { c * 255.0 } else { c };
+                Value::Integer(c.round().clamp(0.0, 255.0) as i64)
+            };
+            Some(("light", "color", Value::Array(channels.iter().map(|c| to_255(*c)).collect())))
+        }
+        _ => None,
+    }
 }
 
 /// Routing table: property key → (toml section, field name, value).
@@ -26746,11 +28130,12 @@ fn route_property(key: &str, val: &str) -> Option<(&'static str, &'static str, t
         // ── [metadata] ────────────────────────────────────────────────
         "Archivable"     => Some(("metadata", "archivable", bool_value(val))),
         // `Unit` is the authored-unit symbol (m / cm / mm / ft / in /
-        // studs). Validated against `Unit::from_symbol` so the disk
-        // never sees a typo like "meters" or "feet"; unknown symbols
-        // are rejected (the route returns None → caller no-ops the
-        // write, panel keeps the previous value).
-        "Unit"           => eustress_common::units::Unit::from_symbol(val)
+        // stud). The user's choice is parsed leniently (`Unit::from_any`,
+        // so any spelling picks the current stud) and written back as the
+        // canonical `Unit::symbol`, so the disk never sees a typo like
+        // "meters"; unknown values are rejected (the route returns None →
+        // caller no-ops the write, panel keeps the previous value).
+        "Unit"           => eustress_common::units::Unit::from_any(val)
             .map(|u| ("metadata", "unit", Value::String(u.symbol().to_string()))),
 
         // ── [asset] ───────────────────────────────────────────────────
@@ -27119,7 +28504,7 @@ pub fn parse_clock_hours(text: &str) -> Option<f64> {
 
 /// `ColorShift_Bottom` → `color_shift_bottom`, `Brightness` → `brightness`.
 /// Already-snake_case input passes through unchanged.
-fn to_snake_case(name: &str) -> String {
+pub(crate) fn to_snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (i, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() {
@@ -27151,24 +28536,55 @@ fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
     }
 }
 
-/// Parses a Color4 string "r, g, b, a" into f32 tuple for TOML write-back
-fn parse_color4_value(value: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
-    if parts.len() == 4 {
-        let r = parts[0].parse::<f32>().ok()?;
-        let g = parts[1].parse::<f32>().ok()?;
-        let b = parts[2].parse::<f32>().ok()?;
-        let a = parts[3].parse::<f32>().ok()?;
-        Some((r, g, b, a))
-    } else if parts.len() == 3 {
-        // RGB without alpha - default alpha to 1.0
-        let r = parts[0].parse::<f32>().ok()?;
-        let g = parts[1].parse::<f32>().ok()?;
-        let b = parts[2].parse::<f32>().ok()?;
-        Some((r, g, b, 1.0))
-    } else {
-        None
+/// The channels of a colour written in a service row, 0-1: `#RRGGBB`, or
+/// `r, g, b` / `r, g, b, a` with rgb in 0-255 (alpha 0-1). When every rgb
+/// channel has a decimal point and none is over 1, they are fractions (a
+/// schema default such as `0.75, 0.75, 0.75`).
+fn service_color_channels(text: &str) -> Option<[f32; 4]> {
+    let t = text.trim();
+    let hex = t.trim_start_matches('#');
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
+        return Some([byte(0), byte(2), byte(4), 1.0]);
     }
+    let parts: Vec<&str> = t.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let mut nums = Vec::with_capacity(parts.len());
+    for p in &parts {
+        let v = p.parse::<f32>().ok().filter(|v| v.is_finite())?;
+        nums.push(v);
+    }
+    let fractions = parts[..3].iter().all(|p| p.contains('.')) && nums[..3].iter().all(|v| *v <= 1.0);
+    let scale = if fractions { 1.0 } else { 1.0 / 255.0 };
+    let alpha = nums.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+    Some([
+        (nums[0] * scale).clamp(0.0, 1.0),
+        (nums[1] * scale).clamp(0.0, 1.0),
+        (nums[2] * scale).clamp(0.0, 1.0),
+        alpha,
+    ])
+}
+
+/// A service colour row's text: `r, g, b` in 0-255, what the swatch and its
+/// picker read and write.
+fn service_color_text(raw: &str) -> String {
+    match service_color_channels(raw) {
+        Some([r, g, b, _]) => {
+            let ch = |v: f32| (v * 255.0).round() as i64;
+            format!("{}, {}, {}", ch(r), ch(g), ch(b))
+        }
+        None => raw.to_string(),
+    }
+}
+
+/// A service colour edited in the panel, stored as the service keeps it
+/// (0-1 channels). The panel shows 0-255, and those numbers used to be
+/// stored unscaled: an OutdoorAmbient of `128, 128, 128` became 128, not
+/// 0.5, and lit the scene 255 times over.
+fn service_color_from_panel(text: &str) -> Option<[f64; 4]> {
+    service_color_channels(text).map(|c| c.map(|v| v as f64))
 }
 
 /// Parses a Vec3 string "x, y, z" into individual components
@@ -27566,6 +28982,14 @@ fn build_service_properties(
                             let type_str = prop_table.get("type")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("string");
+                            // A colour row is the swatch and its picker
+                            // (`ColorRow`, type "color"). The schema says
+                            // `Color3`, Roblox's name, which the panel had no
+                            // row for, so every Lighting colour was bare text.
+                            let type_str = match type_str {
+                                "Color3" | "Color" => "color",
+                                other => other,
+                            };
                             
                             let readonly = prop_table.get("readonly")
                                 .and_then(|v| v.as_bool())
@@ -27612,6 +29036,11 @@ fn build_service_properties(
                                 // dawn instead of wrapping in the middle.
                                 ("clock", Some(h)) => format!("{:.4}", clock_hours_to_slider(h)),
                                 _ => raw,
+                            };
+                            let value_str = if type_str == "color" {
+                                service_color_text(&value_str)
+                            } else {
+                                value_str
                             };
 
                             let mut prop_data =
@@ -27730,9 +29159,171 @@ fn drain_pending_build(
     }
 }
 
+/// Refresh one tab's unsaved-changes dot in place: the `StudioState` mirror
+/// and the single Slint row. A full strip rebuild would re-push the editor
+/// text a few frames later, which must not happen mid-typing.
+fn patch_center_tab_dirty(ui: &StudioWindow, state: &mut StudioState, mgr_idx: usize, dirty: bool) {
+    // The strip omits the Scene tab, which is manager index 0.
+    let Some(row) = mgr_idx.checked_sub(1) else { return };
+    if let Some(tab) = state.center_tabs.get_mut(row) {
+        tab.dirty = dirty;
+    }
+    let model = ui.get_center_tabs();
+    if let Some(mut data) = model.row_data(row) {
+        if data.dirty != dirty {
+            data.dirty = dirty;
+            model.set_row_data(row, data);
+        }
+    }
+}
+
+/// Save every dirty code tab that `closing` selects, before a close removes
+/// it from the strip. `entity_source` maps a tab's entity to the source file
+/// the loader read for it.
+fn save_dirty_tabs_before_close(
+    mgr: &mut super::center_tabs::CenterTabManager,
+    entity_source: impl Fn(Entity) -> Option<std::path::PathBuf>,
+    closing: impl Fn(usize, &super::center_tabs::CenterTabEntry) -> bool,
+) -> Vec<Result<std::path::PathBuf, String>> {
+    let mut results = Vec::new();
+    for i in 0..mgr.tabs.len() {
+        let tab = &mgr.tabs[i];
+        if !tab.dirty || !closing(i, tab) {
+            continue;
+        }
+        let src = tab.entity.and_then(&entity_source);
+        match super::center_tabs::save_code_tab(tab, src.as_deref()) {
+            Ok(Some(path)) => {
+                mgr.tabs[i].dirty = false;
+                results.push(Ok(path));
+            }
+            Ok(None) => {}
+            Err(e) => results.push(Err(e)),
+        }
+    }
+    results
+}
+
+/// Carry out a close the unsaved-changes prompt held: close the tabs, or
+/// continue the exit (through the scene snapshot prompt when the scene has
+/// edits since its last snapshot).
+fn finish_tab_close(
+    mgr: &mut super::center_tabs::CenterTabManager,
+    req: super::center_tabs::TabCloseRequest,
+    state: Option<&mut StudioState>,
+    exit_events: &mut MessageWriter<bevy::app::AppExit>,
+) {
+    if req != super::center_tabs::TabCloseRequest::AppExit {
+        mgr.apply_close(req);
+        return;
+    }
+    match state {
+        Some(s) if s.has_unsaved_changes => s.show_exit_confirmation = true,
+        _ => {
+            exit_events.write(bevy::app::AppExit::Success);
+        }
+    }
+}
+
+/// Tab names for the unsaved-changes prompt: up to four, then a count.
+fn unsaved_tab_names(names: &[&str]) -> String {
+    const SHOWN: usize = 4;
+    if names.len() <= SHOWN {
+        return match names {
+            [] => String::new(),
+            [one] => one.to_string(),
+            [init @ .., last] => format!("{} and {}", init.join(", "), last),
+        };
+    }
+    format!("{} and {} more", names[..SHOWN].join(", "), names.len() - SHOWN)
+}
+
+/// Show the unsaved-changes prompt while a close waits on it, naming the
+/// tabs it would close; hide it once the close is answered.
+fn sync_unsaved_changes_dialog(
+    tab_manager: Option<Res<super::center_tabs::CenterTabManager>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+) {
+    let (Some(mgr), Some(ctx)) = (tab_manager, slint_context) else { return };
+    let ui = &ctx.window;
+    let want = mgr.pending_close.is_some();
+    if ui.get_show_unsaved_changes_dialog() == want {
+        return;
+    }
+    if let Some(req) = mgr.pending_close {
+        let dirty = mgr.dirty_tabs_closed_by(req);
+        let names: Vec<&str> = dirty.iter().map(|&i| mgr.tabs[i].name.as_str()).collect();
+        ui.set_unsaved_changes_count(names.len() as i32);
+        ui.set_unsaved_changes_names(unsaved_tab_names(&names).into());
+    }
+    ui.set_show_unsaved_changes_dialog(want);
+}
+
+/// Log the saves a close made. Returns false when any save failed, and the
+/// caller then keeps every tab open so nothing unsaved is dropped.
+fn report_close_saves(
+    results: &[Result<std::path::PathBuf, String>],
+    output: Option<&mut OutputConsole>,
+) -> bool {
+    let ok = results.iter().all(|r| r.is_ok());
+    if let Some(out) = output {
+        for r in results {
+            match r {
+                Ok(path) => out.info(format!("Saved {} before closing its tab", path.display())),
+                Err(e) => out.error(format!("Save failed, tab kept open: {e}")),
+            }
+        }
+    }
+    ok
+}
+
+/// The syntect grammar for a tab's current view, and the source file behind
+/// its Code view (`None` for a Summary or Markdown view, which highlight as
+/// Markdown).
+fn script_view_for_tab(
+    tab: &super::center_tabs::CenterTabEntry,
+    loaded: &Query<&crate::space::LoadedFromFile>,
+) -> (String, Option<std::path::PathBuf>) {
+    use super::center_tabs::{CenterTabType, SoulScriptMode};
+    if matches!(
+        tab.tab_type,
+        CenterTabType::SoulScript { mode: SoulScriptMode::Summary | SoulScriptMode::Markdown }
+    ) {
+        return ("Markdown".to_string(), None);
+    }
+    let entity_source = tab.entity.and_then(|e| loaded.get(e).ok()).map(|l| l.path.clone());
+    let source = super::center_tabs::code_source_file(tab, entity_source.as_deref());
+    let language = source
+        .as_deref()
+        .and_then(|p| p.extension().and_then(|x| x.to_str()))
+        .map(|ext| language_for_ext(ext).to_string())
+        .unwrap_or_else(|| "Rust".to_string());
+    (language, source)
+}
+
+/// The editor's colours, from the live Studio palette.
+fn editor_palette(ui: &StudioWindow) -> crate::script_editor::theme::EditorPalette {
+    use crate::script_editor::theme::{EditorPalette, Rgb};
+    let d = ui.global::<Theme>().get_data();
+    let rgb = |c: slint::Color| Rgb(c.red(), c.green(), c.blue());
+    EditorPalette {
+        background: rgb(d.viewport_background),
+        text_primary: rgb(d.text_primary),
+        text_secondary: rgb(d.text_secondary),
+        text_error: rgb(d.text_error),
+        accent_blue: rgb(d.accent_blue),
+        accent_cyan: rgb(d.accent_cyan),
+        accent_green: rgb(d.accent_green),
+        accent_orange: rgb(d.accent_orange),
+        accent_purple: rgb(d.accent_purple),
+        accent_yellow: rgb(d.accent_yellow),
+    }
+}
+
 fn sync_tab_manager_to_studio_state(
     mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
     mut state: Option<ResMut<StudioState>>,
+    loaded: Query<&crate::space::LoadedFromFile>,
 ) {
     let Some(ref mut mgr) = tab_manager else { return };
     if !mgr.dirty { return; }
@@ -27768,6 +29359,7 @@ fn sync_tab_manager_to_studio_state(
                 } else {
                     active_tab.content.clone()
                 };
+                (state.script_language, state.script_source_path) = script_view_for_tab(active_tab, &loaded);
                 state.script_content_dirty = true;
             }
         }
@@ -27806,6 +29398,10 @@ fn sync_tab_manager_to_studio_state(
             } else {
                 active_tab.content.clone()
             };
+            (state.script_language, state.script_source_path) = script_view_for_tab(active_tab, &loaded);
+            // Highlight the content as soon as the tab shows, not on the
+            // first edit.
+            state.script_content_dirty = true;
         }
     }
 
@@ -27842,6 +29438,278 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
+/// Byte offset of the caret at 1-based `line` and `col`, where the editor
+/// counts columns in characters. Clamped to the end of the line.
+fn caret_byte_offset(source: &str, line: i32, col: i32) -> usize {
+    let mut start = 0usize;
+    for _ in 1..line.max(1) {
+        match source[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return source.len(),
+        }
+    }
+    let end = source[start..].find('\n').map_or(source.len(), |i| start + i);
+    let text = &source[start..end];
+    let chars = (col.max(1) - 1) as usize;
+    start + text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
+}
+
+/// The identifier the caret touches: letters, digits and `_` on either side
+/// of `offset`. `None` between two non-identifier characters.
+fn identifier_around(source: &str, offset: usize) -> Option<&str> {
+    let offset = floor_char_boundary(source, offset);
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let start = source[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_ident(*c))
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = source[offset..]
+        .char_indices()
+        .find(|(_, c)| !is_ident(*c))
+        .map_or(source.len(), |(i, _)| offset + i);
+    let ident = &source[start..end];
+    (!ident.is_empty() && !ident.starts_with(|c: char| c.is_ascii_digit())).then_some(ident)
+}
+
+/// Pairs for a file with no language service.
+const DEFAULT_EDITOR_PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"')];
+
+/// Put an edit the engine made into the editor. The text and selection go
+/// to Slint together (the editor applies both in one handler), and the text
+/// travels the typed-edit path, so the tab is marked dirty and re-analyzed.
+fn apply_script_edit(
+    state: &mut StudioState,
+    edit: crate::script_editor::editing::Edit,
+    queue: &SlintActionQueue,
+) {
+    state.script_editor_content = edit.text.clone();
+    state.script_content_dirty = true;
+    state.pending_external_edit = Some((edit.selection.anchor as u32, edit.selection.cursor as u32));
+    queue.push(SlintAction::ScriptContentChanged(edit.text));
+}
+
+/// Record `before` as its own undo step for the active tab.
+fn record_script_step(
+    state: &mut StudioState,
+    tabs: Option<&super::center_tabs::CenterTabManager>,
+    before: &str,
+    cursor: usize,
+) {
+    let Some(id) = tabs.and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id) else { return };
+    let history = state.script_history.entry(id).or_default();
+    history.break_group();
+    history.record(before, cursor, std::time::Instant::now());
+    history.break_group();
+}
+
+/// Select the current find match in the editor, scroll it into view when it
+/// is off screen, and show "3 of 12" (or "No results").
+fn select_find_match(state: &mut StudioState, matches: &[(usize, usize)], ui: Option<&StudioWindow>) {
+    let status = if state.find_query.is_empty() {
+        String::new()
+    } else if matches.is_empty() {
+        "No results".to_string()
+    } else {
+        state.find_index = state.find_index.min(matches.len() - 1);
+        let (a, b) = matches[state.find_index];
+        state.pending_external_edit = Some((a as u32, b as u32));
+        if let Some(ui) = ui {
+            let line = crate::script_editor::editing::line_of(&state.script_editor_content, a) as i32;
+            let first = ui.get_script_visible_first_line();
+            let count = ui.get_script_visible_line_count().max(3);
+            if line - 1 < first || line - 1 >= first + count - 2 {
+                ui.set_script_scroll_to_line((line - count / 3).max(1));
+            }
+        }
+        format!("{} of {}", state.find_index + 1, matches.len())
+    };
+    if let Some(ui) = ui {
+        ui.set_script_find_status(status.into());
+    }
+}
+
+/// The longest line in characters, a tab counting as eight: the width the
+/// script editor makes scrollable when lines do not wrap. Over-counting a
+/// tab only adds scroll room; under-counting would cut a line short.
+fn max_line_chars(text: &str) -> i32 {
+    text.lines()
+        .map(|line| line.chars().map(|c| if c == '\t' { 8 } else { 1 }).sum::<usize>())
+        .max()
+        .unwrap_or(0)
+        .min(i32::MAX as usize) as i32
+}
+
+/// 0-based line and character column of a byte offset.
+fn line_col0(source: &str, offset: usize) -> (i32, i32) {
+    let offset = floor_char_boundary(source, offset);
+    let start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+    (source[..start].matches('\n').count() as i32, source[start..offset].chars().count() as i32)
+}
+
+/// The active Code view's language service: the one the analyzer runs, when
+/// it belongs to the view's source file. A Summary or Markdown view has no
+/// source file, so it gets none.
+fn active_code_service(
+    state: &StudioState,
+    analysis: Option<&crate::script_editor::ScriptAnalysis>,
+) -> Option<std::sync::Arc<dyn crate::script_editor::language::LanguageService>> {
+    let path = state.script_source_path.as_deref()?;
+    let service = analysis?.service.clone()?;
+    (service.id() == crate::script_editor::language::language_for_path(path)).then_some(service)
+}
+
+/// The trailing `a.b:c` chain of `text`, as written; `None` when empty.
+fn trailing_chain(text: &str) -> Option<&str> {
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))
+        .last()
+        .map(|(i, _)| i)?;
+    Some(&text[start..])
+}
+
+/// The string argument the caret sits in, from the line up to the caret:
+/// the call's name as written and the argument's index. `None` outside a
+/// string, or in a string that is not a call argument on this line.
+fn string_arg_at(line_to_caret: &str) -> Option<crate::script_editor::language::StringArg> {
+    let mut open: Option<(usize, char)> = None;
+    let mut escaped = false;
+    for (i, c) in line_to_caret.char_indices() {
+        match open {
+            Some((_, quote)) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == quote {
+                    open = None;
+                }
+            }
+            None if matches!(c, '"' | '\'' | '`') => open = Some((i, c)),
+            None => {}
+        }
+    }
+    let (quote_at, _) = open?;
+    let before = &line_to_caret[..quote_at];
+    let mut depth = 0i32;
+    let mut arg_index = 0u32;
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+            '(' if depth == 0 => {
+                let callee = trailing_chain(before[..i].trim_end())?;
+                return Some(crate::script_editor::language::StringArg {
+                    callee: callee.to_string(),
+                    arg_index,
+                });
+            }
+            '(' | '[' | '{' => depth -= 1,
+            ',' if depth == 0 => arg_index += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What the shell knows about the caret, for a language service's
+/// completion: the identifier prefix, a `.` or `:` access and the receiver
+/// before it, and a string argument the caret sits in. `::` is a path, not
+/// an access.
+fn completion_context(
+    source: &str,
+    offset: usize,
+    script_class: Option<crate::script_editor::language::ScriptClass>,
+) -> crate::script_editor::language::CompletionContext<'_> {
+    use crate::script_editor::language::{Access, CompletionContext};
+    let offset = floor_char_boundary(source, offset);
+    let prefix_start = source[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let line_start = source[..prefix_start].rfind('\n').map_or(0, |i| i + 1);
+    let head = &source[line_start..prefix_start];
+    let (access, receiver) = if head.ends_with("::") || head.ends_with("..") {
+        (None, None)
+    } else if let Some(rest) = head.strip_suffix('.') {
+        (Some(Access::Dot), trailing_chain(rest))
+    } else if let Some(rest) = head.strip_suffix(':') {
+        (Some(Access::Colon), trailing_chain(rest))
+    } else {
+        (None, None)
+    };
+    CompletionContext {
+        source,
+        offset,
+        prefix: &source[prefix_start..offset],
+        receiver,
+        access,
+        in_string: string_arg_at(&source[line_start..offset]),
+        script_class,
+        instance_tree: None,
+    }
+}
+
+#[cfg(test)]
+mod completion_context_tests {
+    use super::*;
+    use crate::script_editor::language::Access;
+
+    #[test]
+    fn caret_columns_count_characters() {
+        let src = "héllo\nwörld x";
+        assert_eq!(caret_byte_offset(src, 1, 3), "hé".len());
+        assert_eq!(caret_byte_offset(src, 2, 7), "héllo\nwörld ".len());
+        assert_eq!(caret_byte_offset(src, 2, 99), src.len(), "clamped to the line end");
+        assert_eq!(caret_byte_offset(src, 9, 1), src.len());
+    }
+
+    #[test]
+    fn the_identifier_under_the_caret() {
+        let src = "local héro = spawn(x)";
+        assert_eq!(identifier_around(src, "local hé".len()), Some("héro"));
+        assert_eq!(identifier_around(src, "local ".len()), Some("héro"), "at its first character");
+        assert_eq!(identifier_around(src, "local héro".len()), Some("héro"), "just after it");
+        assert_eq!(identifier_around(src, "local héro =".len()), None);
+        assert_eq!(identifier_around("x = 42", 5), None, "a number is not an identifier");
+    }
+
+    #[test]
+    fn member_access_and_receiver() {
+        let src = "local p = game.Players.LocalPlayer:Kic";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!(cx.prefix, "Kic");
+        assert_eq!(cx.access, Some(Access::Colon));
+        assert_eq!(cx.receiver, Some("game.Players.LocalPlayer"));
+
+        let src = "workspace.";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!((cx.prefix, cx.access, cx.receiver), ("", Some(Access::Dot), Some("workspace")));
+
+        let src = "let v = Vec::ne";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!(cx.access, None, "a Rune path is not a member access");
+    }
+
+    #[test]
+    fn string_arguments_name_their_call() {
+        let src = "local rs = game:GetService(\"Repl";
+        let cx = completion_context(src, src.len(), None);
+        let arg = cx.in_string.expect("inside the string argument");
+        assert_eq!(arg.callee, "game:GetService");
+        assert_eq!(arg.arg_index, 0);
+        assert_eq!(cx.prefix, "Repl");
+
+        let src = "x:FindFirstChild(\"a\", \"b";
+        assert_eq!(completion_context(src, src.len(), None).in_string.map(|a| a.arg_index), Some(1));
+        assert!(completion_context("print(\"done\") x", 16, None).in_string.is_none());
+    }
+}
+
 /// Push completion state into Slint.
 ///
 /// Change-gated on `completion_dirty`: a steady editor rebuilds no models, so
@@ -27864,6 +29732,16 @@ fn sync_completion_to_slint(
         ui.set_script_caret_to_offset(offset as i32);
     }
 
+    // An edit the engine made: the text and selection go together, and the
+    // editor applies both in one handler when the revision changes.
+    if let Some((anchor, cursor)) = state.pending_external_edit.take() {
+        state.script_external_revision = state.script_external_revision.wrapping_add(1);
+        ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        ui.set_script_edit_anchor(anchor as i32);
+        ui.set_script_edit_cursor(cursor as i32);
+        ui.set_script_external_revision(state.script_external_revision);
+    }
+
     if state.signature_dirty {
         state.signature_dirty = false;
         ui.set_script_signature_label(state.signature_label.as_str().into());
@@ -27884,11 +29762,14 @@ fn sync_completion_to_slint(
             // The popup keys its glyph and colour off this string. `Module`
             // covers both engine types (`Vector3`) and namespaces, which read
             // the same way in a completion list.
-            kind: match c.kind {
-                crate::script_editor::CompletionKind::Keyword => "keyword",
-                crate::script_editor::CompletionKind::Function => "function",
-                crate::script_editor::CompletionKind::Module => "type",
-                crate::script_editor::CompletionKind::Variable => "variable",
+            kind: {
+                use crate::script_editor::language::CompletionKind as K;
+                match c.kind {
+                    K::Keyword | K::Snippet => "keyword",
+                    K::Function | K::Method => "function",
+                    K::Class | K::Enum | K::Module | K::Service | K::Instance => "type",
+                    K::Property | K::Event | K::Variable | K::Constant => "variable",
+                }
             }
             .into(),
         })
@@ -28025,6 +29906,8 @@ fn sync_center_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     mut state: Option<ResMut<StudioState>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    languages: Option<Res<crate::script_editor::plugin::ScriptLanguages>>,
+    mut last_palette: Local<Option<crate::script_editor::theme::EditorPalette>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut state) = state else { return };
@@ -28179,6 +30062,7 @@ fn sync_center_tabs_to_slint(
         // Also push editor content now that ScriptEditor exists
         if tab_type == "script" || tab_type == "code" {
             ui.set_script_editor_content(state.script_editor_content.as_str().into());
+            ui.set_script_max_line_chars(max_line_chars(&state.script_editor_content));
             let nums = build_line_numbers_text(&state.script_editor_content);
             ui.set_script_line_numbers(nums.into());
             let nums_arr = build_line_numbers_array(&state.script_editor_content);
@@ -28199,12 +30083,27 @@ fn sync_center_tabs_to_slint(
 
     // Sync editor content + line numbers to Slint when a script or code tab is active.
     // Skip during deferred tab switch — content is pushed in Frame N+3 instead.
+    // The spans carry colours, so a theme change re-highlights the script.
+    let palette = editor_palette(ui);
+    if *last_palette != Some(palette) {
+        if last_palette.is_some() && (tab_type == "script" || tab_type == "code") {
+            state.script_content_dirty = true;
+        }
+        *last_palette = Some(palette);
+    }
     let script_dirty = state.script_content_dirty;
     let in_deferred = state.tabs_deferred_frames > 0;
     // Don't consume the dirty flag during deferral — wait until we can actually apply it
-    if !in_deferred && script_dirty { state.script_content_dirty = false; }
+    if !in_deferred && script_dirty {
+        state.script_content_dirty = false;
+        // The analyzer follows this counter, so this system is the flag's
+        // only consumer and the two can never race for one edit.
+        state.script_content_revision = state.script_content_revision.wrapping_add(1);
+    }
     if !in_deferred && (tab_type == "script" || tab_type == "code") && script_dirty {
-        let language = if state.active_center_tab > 0 {
+        let language = if !state.script_language.is_empty() {
+            state.script_language.clone()
+        } else if state.active_center_tab > 0 {
             let idx = (state.active_center_tab - 1) as usize;
             if let Some(tab) = state.center_tabs.get(idx) {
                 let lower_name = tab.name.to_lowercase();
@@ -28233,21 +30132,28 @@ fn sync_center_tabs_to_slint(
             })
             .collect();
 
-        // Per-token spans for true syntax highlighting
-        let token_spans: Vec<TokenSpan> = highlight_to_token_spans(&state.script_editor_content, &language)
-            .into_iter()
-            .map(|s| TokenSpan {
-                line: s.line,
-                x: s.x,
-                text: s.text.into(),
-                r: s.r,
-                g: s.g,
-                b: s.b,
-                bold: s.bold,
-            })
-            .collect();
+        // Per-token spans. A file whose language has a service is lexed by it
+        // and coloured from the Studio palette; any other file uses syntect.
+        let service = state
+            .script_source_path
+            .as_deref()
+            .and_then(|path| languages.as_ref().and_then(|l| l.0.for_path(path)));
+        let spans = match service {
+            Some(service) => crate::ui::highlight::service_token_spans(
+                &state.script_editor_content,
+                service.as_ref(),
+                &palette,
+            ),
+            None => highlight_to_token_spans(&state.script_editor_content, &language),
+        };
+        // Kept whole; the window push after this block hands Slint only the
+        // spans near the visible lines.
+        ui.set_script_highlight_active(!spans.is_empty());
+        state.script_spans_all = spans;
+        state.script_span_window = None;
 
         ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        ui.set_script_max_line_chars(max_line_chars(&state.script_editor_content));
         let nums = build_line_numbers_text(&state.script_editor_content);
         ui.set_script_line_numbers(nums.into());
         let nums_arr = build_line_numbers_array(&state.script_editor_content);
@@ -28255,18 +30161,60 @@ fn sync_center_tabs_to_slint(
         ui.set_script_line_numbers_array(slint::ModelRc::from(nums_model));
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
         ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
-        let token_model = std::rc::Rc::new(slint::VecModel::from(token_spans));
-        ui.set_script_token_spans(slint::ModelRc::from(token_model));
         // On tab switch (not on every keystroke): reset editor scroll to line 1
         if tabs_changed {
             ui.set_script_scroll_to_top(true);
         }
-    } else {
-        state.script_highlight_lines.clear();
-        let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
-        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
-        let token_model = std::rc::Rc::new(slint::VecModel::from(Vec::<TokenSpan>::new()));
-        ui.set_script_token_spans(slint::ModelRc::from(token_model));
+    } else if in_deferred || !(tab_type == "script" || tab_type == "code") {
+        // Clear only while the editor's content is leaving: a tab switch in
+        // flight, or a tab that is not a script. A frame without an edit keeps
+        // the spans already pushed; the editor's text is transparent while
+        // spans exist, so the overlay IS the visible text.
+        if ui.get_script_token_spans().row_count() > 0
+            || !state.script_highlight_lines.is_empty()
+            || !state.script_spans_all.is_empty()
+        {
+            state.script_highlight_lines.clear();
+            state.script_spans_all.clear();
+            state.script_span_window = None;
+            ui.set_script_highlight_active(false);
+            let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
+            ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+            let token_model = std::rc::Rc::new(slint::VecModel::from(Vec::<TokenSpan>::new()));
+            ui.set_script_token_spans(slint::ModelRc::from(token_model));
+        }
+    }
+
+    // Draw only the spans near the visible lines. The window reaches two
+    // screens above and two below the view, and is re-pushed once the view
+    // leaves it, so scrolling rarely rebuilds and never builds the whole file.
+    if !in_deferred && (tab_type == "script" || tab_type == "code") {
+        let first = ui.get_script_visible_first_line().max(0);
+        let count = ui.get_script_visible_line_count().max(1);
+        let covered = state
+            .script_span_window
+            .is_some_and(|(start, end)| first >= start && first + count <= end);
+        if !covered {
+            let (start, end) = ((first - 2 * count).max(0), first + 3 * count);
+            let all = &state.script_spans_all;
+            let lo = all.partition_point(|s| s.line < start);
+            let hi = all.partition_point(|s| s.line < end);
+            let window: Vec<TokenSpan> = all[lo..hi]
+                .iter()
+                .map(|s| TokenSpan {
+                    line: s.line,
+                    x: s.x,
+                    text: s.text.as_str().into(),
+                    r: s.r,
+                    g: s.g,
+                    b: s.b,
+                    bold: s.bold,
+                })
+                .collect();
+            let token_model = std::rc::Rc::new(slint::VecModel::from(window));
+            ui.set_script_token_spans(slint::ModelRc::from(token_model));
+            state.script_span_window = Some((start, end));
+        }
     }
 
     // Problems-panel jump: wait until no tab switch is in flight, so the
@@ -28328,6 +30276,12 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         // Shares the atmosphere icon: both are environment-lighting volumes,
         // and Clouds already shares with Sky on the same reasoning.
         ClassName::ReflectionProbe => "atmosphere",
+        // Post-processing effects, which live under Lighting.
+        ClassName::BloomEffect => "bloomeffect",
+        ClassName::SunRaysEffect => "sunrayseffect",
+        ClassName::DepthOfFieldEffect => "depthoffieldeffect",
+        ClassName::ColorCorrectionEffect | ClassName::ColorGradingEffect => "colorcorrectioneffect",
+        ClassName::BlurEffect => "blureffect",
         ClassName::SoulScript => "soulservice",
         ClassName::Decal => "decal",
         ClassName::Attachment => "attachment",
@@ -29468,6 +31422,41 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::SettleSelection)),
         ("", Some(A::RotateY90)),
         ("", Some(A::TiltZ90)),
+        // Live while the terrain tools are the current tool, where they win
+        // over the keys above (`ActionContext::Terrain`); Terrain Tools
+        // itself is global.
+        ("TERRAIN TOOLS", None),
+        ("", Some(A::TerrainTools)),
+        ("", Some(A::TerrainDraw)),
+        ("", Some(A::TerrainSculpt)),
+        ("", Some(A::TerrainSmooth)),
+        ("", Some(A::TerrainFlatten)),
+        ("", Some(A::TerrainPaint)),
+        ("", Some(A::TerrainSeaLevel)),
+        ("", Some(A::TerrainRegion)),
+        ("", Some(A::TerrainSizeDown)),
+        ("", Some(A::TerrainSizeUp)),
+        ("", Some(A::TerrainStrengthDown)),
+        ("", Some(A::TerrainStrengthUp)),
+        ("", Some(A::TerrainPivotPrev)),
+        ("", Some(A::TerrainPivotNext)),
+        ("", Some(A::TerrainPlaneLock)),
+        ("", Some(A::TerrainPlanePick)),
+        ("", Some(A::TerrainPlaneUp)),
+        ("", Some(A::TerrainPlaneDown)),
+        ("", Some(A::TerrainPlaneUpFast)),
+        ("", Some(A::TerrainPlaneDownFast)),
+        ("", Some(A::TerrainSnap)),
+        ("", Some(A::TerrainSnapStep)),
+        ("", Some(A::TerrainContours)),
+        ("", Some(A::TerrainMirror)),
+        ("", Some(A::TerrainMirrorAxis)),
+        ("", Some(A::TerrainSampleMaterial)),
+        ("", Some(A::TerrainRegionCopy)),
+        ("", Some(A::TerrainRegionCut)),
+        ("", Some(A::TerrainRegionPaste)),
+        ("", Some(A::TerrainRegionDuplicate)),
+        ("", Some(A::TerrainRegionDelete)),
         ("SIMULATION", None),
         ("", Some(A::PlayWithCharacter)),
         ("", Some(A::PlaySolo)),
@@ -30053,6 +32042,24 @@ mod property_key_tests {
         // not in the panel's display casing.
         let props: HashMap<String, PropertyValue> = HashMap::new();
         assert_eq!(resolve_service_property_key(&props, "SomeNewThing"), "some_new_thing");
+    }
+
+    #[test]
+    fn a_service_colour_edit_is_stored_as_fractions() {
+        let c = service_color_from_panel("128, 128, 128").expect("parses");
+        assert!((c[0] - 128.0 / 255.0).abs() < 1e-6 && c[3] == 1.0, "{c:?}");
+        let c = service_color_from_panel("0.5, 0.25, 1.0").expect("parses");
+        assert!((c[0] - 0.5).abs() < 1e-6 && (c[1] - 0.25).abs() < 1e-6);
+        let c = service_color_from_panel("#FF8000").expect("parses");
+        assert!((c[1] - 128.0 / 255.0).abs() < 1e-6);
+        assert!(service_color_from_panel("blue").is_none());
+    }
+
+    #[test]
+    fn a_service_colour_row_shows_0_to_255_without_alpha() {
+        // The live value's display form, and a schema default's.
+        assert_eq!(service_color_text("128, 128, 128, 1.00"), "128, 128, 128");
+        assert_eq!(service_color_text("0.75, 0.75, 0.75"), "191, 191, 191");
     }
 }
 

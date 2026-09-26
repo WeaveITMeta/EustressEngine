@@ -1,10 +1,10 @@
 //! Shared world-space height query/write helpers.
 //!
-//! `TerrainData` for a disk-loaded/generated terrain (the live, working path
-//! — see `crate::terrain_disk_load::hydrate_terrain_from_disk` in the engine
-//! crate, and `TerrainConfig::resize_cache`) is ONE global heightmap raster
+//! `TerrainData` for a disk-loaded/generated terrain (the live, working path:
+//! see `super::disk::hydrate_terrain_from_disk`, and
+//! `TerrainConfig::resize_cache`) is ONE global heightmap raster
 //! spanning the whole terrain (`cache_width = (chunks_x*2+1) * chunk_resolution`,
-//! centered so chunk `(0,0)` sits in the middle), living on the single
+//! centered so the config's `center_chunk` sits in the middle), living on the single
 //! `TerrainRoot` entity — NOT one `TerrainData` per chunk entity. Chunks only
 //! carry a `position`/`lod` for addressing into that shared raster at mesh-gen
 //! time. `TerrainData::sample_height`/`set_height` (config.rs) already do the
@@ -37,20 +37,18 @@ use super::{TerrainConfig, TerrainData};
 use super::material::{
     material_cell, material_cell_weights, paint_material_cell, SlotWeights, TerrainMaterial, MATERIAL_SLOT_NONE,
 };
+use super::mesh::ground_at_world;
 use super::volume::{heightfield_slope_factor, lattice_cell_size, sample_field_parts, FieldSample, TerrainVolume};
 
 /// World XZ (metres) → global normalized `world_u, world_v ∈ [0,1]` — the
-/// exact inverse of the formula `generate_chunk_mesh` uses to go the other
-/// way (mesh.rs: `world_u = (chunk_pos.x + u + chunks_x) / total_chunks_x`).
+/// exact inverse of the mapping `generate_chunk_mesh` uses to go the other
+/// way (`TerrainConfig::chunk_point_uv`), clamped onto the raster.
 /// `chunk_pos.x + u` is algebraically just `world_x / chunk_size` (`u` is the
 /// chunk-local fractional remainder), so this needs no chunk lookup at all —
-/// one division, one offset, one clamp.
+/// one division, one offset, one clamp (see `TerrainConfig::world_to_uv`).
 pub fn world_to_uv(config: &TerrainConfig, world_x: f32, world_z: f32) -> (f32, f32) {
-    let total_x = (config.chunks_x * 2 + 1) as f32;
-    let total_z = (config.chunks_z * 2 + 1) as f32;
-    let u = (world_x / config.chunk_size.max(1e-3) + config.chunks_x as f32) / total_x;
-    let v = (world_z / config.chunk_size.max(1e-3) + config.chunks_z as f32) / total_z;
-    (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+    let uv = config.world_to_uv(world_x, world_z);
+    (uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0))
 }
 
 /// World-space height (metres) at `world_x, world_z`, reading the CURRENT
@@ -236,12 +234,19 @@ pub fn cache_cell_at_world(config: &TerrainConfig, data: &TerrainData, world_x: 
 /// used previously (`editor::terrain_paint_system`'s `// TODO: Proper
 /// terrain raycast`) — a plane hit-test is wrong on any non-flat terrain,
 /// let alone a mountain.
+///
+/// Over a hole of a sparse surface ([`ground_at_world`]) there is no ground
+/// to cross, so the ray carries on past it; one that drops into a hole and
+/// runs on under the ground beside it meets that ground's side.
 pub fn raycast_terrain(config: &TerrainConfig, data: &TerrainData, ray: Ray3d, max_distance: f32, step: f32) -> Option<Vec3> {
     if step <= 0.0 || max_distance <= 0.0 {
         return None;
     }
     let sample_at = |t: f32| -> (Vec3, f32) {
         let p = ray.origin + ray.direction * t;
+        if !ground_at_world(config, data, p.x, p.z) {
+            return (p, f32::INFINITY);
+        }
         let h = height_at_world(config, data, p.x, p.z);
         (p, p.y - h)
     };
@@ -294,6 +299,10 @@ pub fn raycast_terrain(config: &TerrainConfig, data: &TerrainData, ray: Ray3d, m
 /// in solid is bisected back to the crossing. A ray that starts in solid
 /// walks out first, then looks for the next way in, like
 /// [`raycast_terrain`].
+///
+/// Over a hole of a sparse surface ([`ground_at_world`]) the field holds the
+/// edits alone, its heightfield term left out: the ray passes where no brick
+/// adds rock, and hits the bricks that do.
 pub fn raycast_field(
     config: &TerrainConfig,
     data: &TerrainData,
@@ -318,7 +327,7 @@ pub fn raycast_field(
     let edited = volume.influence_bounds(cell);
     let field_at = |t: f32| -> (Vec3, FieldSample) {
         let p = ray.origin + ray.direction * t;
-        (p, sample_field_parts(config, data, volume, p))
+        (p, surface_field_parts(config, data, volume, cell, p))
     };
     let dir = *ray.direction;
     // Horizontal share of the ray: how much of each step runs across the slope.
@@ -332,7 +341,8 @@ pub fn raycast_field(
             return None;
         }
         let (p, sample) = field_at(t);
-        if !sample.value.is_finite() {
+        // +inf is air over a hole with no edit near; NaN or -inf is garbage.
+        if sample.value.is_nan() || sample.value == f32::NEG_INFINITY {
             return None;
         }
         if sample.is_solid() || sample.value == 0.0 {
@@ -386,6 +396,18 @@ pub fn raycast_field(
     None
 }
 
+/// [`sample_field_parts`] over the ground the meshes keep: over a hole of a
+/// sparse surface ([`ground_at_world`]) the heightfield term is left out,
+/// reading +inf, so only the edits (distances read at lattice spacing
+/// `cell`) remain to hit.
+fn surface_field_parts(config: &TerrainConfig, data: &TerrainData, volume: &TerrainVolume, cell: f32, p: Vec3) -> FieldSample {
+    if ground_at_world(config, data, p.x, p.z) {
+        return sample_field_parts(config, data, volume, p);
+    }
+    let (add, carve) = volume.edit_distances(cell, p);
+    FieldSample::compose(f32::INFINITY, add, carve)
+}
+
 /// The terrain point a picking ray hits: [`raycast_field`] when the terrain
 /// holds volumetric edits, so the brush lands on cave walls and overhangs,
 /// else the cheaper heightfield march [`raycast_terrain`] with `step`.
@@ -413,6 +435,7 @@ mod tests {
             chunk_resolution: 32,
             chunks_x: 2,
             chunks_z: 2,
+            center_chunk: IVec2::ZERO,
             lod_levels: 1,
             lod_distances: vec![64.0],
             view_distance: 512.0,
@@ -445,9 +468,10 @@ mod tests {
         // edge of the center chunk, not its middle. With `chunks_x` chunks on
         // either side plus the center one (`chunks_x*2+1` total), the center
         // chunk's left edge sits at u = chunks_x / (chunks_x*2+1) — for
-        // chunks_x=2 that's 2/5 = 0.4, matching `generate_chunk_mesh`'s own
-        // `world_u = (chunk_pos.x + u + chunks_x) / total_chunks_x` exactly
-        // (verified against mesh.rs, not assumed). The chunk's actual
+        // chunks_x=2 that's 2/5 = 0.4, matching the mapping
+        // `generate_chunk_mesh` reads through (`TerrainConfig::chunk_point_uv`,
+        // on this origin-centred grid `(chunk_pos.x + u + chunks_x) /
+        // total_chunks_x`) exactly. The chunk's actual
         // MIDPOINT (u=0.5 here) sits at world_x = chunk_size/2, not 0.0.
         let (u, v) = world_to_uv(&config, 0.0, 0.0);
         let expected = config.chunks_x as f32 / (config.chunks_x * 2 + 1) as f32;
@@ -768,5 +792,44 @@ mod tests {
         let hit = raycast_field(&config, &data, &volume, ray, 2000.0).expect("hits the far ground");
         assert!(hit.y.abs() < 0.05 && (hit.x - 1000.0).abs() < 5.0, "hit at {hit:?}");
         assert!(raycast_terrain(&config, &data, ray, 2000.0, 2.0).is_some());
+    }
+
+    #[test]
+    fn raycasts_pass_over_a_hole_and_hit_the_ground_and_bricks_around_it() {
+        use crate::terrain::volume::{apply_sphere, CsgOp};
+
+        let config = test_config(); // 2 m lattice, flat at Y = 0
+        let mut data = test_data(&config);
+        ensure_material_cache(&mut data);
+        // Every cell of chunk (0, 0)'s tile a hole: world x and z 0..64.
+        let side = config.chunk_resolution;
+        let tile = config.chunk_grid_index(IVec2::ZERO).expect("on the grid") * side;
+        let w = data.cache_width as usize;
+        for z in tile.y..tile.y + side {
+            for x in tile.x..tile.x + side {
+                data.material_cache[z as usize * w + x as usize] = [MATERIAL_SLOT_NONE; 4];
+            }
+        }
+        assert!(raycast_terrain(&config, &data, straight_down(32.0, 32.0), 500.0, 2.0).is_some(), "a full surface");
+        data.sparse_surface = true;
+
+        assert!(raycast_terrain(&config, &data, straight_down(32.0, 32.0), 500.0, 2.0).is_none(), "over the hole");
+        let beside = raycast_terrain(&config, &data, straight_down(-32.0, 32.0), 500.0, 2.0).expect("hits the ground");
+        assert!(beside.y.abs() < 0.5, "the ground beside the hole is at 0, hit at {}", beside.y);
+        // A shallow ray over the hole lands on the ground past it.
+        let across = Ray3d::new(Vec3::new(10.0, 1.0, 32.0), Dir3::new(Vec3::new(1.0, -0.01, 0.0)).unwrap());
+        let past = raycast_terrain(&config, &data, across, 500.0, 2.0).expect("hits the ground past the hole");
+        assert!(past.x > 64.0 && past.y.abs() < 0.5, "hit at {past:?}");
+
+        // A ball added over the hole is hit; beside it the ray falls through.
+        let mut volume = TerrainVolume::new();
+        apply_sphere(&config, &mut volume, Vec3::new(32.0, 20.0, 32.0), 5.0, CsgOp::Add, None);
+        let top = raycast_field(&config, &data, &volume, straight_down(32.0, 32.0), 500.0).expect("hits the ball");
+        assert!((top.y - 25.0).abs() < 0.3, "the ball's top is at 25, hit at {}", top.y);
+        assert!(raycast_field(&config, &data, &volume, straight_down(12.0, 50.0), 500.0).is_none(), "over the hole");
+        let ground = raycast_field(&config, &data, &volume, straight_down(-32.0, 32.0), 500.0).expect("hits the ground");
+        assert!(ground.y.abs() < 0.05, "the ground is at 0, hit at {}", ground.y);
+        let picked = raycast_terrain_surface(&config, &data, Some(&volume), straight_down(12.0, 50.0), 500.0, 2.0);
+        assert!(picked.is_none(), "picking lands on no phantom ground");
     }
 }

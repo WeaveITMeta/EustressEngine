@@ -82,6 +82,20 @@ pub fn register_asset_sources(app: &mut App, space_root: &Path) {
     // better — it prefers an exe-adjacent root and verifies the characters are
     // actually in it instead of trusting a path that merely exists.
     eustress_common::avatar::boot::register_avatar_asset_sources(app);
+
+    // The default source reads this crate's assets, then common's shipped
+    // ones: a file that moves into `common/assets` (the one folder both apps
+    // ship) keeps resolving by the path Studio and saved Spaces already use.
+    // Registered before `AssetPlugin`, which keeps a default source that
+    // already exists (`init_default_source` only fills an empty one).
+    let roots = vec![crate::engine_assets_dir(), eustress_common::assets_dir()];
+    info!("📁 Default asset source layers: {:?}", roots);
+    app.register_asset_source(
+        bevy::asset::io::AssetSourceId::Default,
+        bevy::asset::io::AssetSourceBuilder::new(move || -> Box<dyn bevy::asset::io::ErasedAssetReader> {
+            Box::new(crate::space::space_asset_source::LayeredAssetReader::new(roots.clone()))
+        }),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,6 +194,9 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // processes (MCP server, CLI, plugins) to query live ECS / sim /
         // embedvec. Port handoff via `<universe>/.eustress/engine.port`.
         .add_plugins(crate::engine_bridge::EngineBridgePlugin)
+        // Restore points: the revert job both the bridge and the History
+        // panel start, and the counter the panel refreshes on.
+        .add_plugins(crate::space::snapshot::SnapshotPlugin)
         // Guarantee `SpaceRoot` is always a resource (bridge handlers and
         // the port-file resync need it at boot). init_resource is a no-op
         // if the shell already inserted an override.
@@ -196,6 +213,14 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         })
         // Physics (Avian 0.7 — runs at a fixed timestep)
         .add_plugins(avian3d::PhysicsPlugins::default())
+        // Physics constraints scripts make during Play (hinges, sliders,
+        // springs, welds, VectorForces) become joints on the machine that
+        // simulates them. After Avian: it uses Avian's schedules and solver sets.
+        .add_plugins(eustress_play_runtime::joints::ScriptedJointsPlugin)
+        // A part with a DataMesh child (SpecialMesh, BlockMesh,
+        // CylinderMesh) draws it, in Edit and Play; its collider stays its
+        // own shape. The Player adds the same plugin.
+        .add_plugins(eustress_common::data_mesh::DataMeshPlugin)
         // ── Avian static-scene gating (scale to 131K+ colliders) ────────
         // EVERY can_collide part carries a real collider (exact click-
         // selection + script raycasts everywhere — no deferral). What must
@@ -237,7 +262,7 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
             avian3d::physics_transform::PhysicsTransformSystems::PositionToTransform
                 .run_if(physics_clock_advanced),
         )
-        .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
+        .insert_resource(avian3d::prelude::Gravity(eustress_common::services::workspace::DEFAULT_GRAVITY))
         // ── Determinism pins (C2) ──────────────────────────────────────
         // Pin the fixed timestep explicitly so per-step dt is a fixed
         // contract ("Avian (Deterministic)"). 60 Hz matches the sim clock.
@@ -289,6 +314,9 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // played to Players over WebTransport. In this tier so the headless
         // engine can host too (`EUSTRESS_HOST_ON_PLAY=1`).
         .add_plugins(crate::multiplayer::MultiplayerPlugin)
+        // `eustress://edit/<id>` from the gallery's Edit button: download
+        // the open-source listing's world and open a copy of it.
+        .add_plugins(crate::space::gallery_edit::GalleryEditPlugin)
         // Soul scripting + physics bridge + script-facing ECS snapshot.
         // RuneECSBindingsPlugin lives under `ui::` for historical reasons
         // but is Slint-free (resource + per-frame snapshot sync) — without
@@ -441,11 +469,19 @@ pub fn rate_limited_error_handler(
 /// simulating (unpaused → Play) or the collider world changed: a transform
 /// write on a collider-bearing entity or a collider ANCESTOR (dragging a
 /// whole Model must re-propagate its children), or collider add/remove.
-/// On a static Edit scene this is two tick-level empty-probe checks —
-/// O(changed), not O(colliders) — so 131K+ static colliders idle at ~zero
-/// while staying fully raycastable (the spatial-query BVH only needs
-/// refreshing when something ACTUALLY changed, which reopens this gate the
-/// same frame).
+/// On a static Edit scene the sweeps stay shut, so 131K+ static colliders
+/// stay fully raycastable (the spatial-query BVH only needs refreshing when
+/// something ACTUALLY changed, which reopens this gate the same frame).
+///
+/// The change test itself still visits every collider: a `Changed<T>` filter
+/// checks a tick on every matched row, so an empty answer costs a full walk.
+/// Under the `avian_gate` performance switch the gate does less of that. It
+/// answers true without walking while physics runs (the sweeps run anyway),
+/// and it detects added colliders from the collider count, summed over
+/// tables, instead of a second `Added<Collider>` walk: an add always changes
+/// that count or comes with a removal, and a removal opens the gate by
+/// itself.
+#[allow(clippy::too_many_arguments)]
 fn avian_prepare_needed(
     physics_time: Res<Time<avian3d::prelude::Physics>>,
     moved: Query<
@@ -463,6 +499,9 @@ fn avian_prepare_needed(
         ),
     >,
     added: Query<(), bevy::ecs::query::Added<avian3d::prelude::Collider>>,
+    // `avian_gate` switch: the collider count at the previous evaluation.
+    colliders: Query<(), bevy::ecs::query::With<avian3d::prelude::Collider>>,
+    mut last_collider_count: Local<Option<usize>>,
     mut removed: RemovedComponents<avian3d::prelude::Collider>,
     // Attribution only (read on the 10 s report): which colliders moved.
     moved_detail: Query<
@@ -481,10 +520,25 @@ fn avian_prepare_needed(
     let any_removed = !removed.is_empty();
     removed.clear();
     let unpaused = !physics_time.is_paused();
+    if !eustress_common::utils::perf_on("avian_gate") {
+        let any_moved = !moved.is_empty();
+        let any_added = !added.is_empty();
+        let open = unpaused || any_moved || any_added || any_removed;
+        diag.record(unpaused, any_moved, any_added, any_removed, &moved_detail);
+        return open;
+    }
+    // Updated on every evaluation, the unpaused ones included, so the first
+    // paused evaluation after Play compares against a current count.
+    let count = eustress_common::utils::count_matching(&colliders);
+    let any_added = *last_collider_count != Some(count);
+    *last_collider_count = Some(count);
+    if unpaused {
+        diag.record(true, false, any_added, any_removed, &moved_detail);
+        return true;
+    }
     let any_moved = !moved.is_empty();
-    let any_added = !added.is_empty();
-    let open = unpaused || any_moved || any_added || any_removed;
-    diag.record(unpaused, any_moved, any_added, any_removed, &moved_detail);
+    let open = any_moved || any_added || any_removed;
+    diag.record(false, any_moved, any_added, any_removed, &moved_detail);
     open
 }
 

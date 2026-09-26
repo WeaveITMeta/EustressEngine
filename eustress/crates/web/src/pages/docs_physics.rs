@@ -799,8 +799,13 @@ pub fn on_update(dt) {
                             </p>
                             <p>
                                 "Two things follow from a kinematic body. Walking into an unanchored part does not
-                                push it; the capsule stops or slides along it. And the character falls under its
-                                own gravity of 9.80665 m/s², separate from the gravity that dynamic parts use."
+                                push it; the capsule stops or slides along it. And the controller applies gravity
+                                itself: each frame it reads the gravity dynamic parts fall with and uses its
+                                downward part, so a Space set to the Moon's 1.62 m/s² slows the character's fall
+                                along with everything else. Jumps follow Roblox's rules, so a game tuned for Roblox's
+                                gravity jumps as it was tuned: with UseJumpPower a jump leaves the ground at JumpPower,
+                                and otherwise it peaks at JumpHeight under whatever gravity the Space has. Weightless,
+                                only a JumpPower jump leaves the ground."
                             </p>
                         </div>
 
@@ -835,6 +840,21 @@ pub fn on_update(dt) {
                                 against the colliders at its target, and if it would not fit, it stops at the last
                                 clear point on the way. That keeps a climbing character out of walls and out of the
                                 ground."
+                            </p>
+                            <p>
+                                "A character climbs the world: anchored parts, terrain, and anything else that stays
+                                where it is. It never climbs another player's character, an NPC (any Model holding a
+                                Humanoid or an AnimationController), an unanchored part, or a part with a
+                                Transparency of 0.95 or more, and it passes straight through a part with CanCollide
+                                off. A Climbable attribute on a part overrides that: true makes it climbable, false
+                                keeps characters off it."
+                            </p>
+                            <p>
+                                "A hang is braced when there is wall under the feet, with the soles planted on it, and
+                                free when there is not, with the legs hanging and the body swinging under the hands. A
+                                pull-up goes through the pull, a knee onto the top and the stand, and backs down the
+                                way it came if something overhead is in the way. On a beam or the top of a wall, the
+                                arms go out for balance."
                             </p>
                             <p>
                                 "Foot placement casts a ray down from each foot, plants a foot that has nearly

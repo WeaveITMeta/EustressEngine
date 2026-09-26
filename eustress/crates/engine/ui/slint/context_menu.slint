@@ -5,6 +5,7 @@
 
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { KitDivider } from "dialog_kit.slint";
 
 // Menu item data
 export struct MenuItem {
@@ -17,18 +18,31 @@ export struct MenuItem {
 }
 
 // ── Menu Item Row ─────────────────────────────────────────────────────────
+//
+// One 26px row: icon, label, and the live shortcut right-aligned in the
+// disabled grey. `danger` paints a destructive action (Delete) in the red
+// accent, icon and label both.
 
 component MenuItemRow inherits Rectangle {
     in property <string> label: "";
     in property <string> shortcut: "";
     in property <image> icon;
     in property <bool> enabled: true;
+    in property <bool> danger: false;
 
     callback clicked();
 
+    property <color> ink: !root.enabled ? Theme.text-disabled
+        : root.danger ? Theme.accent-red
+        : Theme.text-primary;
+
     height: 26px;
-    background: self.enabled && touch.has-hover ? Theme.button-hover : transparent;
-    border-radius: 3px;
+    background: !root.enabled ? transparent
+        : touch.pressed ? (root.danger ? Theme.accent-red.with-alpha(0.22) : Theme.button-pressed)
+        : touch.has-hover ? (root.danger ? Theme.accent-red.with-alpha(0.14) : Theme.explorer-item-hover)
+        : transparent;
+    border-radius: Theme.radius-sm;
+    animate background { duration: 80ms; easing: ease-out; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -36,33 +50,35 @@ component MenuItemRow inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    // Absolute positioning inside the row instead of HorizontalLayout —
-    // the Layout was cross-stretching the Image, which pushed the 14px
-    // glyph to the TOP of the 26px row rather than vertical centre, so
-    // icons sat visibly higher than their text. Explicit `y` bindings
-    // centre each child against the row's own height.
+    // Absolute positioning inside the row instead of a HorizontalLayout: a
+    // layout cross-stretches the Image and pushes the glyph to the top of
+    // the row. Explicit `y` bindings centre each child on the row.
 
     Image {
-        x: 10px;
+        x: 9px;
         y: (parent.height - self.height) / 2;
         width: 14px;
         height: 14px;
         source: root.icon;
         image-fit: contain;
-        colorize: root.enabled ? Theme.text-secondary : Theme.text-disabled;
+        colorize: !root.enabled ? Theme.text-disabled
+            : root.danger ? Theme.accent-red
+            : touch.has-hover ? Theme.text-primary
+            : Theme.text-secondary;
     }
 
     Text {
         x: 32px;
         y: (parent.height - self.height) / 2;
         width: root.shortcut != ""
-            ? parent.width - 32px - 8px - shortcut-text.preferred-width - 8px
-            : parent.width - 32px - 8px;
+            ? parent.width - 32px - 12px - shortcut-text.preferred-width - 10px
+            : parent.width - 32px - 10px;
         text: root.label;
-        color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+        color: root.ink;
         font-size: 12px;
         vertical-alignment: center;
         horizontal-alignment: left;
+        overflow: elide;
     }
 
     shortcut-text := Text {
@@ -70,8 +86,9 @@ component MenuItemRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         text: root.shortcut;
         color: Theme.text-disabled;
-        font-size: 10px;
+        font-size: 11px;
         vertical-alignment: center;
+        horizontal-alignment: right;
         visible: root.shortcut != "";
     }
 }
@@ -79,14 +96,12 @@ component MenuItemRow inherits Rectangle {
 // ── Separator ─────────────────────────────────────────────────────────────
 
 component MenuSeparator inherits Rectangle {
-    height: 5px;
+    height: 9px;
 
-    Rectangle {
-        y: 2px;
-        height: 1px;
-        x: 8px;
-        width: parent.width - 16px;
-        background: Theme.border-color;
+    KitDivider {
+        x: 6px;
+        y: 4px;
+        width: parent.width - 12px;
     }
 }
 
@@ -133,13 +148,14 @@ export component ContextMenu inherits Rectangle {
     // can resolve to 0 and hide the menu entirely.
     height: body.min-height;
     clip: true;
-    // Theme-backed background + border instead of the old hardcoded
-    // #1e1f2e purple that clashed with the rest of the dark UI.
-    background: Theme.dialog-background;
-    border-radius: 6px;
+    // The one popup surface: glass, `radius-md`, one border, the 1px top
+    // hairline and the floating shadow.
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: Theme.border-color;
-    drop-shadow-blur: 16px;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 4px;
     drop-shadow-color: Theme.shadow-float;
 
     // Absorb clicks on the menu body
@@ -147,8 +163,16 @@ export component ContextMenu inherits Rectangle {
         scroll-event(event) => { return accept; }
     }
 
+    Rectangle {
+        x: Theme.radius-md;
+        y: 0;
+        width: parent.width - 2 * Theme.radius-md;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
     body := VerticalLayout {
-        padding: 4px;
+        padding: 5px;
         spacing: 1px;
 
         // ── Dynamic items (file menu) ──
@@ -163,6 +187,7 @@ export component ContextMenu inherits Rectangle {
                         label: item.label;
                         shortcut: item.shortcut;
                         enabled: item.enabled;
+                        danger: item.id == "delete";
                         clicked => { root.on-action(item.id); }
                     }
 
@@ -185,12 +210,12 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/plus.svg");
-                    label: "Insert Part Here"; shortcut: "";
+                    label: "Insert part here"; shortcut: "";
                     clicked => { root.on-action("insert-here"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/paste.svg");
-                    label: "Paste Here"; shortcut: root.shortcut-paste;
+                    label: "Paste here"; shortcut: root.shortcut-paste;
                     clicked => { root.on-action("paste-here"); }
                 }
 
@@ -198,17 +223,17 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/crosshair.svg");
-                    label: "Focus Selection"; shortcut: root.shortcut-focus;
+                    label: "Focus selection"; shortcut: root.shortcut-focus;
                     clicked => { root.on-action("focus-selection"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/binoculars.svg");
-                    label: "Zoom to Selection"; shortcut: "";
+                    label: "Zoom to selection"; shortcut: "";
                     clicked => { root.on-action("zoom-to-selection"); }
                 }
                 MenuItemRow {
-                    icon: @image-url("../../assets/icons/ui/chevron-right.svg");
-                    label: "Select Children"; shortcut: root.shortcut-select-children;
+                    icon: @image-url("../../assets/icons/ui/select.svg");
+                    label: "Select children"; shortcut: root.shortcut-select-children;
                     clicked => { root.on-action("select_children"); }
                 }
 
@@ -239,12 +264,12 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/anchor.svg");
-                    label: "Toggle Anchor"; shortcut: root.shortcut-anchor;
+                    label: "Toggle anchor"; shortcut: root.shortcut-anchor;
                     clicked => { root.on-action("toggle-anchor"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/lock.svg");
-                    label: "Toggle Lock"; shortcut: root.shortcut-lock;
+                    label: "Toggle lock"; shortcut: root.shortcut-lock;
                     clicked => { root.on-action("toggle-lock"); }
                 }
 
@@ -262,7 +287,7 @@ export component ContextMenu inherits Rectangle {
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/link.svg");
-                    label: "Copy Path"; shortcut: root.shortcut-copy-path;
+                    label: "Copy path"; shortcut: root.shortcut-copy-path;
                     clicked => { root.on-action("copy-path"); }
                 }
 
@@ -271,6 +296,7 @@ export component ContextMenu inherits Rectangle {
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/delete.svg");
                     label: "Delete"; shortcut: root.shortcut-delete;
+                    danger: true;
                     clicked => { root.on-action("delete"); }
                 }
             }
@@ -317,7 +343,7 @@ export component ContextMenu inherits Rectangle {
                 // and @reference the selected entity.
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/link.svg");
-                    label: "Copy Path"; shortcut: root.shortcut-copy-path;
+                    label: "Copy path"; shortcut: root.shortcut-copy-path;
                     clicked => { root.on-action("copy-path"); }
                 }
 
@@ -339,6 +365,7 @@ export component ContextMenu inherits Rectangle {
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/delete.svg");
                     label: "Delete"; shortcut: root.shortcut-delete;
+                    danger: true;
                     clicked => { root.on-action("delete"); }
                 }
             }

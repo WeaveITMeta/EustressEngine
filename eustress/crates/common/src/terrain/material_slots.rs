@@ -40,14 +40,38 @@
 //! vertex-colour mesher paints it through [`TerrainSlotPalette`] (kept on
 //! `TerrainData`) for as long as the textured terrain material is not up.
 //!
+//! ## Imported Roblox colours
+//!
+//! The Roblox importer records a place's terrain colours in
+//! `Workspace/Terrain/_instance.toml`, the terrain instance's own file, as a
+//! `[material_colors]` table: one sRGB triple, each channel from 0 to 1, per
+//! Roblox terrain material, keyed by its Roblox name. Every Roblox terrain
+//! material is the built-in of the same name, and the loader applies its
+//! colour to that built-in relative to Roblox's own default for it: each
+//! channel of the tint is multiplied by the place's colour over the default,
+//! both in linear light, and kept within [`MAX_TINT`]. A material left at its
+//! Roblox default (to within half a byte step) draws exactly as shipped, and
+//! a recoloured one moves away from its calibrated look by the ratio the
+//! creator moved it by in Roblox. The swatch follows the tint, so the picker
+//! and the vertex-colour fallback show the change too.
+//!
+//! Palette entries and material files start from the adjusted built-ins. A
+//! custom slot copies its base with the Space's colours applied, and an entry
+//! for a built-in overrides the adjusted slot with the keys it sets: a file's
+//! own `tint`, like its own texture set (which starts from a fresh tint),
+//! beats the imported colour. A name that is not a Roblox terrain material is
+//! ignored, and an entry that is not three numbers from 0 to 1 is reported
+//! and skipped.
+//!
 //! ## Reloading
 //!
 //! [`TerrainMaterialSource`] names the terrain directory. The host points it
 //! at the active Space; [`reload_terrain_material_slots`] rebuilds the table
 //! whenever it changes or a reload is requested, and
 //! [`watch_terrain_material_files`] requests one when a `FileChanged` message
-//! reports `_terrain.toml` or a `materials/*.mat.toml` changing. Hosts without
-//! a file watcher (the Client) simply never send those messages.
+//! reports `_terrain.toml`, `_instance.toml` or a `materials/*.mat.toml`
+//! changing. Hosts without a file watcher (the Client) simply never send
+//! those messages.
 //!
 //! ## Adding a material, physics and gameplay
 //!
@@ -117,7 +141,8 @@ pub const UNDEFINED_SLOT_SRGB: [f32; 3] = [0.5, 0.5, 0.5];
 
 /// Largest tint component accepted. A calibrated built-in tint stays under 3
 /// (Grass lifts the grass set's deep blue channel the most); anything far
-/// past that is a typo that would blow the albedo out.
+/// past that is a typo that would blow the albedo out. An imported Roblox
+/// colour that would lift a tint further stops here too.
 pub const MAX_TINT: f32 = 8.0;
 
 /// Tiling limits, in metres per texture repeat.
@@ -231,7 +256,7 @@ pub struct MaterialSlot {
     /// where it has no fitting entry (the collider keeps its default).
     pub physics_material: Option<String>,
     /// The `.mat.toml` that defined or overrode this slot, `None` for a
-    /// built-in as shipped.
+    /// built-in no material file overrides.
     pub source: Option<PathBuf>,
 }
 
@@ -513,13 +538,17 @@ impl TerrainMaterialSlots {
     }
 
     /// The table for the terrain in `terrain_dir` (a Space's
-    /// `Workspace/Terrain`): the built-ins, overridden and extended by its
-    /// palette and material files (see the module docs), plus a message for
-    /// everything that was skipped or corrected. A directory without a
-    /// `_terrain.toml` or `materials/` just yields the built-ins.
+    /// `Workspace/Terrain`): the built-ins as its imported Roblox colours
+    /// adjust them, overridden and extended by its palette and material files
+    /// (see the module docs), plus a message for everything that was skipped
+    /// or corrected. A directory with none of those files just yields the
+    /// built-ins.
     pub fn load_from_terrain_dir(terrain_dir: &Path) -> (Self, Vec<String>) {
-        let mut slots = builtin_slot_list();
         let mut warnings = Vec::new();
+        // What every slot below starts from, built-in or custom.
+        let mut builtins = builtin_slot_list();
+        apply_imported_colors(terrain_dir, &mut builtins, &mut warnings);
+        let mut slots = builtins.clone();
         let mut defined_by: Vec<Option<PathBuf>> = vec![None; MATERIAL_SLOT_COUNT];
         let mut listed: Vec<PathBuf> = Vec::new();
 
@@ -576,6 +605,7 @@ impl TerrainMaterialSlots {
                             def.as_ref(),
                             &dir,
                             source,
+                            &builtins,
                             &mut warnings,
                         ));
                         defined_by[slot as usize] = Some(path);
@@ -627,8 +657,15 @@ impl TerrainMaterialSlots {
                 ));
                 continue;
             }
-            slots[slot as usize] =
-                Some(resolve_slot(slot, None, Some(&def), &materials_dir, Some(path.clone()), &mut warnings));
+            slots[slot as usize] = Some(resolve_slot(
+                slot,
+                None,
+                Some(&def),
+                &materials_dir,
+                Some(path.clone()),
+                &builtins,
+                &mut warnings,
+            ));
             defined_by[slot as usize] = Some(path);
         }
 
@@ -638,14 +675,170 @@ impl TerrainMaterialSlots {
     }
 }
 
+/// Roblox's default colour of every terrain material a place can recolour, as
+/// sRGB bytes (`TerrainMaterials::default_color` in rbx_types), under the
+/// name the importer keys `[material_colors]` by and with the built-in of
+/// that name. See "Imported Roblox colours" in the module docs.
+const ROBLOX_DEFAULT_COLORS: [(&str, TerrainMaterial, [u8; 3]); 21] = [
+    ("Grass", TerrainMaterial::Grass, [106, 127, 63]),
+    ("Slate", TerrainMaterial::Slate, [63, 127, 107]),
+    ("Concrete", TerrainMaterial::Concrete, [127, 102, 63]),
+    ("Brick", TerrainMaterial::Brick, [138, 86, 62]),
+    ("Sand", TerrainMaterial::Sand, [143, 126, 95]),
+    ("WoodPlanks", TerrainMaterial::WoodPlanks, [139, 109, 79]),
+    ("Rock", TerrainMaterial::Rock, [102, 108, 111]),
+    ("Glacier", TerrainMaterial::Glacier, [101, 176, 234]),
+    ("Snow", TerrainMaterial::Snow, [195, 199, 218]),
+    ("Sandstone", TerrainMaterial::Sandstone, [137, 90, 71]),
+    ("Mud", TerrainMaterial::Mud, [58, 46, 36]),
+    ("Basalt", TerrainMaterial::Basalt, [30, 30, 37]),
+    ("Ground", TerrainMaterial::Ground, [102, 92, 59]),
+    ("CrackedLava", TerrainMaterial::CrackedLava, [232, 156, 74]),
+    ("Asphalt", TerrainMaterial::Asphalt, [115, 123, 107]),
+    ("Cobblestone", TerrainMaterial::Cobblestone, [132, 123, 90]),
+    ("Ice", TerrainMaterial::Ice, [129, 194, 224]),
+    ("LeafyGrass", TerrainMaterial::LeafyGrass, [115, 132, 74]),
+    ("Salt", TerrainMaterial::Salt, [198, 189, 181]),
+    ("Limestone", TerrainMaterial::Limestone, [206, 173, 148]),
+    ("Pavement", TerrainMaterial::Pavement, [148, 148, 140]),
+];
+
+/// The built-in Roblox terrain material `name` is, with its Roblox default
+/// colour; `None` for a name Roblox does not let a place recolour.
+fn roblox_material(name: &str) -> Option<(TerrainMaterial, [u8; 3])> {
+    ROBLOX_DEFAULT_COLORS
+        .iter()
+        .find(|(roblox_name, _, _)| *roblox_name == name)
+        .map(|(_, material, default)| (*material, *default))
+}
+
+/// `value` as an sRGB colour: an array of three numbers from 0 to 1.
+fn srgb_color(value: &toml::Value) -> Option<[f32; 3]> {
+    let [r, g, b] = value.as_array()?.as_slice() else {
+        return None;
+    };
+    let channel = |item: &toml::Value| -> Option<f32> {
+        let number = match item {
+            toml::Value::Float(number) => *number,
+            toml::Value::Integer(number) => *number as f64,
+            _ => return None,
+        };
+        // NaN fails the range test as well.
+        (0.0..=1.0).contains(&number).then_some(number as f32)
+    };
+    Some([channel(r)?, channel(g)?, channel(b)?])
+}
+
+/// Largest Terrain `_instance.toml`, in bytes, parsed whole for its colours.
+/// Early Roblox imports stored the raw voxel payload in that file, tens of
+/// megabytes of it, and a slot reload needs only the `[material_colors]`
+/// table, so a larger file is cut down to that table first
+/// ([`material_colors_section`]).
+const MAX_WHOLE_INSTANCE_TOML: usize = 1 << 20;
+
+/// The `[material_colors]` table of an instance file's text: from its header
+/// line up to the next table header, or to the end. `None` when the file has
+/// no such header. Only the header form the importer writes is found, which
+/// is all a file too large to parse whole needs.
+fn material_colors_section(text: &str) -> Option<&str> {
+    let mut start = None;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        match start {
+            None if trimmed == "[material_colors]" => start = Some(offset),
+            Some(begin) if is_table_header(trimmed) => return Some(&text[begin..offset]),
+            _ => {}
+        }
+        offset += line.len();
+    }
+    start.map(|begin| &text[begin..])
+}
+
+/// Whether a trimmed line opens a TOML table (`[name]` or `[[name]]`). The
+/// rows of a multi-line array of arrays hold commas, so they never match.
+fn is_table_header(line: &str) -> bool {
+    line.len() > 2 && line.starts_with('[') && line.ends_with(']') && !line.contains(',')
+}
+
+/// Apply the `[material_colors]` table of `terrain_dir`'s `_instance.toml`
+/// to the built-in slots of `slots`; see "Imported Roblox colours" in the
+/// module docs. A missing file or table changes nothing. A file that cannot
+/// be read or parsed changes nothing either and is reported in `warnings`,
+/// as is every malformed entry.
+fn apply_imported_colors(terrain_dir: &Path, slots: &mut [Option<MaterialSlot>], warnings: &mut Vec<String>) {
+    let path = terrain_dir.join("_instance.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warnings.push(format!("Failed to read {}: {error}", path.display()));
+            return;
+        }
+    };
+    // A large file is parsed only as far as its colour table (see
+    // `MAX_WHOLE_INSTANCE_TOML`); without one it has no colours to apply.
+    let source = if text.len() > MAX_WHOLE_INSTANCE_TOML {
+        match material_colors_section(&text) {
+            Some(section) => section,
+            None => return,
+        }
+    } else {
+        text.as_str()
+    };
+    let file = match source.parse::<toml::Table>() {
+        Ok(file) => file,
+        Err(error) => {
+            warnings.push(format!("Failed to parse {}: {error}", path.display()));
+            return;
+        }
+    };
+    let Some(colors) = file.get("material_colors") else {
+        return;
+    };
+    let Some(colors) = colors.as_table() else {
+        warnings.push(format!("{}: material_colors must be a table of colours; ignored", path.display()));
+        return;
+    };
+    for (name, value) in colors {
+        let Some((material, default)) = roblox_material(name) else {
+            debug!("{}: material_colors.{name} is not a Roblox terrain material; ignored", path.display());
+            continue;
+        };
+        let Some(color) = srgb_color(value) else {
+            warnings.push(format!(
+                "{}: material_colors.{name} = {value} must be three numbers from 0 to 1; skipped",
+                path.display()
+            ));
+            continue;
+        };
+        let default = default.map(|byte| f32::from(byte) / 255.0);
+        // Within half a byte step of the default in every channel: the place
+        // left this material alone, so it keeps its calibrated tint exactly.
+        if color.iter().zip(default).all(|(c, d)| (c - d).abs() <= 0.5 / 255.0) {
+            continue;
+        }
+        let Some(builtin) = slots.get_mut(material.to_u8() as usize).and_then(Option::as_mut) else {
+            continue;
+        };
+        let now = linear_rgb(Color::srgb_from_array(color));
+        let was = linear_rgb(Color::srgb_from_array(default));
+        let tint = builtin.tint;
+        builtin.tint = std::array::from_fn(|i| (tint[i] * (now[i] / was[i].max(1e-4))).clamp(0.0, MAX_TINT));
+    }
+}
+
 /// Slot `slot` as `def` (read from a file in `def_dir`) defines it; see the
-/// module docs for how its keys override the built-in it starts from.
+/// module docs for how its keys override the built-in it starts from, which
+/// it copies from `builtins` (the built-ins as the Space's imported colours
+/// adjust them, indexed by slot).
 fn resolve_slot(
     slot: u8,
     palette_name: Option<&str>,
     def: Option<&MaterialTomlDef>,
     def_dir: &Path,
     source: Option<PathBuf>,
+    builtins: &[Option<MaterialSlot>],
     warnings: &mut Vec<String>,
 ) -> MaterialSlot {
     let non_empty = |text: &str| -> Option<String> {
@@ -681,7 +874,11 @@ fn resolve_slot(
         },
     };
 
-    let mut resolved = builtin_slot(base);
+    let mut resolved = builtins
+        .get(base.to_u8() as usize)
+        .and_then(Option::as_ref)
+        .cloned()
+        .unwrap_or_else(|| builtin_slot(base));
     resolved.name = def_name
         .or(listed_name)
         .unwrap_or_else(|| match TerrainMaterial::from_u8(slot) {
@@ -829,7 +1026,7 @@ pub fn write_custom_material_toml(
 
 /// Where the active terrain's custom material slots come from. The host
 /// points it at the open Space's `Workspace/Terrain`; `None` (the default,
-/// and the Client's) means the built-ins only.
+/// before a Space opens) means the built-ins only.
 #[derive(Resource, Debug, Default)]
 pub struct TerrainMaterialSource {
     terrain_dir: Option<PathBuf>,
@@ -859,9 +1056,10 @@ impl TerrainMaterialSource {
 }
 
 /// Rebuild [`TerrainMaterialSlots`] when [`TerrainMaterialSource`] changes.
-/// The files are a `_terrain.toml` and a handful of small `.mat.toml`s, so
-/// this reads them on the spot. An unchanged table is left alone, so nothing
-/// downstream (palette, remesh, texture arrays) reacts to a no-op reload.
+/// The files are a `_terrain.toml`, the terrain's `_instance.toml` and a
+/// handful of small `.mat.toml`s, so this reads them on the spot. An
+/// unchanged table is left alone, so nothing downstream (palette, remesh,
+/// texture arrays) reacts to a no-op reload.
 pub fn reload_terrain_material_slots(
     source: Res<TerrainMaterialSource>,
     mut slots: ResMut<TerrainMaterialSlots>,
@@ -893,11 +1091,22 @@ pub fn reload_terrain_material_slots(
     }
 }
 
-/// Request a slot reload when `_terrain.toml` or a `materials/*.mat.toml`
-/// of the source directory changes on disk, and a texture-array rebuild
-/// when an image a slot reads changes (its path, and so the array key, stays
-/// the same). Reads the engine watcher's `FileChanged` broadcast; absent in
-/// hosts without one.
+/// Whether `path` is a file the slot table of terrain directory `dir` is read
+/// from: its `_terrain.toml`, its `_instance.toml` (the imported Roblox
+/// colours) or a `materials/*.mat.toml`.
+fn is_slot_table_file(dir: &Path, path: &Path) -> bool {
+    let is_mat_toml =
+        path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".mat.toml"));
+    path == dir.join("_terrain.toml")
+        || path == dir.join("_instance.toml")
+        || (is_mat_toml && path.parent() == Some(dir.join("materials").as_path()))
+}
+
+/// Request a slot reload when `_terrain.toml`, `_instance.toml` or a
+/// `materials/*.mat.toml` of the source directory changes on disk, and a
+/// texture-array rebuild when an image a slot reads changes (its path, and so
+/// the array key, stays the same). Reads the engine watcher's `FileChanged`
+/// broadcast; absent in hosts without one.
 pub fn watch_terrain_material_files(
     changes: Option<MessageReader<FileChanged>>,
     mut source: ResMut<TerrainMaterialSource>,
@@ -921,11 +1130,7 @@ pub fn watch_terrain_material_files(
             if !path.starts_with(dir) {
                 continue;
             }
-            let is_mat_toml =
-                path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".mat.toml"));
-            if path == dir.join("_terrain.toml")
-                || (is_mat_toml && path.parent() == Some(dir.join("materials").as_path()))
-            {
+            if is_slot_table_file(dir, path) {
                 reload = true;
             } else if slots.uses_texture_file(path) {
                 retexture = true;
@@ -1140,6 +1345,23 @@ mod tests {
         match slot.texture_set {
             Some(TerrainTextureSet::Bundled(name)) => Some(name),
             _ => None,
+        }
+    }
+
+    /// `material`'s shipped tint after an imported Roblox colour of `srgb`:
+    /// each channel times the place's colour over the Roblox default, both in
+    /// linear light.
+    fn imported_tint(material: TerrainMaterial, srgb: [f32; 3]) -> [f32; 3] {
+        let (_, default) = roblox_material(material.name()).expect("a Roblox terrain material");
+        let now = linear_rgb(Color::srgb(srgb[0], srgb[1], srgb[2]));
+        let was = linear_rgb(Color::srgb_u8(default[0], default[1], default[2]));
+        let shipped = builtin_slot(material).tint;
+        std::array::from_fn(|i| (shipped[i] * (now[i] / was[i])).clamp(0.0, MAX_TINT))
+    }
+
+    fn assert_close(got: [f32; 3], want: [f32; 3], what: &str) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() <= 1e-5 * w.abs().max(1.0), "{what}: {got:?}, expected {want:?}");
         }
     }
 
@@ -1555,5 +1777,275 @@ mod tests {
         let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
         assert!(warnings.is_empty());
         assert_eq!(table, TerrainMaterialSlots::builtins());
+    }
+
+    #[test]
+    fn every_roblox_terrain_material_is_the_builtin_of_the_same_name() {
+        // The keys `roblox-import` writes into `[material_colors]`.
+        let importer_keys = [
+            "Grass",
+            "Slate",
+            "Concrete",
+            "Brick",
+            "Sand",
+            "WoodPlanks",
+            "Rock",
+            "Glacier",
+            "Snow",
+            "Sandstone",
+            "Mud",
+            "Basalt",
+            "Ground",
+            "CrackedLava",
+            "Asphalt",
+            "Cobblestone",
+            "Ice",
+            "LeafyGrass",
+            "Salt",
+            "Limestone",
+            "Pavement",
+        ];
+        let names: Vec<&str> = ROBLOX_DEFAULT_COLORS.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(names, importer_keys);
+        for (name, material, default) in ROBLOX_DEFAULT_COLORS {
+            assert_eq!(material.name(), name);
+            assert_eq!(TerrainMaterial::from_name(name), Some(material));
+            assert_eq!(roblox_material(name), Some((material, default)));
+            assert!(default.iter().all(|byte| *byte > 0), "{name}: a zero channel has no ratio");
+        }
+        // Eustress's own extras are not Roblox colours.
+        assert_eq!(roblox_material("Dirt"), None);
+        assert_eq!(roblox_material("Water"), None);
+        assert_eq!(roblox_material("grass"), None, "keys match exactly");
+    }
+
+    #[test]
+    fn imported_colours_left_at_the_roblox_defaults_change_nothing() {
+        let dir = temp_terrain_dir("roblox_defaults");
+        // What the importer writes for a place that never recoloured its
+        // terrain: every material at its default, as a byte over 255.
+        let mut text = String::from("[metadata]\nclass_name = \"Terrain\"\n\n[material_colors]\n");
+        for (name, _, [r, g, b]) in ROBLOX_DEFAULT_COLORS {
+            let [r, g, b] = [r, g, b].map(|byte| f64::from(byte) / 255.0);
+            text.push_str(&format!("{name} = [{r:?}, {g:?}, {b:?}]\n"));
+        }
+        std::fs::write(dir.join("_instance.toml"), &text).unwrap();
+
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let grass = table.get(TerrainMaterial::Grass.to_u8()).unwrap();
+        assert_eq!(grass.tint, builtin_slot(TerrainMaterial::Grass).tint, "the shipped calibrated tint, exactly");
+        assert_eq!(table, TerrainMaterialSlots::builtins());
+        assert_eq!(*table.palette(), TerrainSlotPalette::default());
+
+        // Rounded to four places, still within half a byte step.
+        std::fs::write(dir.join("_instance.toml"), "[material_colors]\nGrass = [0.4157, 0.498, 0.2471]\n").unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(table, TerrainMaterialSlots::builtins());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_recoloured_roblox_material_moves_its_tint_by_the_linear_ratio() {
+        let dir = temp_terrain_dir("roblox_recolour");
+        std::fs::write(
+            dir.join("_instance.toml"),
+            "[metadata]\nclass_name = \"Terrain\"\n\n[material_colors]\nGrass = [0.8, 0.2, 0.2]\n",
+        )
+        .unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        assert_eq!(roblox_material("Grass"), Some((TerrainMaterial::Grass, [106, 127, 63])));
+        let grass = table.get(TerrainMaterial::Grass.to_u8()).unwrap();
+        let shipped = builtin_slot(TerrainMaterial::Grass);
+        assert_close(grass.tint, imported_tint(TerrainMaterial::Grass, [0.8, 0.2, 0.2]), "Grass tint");
+        assert!(grass.tint[0] > shipped.tint[0] && grass.tint[1] < shipped.tint[1], "{:?}", grass.tint);
+        // The swatch, and so the palette the mesher paints, follows.
+        assert_ne!(grass.swatch_srgb(), shipped.swatch_srgb());
+        assert!(grass.swatch_linear()[0] > shipped.swatch_linear()[0]);
+        assert_eq!(table.swatch_srgb(TerrainMaterial::Grass.to_u8()), grass.swatch_srgb());
+        assert_ne!(*table.palette(), TerrainSlotPalette::default());
+        // Only the colour moves: no file overrides the slot, and every other
+        // slot stays as shipped.
+        assert_eq!(grass.texture_set, shipped.texture_set);
+        assert_eq!(grass.roughness, shipped.roughness);
+        assert!(grass.source.is_none());
+        let builtins = TerrainMaterialSlots::builtins();
+        for (slot, def) in table.iter().filter(|(slot, _)| *slot != TerrainMaterial::Grass.to_u8()) {
+            assert_eq!(Some(def), builtins.get(slot), "slot {slot}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_instance_file_too_large_to_parse_whole_still_gives_its_colours() {
+        let dir = temp_terrain_dir("roblox_large_instance");
+        // A legacy import: megabytes of raw voxel payload around the colours,
+        // written the multi-line way `toml::to_string_pretty` writes arrays.
+        let blob = "ab".repeat(MAX_WHOLE_INSTANCE_TOML);
+        let text = format!(
+            "[metadata]\nclass_name = \"Terrain\"\n\n[properties.extras]\nSmoothGrid = \"{blob}\"\n\n\
+             [material_colors]\nGrass = [\n    0.8,\n    0.2,\n    0.2,\n]\n\n[terrain]\nsource = \"imported\"\n"
+        );
+        assert!(text.len() > MAX_WHOLE_INSTANCE_TOML);
+        std::fs::write(dir.join("_instance.toml"), &text).unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let grass = table.get(TerrainMaterial::Grass.to_u8()).unwrap();
+        assert_close(grass.tint, imported_tint(TerrainMaterial::Grass, [0.8, 0.2, 0.2]), "Grass tint");
+
+        // A large file without the table changes nothing and warns about nothing.
+        std::fs::write(dir.join("_instance.toml"), format!("[properties.extras]\nSmoothGrid = \"{blob}\"\n")).unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let grass = TerrainMaterial::Grass.to_u8();
+        assert_eq!(table.get(grass), TerrainMaterialSlots::builtins().get(grass));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_colour_table_is_cut_out_at_the_next_table_header() {
+        let text = "[a]\nx = 1\n[material_colors]\nGrass = [\n    0.1,\n    0.2,\n    0.3,\n]\n[[b]]\ny = 2\n";
+        assert_eq!(
+            material_colors_section(text),
+            Some("[material_colors]\nGrass = [\n    0.1,\n    0.2,\n    0.3,\n]\n")
+        );
+        let last = "[material_colors]\nGrass = [0.1, 0.2, 0.3]";
+        assert_eq!(material_colors_section(last), Some(last));
+        assert_eq!(material_colors_section("[a]\nx = 1\n"), None);
+        assert!(is_table_header("[metadata]") && is_table_header("[[palette]]"));
+        assert!(!is_table_header("]") && !is_table_header("[0.1, 0.2]") && !is_table_header("[]"));
+    }
+
+    #[test]
+    fn unknown_and_malformed_imported_colours_leave_the_rest_alone() {
+        let dir = temp_terrain_dir("roblox_malformed");
+        std::fs::write(
+            dir.join("_instance.toml"),
+            "[material_colors]\n\
+             Grass = [0.8, 0.2, 0.2]\n\
+             Unobtainium = [0.1, 0.2, 0.3]\n\
+             Water = [0.1, 0.2, 0.3]\n\
+             Slate = [0.5, 0.5]\n\
+             Rock = \"red\"\n\
+             Brick = [1.5, 0.2, 0.2]\n\
+             Mud = [nan, 0.2, 0.2]\n\
+             Sand = [1, 0, 0]\n",
+        )
+        .unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+
+        // One warning per malformed entry, naming it; the unknown names only
+        // reach the debug log.
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        for name in ["Slate", "Rock", "Brick", "Mud"] {
+            let key = format!("material_colors.{name} ");
+            assert!(warnings.iter().any(|warning| warning.contains(key.as_str())), "{name}: {warnings:?}");
+            let material = TerrainMaterial::from_name(name).unwrap();
+            assert_eq!(table.get(material.to_u8()), Some(&builtin_slot(material)), "{name} stays as shipped");
+        }
+        for name in ["Unobtainium", "Water"] {
+            let key = format!("material_colors.{name} ");
+            assert!(!warnings.iter().any(|warning| warning.contains(key.as_str())), "{name}: {warnings:?}");
+        }
+        assert_eq!(table.get(TerrainMaterial::Water.to_u8()), Some(&builtin_slot(TerrainMaterial::Water)));
+        // The good entries around them still apply, whole numbers included.
+        let tint = |material: TerrainMaterial| table.get(material.to_u8()).unwrap().tint;
+        assert_close(tint(TerrainMaterial::Grass), imported_tint(TerrainMaterial::Grass, [0.8, 0.2, 0.2]), "Grass");
+        assert_close(tint(TerrainMaterial::Sand), imported_tint(TerrainMaterial::Sand, [1.0, 0.0, 0.0]), "Sand");
+
+        // A table that is not one, or a file that does not parse, is reported
+        // and changes nothing.
+        for text in ["material_colors = \"red\"\n", "[material_colors\nGrass = [0.8, 0.2, 0.2]\n"] {
+            std::fs::write(dir.join("_instance.toml"), text).unwrap();
+            let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+            assert_eq!(warnings.len(), 1, "{text:?}: {warnings:?}");
+            assert_eq!(table, TerrainMaterialSlots::builtins(), "{text:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_material_file_beats_the_imported_colour_and_custom_slots_inherit_it() {
+        let dir = temp_terrain_dir("roblox_precedence");
+        std::fs::write(
+            dir.join("_instance.toml"),
+            "[material_colors]\nGrass = [0.8, 0.2, 0.2]\nRock = [0.6, 0.3, 0.3]\n",
+        )
+        .unwrap();
+        // Built-in Grass's own file sets a tint; built-in Rock's only a
+        // roughness.
+        std::fs::write(
+            dir.join("materials/grass.mat.toml"),
+            "[material]\nname = \"Grass\"\nslot = 0\ntint = [1.2, 0.7, 0.6]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("materials/rock.mat.toml"),
+            "[material]\nname = \"Rock\"\nslot = 1\nroughness = 0.5\n",
+        )
+        .unwrap();
+        // Custom slots on both bases, one with a tint of its own.
+        std::fs::write(
+            dir.join("materials/moss.mat.toml"),
+            "[material]\nname = \"Moss\"\nslot = 30\nbase = \"Grass\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("materials/red_rock.mat.toml"),
+            "[material]\nname = \"Red Rock\"\nslot = 31\nbase = \"Rock\"\ntint = [1.2, 0.7, 0.6]\n",
+        )
+        .unwrap();
+
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let grass = table.get(0).unwrap();
+        assert_eq!(grass.tint, [1.2, 0.7, 0.6], "the file's own tint beats the imported colour");
+        assert_eq!(grass.source.as_deref(), Some(dir.join("materials/grass.mat.toml").as_path()));
+        let rock = table.get(1).unwrap();
+        assert_eq!(rock.roughness, 0.5);
+        let recoloured_rock = imported_tint(TerrainMaterial::Rock, [0.6, 0.3, 0.3]);
+        assert_close(rock.tint, recoloured_rock, "a file without a tint keeps the imported one");
+        // A custom slot copies its base as the imported colours left it, not
+        // the Space's own override of the built-in slot.
+        let moss = table.get(30).unwrap();
+        assert_close(moss.tint, imported_tint(TerrainMaterial::Grass, [0.8, 0.2, 0.2]), "Moss copies recoloured Grass");
+        assert_eq!(table.get(31).unwrap().tint, [1.2, 0.7, 0.6]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn without_imported_colours_the_builtins_stay_as_shipped() {
+        let dir = temp_terrain_dir("roblox_none");
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(table, TerrainMaterialSlots::builtins());
+
+        // A terrain instance file without the table, as a Space made in the
+        // Studio has.
+        std::fs::write(
+            dir.join("_instance.toml"),
+            "[terrain]\nwater_transparency = 0.3\n\n[metadata]\nclass_name = \"Terrain\"\n",
+        )
+        .unwrap();
+        let (table, warnings) = TerrainMaterialSlots::load_from_terrain_dir(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(table, TerrainMaterialSlots::builtins());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_watcher_reloads_for_every_file_the_table_reads() {
+        let dir = Path::new("space").join("Workspace").join("Terrain");
+        assert!(is_slot_table_file(&dir, &dir.join("_terrain.toml")));
+        assert!(is_slot_table_file(&dir, &dir.join("_instance.toml")));
+        assert!(is_slot_table_file(&dir, &dir.join("materials").join("moss.mat.toml")));
+        // A terrain layer's own instance file, a nested material file and a
+        // texture are not files the table reads.
+        assert!(!is_slot_table_file(&dir, &dir.join("MeadowGrass").join("_instance.toml")));
+        assert!(!is_slot_table_file(&dir, &dir.join("materials").join("textures").join("moss.mat.toml")));
+        assert!(!is_slot_table_file(&dir, &dir.join("materials").join("moss_albedo.png")));
     }
 }

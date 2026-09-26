@@ -82,6 +82,33 @@ struct TerrainSurfaceParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var<storage, read> terrain_slots: array<TerrainSlotRecord, 256>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> terrain_params: TerrainSurfaceParams;
 
+#ifdef TERRAIN_FAR_FIELD
+// The far field (`TerrainFarFieldMaterial`, see `far_field.rs`) draws this
+// stage over the levels its own vertex stage, `terrain_far_field.wgsl`,
+// lifts onto the height texture. Bindings 107 and 108 are its additions; the
+// unit tests there hold `TerrainFarFieldParams` to the Rust packing and to
+// the vertex stage's copy.
+struct TerrainFarFieldParams {
+    // World XZ the near disc is centred on, which follows the scene camera
+    // in steps (each level is centred on the camera by its own transform).
+    camera_xz: vec2<f32>,
+    // Pixels nearer `camera_xz` than this, in XZ, are dropped: the chunks
+    // draw there.
+    near_radius: f32,
+    // Metres each level sits below the one inside it.
+    sink: f32,
+    // World size of one raster cell.
+    cell: vec2<f32>,
+    // 1 when a material-map cell whose id_a is "no material" is a hole.
+    sparse: u32,
+    _pad: u32,
+}
+
+// The surface heights (R32Float). Only the vertex stage reads them.
+@group(#{MATERIAL_BIND_GROUP}) @binding(107) var terrain_far_heights: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> terrain_far: TerrainFarFieldParams;
+#endif
+
 const TERRAIN_FLAG_TEXTURED: u32 = 1u;
 // "No material": an unused id_b, or a cell nothing has painted.
 const SLOT_NONE: u32 = 255u;
@@ -180,6 +207,31 @@ fn add_material_map(candidates: ptr<function, SlotCandidates>, world_xz: vec2<f3
     add_material_cell(candidates, vec2<i32>(lo_i.x, hi_i.y), weight * (1.0 - f.x) * f.y);
     add_material_cell(candidates, hi_i, weight * f.x * f.y);
 }
+
+#ifdef TERRAIN_FAR_FIELD
+// Whether the far field draws nothing at `world_xz`: inside the near disc,
+// where the chunks draw, or over a hole of a sparse raster, a material-map
+// cell whose id_a is "no material". The cell is the one nearest the pixel,
+// the cell `TerrainData::cell_at_uv` names.
+fn far_field_hides(world_xz: vec2<f32>) -> bool {
+    if distance(world_xz, terrain_far.camera_xz) < terrain_far.near_radius {
+        return true;
+    }
+    let size = terrain_params.cache_size;
+    if terrain_far.sparse == 0u || size.x == 0u || size.y == 0u {
+        return false;
+    }
+    let last = size - vec2<u32>(1u);
+    let uv = clamp(
+        (world_xz - terrain_params.world_origin) / terrain_params.world_extent,
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    let nearest = min(vec2<u32>(round(uv * vec2<f32>(last))), last);
+    let id_a = u32(round(textureLoad(terrain_material_map, vec2<i32>(nearest), 0).x * 255.0));
+    return id_a == SLOT_NONE;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Sampling one slot
@@ -382,6 +434,15 @@ fn fragment(
     // Taken first, while control flow is still uniform (see SurfaceFrame).
     let dpdx_world = dpdx(in.world_position.xyz);
     let dpdy_world = dpdy(in.world_position.xyz);
+
+#ifdef TERRAIN_FAR_FIELD
+    // After the derivatives: a discard leaves the rest of the stage in
+    // non-uniform control flow, where only reads with explicit gradients
+    // (every read below) are allowed.
+    if far_field_hides(in.world_position.xz) {
+        discard;
+    }
+#endif
 
 #ifdef VISIBILITY_RANGE_DITHER
     visibility_range_dither(in.position, in.visibility_range_dither);

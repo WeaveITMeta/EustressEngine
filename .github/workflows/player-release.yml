@@ -1,0 +1,604 @@
+name: Player Release
+
+# Tag player-v* -> build the Player (eustress-client) on three platforms
+# -> installers that register eustress-player:// -> SHA-256 checksums
+# -> player/latest.json -> R2 -> GitHub Release.
+#
+# The Player's counterpart to release.yml, which ships Studio. Same bucket,
+# same Worker, same credentials. The Player publishes under the bucket's
+# player/ prefix, so neither release can overwrite the other's manifest, and
+# downloads.eustress.dev serves it at:
+#   /player/latest.json                 the manifest, same shape as Studio's
+#   /player/latest/<platform>           302 to the current release's file
+#   /player/vX.Y.Z/<file>               the artifacts
+# Those routes live in infrastructure/cloudflare/download-worker.js.
+#
+# The Player versions independently of Studio: the tag player-vX.Y.Z must
+# match eustress/crates/client/Cargo.toml.
+#
+# Required repository secrets (shared with release.yml):
+#   CLOUDFLARE_API_TOKEN   scoped to Object Read & Write on eustress-downloads
+#   CLOUDFLARE_ACCOUNT_ID
+# Optional, and the workflow says so when absent:
+#   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD   Authenticode signing
+
+on:
+  push:
+    tags: ["player-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Player version to build (X.Y.Z, without the leading player-v)"
+        required: true
+
+permissions:
+  contents: write
+
+# Two Player releases never race each other to player/latest.json.
+concurrency:
+  group: player-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+  CARGO_PROFILE_RELEASE_LTO: thin
+  # The destination, in one place. Changing where Player releases live is
+  # these two edits and the Worker's routes.
+  R2_BUCKET: eustress-downloads
+  R2_PREFIX: player
+  DOWNLOAD_BASE: https://downloads.eustress.dev/player
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # Version and gating.
+  #
+  # The version is derived once and passed down, so a tag, the crate, the
+  # installer and player/latest.json cannot disagree.
+  # ─────────────────────────────────────────────────────────────────────
+  version:
+    name: Resolve version and verify the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${GITHUB_REF_NAME#player-v}"
+          fi
+          # The Worker serves only player/vX.Y.Z/ paths, so any other shape
+          # would build for half an hour and then publish something no
+          # link can reach.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${VERSION}' is not X.Y.Z. downloads.eustress.dev serves Player releases only at player/vX.Y.Z/."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # RELEASE.md's promotion model applies to the Player as it does to
+      # Studio: releases ship from Core only.
+      - name: Assert tagged commit is on Core
+        if: github.event_name == 'push'
+        run: |
+          git fetch origin Core:refs/remotes/origin/Core
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/Core; then
+            echo "::error::Tag ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}) is not reachable from origin/Core. Releases must be tagged on Core, see RELEASE.md."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_SHA} is on Core."
+
+      # `eustress-client --version` reports CARGO_PKG_VERSION, and each build
+      # job checks the binary against this tag. A mismatch caught here costs
+      # seconds instead of three platform builds.
+      - name: Assert crate version matches the tag
+        run: |
+          WANT="${{ steps.v.outputs.version }}"
+          HAVE=$(grep -m1 '^version' eustress/crates/client/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$WANT" != "$HAVE" ]; then
+            echo "::error::This Player release is ${WANT}, but eustress/crates/client/Cargo.toml says ${HAVE}. Bump the crate version to match before tagging, or the shipped Player reports ${HAVE}."
+            exit 1
+          fi
+          echo "OK: crate version ${HAVE} matches."
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Windows x64
+  # ─────────────────────────────────────────────────────────────────────
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      BIN_DIR: eustress/target/x86_64-pc-windows-msvc/release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eustress
+          # Apart from Studio's cache: the two graphs and flags differ, and
+          # one shared key would evict the other on every release.
+          key: player
+
+      # A static C runtime, so the Player starts on a Windows install that
+      # never received the Visual C++ redistributable. The flag goes through
+      # --config, which adds to .cargo/config.toml's lld-link flags where a
+      # RUSTFLAGS variable would replace them (see [profile.dist] in
+      # eustress/Cargo.toml), and the explicit --target keeps it off build
+      # scripts and proc macros.
+      - name: Build
+        working-directory: eustress
+        shell: pwsh
+        run: |
+          cargo build --release --package eustress-client --bin eustress-client `
+            --target x86_64-pc-windows-msvc `
+            --config "target.x86_64-pc-windows-msvc.rustflags=['-C','target-feature=+crt-static']"
+
+      - name: Check the reported version
+        shell: pwsh
+        run: |
+          # Also the first launch: a missing DLL fails here, before packaging.
+          $got = & "$env:BIN_DIR\eustress-client.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "eustress-client --version exited $LASTEXITCODE" }
+          $got = ($got | Out-String).Trim()
+          if ($got -ne "eustress-client $env:VERSION") { throw "--version printed '$got', want 'eustress-client $env:VERSION'" }
+          "OK: $got"
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          # Catches an immediate startup panic (unwrap-on-None, config parse
+          # failure) before a broken binary is packaged. NOT a rendering test:
+          # windows-latest has no real GPU, so a graceful exit for lack of an
+          # adapter is not distinguished from success. A floor, not a
+          # guarantee.
+          $p = Start-Process -FilePath "$env:BIN_DIR\eustress-client.exe" -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) {
+            Write-Error "eustress-client.exe exited within 8s (exit $($p.ExitCode)) - treating as a startup crash."
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Output "OK: still running after 8s."
+
+      - name: Sign the binary
+        shell: pwsh
+        run: |
+          if (-not "${{ secrets.WINDOWS_CERT_PFX }}") {
+            Write-Warning "WINDOWS_CERT_PFX not set - shipping UNSIGNED. Users will see a SmartScreen warning."
+            exit 0
+          }
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_PFX }}"))
+          & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" sign `
+            /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "$env:BIN_DIR\eustress-client.exe"
+          Remove-Item $pfx -Force
+
+      - name: Package
+        shell: pwsh
+        run: |
+          # The layout the installer ships too, staged outside dist/ so that
+          # dist/ holds only the files this job uploads.
+          ./installer/stage-player.ps1 -BinDir $env:BIN_DIR -OutDir player-stage
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Push-Location player-stage
+          7z a "../dist/eustress-player-v$env:VERSION-windows-x64.zip" *
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+          Pop-Location
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          # Setup's own icon: the one eustress-client's build script rendered
+          # from assets/icon.svg. The newest build directory is this build's.
+          $ico = Get-Item "$env:BIN_DIR/build/eustress-client-*/out/icon.ico",
+                          "eustress/target/release/build/eustress-client-*/out/icon.ico" -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $iconArg = @()
+          if ($ico) { $iconArg = @("/DSetupIcon=$($ico.FullName)") }
+          else { Write-Warning "icon.ico from eustress-client's build script was not found; Setup carries Inno's default icon." }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:VERSION" `
+            "/DStageDir=..\..\player-stage" `
+            @iconArg `
+            installer\windows\eustress-player.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Copy-Item dist\windows\EustressPlayer-Setup.exe dist\ -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.zip
+            dist/*.exe
+
+  # ─────────────────────────────────────────────────────────────────────
+  # macOS ARM64
+  # ─────────────────────────────────────────────────────────────────────
+  build-macos-arm64:
+    needs: version
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      BIN_DIR: eustress/target/aarch64-apple-darwin/release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eustress
+          key: player
+
+      - name: Build
+        working-directory: eustress
+        run: cargo build --release --package eustress-client --bin eustress-client --target aarch64-apple-darwin
+
+      - name: Check the reported version
+        run: |
+          GOT=$("$BIN_DIR/eustress-client" --version)
+          if [ "$GOT" != "eustress-client ${VERSION}" ]; then
+            echo "::error::--version printed '${GOT}', want 'eustress-client ${VERSION}'"
+            exit 1
+          fi
+          echo "OK: ${GOT}"
+
+      - name: Smoke test
+        run: |
+          "$BIN_DIR/eustress-client" &
+          PID=$!
+          sleep 8
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"; STATUS=$?
+            echo "::error::eustress-client exited within 8s (exit $STATUS) - treating as a startup crash."
+            exit 1
+          fi
+          kill "$PID"
+          echo "OK: still running after 8s."
+
+      - name: Package DMG
+        run: |
+          pwsh installer/stage-player.ps1 -BinDir "$BIN_DIR" -OutDir player-stage
+
+          APP="dmg/Eustress Player.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
+          cp player-stage/eustress-client "$APP/Contents/MacOS/"
+          # Assets belong in Resources. The Player looks beside its executable,
+          # so a link in MacOS/ leads it there.
+          mv player-stage/common "$APP/Contents/Resources/common"
+          ln -s ../Resources/common "$APP/Contents/MacOS/common"
+
+          # The icon eustress-client's build script rendered from
+          # assets/icon.svg. The newest build directory is this build's.
+          PNG=$(ls -t "$BIN_DIR"/build/eustress-client-*/out/icon_256.png \
+                      eustress/target/release/build/eustress-client-*/out/icon_256.png 2>/dev/null | head -1)
+          if [ -z "$PNG" ]; then
+            echo "::warning::icon_256.png from eustress-client's build script was not found; the Player app ships without its icon."
+          else
+            mkdir AppIcon.iconset
+            for s in 16 32 128 256; do
+              sips -z "$s" "$s" "$PNG" --out "AppIcon.iconset/icon_${s}x${s}.png" > /dev/null
+            done
+            for s in 16 32 128; do
+              sips -z $((s * 2)) $((s * 2)) "$PNG" --out "AppIcon.iconset/icon_${s}x${s}@2x.png" > /dev/null
+            done
+            if ! iconutil -c icns AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"; then
+              echo "::warning::iconutil failed; the Player app ships without its icon."
+            fi
+          fi
+
+          # CFBundleURLTypes makes the Player the handler for eustress-player://
+          # once the app is in Applications or has been opened once.
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Eustress Player</string>
+            <key>CFBundleDisplayName</key><string>Eustress Player</string>
+            <key>CFBundleExecutable</key><string>eustress-client</string>
+            <key>CFBundleIdentifier</key><string>dev.eustress.player</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>dev.eustress.player</string>
+                <key>CFBundleURLSchemes</key>
+                <array><string>eustress-player</string></array>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$APP/Contents/Info.plist"
+
+          # Drag-to-install: the image opens beside a link to Applications.
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Eustress Player" -srcfolder dmg -ov -format UDZO \
+            "dist/eustress-player-v${VERSION}-macos-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Linux x64
+  #
+  # Runner headroom as in release.yml: a release Bevy link has run the
+  # hosted runner out of memory or disk before, so this job trades build
+  # time for headroom.
+  # ─────────────────────────────────────────────────────────────────────
+  build-linux:
+    needs: version
+    runs-on: ubuntu-22.04 # oldest supported glibc, so the binary runs widely
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_BUILD_JOBS: 2
+      VERSION: ${{ needs.version.outputs.version }}
+      BIN_DIR: eustress/target/release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eustress
+          key: player
+
+      # mesa-vulkan-drivers gives the smoke test a software Vulkan adapter;
+      # librsvg2-bin renders the desktop icons from the Player's SVG.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
+            mesa-vulkan-drivers librsvg2-bin mold clang xvfb
+
+      - name: Build
+        working-directory: eustress
+        run: cargo build --release --package eustress-client --bin eustress-client
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Check the reported version
+        run: |
+          GOT=$("$BIN_DIR/eustress-client" --version)
+          if [ "$GOT" != "eustress-client ${VERSION}" ]; then
+            echo "::error::--version printed '${GOT}', want 'eustress-client ${VERSION}'"
+            exit 1
+          fi
+          echo "OK: ${GOT}"
+
+      - name: Smoke test
+        run: |
+          # xvfb gives it a display so surface creation does not hard-fail
+          # purely for lack of one. A software rasterizer still exercises
+          # real startup code, unlike running with no display.
+          xvfb-run --auto-servernum "$BIN_DIR/eustress-client" &
+          PID=$!
+          sleep 8
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"; STATUS=$?
+            echo "::error::eustress-client exited within 8s (exit $STATUS) - treating as a startup crash."
+            exit 1
+          fi
+          kill "$PID" 2>/dev/null || true
+          echo "OK: still running after 8s."
+
+      - name: Package
+        run: |
+          # One top-level folder, so unpacking never scatters files.
+          STAGE=pkg/eustress-player
+          pwsh installer/stage-player.ps1 -BinDir "$BIN_DIR" -OutDir "$STAGE"
+          mkdir -p "$STAGE/icons" dist
+          for s in 16 32 48 64 128 256 512; do
+            rsvg-convert -w "$s" -h "$s" eustress/crates/client/assets/icon.svg \
+              -o "$STAGE/icons/eustress-player-${s}.png"
+          done
+          cp eustress/crates/client/assets/linux/eustress-player.desktop "$STAGE/"
+          cp eustress/crates/client/assets/linux/install.sh "$STAGE/"
+          chmod +x "$STAGE/install.sh" "$STAGE/eustress-client"
+          tar czf "dist/eustress-player-v${VERSION}-linux-x64.tar.gz" -C pkg eustress-player
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Publish
+  # ─────────────────────────────────────────────────────────────────────
+  publish:
+    needs: [version, build-windows, build-macos-arm64, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: mkdir -p dist && find artifacts -type f -exec mv {} dist/ \; && ls -la dist
+
+      - name: Compute checksums
+        working-directory: dist
+        run: |
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      # Same shape as Studio's latest.json, so one parser reads both.
+      - name: Build latest.json
+        working-directory: dist
+        run: |
+          sha()  { grep " $1\$" checksums.txt | awk '{print $1}'; }
+          size() { stat -c%s "$1"; }
+
+          WIN=$(ls eustress-player-*-windows-x64.zip 2>/dev/null | head -1)
+          SETUP=$(ls EustressPlayer-Setup.exe 2>/dev/null | head -1)
+          MAC=$(ls eustress-player-*-macos-arm64.dmg 2>/dev/null | head -1)
+          LIN=$(ls eustress-player-*-linux-x64.tar.gz 2>/dev/null | head -1)
+
+          BASE="${DOWNLOAD_BASE}/v${VERSION}"
+
+          cat > latest.json <<JSON
+          {
+            "version": "${VERSION}",
+            "date": "$(date -u +%Y-%m-%d)",
+            "channel": "stable",
+            "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}",
+            "platforms": {
+              "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
+              "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
+              "macos-arm64":           { "file": "${MAC}",   "url": "${BASE}/${MAC}",   "sha256": "$(sha "$MAC")",   "size_bytes": $(size "$MAC"),   "installer": true },
+              "linux-x64":             { "file": "${LIN}",   "url": "${BASE}/${LIN}",   "sha256": "$(sha "$LIN")",   "size_bytes": $(size "$LIN"),   "installer": false }
+            }
+          }
+          JSON
+          cat latest.json
+
+          # Fail loudly rather than publishing a manifest with a missing
+          # artifact or an empty checksum. A manifest that parses but points
+          # at nothing is worse than no manifest: the website trusts it.
+          node -e '
+            const m = require("./latest.json");
+            for (const [k, v] of Object.entries(m.platforms)) {
+              if (!v.file || !v.sha256 || !v.size_bytes) {
+                console.error(`::error::${k} is missing its artifact, checksum or size`);
+                process.exit(1);
+              }
+            }
+            console.log("manifest complete:", Object.keys(m.platforms).join(", "));
+          '
+
+      - name: Upload to R2
+        working-directory: dist
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUCKET: ${{ env.R2_BUCKET }}
+          PREFIX: ${{ env.R2_PREFIX }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set, so downloads.eustress.dev cannot serve this release."
+            exit 1
+          fi
+
+          # wrangler, not the S3 API, as in release.yml: one credential shape
+          # for every Cloudflare interaction, and --remote so a typo cannot
+          # quietly write to local simulated storage instead.
+          for f in *; do
+            [ "$f" = "latest.json" ] && continue
+            echo "uploading $f"
+            npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/v${VERSION}/${f}" \
+              --file "$f" --remote
+          done
+
+          # The stable path the website polls. Short cache: a release must be
+          # visible in minutes, not in an hour.
+          npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/latest.json" \
+            --file latest.json --remote \
+            --content-type application/json \
+            --cache-control "public, max-age=60"
+
+      - name: Verify the release is actually served
+        run: |
+          # Uploading is not the same as being reachable. Each check below
+          # goes through the Worker by a different route.
+
+          # 1. The manifest names this version.
+          URL="${DOWNLOAD_BASE}/latest.json"
+          SERVED=""
+          for i in 1 2 3 4 5; do
+            SERVED=$(curl -fsS "$URL" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).version)}catch{console.log("")}})' || true)
+            [ "$SERVED" = "$VERSION" ] && break
+            echo "attempt ${i}: served '${SERVED}', want '${VERSION}' - retrying"
+            sleep 10
+          done
+          if [ "$SERVED" != "$VERSION" ]; then
+            echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check that the deployed Worker has the player/ routes and the bucket binding."
+            exit 1
+          fi
+          echo "OK: ${URL} serves ${SERVED}"
+
+          # 2. The artifact route returns the uploaded bytes: the checksums
+          #    file comes back identical to the one computed above.
+          if ! curl -fsS "${DOWNLOAD_BASE}/v${VERSION}/checksums.txt" -o served-checksums.txt; then
+            echo "::error::${DOWNLOAD_BASE}/v${VERSION}/checksums.txt is not served. The manifest is, so check the Worker's player/vX.Y.Z/ route."
+            exit 1
+          fi
+          if ! cmp -s served-checksums.txt dist/checksums.txt; then
+            echo "::error::${DOWNLOAD_BASE}/v${VERSION}/checksums.txt does not match the checksums this run uploaded."
+            exit 1
+          fi
+          echo "OK: artifacts are served from ${DOWNLOAD_BASE}/v${VERSION}/"
+
+          # 3. Every permanent per-platform link leads to this release's file.
+          FAILED=0
+          for p in $(node -e 'console.log(Object.keys(require("./dist/latest.json").platforms).join(" "))'); do
+            WANT=$(node -e "console.log(require('./dist/latest.json').platforms['$p'].url)")
+            GOT=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "${DOWNLOAD_BASE}/latest/${p}" || true)
+            if [ "$GOT" = "302 ${WANT}" ]; then
+              echo "OK: ${DOWNLOAD_BASE}/latest/${p} -> ${WANT}"
+            else
+              echo "::error::${DOWNLOAD_BASE}/latest/${p} answered '${GOT}', want '302 ${WANT}'"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"
+
+      # A tag push only: a dispatched run republishes to R2 from a branch,
+      # which has no tag to attach a release to. Never marked Latest, which
+      # stays Studio's.
+      - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
+        with:
+          name: Eustress Player v${{ needs.version.outputs.version }}
+          files: dist/*
+          make_latest: "false"
+          generate_release_notes: true
+          body: |
+            ## Verify your download
+
+            Every artifact is built from this tag by GitHub Actions and
+            published with a SHA-256 checksum.
+
+            ```
+            # Windows (PowerShell)
+            Get-FileHash .\EustressPlayer-Setup.exe -Algorithm SHA256
+
+            # macOS / Linux
+            shasum -a 256 eustress-player-*.tar.gz
+            ```
+
+            Compare against `checksums.txt` in this release.

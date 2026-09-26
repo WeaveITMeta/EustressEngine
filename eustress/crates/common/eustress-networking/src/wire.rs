@@ -1,4 +1,4 @@
-//! # The wire protocol, version 1
+//! # The wire protocol, version 3
 //!
 //! What a host and a player say to each other, and how it is framed. Pure
 //! data: no IO, no clocks, no threads, so the same file serves the desktop
@@ -8,11 +8,14 @@
 //!
 //! - **One reliable, ordered stream** per player, opened by the player. It
 //!   carries [`ToHost`] and [`ToPlayer`] messages, each as one frame: a
-//!   little-endian `u32` length, then a bincode body.
-//! - **Unreliable datagrams** carry [`AvatarFrame`]s, where a late update is
-//!   worth less than the next one. When a transport has no datagrams (a
-//!   WebSocket fallback), the same frame rides the stream instead, as
-//!   [`ToHost::Avatar`] / [`ToPlayer::Avatar`].
+//!   little-endian `u32` length, then a bincode body. The world lane of
+//!   server authority ([`ToPlayer::World`]) rides it, so everything a host
+//!   script did arrives in order.
+//! - **Unreliable datagrams** carry a [`Datagram`]: avatar samples, the
+//!   motion lane, the input lane and unreliable remote calls, where a late
+//!   update is worth less than the next one. When a transport has no
+//!   datagrams (a WebSocket fallback), the same payloads ride the stream
+//!   instead ([`ToHost::Avatar`], [`ToPlayer::Motion`], ...).
 //!
 //! ## Session, in order
 //!
@@ -26,7 +29,11 @@
 //!   WorldReady ──────────────────────────▶
 //!                        ◀─────────────── PeerJoined / Appearance for everyone present
 //!   Appearance{descriptor} ──────────────▶ (relayed to everyone)
+//!                        ◀─────────────── World{catch-up}, then World per tick
 //!   AvatarFrame datagrams ◀═════════════▶ (host validates, stamps the peer id, relays)
+//!   Input datagrams ═════════════════════▶
+//!                        ◀═══════════════ Motion datagrams
+//!   Remote{call} ────────────────────────▶ (checked, then delivered to scripts)
 //! ```
 //!
 //! Every decode is size-bounded ([`MAX_FRAME_BYTES`]), so a forged length
@@ -38,9 +45,11 @@ use serde::{Deserialize, Serialize};
 
 use eustress_echk::WorldManifest;
 
+use crate::repl::{InputFrame, MotionFrame, RemoteCall, RemoteReply, TrackWire, WorldFrame};
+
 /// Bumped on any change a peer on the previous version could misread. A host
 /// refuses a player whose version differs, with a reason a person can act on.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Largest reliable frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -53,6 +62,14 @@ pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_CHAT_CHARS: usize = 400;
 /// An avatar descriptor, as JSON, may not exceed this.
 pub const MAX_APPEARANCE_BYTES: usize = 64 * 1024;
+/// An identity ticket is at most this long, printable ASCII.
+pub const MAX_TICKET_CHARS: usize = 2048;
+/// A listing id is at most this long.
+pub const MAX_SIM_ID_CHARS: usize = 64;
+/// Receipts one message may carry.
+pub const MAX_RECEIPTS: usize = 64;
+/// A purchase id is at most this long, `[A-Za-z0-9_-]`.
+pub const MAX_RECEIPT_ID_CHARS: usize = 128;
 
 /// A participant in a session. The host is always [`HOST_PEER`].
 pub type PeerId = u32;
@@ -64,8 +81,13 @@ pub const HOST_PEER: PeerId = 0;
 pub struct Hello {
     pub protocol: u16,
     pub name: String,
+    /// The app the player runs, with its version (`eustress-client 0.1.0`).
     /// Informational; shown in the host's log.
     pub engine_version: String,
+    /// A short-lived ticket from the API naming this player's account, bound
+    /// to the host's certificate pin. The host verifies it with the API and
+    /// never trusts it as sent.
+    pub identity: Option<String>,
 }
 
 /// The host's answer to an accepted [`Hello`].
@@ -80,6 +102,15 @@ pub struct Welcome {
     /// Where to place the player's avatar once the world is open.
     pub spawn: [f32; 3],
     pub max_players: u16,
+    /// The gallery listing this world is published as, when it is one:
+    /// where purchases in it are made.
+    pub sim_id: Option<String>,
+    /// The host's own identity ticket, bound to its certificate pin, so a
+    /// player can verify who hosts (a purchase is only made in a session the
+    /// listing's creator hosts). Never trusted as sent.
+    pub host_identity: Option<String>,
+    /// The host's tick when it welcomed this player, to start its clock.
+    pub tick: u64,
 }
 
 /// Someone else in the session.
@@ -103,6 +134,18 @@ pub enum ToHost {
     /// An avatar frame, when the transport has no datagrams.
     Avatar(AvatarFrame),
     Goodbye,
+    /// The player answered a [`ToPlayer::PurchasePrompt`].
+    PurchaseClosed { prompt: u32, purchased: bool },
+    /// Purchases this player's account holds for the listing, by id, for the
+    /// host to verify with the API and grant.
+    Receipts { purchase_ids: Vec<String> },
+    /// `FireServer` / `InvokeServer`.
+    Remote(RemoteCall),
+    /// The input lane, when the transport has no datagrams.
+    Input(InputFrame),
+    /// Animation track changes this player's scripts made on its own
+    /// character, in order.
+    Tracks(Vec<TrackWire>),
 }
 
 /// Host → player, on the reliable stream.
@@ -123,6 +166,29 @@ pub enum ToPlayer {
     Avatar(AvatarFrame),
     /// The host removed this player; the connection closes after this.
     Kicked { reason: String },
+    /// A host script asked this player to buy `product`. `expects` is 0 for
+    /// any product, 1 for a consumable, 2 for a pass. Answered with
+    /// [`ToHost::PurchaseClosed`] carrying the same `prompt`.
+    PurchasePrompt { prompt: u32, product: u64, expects: u8 },
+    /// What the host's tree did in one tick, in order.
+    World(WorldFrame),
+    /// The motion lane, when the transport has no datagrams.
+    Motion(MotionFrame),
+    /// The answer to an `InvokeServer`.
+    RemoteReply(RemoteReply),
+}
+
+/// Everything that rides a datagram, either way. Each kind also has a
+/// stream form for transports without datagrams.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Datagram {
+    Avatar(AvatarFrame),
+    /// Host → player.
+    Motion(MotionFrame),
+    /// Player → host.
+    Input(InputFrame),
+    /// Player → host: `UnreliableRemoteEvent:FireServer`.
+    Remote(RemoteCall),
 }
 
 /// One sample of an avatar, sent unreliably about 20 times a second.
@@ -205,15 +271,15 @@ pub fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, WireError> {
     options().deserialize(body).map_err(|e| WireError::Malformed(e.to_string()))
 }
 
-/// Encode an avatar frame as one datagram (no length prefix; a datagram is
-/// already delimited).
-pub fn encode_datagram(frame: &AvatarFrame) -> Vec<u8> {
-    // A fixed-size struct cannot exceed the limit.
-    options().serialize(frame).unwrap_or_default()
+/// Encode one datagram (no length prefix; a datagram is already delimited).
+/// Empty when the payload cannot encode; the caller splits motion to fit
+/// (see [`crate::repl::motion::split_motion`]).
+pub fn encode_datagram(d: &Datagram) -> Vec<u8> {
+    options().serialize(d).unwrap_or_default()
 }
 
 /// Decode one datagram.
-pub fn decode_datagram(bytes: &[u8]) -> Result<AvatarFrame, WireError> {
+pub fn decode_datagram(bytes: &[u8]) -> Result<Datagram, WireError> {
     decode_body(bytes)
 }
 
@@ -273,6 +339,32 @@ pub fn sanitize_chat(raw: &str) -> Option<String> {
     (!clean.is_empty()).then_some(clean)
 }
 
+/// An identity ticket fit to pass on, or `None`: printable ASCII, at most
+/// [`MAX_TICKET_CHARS`]. Tickets are opaque here; the API verifies them.
+pub fn sanitize_ticket(raw: &str) -> Option<String> {
+    let ok = !raw.is_empty() && raw.len() <= MAX_TICKET_CHARS && raw.bytes().all(|b| b.is_ascii_graphic());
+    ok.then(|| raw.to_string())
+}
+
+/// Purchase ids fit to pass on: at most [`MAX_RECEIPTS`], each non-empty,
+/// at most [`MAX_RECEIPT_ID_CHARS`] of `[A-Za-z0-9_-]`, without repeats.
+/// Anything else is dropped rather than failing the whole list.
+pub fn sanitize_receipts(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in raw {
+        let ok = !id.is_empty()
+            && id.len() <= MAX_RECEIPT_ID_CHARS
+            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if ok && !out.contains(id) {
+            out.push(id.clone());
+            if out.len() == MAX_RECEIPTS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,9 +407,16 @@ mod tests {
 
     #[test]
     fn datagrams_round_trip_and_stay_small() {
-        let d = encode_datagram(&frame());
+        let d = encode_datagram(&Datagram::Avatar(frame()));
         assert!(d.len() < 64, "avatar datagram grew to {} bytes", d.len());
-        assert_eq!(decode_datagram(&d).unwrap(), frame());
+        assert_eq!(decode_datagram(&d).unwrap(), Datagram::Avatar(frame()));
+
+        let mut sample = crate::repl::InputSample { tick: 9, ..Default::default() };
+        sample.camera = [1.0, 2.0, 3.0];
+        let input = Datagram::Input(InputFrame { samples: vec![sample; crate::repl::input::INPUT_REDUNDANCY] });
+        let bytes = encode_datagram(&input);
+        assert!(bytes.len() < 400, "input datagram grew to {} bytes", bytes.len());
+        assert_eq!(decode_datagram(&bytes).unwrap(), input);
     }
 
     #[test]
@@ -331,6 +430,24 @@ mod tests {
         let n = body.len();
         body[n - 8..].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
         assert!(decode_body::<ToHost>(&body).is_err());
+    }
+
+    #[test]
+    fn receipts_keep_only_well_formed_unique_ids() {
+        let raw: Vec<String> = vec![
+            "pur_1".into(),
+            "pur_1".into(),
+            "".into(),
+            "has space".into(),
+            "../etc".into(),
+            "x".repeat(MAX_RECEIPT_ID_CHARS + 1),
+            "Z-9_a".into(),
+        ];
+        assert_eq!(sanitize_receipts(&raw), vec!["pur_1".to_string(), "Z-9_a".to_string()]);
+        let many: Vec<String> = (0..MAX_RECEIPTS + 10).map(|i| format!("p{i}")).collect();
+        assert_eq!(sanitize_receipts(&many).len(), MAX_RECEIPTS);
+        assert_eq!(sanitize_ticket("abc.DEF-1_2"), Some("abc.DEF-1_2".to_string()));
+        assert_eq!(sanitize_ticket("a b"), None);
     }
 
     #[test]

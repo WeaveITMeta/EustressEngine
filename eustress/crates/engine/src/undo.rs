@@ -387,6 +387,10 @@ pub enum Action {
         /// Empty for an edit that only wrote the raster.
         #[serde(default)]
         bricks: Vec<TerrainBrickDelta>,
+        /// Water levels the edit changed (the terrain tools' Sea Level, a
+        /// water fill), empty for an edit that changed none.
+        #[serde(default)]
+        water: Vec<eustress_common::terrain::TerrainWaterTileDelta>,
     },
 }
 
@@ -588,9 +592,10 @@ impl Action {
     /// action. What [`MAX_TERRAIN_HISTORY_BYTES`] is measured in.
     fn terrain_bytes(&self) -> usize {
         match self {
-            Action::TerrainEdit { tiles, bricks, .. } => {
+            Action::TerrainEdit { tiles, bricks, water, .. } => {
                 tiles.iter().map(TerrainTileDelta::byte_len).sum::<usize>()
                     + bricks.iter().map(TerrainBrickDelta::byte_len).sum::<usize>()
+                    + water.iter().map(eustress_common::terrain::TerrainWaterTileDelta::byte_len).sum::<usize>()
             }
             _ => 0,
         }
@@ -683,6 +688,10 @@ pub struct UndoStack {
     /// Key and time of the top entry when it was pushed by
     /// [`UndoStack::push_coalesced`]; `None` once anything else happens.
     coalesce: Option<(&'static str, std::time::Instant)>,
+    /// Moves on every change to the entries or the cursor: push, a folded
+    /// push, undo, redo, a single-entry undo, revert, clear and a terrain
+    /// rebase. See [`UndoStack::revision`].
+    revision: u64,
 }
 
 impl UndoStack {
@@ -730,6 +739,7 @@ impl UndoStack {
                 _ => false,
             };
             if merged {
+                self.revision = self.revision.wrapping_add(1);
                 // A folded step is still new work. The sequence moves so the
                 // unsaved marker (title asterisk, exit prompt) and the
                 // activity tracker see it, and stream subscribers, who see
@@ -755,6 +765,7 @@ impl UndoStack {
 
     fn push_internal(&mut self, action: Action, label: Option<String>) {
         self.coalesce = None;
+        self.revision = self.revision.wrapping_add(1);
         // Remove any actions after current index (they were undone)
         self.history.truncate(self.current_index);
         self.labels.truncate(self.current_index);
@@ -821,6 +832,7 @@ impl UndoStack {
     /// `"Undo This Event"` right-click action.
     pub fn take_at(&mut self, index: usize) -> Option<Action> {
         if index >= self.history.len() { return None; }
+        self.revision = self.revision.wrapping_add(1);
         let removed = self.history.remove(index);
         let _ = self.labels.remove(index);
         if self.current_index > index {
@@ -848,6 +860,9 @@ impl UndoStack {
             if let Some(action) = self.history.get(self.current_index).cloned() {
                 out.push(action);
             }
+        }
+        if !out.is_empty() {
+            self.revision = self.revision.wrapping_add(1);
         }
         out
     }
@@ -881,6 +896,7 @@ impl UndoStack {
         self.coalesce = None;
         if self.can_undo() {
             self.current_index -= 1;
+            self.revision = self.revision.wrapping_add(1);
             self.history.get(self.current_index).cloned()
         } else {
             None
@@ -893,6 +909,7 @@ impl UndoStack {
         if self.can_redo() {
             let action = self.history.get(self.current_index).cloned();
             self.current_index += 1;
+            self.revision = self.revision.wrapping_add(1);
             action
         } else {
             None
@@ -915,6 +932,16 @@ impl UndoStack {
         self.labels.clear();
         self.coalesce = None;
         self.current_index = 0;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// A number that changes whenever the entries or the cursor change, and
+    /// only then. [`UndoStack::sequence`] moves only on pushes, and Bevy's
+    /// change detection trips on any mutable access, so a reader that
+    /// redraws when this differs from the value it last drew redraws
+    /// exactly when there is something new to show.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Re-express the heights held by every terrain entry recorded on the
@@ -929,6 +956,7 @@ impl UndoStack {
         from: eustress_common::terrain::HeightBand,
         to: eustress_common::terrain::HeightBand,
     ) {
+        self.revision = self.revision.wrapping_add(1);
         fn rebase(
             action: &mut Action,
             root: u64,
@@ -1018,7 +1046,11 @@ impl Plugin for UndoPlugin {
             .add_message::<RevertToEvent>()
             .add_message::<HistoryJumpEvent>()
             .init_resource::<crate::drag_guard::DragCancelRequest>()
-            .add_systems(First, assign_runtime_instance_ids)
+            .add_systems(
+                First,
+                assign_runtime_instance_ids
+                    .run_if(eustress_common::utils::maybe_added::<crate::classes::Instance>),
+            )
             .add_systems(Update, (
                 handle_undo_events,
                 handle_redo_events,
@@ -1174,10 +1206,22 @@ pub fn handle_revert_to_events(world: &mut World) {
 
 /// Jump the history so the entry at `target` is the newest one applied:
 /// undo back to it, or redo forward to it. What clicking a row in the
-/// History panel means.
+/// History panel means. [`HistoryJumpEvent::BEFORE_ALL`] undoes every entry.
 #[derive(Message)]
 pub struct HistoryJumpEvent {
     pub target: usize,
+}
+
+impl HistoryJumpEvent {
+    /// `target` for the point before the first entry: every entry undone.
+    pub const BEFORE_ALL: usize = usize::MAX;
+
+    /// The jump for a History panel row id: the entry at that index, or,
+    /// for a negative id (the panel's "nothing applied" position), before
+    /// every entry.
+    pub fn to_row(id: i32) -> Self {
+        Self { target: usize::try_from(id).unwrap_or(Self::BEFORE_ALL) }
+    }
 }
 
 pub fn handle_history_jump_events(world: &mut World) {
@@ -1188,11 +1232,20 @@ pub fn handle_history_jump_events(world: &mut World) {
         if cancel_live_drag(world) {
             return;
         }
-        let want = target.saturating_add(1);
+        // How many entries stay applied: through `target`, or none.
+        let want = if target == HistoryJumpEvent::BEFORE_ALL { 0 } else { target.saturating_add(1) };
         let current = world.resource::<UndoStack>().current_index();
         let mut touched: Vec<Action> = Vec::new();
         if want < current {
-            let actions = world.resource_mut::<UndoStack>().drain_until(target);
+            let actions = {
+                let mut stack = world.resource_mut::<UndoStack>();
+                let mut undone = Vec::new();
+                while stack.current_index() > want {
+                    let Some(action) = stack.undo() else { break };
+                    undone.push(action);
+                }
+                undone
+            };
             for action in &actions {
                 apply_undo_ecs(action, world);
             }
@@ -1821,8 +1874,8 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
-        Action::TerrainEdit { label, root, tiles, bricks } => {
-            apply_terrain_edit(world, label, *root, tiles, bricks, TerrainTileSide::Before);
+        Action::TerrainEdit { label, root, tiles, bricks, water } => {
+            apply_terrain_edit(world, label, *root, tiles, bricks, water, TerrainTileSide::Before);
         }
         _ => {
             warn!("Undo not yet implemented for: {}", action.description());
@@ -1843,32 +1896,57 @@ fn apply_terrain_edit(
     root: u64,
     tiles: &[TerrainTileDelta],
     bricks: &[TerrainBrickDelta],
+    water: &[eustress_common::terrain::TerrainWaterTileDelta],
     side: TerrainTileSide,
 ) {
-    use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainRoot, TerrainVolume};
+    use eustress_common::terrain::{
+        apply_terrain_water_tiles, TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainRoot, TerrainVolume,
+        TerrainVoxelWater,
+    };
 
     let verb = match side {
         TerrainTileSide::Before => "undo",
         TerrainTileSide::After => "redo",
     };
+    // An entry that changed water puts it back on a root that has since lost
+    // its water component (or never had one: a redo of the first fill).
+    if !water.is_empty() {
+        let dry_root = world
+            .query_filtered::<(Entity, Option<&TerrainVoxelWater>), With<TerrainRoot>>()
+            .iter(world)
+            .find(|(entity, component)| entity.to_bits() == root && component.is_none())
+            .map(|(entity, _)| entity);
+        if let Some(entity) = dry_root {
+            world.entity_mut(entity).insert(TerrainVoxelWater::default());
+        }
+    }
     // The config is cloned out so the terrain borrow ends with this statement,
     // before the dirty-chunk resource is fetched. The root check runs before
     // anything is written, so a refused entry leaves the terrain and its
     // saved state alone.
     let mut query = world.query_filtered::<
-        (Entity, &TerrainConfig, &mut TerrainData, Option<&mut TerrainVolume>),
+        (Entity, &TerrainConfig, &mut TerrainData, Option<&mut TerrainVolume>, Option<&mut TerrainVoxelWater>),
         With<TerrainRoot>,
     >();
     let outcome = match query.single_mut(world) {
-        Ok((entity, _, _, _)) if entity.to_bits() != root => {
+        Ok((entity, _, _, _, _)) if entity.to_bits() != root => {
             Err("the terrain was replaced since the edit".to_string())
         }
-        Ok((_, config, mut data, volume)) => {
+        Ok((_, _, data, _, _))
+            if water.iter().any(|delta| delta.cache_width != data.cache_width || delta.cache_height != data.cache_height) =>
+        {
+            Err("the terrain's raster changed size since the edit".to_string())
+        }
+        Ok((_, config, mut data, volume, water_component)) => {
             // `into_inner` flags the volume changed, so it is only taken when
-            // there are bricks to write into it.
+            // there are bricks to write into it; likewise the water.
             let volume = volume.filter(|_| !bricks.is_empty()).map(Mut::into_inner);
-            write_terrain_edit_side(config, &mut data, volume, tiles, bricks, side)
-                .map(|(applied, volume_edit)| (config.clone(), applied, volume_edit))
+            write_terrain_edit_side(config, &mut data, volume, tiles, bricks, side).and_then(|(applied, volume_edit)| {
+                if let Some(component) = water_component.filter(|_| !water.is_empty()) {
+                    apply_terrain_water_tiles(component.into_inner(), &data, water, side)?;
+                }
+                Ok((config.clone(), applied, volume_edit))
+            })
         }
         Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => Err("there is no terrain".to_string()),
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
@@ -1883,9 +1961,10 @@ fn apply_terrain_edit(
             }
             mark_terrain_unsaved(world);
             info!(
-                "Terrain {verb}: '{label}' wrote {} tile(s) and {} volume brick(s)",
+                "Terrain {verb}: '{label}' wrote {} tile(s), {} volume brick(s) and {} water tile(s)",
                 tiles.len(),
-                bricks.len()
+                bricks.len(),
+                water.len()
             );
         }
         Err(reason) => {
@@ -2548,13 +2627,14 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::TrashEntities { paths } => {
-            // Redo delete: move files back to trash
+            // Redo delete: back into the trash, and the live subtree with
+            // it. The watcher reports a moved folder as one event, so a bare
+            // rename left every descendant spawned with no file behind it
+            // (the undo arm requests a full rescan for the same reason).
+            // `trash_created_folder` renames, despawns every entity
+            // registered under the path, and purges them from the stores.
             for (original_path, trash_path) in paths {
-                if original_path.exists() {
-                    if let Some(parent) = trash_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::rename(original_path, trash_path);
+                if trash_created_folder(world, original_path, trash_path, &[]) {
                     info!("↷ Re-trashed {:?}", original_path.file_name().unwrap_or_default());
                 }
             }
@@ -2686,8 +2766,8 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                 world.write_message(spec.to_event(false));
             }
         }
-        Action::TerrainEdit { label, root, tiles, bricks } => {
-            apply_terrain_edit(world, label, *root, tiles, bricks, TerrainTileSide::After);
+        Action::TerrainEdit { label, root, tiles, bricks, water } => {
+            apply_terrain_edit(world, label, *root, tiles, bricks, water, TerrainTileSide::After);
         }
         _ => {
             warn!("Redo not yet implemented for: {}", action.description());
@@ -3440,5 +3520,83 @@ mod coalesce_tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].sequence, stack.sequence());
         assert_eq!(events[1].label.as_deref(), Some("Nudge"));
+    }
+
+    #[test]
+    fn revision_moves_on_every_change_and_only_then() {
+        let mut stack = UndoStack::default();
+        let r0 = stack.revision();
+        stack.push(moved(1, 0.0, 1.0));
+        let r1 = stack.revision();
+        assert_ne!(r1, r0, "push");
+        let _ = stack.current_index();
+        let _ = stack.history();
+        assert_eq!(stack.revision(), r1, "reading changes nothing");
+        let _ = stack.undo();
+        let r2 = stack.revision();
+        assert_ne!(r2, r1, "undo");
+        let _ = stack.undo();
+        assert_eq!(stack.revision(), r2, "an undo with nothing left changes nothing");
+        let _ = stack.redo();
+        let r3 = stack.revision();
+        assert_ne!(r3, r2, "redo");
+        stack.clear();
+        assert_ne!(stack.revision(), r3, "clear");
+    }
+
+    #[test]
+    fn a_jump_before_all_undoes_every_entry() {
+        let mut world = World::new();
+        let part = world.spawn(Transform::from_xyz(3.0, 0.0, 0.0)).id();
+        let step = |from: f32, to: f32| Action::TransformEntities {
+            old_transforms: vec![(part.to_bits(), [from, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+            new_transforms: vec![(part.to_bits(), [to, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+        };
+        let mut stack = UndoStack::default();
+        stack.push(step(0.0, 1.0));
+        stack.push(step(1.0, 2.0));
+        stack.push(step(2.0, 3.0));
+        world.insert_resource(stack);
+        world.init_resource::<Messages<HistoryJumpEvent>>();
+        world.resource_mut::<Messages<HistoryJumpEvent>>().write(HistoryJumpEvent::to_row(-1));
+        handle_history_jump_events(&mut world);
+        assert_eq!(world.resource::<UndoStack>().current_index(), 0);
+        assert_eq!(world.get::<Transform>(part).unwrap().translation.x, 0.0);
+
+        // And forward again to the second entry.
+        world.resource_mut::<Messages<HistoryJumpEvent>>().write(HistoryJumpEvent::to_row(1));
+        handle_history_jump_events(&mut world);
+        assert_eq!(world.resource::<UndoStack>().current_index(), 2);
+        assert_eq!(world.get::<Transform>(part).unwrap().translation.x, 2.0);
+    }
+
+    /// Delete, undo, redo: the redo takes the deleted Model's children
+    /// with it, not only its folder.
+    #[test]
+    fn redoing_a_delete_despawns_the_whole_subtree() {
+        let root = std::env::temp_dir().join(format!("eustress_redo_trash_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let model_dir = root.join("Workspace").join("Model");
+        let child_dir = model_dir.join("Child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(model_dir.join("_instance.toml"), "[metadata]\nclass_name = \"Model\"\n").unwrap();
+        std::fs::write(child_dir.join("_instance.toml"), "[metadata]\nclass_name = \"Part\"\n").unwrap();
+        let trash_dir = root.join(".eustress").join("trash").join("Model");
+
+        let mut world = World::new();
+        let model = world.spawn_empty().id();
+        let child = world.spawn_empty().id();
+        let mut registry = crate::space::SpaceFileRegistry::default();
+        registry.file_to_entity.insert(model_dir.join("_instance.toml"), model);
+        registry.file_to_entity.insert(child_dir.join("_instance.toml"), child);
+        world.insert_resource(registry);
+
+        apply_redo_action(&Action::TrashEntities { paths: vec![(model_dir.clone(), trash_dir.clone())] }, &mut world);
+
+        assert!(!model_dir.exists(), "the folder stayed in place");
+        assert!(trash_dir.join("Child").join("_instance.toml").is_file(), "the subtree did not reach the trash");
+        assert!(world.get_entity(model).is_err(), "the Model is still spawned");
+        assert!(world.get_entity(child).is_err(), "the child is still spawned");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

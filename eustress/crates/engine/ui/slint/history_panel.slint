@@ -1,10 +1,20 @@
 // ============================================================================
 // Eustress Engine Studio - History Panel
-// Undo/Redo history visualization
+//
+// Two views under one header, switched by a segment:
+// - Edits: the undo/redo history (click a row to jump there).
+// - Restore points: the Space's save points (MCP's snapshot layer). Save one,
+//   or revert the Space to one; a revert first saves the Space as it is now,
+//   so it can itself be undone. The confirm is RevertConfirmDialog, mounted
+//   by main.slint.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
-import { Theme, PanelHeader, SidePanelHeader } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Theme, SidePanelHeader } from "theme.slint";
+import {
+    KitButton, KitSegmented, KitNotice, KitField, DialogScrim, DialogCard, DialogFooter,
+} from "dialog_kit.slint";
+import { ListingStatusRow } from "listing_status.slint";
 
 // History entry data
 export struct HistoryEntry {
@@ -22,6 +32,22 @@ export struct HistoryEntry {
     topic: string,
 }
 
+// One restore point, built in Rust (MCP's snapshot layer).
+export struct RestorePointRow {
+    id: string,
+    label: string,
+    // Short ("09:14" today, else "Sep 25 09:14") and full
+    // ("Sat Sep 26, 09:14:05") local times.
+    time: string,
+    time-full: string,
+    author: string,
+    // "you", "agent", "safety" (saved before a revert) or "revert".
+    origin: string,
+    // False when its database checkpoint was pruned; `note` says so.
+    revertible: bool,
+    note: string,
+}
+
 component HistoryItem inherits Rectangle {
     in property <string> action: "";
     in property <string> description: "";
@@ -37,8 +63,9 @@ component HistoryItem inherits Rectangle {
     // in main.slint.
     callback context-menu-requested(length, length);
 
-    height: 40px;
-    background: self.is-current ? Theme.selection-background :
+    height: 36px;
+    border-radius: Theme.radius-sm;
+    background: self.is-current ? Theme.accent-cyan.with-alpha(0.12) :
                 touch.has-hover ? Theme.explorer-item-hover : transparent;
     opacity: self.is-future ? 0.5 : 1.0;
 
@@ -56,60 +83,66 @@ component HistoryItem inherits Rectangle {
         }
         clicked => { root.clicked(); }
     }
-    
-    HorizontalBox {
-        padding-left: 8px;
+
+    HorizontalLayout {
+        padding-left: 6px;
         padding-right: 8px;
         spacing: 8px;
-        
-        // Current indicator
-        Rectangle {
-            width: 4px;
-            height: 24px;
-            background: root.is-current ? Theme.accent-blue : transparent;
-            border-radius: 2px;
+
+        // Current indicator, in the selection cyan.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 3px;
+                height: 20px;
+                background: root.is-current ? Theme.accent-cyan : transparent;
+                border-radius: 1.5px;
+            }
         }
-        
+
         // Icon — driven by the short `topic` kind from
         // `Action::topic_kind()` (same value that's emitted on the
         // `history.<kind>` stream topic), not the long English
         // description — that way icon mapping stays stable even if a
         // description string is reworded.
-        Image {
-            width: 16px;
-            height: 16px;
-            source: root.topic == "create"     ? @image-url("../../assets/icons/ui/plus.svg") :
-                    root.topic == "delete"     ? @image-url("../../assets/icons/ui/delete.svg") :
-                    root.topic == "move"       ? @image-url("../../assets/icons/ui/move.svg") :
-                    root.topic == "rotate"     ? @image-url("../../assets/icons/ui/rotate.svg") :
-                    root.topic == "scale"      ? @image-url("../../assets/icons/ui/scale.svg") :
-                    root.topic == "transform"  ? @image-url("../../assets/icons/ui/move.svg") :
-                    root.topic == "group"      ? @image-url("../../assets/icons/ui/group.svg") :
-                    root.topic == "ungroup"    ? @image-url("../../assets/icons/ui/group.svg") :
-                    root.topic == "property"   ? @image-url("../../assets/icons/ui/settings.svg") :
-                    root.topic == "parameters" ? @image-url("../../assets/icons/ui/settings.svg") :
-                    root.topic == "color"      ? @image-url("../../assets/icons/ui/palette.svg") :
-                    root.topic == "tags"       ? @image-url("../../assets/icons/ui/label.svg") :
-                    root.topic == "attributes" ? @image-url("../../assets/icons/ui/settings.svg") :
-                    root.topic == "terrain"    ? @image-url("../../assets/icons/ui/terrain.svg") :
-                    @image-url("../../assets/icons/ui/settings.svg");
-            image-fit: contain;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.topic == "create"     ? @image-url("../../assets/icons/ui/plus.svg") :
+                        root.topic == "delete"     ? @image-url("../../assets/icons/ui/delete.svg") :
+                        root.topic == "move"       ? @image-url("../../assets/icons/ui/move.svg") :
+                        root.topic == "rotate"     ? @image-url("../../assets/icons/ui/rotate.svg") :
+                        root.topic == "scale"      ? @image-url("../../assets/icons/ui/scale.svg") :
+                        root.topic == "transform"  ? @image-url("../../assets/icons/ui/move.svg") :
+                        root.topic == "group"      ? @image-url("../../assets/icons/ui/group.svg") :
+                        root.topic == "ungroup"    ? @image-url("../../assets/icons/ui/group.svg") :
+                        root.topic == "property"   ? @image-url("../../assets/icons/ui/settings.svg") :
+                        root.topic == "parameters" ? @image-url("../../assets/icons/ui/settings.svg") :
+                        root.topic == "color"      ? @image-url("../../assets/icons/ui/palette.svg") :
+                        root.topic == "tags"       ? @image-url("../../assets/icons/ui/label.svg") :
+                        root.topic == "attributes" ? @image-url("../../assets/icons/ui/settings.svg") :
+                        root.topic == "terrain"    ? @image-url("../../assets/icons/ui/terrain.svg") :
+                        @image-url("../../assets/icons/ui/settings.svg");
+                image-fit: contain;
+                colorize: root.is-current ? Theme.accent-cyan : Theme.text-secondary;
+            }
         }
-        
+
         // Description
-        VerticalBox {
+        VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 0px;
-            
+            alignment: center;
+            spacing: 1px;
+
             Text {
                 text: root.description;
-                color: root.is-current ? Theme.text-primary : 
-                       root.is-future ? Theme.text-disabled : Theme.text-primary;
-                font-size: 12px;
+                color: root.is-future ? Theme.text-disabled : Theme.text-primary;
+                font-size: 11px;
                 overflow: elide;
             }
-            
+
             Text {
                 text: root.timestamp;
                 color: Theme.text-disabled;
@@ -119,12 +152,134 @@ component HistoryItem inherits Rectangle {
     }
 }
 
+// One restore point: its label, when and by whom, where it came from, and
+// "Revert" on hover (or the right-click menu). A point whose checkpoint was
+// pruned is dimmed, with the reason as its subtitle.
+component RestorePointItem inherits Rectangle {
+    in property <RestorePointRow> point;
+    // Save and Revert are refused (Play, hosting, a pending revert).
+    in property <bool> locked: false;
+    callback revert();
+
+    property <bool> can-revert: root.point.revertible && !root.locked;
+
+    height: 40px;
+    border-radius: Theme.radius-sm;
+    background: point-touch.has-hover ? Theme.explorer-item-hover : transparent;
+
+    point-touch := TouchArea {
+        pointer-event(ev) => {
+            if ev.button == PointerEventButton.right && ev.kind == PointerEventKind.down && root.can-revert {
+                point-menu.show();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 8px;
+        opacity: root.point.revertible ? 1.0 : 0.5;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.point.label;
+                color: Theme.text-primary;
+                font-size: 11px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            // When and by whom (the exact time while hovered); or, for a
+            // dimmed point or a revert record, its note.
+            Text {
+                text: (!root.point.revertible || root.point.origin == "revert") && root.point.note != "" ? root.point.note
+                    : (point-touch.has-hover && root.point.time-full != "" ? root.point.time-full : root.point.time)
+                        + (root.point.author != "" ? "  ·  " + root.point.author : "");
+                color: Theme.text-secondary;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        // Where it came from.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: origin-text.preferred-width + 12px;
+                height: 16px;
+                border-radius: 8px;
+                background: root.point.origin == "safety" ? Theme.text-warning.with-alpha(0.14)
+                    : Theme.background-tertiary;
+                origin-text := Text {
+                    text: root.point.origin == "agent" ? "Agent"
+                        : root.point.origin == "safety" ? "Safety"
+                        : root.point.origin == "revert" ? "Revert"
+                        : "You";
+                    color: root.point.origin == "safety" ? Theme.text-warning : Theme.text-secondary;
+                    font-size: 9px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Revert, while hovered.
+        if root.can-revert && point-touch.has-hover: VerticalLayout {
+            alignment: center;
+            KitButton {
+                height: 22px;
+                text: "Revert";
+                kind: "ghost";
+                clicked => { root.revert(); }
+            }
+        }
+    }
+
+    point-menu := PopupWindow {
+        x: point-touch.mouse-x;
+        y: point-touch.mouse-y;
+        width: 150px;
+        height: 30px;
+        Rectangle {
+            background: Theme.dialog-background;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: Theme.shadow-float;
+            Rectangle {
+                x: 3px;
+                y: 3px;
+                width: parent.width - 6px;
+                height: parent.height - 6px;
+                border-radius: 3px;
+                background: menu-touch.has-hover ? Theme.selection-background : transparent;
+                menu-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.revert(); }
+                }
+                Text {
+                    x: 10px;
+                    text: "Revert to this";
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 export component HistoryPanel inherits Rectangle {
-    // Properties
+    // ── Edits ──
     in property <[HistoryEntry]> history: [];
     in property <int> current-index: 0;
-    
-    // Callbacks
+
     callback on-undo();
     callback on-redo();
     callback on-jump-to(int);
@@ -134,168 +289,397 @@ export component HistoryPanel inherits Rectangle {
     // "Revert to Here" entries identical in style to the Explorer
     // right-click menu.
     callback on-context-menu(length, length, int, string, string);
-    
+
+    // Which view shows: "edits" or "restore". Kept by main.slint, so it
+    // survives the panel being rebuilt on a tab switch.
+    in-out property <string> view: "edits";
+
+    // ── Restore points ──
+    in property <[RestorePointRow]> restore-points: [];
+    // Why Save and Revert are refused right now ("" when they are not).
+    in property <string> restore-blocker: "";
+    // A revert is waiting for this Space to reopen (its banner can cancel it).
+    in property <bool> restore-pending: false;
+    // What is in progress ("Reverting to 'X'..."), or "".
+    in property <string> restore-busy: "";
+    // The last result or error, under the list.
+    in property <string> restore-status: "";
+    in property <bool> restore-status-error: false;
+
+    callback on-restore-shown();
+    callback on-restore-save(string);
+    // A row's Revert: main.slint asks for confirmation (id, label, time).
+    callback on-restore-revert-requested(string, string, string);
+    callback on-restore-cancel-pending();
+
+    // The Universe's gallery listing, compact (listing_status.slint).
+    in property <string> listing-status: "";
+    in property <string> listing-headline: "";
+    in property <string> listing-rating: "";
+    callback on-listing-open-review();
+
+    property <bool> restore-locked: root.restore-blocker != "" || root.restore-busy != "";
+    property <bool> naming: false;
+
+    init => {
+        if root.view == "restore" {
+            root.on-restore-shown();
+        }
+    }
+
     background: Theme.panel-background;
-    
-    VerticalBox {
+
+    VerticalLayout {
         padding: 0px;
         spacing: 0px;
 
         // Top title bar — unified with the Properties panel via the
-        // shared `SidePanelHeader` component (36px gradient + 600-weight
-        // title + optional count badge). Every right-hand side panel
-        // now shares this exact top strip.
+        // shared `SidePanelHeader` component. Every right-hand side panel
+        // shares this exact top strip.
         SidePanelHeader {
             title: "History";
-            count: root.history.length;
+            count: root.view == "restore" ? root.restore-points.length : root.history.length;
             show-icon: true;
             icon: @image-url("../../assets/icons/ui/undo.svg");
         }
 
-        // Undo/Redo toolbar — separate row under the title bar so
-        // the header itself stays as clean as the Properties panel.
+        // The view switch.
         Rectangle {
-            height: 40px;
+            height: 34px;
             background: Theme.header-background;
-
-            HorizontalBox {
-                padding: 4px;
-                spacing: 4px;
-                
-                // Undo button
-                Rectangle {
-                    width: 60px;
-                    height: 28px;
-                    background: undo-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                    border-radius: 4px;
-                    
-                    undo-touch := TouchArea {
-                        clicked => { root.on-undo(); }
-                    }
-                    
-                    HorizontalBox {
-                        padding: 4px;
-                        spacing: 4px;
-                        alignment: center;
-                        
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/undo.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-                        
-                        Text {
-                            text: "Undo";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                // Redo button
-                Rectangle {
-                    width: 60px;
-                    height: 28px;
-                    background: redo-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                    border-radius: 4px;
-                    
-                    redo-touch := TouchArea {
-                        clicked => { root.on-redo(); }
-                    }
-                    
-                    HorizontalBox {
-                        padding: 4px;
-                        spacing: 4px;
-                        alignment: center;
-                        
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/redo.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-                        
-                        Text {
-                            text: "Redo";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
-                // Clear button
-                Rectangle {
-                    width: 50px;
-                    height: 28px;
-                    background: clear-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 4px;
-                    
-                    clear-touch := TouchArea {
-                        clicked => { root.on-clear-history(); }
-                    }
-                    
-                    Text {
-                        text: "Clear";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-        
-        // History list
-        if root.history.length == 0: Rectangle {
-            vertical-stretch: 1;
-            
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - 52px) / 2;
-                width: 32px;
-                height: 32px;
-                source: @image-url("../../assets/icons/ui/new-file.svg");
-                image-fit: contain;
-            }
-            
-            Text {
-                x: 0px;
-                y: (parent.height - 52px) / 2 + 36px;
+            Rectangle {
+                y: parent.height - 1px;
                 width: 100%;
-                text: "No history";
-                color: Theme.text-secondary;
-                font-size: 12px;
-                horizontal-alignment: center;
+                height: 1px;
+                background: Theme.border-color;
+            }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 5px;
+                padding-bottom: 6px;
+                KitSegmented {
+                    height: 22px;
+                    horizontal-stretch: 1;
+                    managed: true;
+                    options: ["Edits", "Restore points"];
+                    current-index: root.view == "restore" ? 1 : 0;
+                    selected(i) => {
+                        root.view = i == 1 ? "restore" : "edits";
+                        if i == 1 {
+                            root.on-restore-shown();
+                        }
+                    }
+                }
             }
         }
-        
-        if root.history.length > 0: ScrollView {
+
+        // ═══ Edits ═══
+        if root.view != "restore": VerticalLayout {
             vertical-stretch: 1;
-            horizontal-scrollbar-policy: always-off;
-            vertical-scrollbar-policy: as-needed;
+            spacing: 0px;
 
-            VerticalBox {
-                padding: 4px;
-                spacing: 2px;
-                
-                for entry[index] in root.history: HistoryItem {
-                    action: entry.action;
-                    description: entry.description;
-                    timestamp: entry.timestamp;
-                    topic: entry.topic;
-                    is-current: entry.is-current;
-                    is-future: index > root.current-index;
+            // Undo / Redo / Clear.
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 4px;
+                KitButton {
+                    height: 24px;
+                    text: "Undo";
+                    has-icon: true;
+                    icon: @image-url("../../assets/icons/ui/undo.svg");
+                    clicked => { root.on-undo(); }
+                }
+                KitButton {
+                    height: 24px;
+                    text: "Redo";
+                    has-icon: true;
+                    icon: @image-url("../../assets/icons/ui/redo.svg");
+                    clicked => { root.on-redo(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                KitButton {
+                    height: 24px;
+                    text: "Clear";
+                    kind: "ghost";
+                    clicked => { root.on-clear-history(); }
+                }
+            }
 
-                    clicked => { root.on-jump-to(entry.id); }
-                    context-menu-requested(x, y) => {
-                        root.on-context-menu(x, y, entry.id, entry.topic, entry.description);
+            if root.history.length == 0: Rectangle {
+                vertical-stretch: 1;
+                Text {
+                    x: 16px;
+                    y: 24px;
+                    width: parent.width - 32px;
+                    text: "No edits yet. Changes you make appear here, newest last; click one to go back to it.";
+                    color: Theme.text-disabled;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.history.length > 0: edits-scroll := ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off;
+
+                // Keep the current step in view as edits arrive and as undo
+                // and redo move it. Rows are 36px with 1px between them, below
+                // a 4px padding, and the Start row comes first, so step i is
+                // row i + 1 and "before everything" (-1) is the Start row.
+                property <int> follow: root.current-index;
+                changed follow => {
+                    let top = 4px + (root.current-index + 1) * 37px;
+                    if top + self.viewport-y < 0px {
+                        self.viewport-y = 0px - top;
+                    } else if top + 36px + self.viewport-y > self.visible-height {
+                        self.viewport-y = min(0px, self.visible-height - top - 36px);
+                    }
+                }
+
+                VerticalLayout {
+                    width: edits-scroll.visible-width;
+                    padding: 4px;
+                    spacing: 1px;
+                    alignment: start;
+
+                    // The state before the first step. Clicking it undoes every
+                    // step; it is current when nothing is applied.
+                    HistoryItem {
+                        action: "Start";
+                        description: "Before your first edit";
+                        is-current: root.current-index < 0;
+                        clicked => { root.on-jump-to(-1); }
+                    }
+
+                    for entry[index] in root.history: HistoryItem {
+                        action: entry.action;
+                        description: entry.description;
+                        timestamp: entry.timestamp;
+                        topic: entry.topic;
+                        is-current: entry.is-current;
+                        is-future: index > root.current-index;
+
+                        clicked => { root.on-jump-to(entry.id); }
+                        context-menu-requested(x, y) => {
+                            root.on-context-menu(x, y, entry.id, entry.topic, entry.description);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ═══ Restore points ═══
+        if root.view == "restore": VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+
+            // Save, or name the point first.
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+
+                // Where the published Universe stands in the gallery.
+                if root.listing-status != "": ListingStatusRow {
+                    compact: true;
+                    status: root.listing-status;
+                    headline: root.listing-headline;
+                    rating: root.listing-rating;
+                    open-review => { root.on-listing-open-review(); }
+                }
+
+                if !root.naming: KitButton {
+                    height: 26px;
+                    text: "Save restore point";
+                    kind: "primary";
+                    has-icon: true;
+                    icon: @image-url("../../assets/icons/ui/save.svg");
+                    enabled: !root.restore-locked;
+                    clicked => { root.naming = true; }
+                }
+
+                if root.naming: name-keys := FocusScope {
+                    // Esc cancels naming; the field takes every other key.
+                    capture-key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.naming = false;
+                            return accept;
+                        }
+                        reject
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        name-field := KitField {
+                            height: 24px;
+                            horizontal-stretch: 1;
+                            placeholder-text: "Label (optional)";
+                            init => { self.focus(); }
+                            accepted(label) => {
+                                root.on-restore-save(label);
+                                root.naming = false;
+                            }
+                        }
+                        KitButton {
+                            height: 24px;
+                            text: "Save";
+                            kind: "primary";
+                            enabled: !root.restore-locked;
+                            clicked => {
+                                root.on-restore-save(name-field.text);
+                                root.naming = false;
+                            }
+                        }
+                        KitButton {
+                            height: 24px;
+                            text: "Cancel";
+                            kind: "ghost";
+                            clicked => { root.naming = false; }
+                        }
+                    }
+                }
+
+                // Why Save and Revert are refused, or what is running.
+                if root.restore-busy != "": KitNotice {
+                    kind: "info";
+                    text: root.restore-busy;
+                }
+                if root.restore-busy == "" && root.restore-blocker != "": HorizontalLayout {
+                    spacing: 6px;
+                    KitNotice {
+                        horizontal-stretch: 1;
+                        kind: "warn";
+                        text: root.restore-blocker;
+                    }
+                    if root.restore-pending: VerticalLayout {
+                        alignment: center;
+                        KitButton {
+                            height: 24px;
+                            text: "Cancel";
+                            kind: "ghost";
+                            clicked => { root.on-restore-cancel-pending(); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            if root.restore-points.length == 0: Rectangle {
+                vertical-stretch: 1;
+                Text {
+                    x: 16px;
+                    y: 24px;
+                    width: parent.width - 32px;
+                    text: "No restore points yet. Save one before a risky change, and you can bring the whole Space back to it.";
+                    color: Theme.text-disabled;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            // Newest first.
+            if root.restore-points.length > 0: points-scroll := ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off;
+
+                VerticalLayout {
+                    width: points-scroll.visible-width;
+                    padding: 4px;
+                    spacing: 1px;
+                    alignment: start;
+
+                    for point in root.restore-points: RestorePointItem {
+                        point: point;
+                        locked: root.restore-locked;
+                        revert => { root.on-restore-revert-requested(point.id, point.label, point.time-full); }
+                    }
+                }
+            }
+
+            // The last result, or the error.
+            if root.restore-status != "": Rectangle {
+                height: status-text.preferred-height + 12px;
+                background: Theme.header-background;
+                status-text := Text {
+                    x: 10px;
+                    y: 6px;
+                    width: parent.width - 20px;
+                    text: root.restore-status;
+                    color: root.restore-status-error ? Theme.text-error : Theme.text-secondary;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// Confirm a revert: what happens, and that it can be undone.
+export component RevertConfirmDialog inherits Rectangle {
+    in property <string> label;
+    in property <string> time;
+    callback on-cancel();
+    callback on-revert();
+
+    width: 100%;
+    height: 100%;
+
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.on-cancel();
+                return accept;
+            }
+            return reject;
+        }
+
+        DialogScrim {
+            dismiss => { root.on-cancel(); }
+
+            DialogCard {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(460px, parent.width - 40px);
+                height: min(body.preferred-height + footer.preferred-height + 45px, parent.height - 40px);
+                icon: @image-url("../../assets/icons/ui/undo.svg");
+                title: "Revert to '" + root.label + "'?";
+                subtitle: root.time;
+                close => { root.on-cancel(); }
+
+                body := VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    Text {
+                        text: "Studio first saves the Space as it is now as a restore point, script tabs with unsaved edits included, so you can undo this by reverting to that point.";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Then the Space's files and database return to '" + root.label + "'" + (root.time != "" ? " (" + root.time + ")" : "") + " and the Space reopens. The editor pauses while it reopens.";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                footer := DialogFooter {
+                    KitButton {
+                        text: "Cancel";
+                        clicked => { root.on-cancel(); }
+                    }
+                    KitButton {
+                        text: "Revert";
+                        kind: "danger";
+                        clicked => { root.on-revert(); }
                     }
                 }
             }

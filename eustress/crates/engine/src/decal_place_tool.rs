@@ -1008,23 +1008,15 @@ fn write_quad_transform(
     let mut doc: toml::Value = text
         .parse()
         .map_err(|e: toml::de::Error| format!("parse {:?}: {}", toml_path, e))?;
-    let root = doc
-        .as_table_mut()
-        .ok_or_else(|| format!("TOML root is not a table: {:?}", toml_path))?;
-    let tf = root
-        .entry("transform".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .ok_or("transform is not a table")?;
-
-    let f = |v: f32| toml::Value::Float(v as f64);
-    tf.insert("position".into(), toml::Value::Array(vec![f(position.x), f(position.y), f(position.z)]));
-    tf.insert(
-        "rotation".into(),
-        toml::Value::Array(vec![f(rotation.x), f(rotation.y), f(rotation.z), f(rotation.w)]),
-    );
-    // z stays 1: the quad mesh is flat, so only x/y carry size.
-    tf.insert("scale".into(), toml::Value::Array(vec![f(dims.x), f(dims.y), f(1.0)]));
+    // In the file's own unit (`set_authored_transform_toml`). z stays 1: the
+    // quad mesh is flat, so only x/y carry size.
+    crate::space::instance_loader::set_authored_transform_toml(
+        &mut doc,
+        position,
+        rotation,
+        Some(Vec3::new(dims.x, dims.y, 1.0)),
+    )
+    .map_err(|e| format!("{e}: {:?}", toml_path))?;
 
     let out = toml::to_string_pretty(&doc)
         .map_err(|e| format!("serialize {:?}: {}", toml_path, e))?;

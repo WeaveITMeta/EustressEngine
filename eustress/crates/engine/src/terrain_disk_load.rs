@@ -25,12 +25,15 @@
 //! — no new render wiring.
 
 use bevy::prelude::*;
-use std::path::Path;
 
-use eustress_common::terrain::{
-    load_volume_bricks, reload_terrain_material_slots, spawn_terrain_with_volume, toml_loader,
-    TerrainConfig, TerrainData, TerrainMaterialSource, TerrainRoot, TerrainVolume,
-};
+use eustress_common::terrain::{reload_terrain_material_slots, TerrainMaterialSource, TerrainRoot};
+
+/// The reader every disk terrain in the engine hydrates through: the
+/// Space-open auto-loader below, the worldgen, flat-plate and
+/// heightmap-import systems (`ui/spawn_events.rs`) and the class-sync guard
+/// (`terrain_plugin.rs`). It lives in `eustress-common` so the Player reads a
+/// Space's terrain the same way.
+pub use eustress_common::terrain::disk::{hydrate_terrain_from_disk, HydratedTerrain};
 
 use crate::space::file_loader::LoadInProgress;
 use crate::space::space_ops::space_is_migrated;
@@ -46,53 +49,6 @@ pub struct TerrainDiskLoadLatch(pub Option<std::path::PathBuf>);
 /// by this loader, the Terrain class sync or a panel import.
 #[derive(Component, Debug, Default)]
 pub struct DiskSourcedTerrain;
-
-/// A terrain read back from a `Workspace/Terrain/` directory, ready for
-/// [`spawn_terrain_with_volume`].
-pub struct HydratedTerrain {
-    pub config: TerrainConfig,
-    pub data: TerrainData,
-    /// The volumetric edits from `volume/*.vbk`, empty when there are none.
-    pub volume: TerrainVolume,
-    /// Chunk heightmaps that were found and read.
-    pub chunk_files: usize,
-}
-
-impl HydratedTerrain {
-    /// Spawn the terrain root with its config, raster and volume in one
-    /// spawn, so no chunk meshes before its caves are there.
-    pub fn spawn(
-        self,
-        commands: &mut Commands,
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Entity {
-        spawn_terrain_with_volume(commands, meshes, materials, self.config, self.data, self.volume)
-    }
-}
-
-/// Hydrate a terrain from a `Workspace/Terrain/` directory, the exact recipe
-/// from `worldgen/export.rs` (INTEGRATOR NOTE): `_terrain.toml`, then
-/// `to_terrain_config()`, `resize_cache` and `load_chunks_from_disk` (SIGNED
-/// centered `[-N, +N]` chunk coords, never the importer's unsigned math),
-/// then the `volume/*.vbk` bricks. Shared by the Space-open auto-loader, the
-/// worldgen, flat-plate and heightmap-import systems (`ui/spawn_events.rs`),
-/// and the class-sync guard (`terrain_plugin.rs`), so every terrain spawned
-/// from disk carries its volumetric edits.
-///
-/// Returns `Err` when `_terrain.toml` is missing/unparseable; a toml with
-/// zero readable chunks still returns `Ok` (flat terrain — the config is
-/// valid, chunks may stream in later or simply not exist yet). A brick file
-/// that cannot be read is skipped with a warning (see `load_volume_bricks`).
-pub fn hydrate_terrain_from_disk(terrain_dir: &Path) -> Result<HydratedTerrain, String> {
-    let toml = toml_loader::load_terrain_toml(&terrain_dir.join("_terrain.toml"))?;
-    let config = toml.to_terrain_config();
-    let mut data = TerrainData::procedural();
-    data.resize_cache(&config);
-    let loaded = toml_loader::load_chunks_from_disk(terrain_dir, &config, &mut data);
-    let volume = load_volume_bricks(terrain_dir, &config);
-    Ok(HydratedTerrain { config, data, volume, chunk_files: loaded.len() })
-}
 
 /// Boot-load a legacy/disk Space's `Workspace/Terrain/` (R16 + toml) into the
 /// runtime heightfield, once per Space. See the module docs for the guards.
@@ -224,9 +180,14 @@ fn point_terrain_materials_at_space(
 /// runtime via `space_is_migrated`, not at compile time).
 pub fn register(app: &mut App) {
     app.init_resource::<TerrainDiskLoadLatch>()
+        // Ahead of the streaming chain, as the voxel loader is: the Terrain
+        // class sync runs after that chain, so a root spawned here this frame
+        // is already there when it looks, and is never doubled.
         .add_systems(
             Update,
-            (reset_latch_on_space_switch, load_disk_terrain_on_space_open).chain(),
+            (reset_latch_on_space_switch, load_disk_terrain_on_space_open)
+                .chain()
+                .before(eustress_common::terrain::process_terrain_generation_queue),
         )
         .add_systems(
             Update,

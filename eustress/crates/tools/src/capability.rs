@@ -30,6 +30,8 @@
 
 use std::collections::BTreeSet;
 
+use eustress_common::editor_action::{parse_action, Action};
+
 /// What class of action a tool performs. Ordered by blast radius.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -149,7 +151,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // --- Destructive: removes or irreversibly mutates ---------------
         "delete_entity" | "git_commit" | "git_branch" => Destructive,
         // Dispatches any live editor action by name, and Delete and Cut are
-        // among them, so it is gated exactly like delete_entity.
+        // among them. This is its base class: `capability_of_call` judges a
+        // call by the action it names, and one that names none stays here.
         "invoke_action" => Destructive,
         // The same reasoning covers the rest of the UI-driving family: each can
         // reach ANY control. `ui_click` presses whatever is at a coordinate,
@@ -167,6 +170,9 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // so it gets the one no unrelated token hands out, and it fails closed
         // for every MCP caller.
         "publish_space" => Destructive,
+        // Remove ground: a carve empties a shape of the terrain, and a clear
+        // deletes the whole terrain's files with no undo.
+        "terrain_carve" | "terrain_clear" => Destructive,
         // Presses keys and buttons in a running game: it changes the live
         // session, never the Space on disk.
         "play_input" => Write,
@@ -242,8 +248,29 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "data_bind"
         | "data_unbind"
         | "export_instances_toml"
+        // Terrain edits in the live engine. Sculpt, paint, fill, replace and
+        // layer creation are each one undo step; generate and flat replace the
+        // terrain's files but keep the layers someone authored.
+        | "terrain_generate"
+        | "terrain_flat"
+        | "terrain_sculpt"
+        | "terrain_paint"
+        | "terrain_fill"
+        | "terrain_replace_material"
+        | "terrain_layer_create"
         // Switches the live mode/discipline and persists it to editor settings.
-        | "set_mode" => Write,
+        | "set_mode"
+        // Snapshots of the open Space. Saving one is Ctrl+S plus a commit in
+        // the Space's own autosave repo (and a database checkpoint): it adds a
+        // restore point and removes nothing, unlike git_commit, which takes
+        // arbitrary paths and messages. A revert overwrites the Space, but
+        // only after a safety snapshot of it, unsaved script tabs included,
+        // is confirmed saved, and it aborts before touching anything
+        // otherwise; reverting to that snapshot undoes it. Cancelling removes
+        // a pending restore plan and leaves the Space as it is.
+        | "save_snapshot"
+        | "revert_to_snapshot"
+        | "cancel_pending_revert" => Write,
 
         // Removing a Reference deletes an instance folder.
         "website_remove_reference" => Destructive,
@@ -342,7 +369,17 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // WITHOUT publishing.
         | "list_modes"
         | "list_mode_tools"
-        | "publish_status" => Read,
+        | "publish_status"
+        // Snapshot history and what changed since one: git log, diff and
+        // ls-files in the Space's repo.
+        | "list_snapshots"
+        | "diff_snapshot"
+        // Terrain reads: stats, surface samples, terrain-only raycasts and
+        // voxel reads of the live engine's terrain.
+        | "terrain_stats"
+        | "terrain_query"
+        | "terrain_raycast"
+        | "terrain_read_voxels" => Read,
 
         _ => return None,
     })
@@ -377,9 +414,205 @@ impl Denial {
     }
 }
 
-/// Decide whether a call may proceed.
+/// The class of one editor action, judged by what its handler REACHES, not by
+/// its name. `invoke_action` runs any of them, so this decides what a caller
+/// holding only Write can do with it.
+///
+/// No wildcard arm: a new `Action` variant does not compile until someone
+/// decides its class here.
+///
+/// - Write: changes the view, the selection, a tool or a setting, or makes an
+///   edit the editor's Undo reverses.
+/// - Destructive: removes or overwrites data, walks the edit history (Undo can
+///   delete what a create made, Redo can replay a delete), switches or blocks
+///   the person's session, reaches the network, or faces outward.
+/// - Execute: starts Play, which runs the Space's scripts.
+pub fn action_capability(action: Action) -> Capability {
+    use Capability::*;
+    match action {
+        // Tools, panels, camera, selection and editor settings.
+        Action::SelectTool
+        | Action::MoveTool
+        | Action::RotateTool
+        | Action::ScaleTool
+        | Action::ToggleExplorer
+        | Action::ToggleProperties
+        | Action::ToggleOutput
+        | Action::ToggleCommandBar
+        // No handler, or only an "on the roadmap" notice.
+        | Action::ToggleAssets
+        | Action::ToggleCollaboration
+        | Action::ToggleNetworkPanel
+        | Action::ToggleTransformSpace
+        | Action::FocusSelection
+        | Action::ViewPerspectiveToggle
+        | Action::ViewTop
+        | Action::ViewFront
+        | Action::ViewSideLeft
+        | Action::ViewSideRight
+        | Action::ViewMode2D
+        | Action::ViewMode3D
+        // Adds a view to .eustress/viewpoints.toml.
+        | Action::SaveViewpoint
+        | Action::NextViewpoint
+        | Action::SnapMode1
+        | Action::SnapMode2
+        | Action::SnapModeOff
+        | Action::ToggleCollisions
+        | Action::SelectAll
+        | Action::SelectChildren
+        | Action::SelectDescendants
+        | Action::SelectParent
+        | Action::SelectSiblings
+        | Action::InvertSelection
+        // Open a dialog or a search box inside the editor window.
+        | Action::InsertObject
+        | Action::FindReplace
+        | Action::FocusExplorerSearch
+        | Action::FocusPropertiesFilter
+        // Arm a modal tool. Its edit takes clicks, which `ui_click` gates.
+        | Action::ToolPartSwap
+        | Action::ToolEdgeAlign
+        | Action::ToolModelReflect
+        | Action::ToolGapFill
+        | Action::ToolResizeAlign
+        | Action::ToolMaterialFlip
+        | Action::ToolLinearArray
+        | Action::ToolRadialArray
+        | Action::ToolGridArray
+        | Action::ToolPathArray
+        // Keyboard nudges; nothing handles them as an action.
+        | Action::LiftSelection
+        | Action::SettleSelection
+        // Terrain tool and brush state. Sampling reads the ground.
+        | Action::TerrainTools
+        | Action::TerrainDraw
+        | Action::TerrainSculpt
+        | Action::TerrainSmooth
+        | Action::TerrainFlatten
+        | Action::TerrainPaint
+        | Action::TerrainSeaLevel
+        | Action::TerrainRegion
+        | Action::TerrainSizeDown
+        | Action::TerrainSizeUp
+        | Action::TerrainStrengthDown
+        | Action::TerrainStrengthUp
+        | Action::TerrainPivotPrev
+        | Action::TerrainPivotNext
+        | Action::TerrainPlaneLock
+        | Action::TerrainPlanePick
+        | Action::TerrainPlaneUp
+        | Action::TerrainPlaneDown
+        | Action::TerrainPlaneUpFast
+        | Action::TerrainPlaneDownFast
+        | Action::TerrainSnap
+        | Action::TerrainSnapStep
+        | Action::TerrainContours
+        | Action::TerrainMirror
+        | Action::TerrainMirrorAxis
+        | Action::TerrainSampleMaterial
+        // Copy fills the region clipboard. Paste only arms a placement; the
+        // write is a later click.
+        | Action::TerrainRegionCopy
+        | Action::TerrainRegionPaste
+        // Session controls. Stop restores the source state.
+        | Action::PauseResume
+        | Action::StopPlay => Write,
+
+        // Edits the editor's Undo reverses, and a save.
+        Action::SaveScene
+        | Action::Copy
+        | Action::Paste
+        | Action::PasteInto
+        | Action::Duplicate
+        | Action::Group
+        | Action::ToggleAnchor
+        | Action::LockSelection
+        | Action::UnlockSelection
+        | Action::RotateY90
+        | Action::TiltZ90 => Write,
+
+        // Remove or overwrite data. CSG trashes its source parts; a terrain
+        // duplicate writes its copy's air too, so it can carve.
+        Action::Delete
+        | Action::Cut
+        | Action::CSGNegate
+        | Action::CSGUnion
+        | Action::CSGIntersect
+        | Action::CSGSeparate
+        | Action::TerrainRegionCut
+        | Action::TerrainRegionDelete
+        | Action::TerrainRegionDuplicate
+        // Undo can delete what a create made, and Redo can replay a delete.
+        | Action::Undo
+        | Action::Redo
+        // Only partly reversible for a folder-backed group (grouping.rs).
+        | Action::Ungroup
+        // Switch the open Space, or block the editor on a native dialog.
+        | Action::NewSpace
+        | Action::NewUniverse
+        | Action::OpenFile
+        | Action::SaveSceneAs
+        // Hosting reaches the network, and stopping it drops players.
+        | Action::StartServer
+        | Action::StopServer
+        // Outward-facing. Today they open the publish dialog; a later change
+        // that publishes directly must not become callable at Write.
+        | Action::PublishSpace
+        | Action::PublishUniverse => Destructive,
+
+        // Play runs the Space's scripts.
+        Action::PlayWithCharacter | Action::PlaySolo => Execute,
+    }
+}
+
+/// The bridge request `invoke_action` sends for this input: its `action` field
+/// and nothing else. The gate classifies this value and the tool sends this
+/// value, so the two cannot disagree about which action runs.
+pub fn invoke_action_params(input: &serde_json::Value) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    if let Some(action) = input.get("action") {
+        params.insert("action".to_string(), action.clone());
+    }
+    serde_json::Value::Object(params)
+}
+
+/// The class of one call, arguments included. `invoke_action` is judged by the
+/// action it would run ([`action_capability`]), read with the engine's own
+/// [`parse_action`] from the request the tool sends; an input that names no
+/// action keeps the tool's base class, so a malformed or misspelt request
+/// fails closed. Every other tool has its base class.
+pub fn capability_of_call(tool_name: &str, input: &serde_json::Value) -> Option<Capability> {
+    match tool_name {
+        "invoke_action" => parse_action(&invoke_action_params(input))
+            .map(action_capability)
+            .or_else(|| capability_of(tool_name)),
+        _ => capability_of(tool_name),
+    }
+}
+
+/// Decide whether a call may proceed, by the tool's base class alone. The
+/// registry dispatches through [`authorize_call`], which can lower the class
+/// for a call whose arguments make it safer.
 pub fn authorize(tool_name: &str, permissions: &Permissions) -> Result<Capability, Denial> {
-    match capability_of(tool_name) {
+    decide(tool_name, capability_of(tool_name), permissions)
+}
+
+/// Decide whether this call, arguments included, may proceed.
+pub fn authorize_call(
+    tool_name: &str,
+    input: &serde_json::Value,
+    permissions: &Permissions,
+) -> Result<Capability, Denial> {
+    decide(tool_name, capability_of_call(tool_name, input), permissions)
+}
+
+fn decide(
+    tool_name: &str,
+    class: Option<Capability>,
+    permissions: &Permissions,
+) -> Result<Capability, Denial> {
+    match class {
         Some(cap) if permissions.allows(cap) => Ok(cap),
         Some(cap) => Err(Denial {
             tool_name: tool_name.to_string(),
@@ -472,6 +705,32 @@ mod tests {
     }
 
     #[test]
+    fn terrain_tools_are_classified_by_what_they_can_remove() {
+        for tool in ["terrain_stats", "terrain_query", "terrain_raycast", "terrain_read_voxels"] {
+            assert_eq!(capability_of(tool), Some(Capability::Read), "{tool}");
+        }
+        for tool in [
+            "terrain_generate",
+            "terrain_flat",
+            "terrain_sculpt",
+            "terrain_paint",
+            "terrain_fill",
+            "terrain_replace_material",
+            "terrain_layer_create",
+        ] {
+            assert_eq!(capability_of(tool), Some(Capability::Write), "{tool}");
+        }
+        // Carving and clearing remove ground, so a standard caller is refused.
+        for tool in ["terrain_carve", "terrain_clear"] {
+            assert_eq!(capability_of(tool), Some(Capability::Destructive), "{tool}");
+            assert!(
+                authorize(tool, &Permissions::standard()).is_err(),
+                "{tool} must be refused to a standard caller"
+            );
+        }
+    }
+
+    #[test]
     fn every_registered_tool_is_classified() {
         // The omission guard: a tool registered without a classification is
         // undispatchable, so this failing is a build-time reminder rather
@@ -489,5 +748,104 @@ mod tests {
             "these registered tools have no capability classification and would be \
              denied at dispatch: {unclassified:?}"
         );
+    }
+
+    #[test]
+    fn invoke_action_is_judged_by_the_action_it_runs() {
+        use serde_json::json;
+        let class = |action: &str| capability_of_call("invoke_action", &json!({ "action": action }));
+        for write in ["ViewMode2D", "ViewTop", "SelectAll", "MoveTool", "Copy", "Group", "SaveScene"] {
+            assert_eq!(class(write), Some(Capability::Write), "{write}");
+        }
+        for destructive in [
+            "Delete",
+            "Cut",
+            "Undo",
+            "Redo",
+            "Ungroup",
+            "CSGUnion",
+            "OpenFile",
+            "NewSpace",
+            "SaveSceneAs",
+            "StartServer",
+            "StopServer",
+            "PublishSpace",
+            "PublishUniverse",
+            "TerrainRegionDuplicate",
+        ] {
+            assert_eq!(class(destructive), Some(Capability::Destructive), "{destructive}");
+        }
+        for execute in ["PlaySolo", "PlayWithCharacter"] {
+            assert_eq!(class(execute), Some(Capability::Execute), "{execute}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_action_keeps_the_base_class() {
+        use serde_json::json;
+        assert_eq!(capability_of("invoke_action"), Some(Capability::Destructive));
+        for input in [
+            json!({ "action": "delete" }),
+            json!({ "action": "DELETE" }),
+            json!({ "action": " ViewMode2D" }),
+            json!({ "action": 5 }),
+            json!({ "action": { "ViewMode2D": null } }),
+            json!({}),
+            json!("ViewMode2D"),
+        ] {
+            assert_eq!(
+                capability_of_call("invoke_action", &input),
+                Some(Capability::Destructive),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_action_key_is_judged_by_the_action_sent() {
+        // serde_json keeps the last value, and the tool sends the very request
+        // the gate classified, so "ViewMode2D, then Delete" is a Delete at both.
+        let input: serde_json::Value =
+            serde_json::from_str(r#"{"action":"ViewMode2D","action":"Delete"}"#).unwrap();
+        assert_eq!(capability_of_call("invoke_action", &input), Some(Capability::Destructive));
+        assert_eq!(invoke_action_params(&input)["action"], "Delete");
+    }
+
+    #[test]
+    fn the_request_sent_carries_only_the_action() {
+        let input = serde_json::json!({ "action": "ViewMode2D", "extra": true });
+        assert_eq!(invoke_action_params(&input), serde_json::json!({ "action": "ViewMode2D" }));
+    }
+
+    #[test]
+    fn a_standard_caller_may_run_write_actions_only() {
+        use serde_json::json;
+        let p = Permissions::standard().for_principal("mcp-client");
+        assert_eq!(
+            authorize_call("invoke_action", &json!({ "action": "ViewMode2D" }), &p),
+            Ok(Capability::Write)
+        );
+        let denial = authorize_call("invoke_action", &json!({ "action": "Delete" }), &p).unwrap_err();
+        assert_eq!(denial.required, Some(Capability::Destructive));
+        assert!(authorize_call("invoke_action", &json!({ "action": "PlaySolo" }), &p).is_err());
+        // The name-only check still refuses the tool outright.
+        assert!(authorize("invoke_action", &p).is_err());
+    }
+
+    #[test]
+    fn other_tools_keep_their_base_class_whatever_the_input() {
+        let input = serde_json::json!({ "action": "ViewMode2D" });
+        for tool in [
+            "run_bash",
+            "delete_entity",
+            "ui_click",
+            "ui_sequence",
+            "invoke_mode_tool",
+            "publish_space",
+            "read_file",
+            "tool_added_next_week",
+        ] {
+            assert_eq!(capability_of_call(tool, &input), capability_of(tool), "{tool}");
+        }
     }
 }

@@ -45,7 +45,9 @@ pub(crate) fn avatar_asset_sources_registered() -> bool {
 
 /// Candidate roots for the bundled common assets, best first.
 fn bundled_asset_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    // 0. The shipped common assets, wherever the one rule finds them (beside
+    //    the executable, a macOS bundle's Resources, or the source tree).
+    let mut out = vec![crate::assets_dir()];
 
     // 1. Next to the executable — how a shipped build finds its assets.
     if let Ok(exe) = std::env::current_exe() {

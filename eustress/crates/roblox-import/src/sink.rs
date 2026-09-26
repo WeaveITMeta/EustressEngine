@@ -136,9 +136,9 @@ pub struct NodeSpec<'a> {
     pub extras: &'a std::collections::HashMap<String, toml::Value>,
     /// `[properties.physics]` entries (PhysicalProperties decomposition).
     pub physics: &'a std::collections::HashMap<String, toml::Value>,
-    /// `[properties.attributes]` entries.
+    /// Root `[attributes]` entries (Roblox attributes and folded value objects).
     pub attributes: &'a std::collections::HashMap<String, toml::Value>,
-    /// `[metadata.tags]` values.
+    /// CollectionService tags (the root `tags` array in a TOML).
     pub tags: &'a [String],
 }
 
@@ -270,11 +270,18 @@ pub fn is_file_natured_node(class: ClassName) -> bool {
             | ClassName::TextBox
             | ClassName::ImageLabel
             | ClassName::ImageButton
-            // Local lights load through the engine's folder-form light arm;
-            // the binary path has no light spawner and skips light cores.
+            // Lights load through the engine's folder-form light arms; the
+            // binary path has no light spawner and skips light cores.
             | ClassName::PointLight
             | ClassName::SpotLight
             | ClassName::SurfaceLight
+            | ClassName::DirectionalLight
+            // A DataMesh keeps what its part draws in a `[mesh]` section,
+            // which a binary core does not carry.
+            | ClassName::SpecialMesh
+            | ClassName::BlockMesh
+            | ClassName::CylinderMesh
+            | ClassName::FileMesh
     )
 }
 

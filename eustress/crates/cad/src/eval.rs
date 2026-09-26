@@ -150,11 +150,6 @@ fn solid_bbox_diagonal(s: &Solid) -> f64 {
     }
 }
 
-/// Bounding-box diagonal of a solid, in metres.
-pub(crate) fn solid_size(s: &Solid) -> f64 {
-    solid_bbox_diagonal(s)
-}
-
 /// Union. `pub(crate)` so `parts_csg` reuses the normalized path.
 pub(crate) fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
     boolean_normalized(a, b, |x, y, tol| truck_shapeops::or(x, y, tol))
@@ -1378,11 +1373,23 @@ impl<'t> Model<'t> {
             if !(csk_r > r) {
                 return Err(err(name, "countersink_diameter must be larger than the hole diameter"));
             }
-            let half = angle * 0.5;
+            let tan = (angle * 0.5).tan();
             let lift = 3.0 * overcut;
-            let r_top = csk_r + lift * half.tan();
-            let apex = csk_r / half.tan();
-            let cone = build::cone(&hf, r_top, -lift, apex, name)?;
+            let r_top = csk_r + lift * tan;
+            // Where the cone meets the bore, and where the bore ends.
+            let meet = (csk_r - r) / tan;
+            let floor = start + len;
+            if !(floor > meet) {
+                return Err(err(
+                    name,
+                    "the countersink reaches past the end of the hole; make it smaller or the hole deeper",
+                ));
+            }
+            // End the cone inside the bore: past the circle where it meets
+            // the bore, short of the axis and of the bore's floor.
+            let bottom = meet + (0.5 * r / tan).min(0.5 * (floor - meet));
+            let r_bottom = csk_r - bottom * tan;
+            let cone = build::countersink_frustum(&hf, r_top, -lift, r_bottom, bottom, name)?;
             union_into(&mut cutter, &mut names, cone, "countersink")?;
             out.note(format!("countersink {:.1} deg to {:.2} mm", angle.to_degrees(), 2.0 * csk_r * 1000.0));
         }

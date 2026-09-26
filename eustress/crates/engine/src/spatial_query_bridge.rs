@@ -150,9 +150,11 @@ pub struct ShapecastResult {
 // 4. ScriptSpatialQuery — Thread-safe bridge resource
 // ============================================================================
 
-/// Bevy Resource that holds a thread-safe snapshot of entity metadata
-/// needed to resolve raycast results (Entity → name, material, etc.).
-/// Scripts read from this; the sync system writes to it each frame.
+/// Bevy Resource that carries script raycasts between the script VMs and the
+/// Bevy system that runs them. A hit's name and material are read from the
+/// hit entity when the raycast runs; the per-frame metadata mirror below is
+/// kept only when the `raycast_lookup` performance switch is off
+/// (`eustress_common::utils::perf_on`).
 ///
 /// # Why raycasts answer with one frame of latency
 ///
@@ -175,7 +177,8 @@ pub struct ShapecastResult {
 /// different number of raycasts gets `None` rather than a wrong hit.
 #[derive(Resource, Clone)]
 pub struct ScriptSpatialQuery {
-    /// Entity metadata: Bevy Entity bits → (name, material_name, can_collide)
+    /// Entity metadata: Bevy Entity bits → (name, material_name, can_collide).
+    /// Filled only with the `raycast_lookup` switch off (see [`hit_metadata`]).
     pub entity_metadata: Arc<RwLock<HashMap<u64, EntityMetadata>>>,
     /// Pending raycast requests from scripts, keyed by call slot
     pub raycast_requests: Arc<RwLock<HashMap<u32, RaycastRequest>>>,
@@ -449,8 +452,7 @@ pub fn execute_raycast(
         }
 
         // Resolve metadata
-        let metadata = bridge.get_metadata(entity_bits)
-            .unwrap_or_default();
+        let metadata = hit_metadata(bridge, name_query, hit.entity);
 
         // Apply water filter
         if params.ignore_water && metadata.is_water {
@@ -533,7 +535,7 @@ pub fn execute_raycast_all(
     let mut results = Vec::with_capacity(hits.len());
     for hit in hits.iter() {
         let entity_bits = hit.entity.to_bits();
-        let metadata = bridge.get_metadata(entity_bits).unwrap_or_default();
+        let metadata = hit_metadata(bridge, name_query, hit.entity);
         if params.ignore_water && metadata.is_water {
             continue;
         }
@@ -555,8 +557,35 @@ pub fn execute_raycast_all(
     results
 }
 
+/// Name and material of a raycast hit, read from the hit entity as the
+/// raycast runs. The raycast system already holds the query, so this costs
+/// one lookup per hit instead of a mirror kept for every entity every frame.
+/// The strings are the ones the mirror stored (`Name` as text,
+/// `format!("{:?}", material)`), and an entity with neither component gets
+/// the same empty default. With the `raycast_lookup` switch off, reads the
+/// mirror that [`sync_entity_metadata`] keeps instead.
+fn hit_metadata(
+    bridge: &ScriptSpatialQuery,
+    name_query: &Query<(Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>)>,
+    entity: Entity,
+) -> EntityMetadata {
+    if !eustress_common::utils::perf_on("raycast_lookup") {
+        return bridge.get_metadata(entity.to_bits()).unwrap_or_default();
+    }
+    match name_query.get(entity) {
+        Ok((_, None, None)) | Err(_) => EntityMetadata::default(),
+        Ok((_, name, part)) => EntityMetadata {
+            name: name.map(|n| n.to_string()).unwrap_or_default(),
+            material: part.map(|p| format!("{:?}", p.material)).unwrap_or_default(),
+            can_collide: part.map_or(true, |p| p.can_collide),
+            is_water: false,
+        },
+    }
+}
+
 // ============================================================================
 // 6. Metadata Sync System — Runs each frame to keep bridge up to date
+//    (only with the `raycast_lookup` switch off; see `hit_metadata`)
 // ============================================================================
 
 /// Sync entity metadata from ECS into the ScriptSpatialQuery bridge —
@@ -716,10 +745,16 @@ pub struct SpatialQueryBridgePlugin;
 
 impl Plugin for SpatialQueryBridgePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ScriptSpatialQuery>()
-            .add_systems(PostUpdate, (
+        app.init_resource::<ScriptSpatialQuery>();
+        // Performance switch `raycast_lookup`: hits read their name and
+        // material from the hit entity, so the per-frame mirror is not kept.
+        if eustress_common::utils::perf_on("raycast_lookup") {
+            app.add_systems(PostUpdate, process_script_raycast_requests);
+        } else {
+            app.add_systems(PostUpdate, (
                 sync_entity_metadata,
                 process_script_raycast_requests.after(sync_entity_metadata),
             ));
+        }
     }
 }

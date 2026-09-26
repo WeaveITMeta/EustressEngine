@@ -20,20 +20,10 @@ impl Plugin for PhysicsPlugin {
             .register_type::<PhysicsMaterial>()
             .register_type::<Constraint>()
             .register_type::<BodyVelocity>()
-            .register_type::<BodyForce>()
-            
-            // Systems
-            .add_systems(Update, sync_physics_settings);
-    }
-}
-
-/// Sync PhysicsService settings with Avian3D (if needed)
-#[allow(dead_code)]
-fn sync_physics_settings(
-    physics: Res<PhysicsService>,
-    mut gravity: ResMut<avian3d::prelude::Gravity>,
-) {
-    if physics.is_changed() {
-        *gravity = avian3d::prelude::Gravity(physics.gravity);
+            .register_type::<BodyForce>();
+        // No gravity system here. Gravity is owned by `Workspace.gravity` and
+        // written to Avian only by `sync_workspace_gravity_to_avian`. This
+        // plugin used to copy a separate PhysicsService gravity into Avian,
+        // a second writer for the same resource.
     }
 }

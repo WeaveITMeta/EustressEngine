@@ -11,7 +11,14 @@
 //   PUT  /api/simulations/{id}/world/chunks/{hash}   author  one chunk
 //   POST /api/simulations/{id}/world/commit          author  the listing now plays this manifest
 //   GET  /api/simulations/{id}/world/manifest        gated   the committed manifest
-//   GET  /api/simulations/{id}/world/chunks/{hash}   gated   one chunk the manifest names
+//   GET  /api/simulations/{id}/world/source          gated   the source world, for Edit
+//   GET  /api/simulations/{id}/world/chunks/{hash}   gated   one chunk a manifest names
+//
+// Two worlds per listing. The manifest is what every player receives, with
+// no server-only service in it (ServerScriptService, ServerStorage). The
+// source world adds those services, and exists only when the author turned on
+// Share Source: Studio commits it with `kind: "source"`, and only open-source
+// listings (or their author, or an admin) can read it or its chunks.
 //
 // R2 layout: universes/{id}/chunks/{hash}.echk and
 // universes/{id}/manifests/{sha256}.json. Chunks are stored per listing, so
@@ -48,7 +55,7 @@ export const chunkKey = (simId, hash) => `universes/${simId}/chunks/${hash}.echk
 export const manifestKey = (simId, sha256) => `universes/${simId}/manifests/${sha256}.json`;
 const chunkPrefix = (simId) => `universes/${simId}/chunks/`;
 
-const ROUTE = /^\/api\/simulations\/([a-f0-9-]+)\/world\/(begin|commit|manifest|chunks\/([^/]+))$/;
+const ROUTE = /^\/api\/simulations\/([a-f0-9-]+)\/world\/(begin|commit|manifest|source|chunks\/([^/]+))$/;
 
 /// Dispatch a `/world/` request. `null` for any path this module does not own.
 export async function handleWorldRoute(request, url, env, cors, deps) {
@@ -59,6 +66,7 @@ export async function handleWorldRoute(request, url, env, cors, deps) {
   if (route === 'begin' && method === 'POST') return handleBegin(request, simId, env, cors, deps);
   if (route === 'commit' && method === 'POST') return handleCommit(request, simId, env, cors, deps);
   if (route === 'manifest' && method === 'GET') return handleGetManifest(request, simId, env, cors, deps);
+  if (route === 'source' && method === 'GET') return handleGetSource(request, simId, env, cors, deps);
   if (hash !== undefined && method === 'PUT') return handlePutChunk(request, simId, hash, env, cors, deps);
   if (hash !== undefined && method === 'GET') return handleGetChunk(request, simId, hash, env, cors, deps);
   return deps.json({ error: 'Method not allowed' }, 405, cors);
@@ -231,9 +239,11 @@ async function ownedListing(request, simId, env, cors, deps) {
   if (!raw) return { error: deps.json({ error: 'Simulation not found' }, 404, cors) };
   const sim = JSON.parse(raw);
   if (sim.author_id !== userId) return { error: deps.json({ error: 'Not your simulation' }, 403, cors) };
-  // A legal hold covers storage, so its author cannot swap the content under it.
+  // A legal hold covers storage, so its author cannot swap the content under
+  // it. The refusal reads as ordinary review: naming the hold would tell a
+  // suspected uploader that one exists (see authorView in moderation.mjs).
   if (sim.moderation?.status === 'quarantined')
-    return { error: deps.json({ error: 'This listing is under legal review and cannot be changed', code: 'quarantined' }, 409, cors) };
+    return { error: deps.json({ error: 'This listing is being reviewed and cannot be changed right now', code: 'in_review' }, 409, cors) };
   // Same freeze the create route honours: re-uploading into an existing
   // listing would otherwise walk around it.
   if (await env.USERS.get(`publish-frozen:${userId}`))
@@ -250,7 +260,7 @@ async function servableListing(request, simId, env, cors, deps) {
   const auth = await deps.verifyAuth(request, env);
   const admin = auth ? await deps.requireAdmin(request, env) : null;
   if (!deps.canServe(sim, auth, !!admin))
-    return { error: deps.json({ error: 'Simulation not available' }, sim.moderation?.status === 'quarantined' ? 451 : 403, cors) };
+    return { error: deps.json({ error: 'Simulation not available' }, 403, cors) };
   return { sim, listable: false };
 }
 
@@ -268,6 +278,9 @@ function applyListing(sim, listing) {
   if (typeof listing.description === 'string') set('description', listing.description.trim().slice(0, MAX_LISTING.description));
   if (typeof listing.genre === 'string' && listing.genre.trim()) set('genre', listing.genre.trim().slice(0, MAX_LISTING.genre));
   if (typeof listing.is_public === 'boolean') set('is_public', listing.is_public);
+  // The author's "Share Source": the gallery offers Edit (open in Studio)
+  // only on a listing that carries it.
+  if (typeof listing.open_source === 'boolean') set('open_source', listing.open_source);
   return changed;
 }
 
@@ -305,10 +318,12 @@ async function handlePutChunk(request, simId, hash, env, cors, deps) {
   const key = chunkKey(simId, hash);
   const existing = await env.SCENES.head(key);
   if (existing && existing.size === length) return deps.json({ hash, stored: false, present: true }, 200, cors);
-  if (existing && owned.sim.world?.manifest_key) {
-    const committed = await committedHashes(env, owned.sim.world.manifest_key);
-    if (committed?.has(hash))
-      return deps.json({ error: 'This chunk is part of the published world and cannot be replaced', code: 'chunk_committed' }, 409, cors);
+  if (existing && owned.sim.world) {
+    for (const committedKey of [owned.sim.world.manifest_key, owned.sim.world.source_manifest_key].filter(Boolean)) {
+      const committed = await committedHashes(env, committedKey);
+      if (committed?.has(hash))
+        return deps.json({ error: 'This chunk is part of the published world and cannot be replaced', code: 'chunk_committed' }, 409, cors);
+    }
   }
 
   // Streamed: a request body with a Content-Length has the known length R2 needs.
@@ -343,19 +358,35 @@ async function handleCommit(request, simId, env, cors, deps) {
   if (missing.length)
     return deps.json({ error: `${missing.length} chunk(s) are not uploaded`, code: 'chunks_missing', missing }, 409, cors);
 
+  const sim = owned.sim;
+  const source = read.body.kind === 'source';
+  if (source && !sim.world?.manifest_key)
+    return deps.json({ error: 'Commit the world before its source', code: 'no_world' }, 409, cors);
+  if (source && sim.open_source !== true)
+    return deps.json({ error: 'Share Source is off for this listing', code: 'not_open_source' }, 409, cors);
+
   const sha = await sha256Hex(read.bytes);
   const key = manifestKey(simId, sha);
   await env.SCENES.put(key, read.bytes, {
     httpMetadata: { contentType: 'application/json' },
     customMetadata: { simId, authorId: owned.userId },
   });
-
-  const sim = owned.sim;
   const now = new Date().toISOString();
-  const sameWorld = sim.world?.manifest_sha256 === sha;
+
+  // The source world only adds the server-only services to the world
+  // players already get; it changes nothing they play, so no review.
+  if (source) {
+    sim.world = { ...sim.world, source_manifest_key: key, source_manifest_sha256: sha, source_committed_at: now };
+    sim.updated_at = now;
+    await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+    return deps.json({ ok: true, kind: 'source', manifest_sha256: sha, chunks: sizes.size, bytes }, 200, cors);
+  }
+
+  const prior = sim.world;
+  const sameWorld = prior?.manifest_sha256 === sha;
   const listingChanged = applyListing(sim, read.body.listing);
   const publishHash = isContentHash(read.body.publish_hash) ? read.body.publish_hash : null;
-  if (sim.world && !sameWorld) sim.version = (sim.version || 1) + 1;
+  if (prior && !sameWorld) sim.version = (sim.version || 1) + 1;
 
   sim.format = WORLD_FORMAT;
   sim.world = {
@@ -370,6 +401,14 @@ async function handleCommit(request, simId, env, cors, deps) {
     bytes,
     committed_at: now,
   };
+  // A source belongs to the world it was committed with: kept when the same
+  // world is committed again with Share Source still on, dropped otherwise.
+  // Studio commits the fresh source right after a new world.
+  if (sameWorld && sim.open_source === true && prior?.source_manifest_key) {
+    sim.world.source_manifest_key = prior.source_manifest_key;
+    sim.world.source_manifest_sha256 = prior.source_manifest_sha256;
+    sim.world.source_committed_at = prior.source_committed_at;
+  }
   // What moderation's submit heads before it will review a listing.
   sim.r2_key = key;
   // Moderation dedups on (author, etag, size) of an uploaded .pak. A manifest
@@ -399,7 +438,8 @@ async function handleCommit(request, simId, env, cors, deps) {
     chunks: sizes.size,
     bytes,
     version: sim.version || 1,
-    moderation: sim.moderation?.status || 'pending',
+    // Author-facing status only; held and quarantined both read as in_review.
+    moderation: ({ approved: sim.is_public === false ? 'approved_private' : 'listed', rejected: 'not_listed', changes_requested: 'changes_requested', appealed: 'appeal_in_review' })[sim.moderation?.status] || 'in_review',
   }, 200, cors);
 }
 
@@ -430,14 +470,46 @@ async function handleGetManifest(request, simId, env, cors, deps) {
   return new Response(obj.body, { headers });
 }
 
+/// Whether this viewer may read a listing's source world: anyone when its
+/// author shares the source, otherwise its author or an admin.
+async function mayReadSource(request, sim, env, deps) {
+  if (sim.open_source === true) return true;
+  const auth = await deps.verifyAuth(request, env);
+  if (!auth) return false;
+  return auth === sim.author_id || !!(await deps.requireAdmin(request, env));
+}
+
+async function handleGetSource(request, simId, env, cors, deps) {
+  const gate = await servableListing(request, simId, env, cors, deps);
+  if (gate.error) return gate.error;
+  const sim = gate.sim;
+  // Not found either way, so a private source is indistinguishable from none.
+  if (!sim.world?.source_manifest_key || !(await mayReadSource(request, sim, env, deps)))
+    return deps.json({ error: 'This listing shares no source' }, 404, cors);
+  const obj = await env.SCENES.get(sim.world.source_manifest_key);
+  if (!obj) return deps.json({ error: 'The source manifest is missing from storage' }, 404, cors);
+  return new Response(obj.body, {
+    headers: {
+      ...cors,
+      'Content-Type': 'application/json',
+      'Cache-Control': 'private, no-store',
+      'X-Eustress-Manifest-Sha256': sim.world.source_manifest_sha256,
+    },
+  });
+}
+
 async function handleGetChunk(request, simId, hash, env, cors, deps) {
   if (!isContentHash(hash)) return deps.json({ error: 'Not a chunk name' }, 400, cors);
   const gate = await servableListing(request, simId, env, cors, deps);
   if (gate.error) return gate.error;
   const sim = gate.sim;
   if (sim.format !== WORLD_FORMAT || !sim.world?.manifest_key) return deps.json({ error: 'Chunk not found' }, 404, cors);
-  const committed = await committedHashes(env, sim.world.manifest_key);
-  if (!committed?.has(hash)) return deps.json({ error: 'Chunk not found' }, 404, cors);
+  // A chunk the world names, or one only the source world names (a
+  // server-only service) for a viewer who may read the source.
+  let named = (await committedHashes(env, sim.world.manifest_key))?.has(hash);
+  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, env, deps)))
+    named = (await committedHashes(env, sim.world.source_manifest_key))?.has(hash);
+  if (!named) return deps.json({ error: 'Chunk not found' }, 404, cors);
   const obj = await env.SCENES.get(chunkKey(simId, hash));
   if (!obj) return deps.json({ error: 'Chunk not found' }, 404, cors);
   return new Response(obj.body, {

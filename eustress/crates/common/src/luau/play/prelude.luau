@@ -21,12 +21,72 @@ local Host = {}
 -- Error reporting
 -- ─────────────────────────────────────────────────────────────────────────
 
+-- Which script each thread and connection belongs to (see ownership below),
+-- declared here for the reporters.
+local ownerOf = setmetatable({}, { __mode = "k" })
+local threadsOf = {}
+local connsOf = {}
+-- Each running script's path, for the Output lines about it.
+local nameOf = {}
+-- Each script's top-level thread, with the script it runs.
+local bodies = setmetatable({}, { __mode = "k" })
+
+local PRELUDE_CHUNK = "EustressPlayPrelude"
+
+-- Where `thread` is, innermost call first, in script code only: its frames
+-- ("ServerScriptService.GameDirector:12 function spawnWave"), and the chunk
+-- and line of the innermost one.
+local function stackOf(thread)
+	local frames, chunk, line = {}, nil, 0
+	for level = 0, 64 do
+		local src, at, name = debug.info(thread, level, "sln")
+		if src == nil then
+			break
+		end
+		if src ~= PRELUDE_CHUNK and src ~= "[C]" and at ~= nil and at > 0 then
+			if chunk == nil then
+				chunk, line = src, at
+			end
+			local frame = src .. ":" .. at
+			if name ~= nil and name ~= "" then
+				frame ..= " function " .. name
+			end
+			tinsert(frames, frame)
+		end
+	end
+	return frames, chunk, line
+end
+
 local function report(err, thread)
-	local msg = tostring(err)
-	local tb = debug.traceback(thread, msg)
-	host.output("error", tb or msg)
+	local frames, chunk, line = stackOf(thread)
+	-- Errors from the host carry mlua's "runtime error: " in front and its
+	-- own traceback behind, which Roblox's never show (the frames go on the
+	-- line instead); a message with no position gets the innermost script
+	-- frame's.
+	local msg = string.gsub(tostring(err), "^runtime error: ", "")
+	local traceback = string.find(msg, "\nstack traceback:", 1, true)
+	if traceback ~= nil then
+		msg = string.sub(msg, 1, traceback - 1)
+	end
+	msg = string.gsub(msg, "%s+$", "")
+	if chunk ~= nil and not string.find(msg, "^[^\n]-:%d+: ") then
+		msg = chunk .. ":" .. line .. ": " .. msg
+	end
+	-- A timeout names where the script was; the thread itself stops a call
+	-- or two later.
+	local stoppedIn, stoppedAt = string.match(msg, "^Script timeout at ([^\n]-):(%d+): ")
+	if stoppedIn ~= nil then
+		chunk, line = stoppedIn, tonumber(stoppedAt)
+	end
+	host.output("error", msg, nameOf[ownerOf[thread]], chunk, line, frames)
 end
 Host.report = report
+
+-- A thread that will never resume, or may not: warn, where it waits.
+local function warnStuck(thread, text)
+	local frames, chunk, line = stackOf(thread)
+	host.output("warn", text, nameOf[ownerOf[thread]], chunk, line, frames)
+end
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- Scheduler
@@ -39,13 +99,67 @@ local Sched = {
 }
 Host.Sched = Sched
 
+-- Threads parked on the scheduler (task.wait, Signal:Wait, a handler runner
+-- back in its pool), each resumed when its time or signal comes.
+local parked = setmetatable({}, { __mode = "k" })
+-- Threads the scheduler resumed that then yielded with coroutine.yield,
+-- parked on nothing, by when: only code holding the thread can resume it,
+-- so one left alone too long is reported.
+local rawYields = setmetatable({}, { __mode = "k" })
+
+-- Every scheduler resume of a script thread. One from the host, rather than
+-- from inside a running script, gets a fresh run budget: the watchdog stops
+-- a script that runs too long without yielding.
+local function resumeThread(co, ...)
+	if running() == nil then
+		host.newBudget()
+	end
+	parked[co] = nil
+	rawYields[co] = nil
+	local ok, err = resume(co, ...)
+	if ok and not parked[co] and status(co) == "suspended" then
+		rawYields[co] = Sched.now
+	end
+	return ok, err
+end
+
+-- A script's top-level code is done: say so, and what it left running.
+local function finished(owner, ok)
+	local conns, threads = 0, 0
+	for c in pairs(connsOf[owner] or {}) do
+		if c.Connected then
+			conns += 1
+		end
+	end
+	for co in pairs(threadsOf[owner] or {}) do
+		if status(co) ~= "dead" then
+			threads += 1
+		end
+	end
+	local left = {}
+	if conns > 0 then
+		tinsert(left, conns .. (if conns == 1 then " connection" else " connections"))
+	end
+	if threads > 0 then
+		tinsert(left, threads .. (if threads == 1 then " thread" else " threads"))
+	end
+	local summary = if #left > 0 then table.concat(left, " and ") .. " still running" else "nothing left running"
+	local what = if ok then "Finished its top-level code; " else "Stopped by the error above; "
+	host.lifecycle(what .. summary, nameOf[owner], owner)
+end
+
 local function safe_resume(co, ...)
 	if co == nil or status(co) == "dead" then
 		return
 	end
-	local ok, err = resume(co, ...)
+	local ok, err = resumeThread(co, ...)
 	if not ok then
 		report(err, co)
+	end
+	local owner = bodies[co]
+	if owner ~= nil and status(co) == "dead" then
+		bodies[co] = nil
+		finished(owner, ok)
 	end
 end
 
@@ -63,13 +177,14 @@ end
 local function runnerLoop(...)
 	acquireAndCall(...)
 	while true do
+		parked[running()] = true
 		acquireAndCall(yield())
 	end
 end
 local function callHandler(fn, ...)
 	if freeRunner == nil then
 		freeRunner = create(runnerLoop)
-		local ok, err = resume(freeRunner, fn, ...)
+		local ok, err = resumeThread(freeRunner, fn, ...)
 		if not ok then
 			report(err, freeRunner)
 			freeRunner = nil
@@ -77,7 +192,7 @@ local function callHandler(fn, ...)
 		return
 	end
 	local runner = freeRunner
-	local ok, err = resume(runner, fn, ...)
+	local ok, err = resumeThread(runner, fn, ...)
 	if not ok then
 		report(err, runner)
 		if freeRunner == runner then
@@ -87,20 +202,160 @@ local function callHandler(fn, ...)
 end
 Host.callHandler = callHandler
 
+-- Which script each thread and connection belongs to, so destroying a script
+-- stops what it started, as in Roblox: its threads end and its connections
+-- drop, wherever they were made. A thread takes the owner of the thread that
+-- made it. A handler runner is shared across scripts, so it carries a
+-- handler's owner only while that handler runs, and goes back to the pool
+-- untagged; a pooled runner left tagged would be killed with the first script
+-- to stop, and silently eat the next handler call.
+-- The tables themselves are declared above, with the reporters.
+
+local function currentOwner()
+	local co = running()
+	return co and ownerOf[co]
+end
+
+-- Scripts written for Roblox, which work in studs (the importer marks them;
+-- the host says so as each starts). A Humanoid's movement values convert for
+-- them at the boundary, and so do the speeds Humanoid signals hand them; the
+-- engine is metres. A tween converts by the script that made it.
+local studsOwners = {}
+local studsOverride = nil
+local STUD_METRES = host.studMetres
+
+function Host.ownerUsesStuds()
+	if studsOverride ~= nil then
+		return studsOverride
+	end
+	local o = currentOwner()
+	return o ~= nil and studsOwners[o] == true
+end
+
+-- A speed in metres a second, in studs a second.
+local function speedInStuds(speed, ...)
+	if type(speed) == "number" then
+		return speed / STUD_METRES, ...
+	end
+	return speed, ...
+end
+
+local function claim(co, owner)
+	if owner == nil then
+		return
+	end
+	ownerOf[co] = owner
+	local set = threadsOf[owner]
+	if set == nil then
+		set = setmetatable({}, { __mode = "k" })
+		threadsOf[owner] = set
+	end
+	set[co] = true
+end
+
+local function unclaim(co, owner)
+	ownerOf[co] = nil
+	local set = threadsOf[owner]
+	if set then
+		set[co] = nil
+	end
+end
+
+-- One handler call on the current runner, under its connection's owner.
+local function ownedCall(owner, fn, ...)
+	local co = running()
+	claim(co, owner)
+	fn(...)
+	unclaim(co, owner)
+end
+
+-- A script's body, started as a thread the script owns.
+function Host.startScript(owner, fn, inStuds, name)
+	if inStuds then
+		studsOwners[owner] = true
+	end
+	nameOf[owner] = name
+	local co = create(fn)
+	claim(co, owner)
+	bodies[co] = owner
+	safe_resume(co)
+	return co
+end
+
+-- A destroyed script stops: every thread it owns ends and every connection it
+-- made drops. Called for each running script the DataModel destroys.
+function Host.stopScript(owner)
+	studsOwners[owner] = nil
+	nameOf[owner] = nil
+	local conns = connsOf[owner]
+	connsOf[owner] = nil
+	if conns then
+		for c in pairs(conns) do
+			c:Disconnect()
+		end
+	end
+	local threads = threadsOf[owner]
+	threadsOf[owner] = nil
+	if threads then
+		for co in pairs(threads) do
+			ownerOf[co] = nil
+			Sched.cancel(co)
+		end
+	end
+end
+
+-- `coroutine` as scripts see it: the real library, except that a coroutine a
+-- script makes is that script's, so a `coroutine.wrap` loop ends with it too.
+Host.ownedCoroutine = setmetatable({
+	-- A thread a script resumes itself waits on nothing any more.
+	resume = function(co, ...)
+		if type(co) == "thread" then
+			parked[co] = nil
+			rawYields[co] = nil
+		end
+		return resume(co, ...)
+	end,
+	create = function(fn)
+		local co = create(fn)
+		claim(co, currentOwner())
+		return co
+	end,
+	wrap = function(fn)
+		local co = create(fn)
+		claim(co, currentOwner())
+		return function(...)
+			local r = pack(resume(co, ...))
+			if not r[1] then
+				error(r[2], 0)
+			end
+			return unpack(r, 2, r.n)
+		end
+	end,
+}, { __index = coroutine })
+
 function Sched.spawn(fn, ...)
 	local co = (type(fn) == "thread") and fn or create(fn)
+	if ownerOf[co] == nil then
+		claim(co, currentOwner())
+	end
 	safe_resume(co, ...)
 	return co
 end
 
 function Sched.defer(fn, ...)
 	local co = (type(fn) == "thread") and fn or create(fn)
+	if ownerOf[co] == nil then
+		claim(co, currentOwner())
+	end
 	tinsert(Sched.deferred, { co = co, args = pack(...) })
 	return co
 end
 
 function Sched.delay(sec, fn, ...)
 	local co = (type(fn) == "thread") and fn or create(fn)
+	if ownerOf[co] == nil then
+		claim(co, currentOwner())
+	end
 	tinsert(Sched.sleeping, { co = co, at = Sched.now + (tonumber(sec) or 0), started = Sched.now, args = pack(...) })
 	return co
 end
@@ -112,6 +367,7 @@ function Sched.wait(sec)
 		return 0
 	end
 	tinsert(Sched.sleeping, { co = co, at = Sched.now + math.max(tonumber(sec) or 0, 0), started = Sched.now })
+	parked[co] = true
 	return yield()
 end
 
@@ -216,6 +472,16 @@ function Signal:Connect(fn)
 	assert(type(fn) == "function", "Connect expects a function")
 	local c = setmetatable({ Connected = true, _fn = fn, _signal = self }, Connection)
 	tinsert(self._handlers, c)
+	local owner = currentOwner()
+	if owner ~= nil then
+		c._owner = owner
+		local set = connsOf[owner]
+		if set == nil then
+			set = setmetatable({}, { __mode = "k" })
+			connsOf[owner] = set
+		end
+		set[c] = true
+	end
 	if self._onFirst and #self._handlers == 1 then
 		self._onFirst()
 	end
@@ -241,6 +507,7 @@ function Signal:Wait()
 	if self._onFirst and #self._handlers == 0 and #self._waiters == 1 then
 		self._onFirst()
 	end
+	parked[co] = true
 	return yield()
 end
 Signal.wait = Signal.Wait
@@ -252,7 +519,15 @@ function Signal:Fire(...)
 		local snapshot = table.clone(handlers)
 		for _, c in ipairs(snapshot) do
 			if c.Connected then
-				callHandler(c._fn, ...)
+				if c._owner ~= nil then
+					if self._speed and studsOwners[c._owner] then
+						callHandler(ownedCall, c._owner, c._fn, speedInStuds(...))
+					else
+						callHandler(ownedCall, c._owner, c._fn, ...)
+					end
+				else
+					callHandler(c._fn, ...)
+				end
 			end
 		end
 	end
@@ -260,7 +535,11 @@ function Signal:Fire(...)
 	if #waiters > 0 then
 		self._waiters = {}
 		for _, co in ipairs(waiters) do
-			safe_resume(co, ...)
+			if self._speed and studsOwners[ownerOf[co]] then
+				safe_resume(co, speedInStuds(...))
+			else
+				safe_resume(co, ...)
+			end
 		end
 	end
 end
@@ -290,6 +569,8 @@ function Host.getSignal(id, name)
 	local sig = byName[name]
 	if sig == nil then
 		sig = newSignal()
+		-- A Humanoid's Running and Climbing hand their handlers a speed.
+		sig._speed = name == "Running" or name == "Climbing"
 		byName[name] = sig
 		host.listen(id, name)
 	end
@@ -307,10 +588,20 @@ function Host.fireSignal(id, name, ...)
 	end
 end
 
-function Host.dropSignals(id)
+-- Threads left waiting on a destroyed instance's signals. They never resume
+-- (as in Roblox); each one still suspended once the scripts it belonged to
+-- have stopped is reported.
+local orphans = {}
+
+function Host.dropSignals(id, destroyed, instName)
 	local byName = instanceSignals[id]
 	if byName then
-		for _, sig in pairs(byName) do
+		for name, sig in pairs(byName) do
+			if destroyed then
+				for _, co in ipairs(sig._waiters) do
+					tinsert(orphans, { co = co, what = "the " .. name .. " event of " .. (instName or "an instance") })
+				end
+			end
 			sig:DisconnectAll()
 		end
 		instanceSignals[id] = nil
@@ -548,9 +839,11 @@ function Tween:Play()
 	self.PlaybackState = "Playing"
 	self._elapsed = self._elapsed or 0
 	self._from = {}
+	studsOverride = self._studs
 	for prop in pairs(self._goals) do
 		self._from[prop] = self.Instance[prop]
 	end
+	studsOverride = nil
 	activeTweens[self] = true
 end
 
@@ -585,6 +878,7 @@ local function stepTweens(dt)
 			local inst = tw.Instance
 			local alive = host.alive(inst)
 			if alive then
+				studsOverride = tw._studs
 				for prop, goal in pairs(tw._goals) do
 					local ok, err = pcall(function()
 						inst[prop] = lerpValue(tw._from[prop], goal, alpha)
@@ -593,6 +887,7 @@ local function stepTweens(dt)
 						host.output("warn", "Tween: " .. tostring(err))
 					end
 				end
+				studsOverride = nil
 			end
 			if finished or not alive then
 				activeTweens[tw] = nil
@@ -634,6 +929,8 @@ Host.TweenService = {
 			Completed = newSignal(),
 			_goals = goals,
 			_elapsed = 0,
+			-- The units of the script that made it, for every step.
+			_studs = Host.ownerUsesStuds(),
 		}, Tween)
 	end,
 	GetValue = function(_, alpha, style, direction)
@@ -676,7 +973,7 @@ function Host.waitForChild(parent, name, timeout)
 		end
 		if not warned and not timeout and Sched.now - started > 5 then
 			warned = true
-			host.output("warn", "Infinite yield possible on '" .. parent:GetFullName() .. ":WaitForChild(\"" .. tostring(name) .. "\")'")
+			warnStuck(co, "Infinite yield possible on '" .. parent:GetFullName() .. ":WaitForChild(\"" .. tostring(name) .. "\")'")
 		end
 	end
 end
@@ -731,9 +1028,13 @@ end
 local function deferFire(inst, name, ...)
 	local id = host.idOf(inst)
 	local args = pack(...)
-	Sched.defer(function()
+	local co = Sched.defer(function()
 		Host.fireSignal(id, name, unpack(args, 1, args.n))
 	end)
+	local owner = ownerOf[co]
+	if owner ~= nil then
+		unclaim(co, owner)
+	end
 end
 
 local luaMethods = {}
@@ -760,19 +1061,67 @@ local function localPlayer()
 	return game:GetService("Players").LocalPlayer
 end
 
+-- Calls this machine made that are waiting on an answer, keyed by the
+-- invocation id the host handed back.
+local pendingInvokes = {}
+
 function luaMethods.FireServer(self, ...)
+	-- A player sends it on. The host's own LocalScripts keep looping back,
+	-- because on the host the server is already here.
+	if host.remoteNetworked() and not host.remoteIsServer() then
+		host.remoteFire(self, "Server", nil, ...)
+		return
+	end
 	deferFire(self, "OnServerEvent", localPlayer(), ...)
 end
 
-function luaMethods.FireClient(self, _player, ...)
+function luaMethods.FireClient(self, player, ...)
+	if host.remoteNetworked() then
+		if not host.remoteIsServer() then
+			error("FireClient can only be called from the server", 2)
+		end
+		if player ~= localPlayer() then
+			host.remoteFire(self, "Client", player, ...)
+			return
+		end
+	end
+	-- Aimed at the host's own player, so it stays here.
 	deferFire(self, "OnClientEvent", ...)
 end
 
 function luaMethods.FireAllClients(self, ...)
+	if host.remoteNetworked() then
+		if not host.remoteIsServer() then
+			error("FireAllClients can only be called from the server", 2)
+		end
+		host.remoteFire(self, "All", nil, ...)
+	end
+	-- The host's own player is a client too, so it always hears it here.
 	deferFire(self, "OnClientEvent", ...)
 end
 
 function luaMethods.InvokeServer(self, ...)
+	if host.remoteNetworked() and not host.remoteIsServer() then
+		if not isyieldable() then
+			error("InvokeServer has to be called from a script thread", 2)
+		end
+		local id = host.remoteInvoke(self, ...)
+		local pending = { done = false }
+		pendingInvokes[id] = pending
+		local waited = 0
+		while not pending.done do
+			waited = waited + Sched.wait(0)
+			if waited >= host.remoteInvokeTimeout then
+				pendingInvokes[id] = nil
+				error("InvokeServer got no answer in " .. host.remoteInvokeTimeout .. " seconds", 2)
+			end
+		end
+		pendingInvokes[id] = nil
+		if pending.ok then
+			return unpack(pending.results, 1, pending.results.n)
+		end
+		error(tostring(pending.err), 2)
+	end
 	local fn = callback(host.idOf(self), "OnServerInvoke")
 	if fn == nil then
 		error("RemoteFunction has no OnServerInvoke callback", 2)
@@ -780,7 +1129,67 @@ function luaMethods.InvokeServer(self, ...)
 	return fn(localPlayer(), ...)
 end
 
+-- Typed remotes. The names go onto the instance as a comma separated string
+-- property, so they replicate like any other property and the host can refuse
+-- a call whose arguments do not match before a script sees it.
+function luaMethods.SetArgumentTypes(self, types)
+	if type(types) ~= "table" then
+		error("SetArgumentTypes takes an array of type names", 2)
+	end
+	local parts = {}
+	for i, name in ipairs(types) do
+		parts[i] = tostring(name)
+	end
+	self.ArgumentTypes = table.concat(parts, ",")
+end
+
+-- A call that arrived from the session. `from` is the Player on a host and
+-- nil on a player, where every call comes from the host. `invocation` is set
+-- when the caller is parked on an answer.
+function Host.deliverRemote(id, from, invocation, ...)
+	if invocation == nil then
+		if from ~= nil then
+			Host.fireSignal(id, "OnServerEvent", from, ...)
+		else
+			Host.fireSignal(id, "OnClientEvent", ...)
+		end
+		return
+	end
+	local fn = callback(id, "OnServerInvoke")
+	if fn == nil then
+		host.remoteReply(invocation, from, false, "RemoteFunction has no OnServerInvoke callback")
+		return
+	end
+	-- On its own thread, since OnServerInvoke may yield. The answer goes back
+	-- whenever it returns, and an error travels as the message.
+	local args = pack(...)
+	Sched.spawn(function()
+		local r = pack(pcall(fn, from, unpack(args, 1, args.n)))
+		if r[1] then
+			host.remoteReply(invocation, from, true, unpack(r, 2, r.n))
+		else
+			host.remoteReply(invocation, from, false, tostring(r[2]))
+		end
+	end)
+end
+
+-- The answer to an InvokeServer this machine made.
+function Host.deliverReply(invocation, ok, err, ...)
+	local pending = pendingInvokes[invocation]
+	if pending == nil then
+		return
+	end
+	pending.ok = ok
+	pending.err = err
+	pending.results = pack(...)
+	pending.done = true
+end
+
 function luaMethods.InvokeClient(self, _player, ...)
+	if host.remoteNetworked() and _player ~= nil and _player ~= localPlayer() then
+		-- A player that never answers would hold this script for good.
+		error("InvokeClient is not supported; use a RemoteEvent both ways", 2)
+	end
 	local fn = callback(host.idOf(self), "OnClientInvoke")
 	if fn == nil then
 		error("RemoteFunction has no OnClientInvoke callback", 2)
@@ -803,38 +1212,6 @@ function Host.fireTagSignal(tag, kind, inst)
 	if t then
 		t[kind]:Fire(inst)
 	end
-end
-
--- AnimationTrack stand-in: accepts the calls ported scripts make.
-function Host.stubAnimationTrack()
-	local track = {
-		IsPlaying = false,
-		Length = 0,
-		Speed = 1,
-		TimePosition = 0,
-		WeightCurrent = 1,
-		Looped = false,
-		Priority = Host.Enum.AnimationPriority.Core,
-		Stopped = newSignal(),
-		Ended = newSignal(),
-		DidLoop = newSignal(),
-		KeyframeReached = newSignal(),
-	}
-	function track:Play()
-		self.IsPlaying = true
-	end
-	function track:Stop()
-		self.IsPlaying = false
-		self.Stopped:Fire()
-	end
-	function track:AdjustSpeed(s)
-		self.Speed = s
-	end
-	function track:AdjustWeight() end
-	function track:GetMarkerReachedSignal()
-		return newSignal()
-	end
-	return track
 end
 
 -- ContextActionService: actions bound to keys or mouse buttons.
@@ -906,6 +1283,20 @@ local function marketplaceReady()
 	return status
 end
 
+-- A player who joined a multiplayer host has its passes read when it joins;
+-- a script asking about them first waits for them (up to 10 s) rather than
+-- answer false.
+local function passesReady(user)
+	if running() ~= nil and isyieldable() then
+		for _ = 1, 100 do
+			if not host.commercePassesPending(user) then
+				return
+			end
+			Sched.wait(0.1)
+		end
+	end
+end
+
 Host.MarketplaceService = {
 	PromptProductPurchase = function(_, player, productId)
 		host.commercePrompt(player, productId, "consumable")
@@ -929,10 +1320,12 @@ Host.MarketplaceService = {
 	end,
 	UserOwnsGamePassAsync = function(_, userId, passId)
 		marketplaceReady()
+		passesReady(userId)
 		return host.commerceOwns(userId, passId)
 	end,
 	PlayerOwnsAsset = function(_, player, productId)
 		marketplaceReady()
+		passesReady(player)
 		return host.commerceOwns(player, productId)
 	end,
 	PromptProductPurchaseFinished = marketplaceSignals.PromptProductPurchaseFinished,
@@ -1023,6 +1416,30 @@ function Host.unbindFromRenderStep(name)
 	renderBindings[name] = nil
 end
 
+-- Threads that will never resume, or have waited on nothing for 5 s: one
+-- warning each, where the thread waits.
+local function reportStuck()
+	if #orphans > 0 then
+		local list = orphans
+		orphans = {}
+		for _, o in ipairs(list) do
+			if status(o.co) == "suspended" then
+				warnStuck(o.co, "Infinite yield: this thread waits on " .. o.what .. ", which was destroyed, so it never resumes")
+			end
+		end
+	end
+	if next(rawYields) ~= nil then
+		for co, since in pairs(rawYields) do
+			if parked[co] or status(co) ~= "suspended" then
+				rawYields[co] = nil
+			elseif Sched.now - since >= 5 then
+				rawYields[co] = nil
+				warnStuck(co, "Infinite yield possible: this thread called coroutine.yield() and nothing has resumed it for 5 s")
+			end
+		end
+	end
+end
+
 function Host.frame(now, dt)
 	local sorted = nil
 	for name, b in pairs(renderBindings) do
@@ -1047,6 +1464,7 @@ function Host.frame(now, dt)
 	RunServiceSignals.PostSimulation:Fire(dt)
 	RunServiceSignals.Heartbeat:Fire(dt)
 	Host.flushDeferred()
+	reportStuck()
 end
 
 -- Tear everything down for Stop.
@@ -1058,6 +1476,10 @@ function Host.reset()
 	end
 	Sched.sleeping = {}
 	Sched.deferred = {}
+	orphans = {}
+	for co in pairs(rawYields) do
+		rawYields[co] = nil
+	end
 	for id in pairs(instanceSignals) do
 		Host.dropSignals(id)
 	end

@@ -15,6 +15,12 @@
 //! A Space-only publish exports that one Space and swaps it into the manifest
 //! the listing already plays, keeping every other Space as published.
 //!
+//! Players never receive the server-only services (ServerScriptService and
+//! ServerStorage), as in Roblox. When the author turns on Share Source, a
+//! second manifest, the source world, adds them for the gallery's Edit;
+//! otherwise they never leave the machine. A publish refuses a webhook URL in
+//! anything the public can download.
+//!
 //! The listing is created once. Its id is kept in the Universe's
 //! `.eustress/sync.toml` (`remote.experience_id`) the moment the API returns
 //! it, so every later publish, a Space-only one included, and a retry after a
@@ -29,10 +35,8 @@ use bevy::prelude::*;
 use eustress_echk::WorldManifest;
 use eustress_worlddb::WorldDb;
 
-use super::echk_export::{export_world, ExportedWorld, SpaceInput, SpaceSource, SAVE_SETTLE};
+use super::echk_export::{export_world, Audience, ExportedWorld, SpaceInput, SpaceSource, SAVE_SETTLE};
 
-/// The API every publish talks to.
-pub const PUBLISH_API: &str = "https://api.eustress.dev";
 /// Largest chunk the API takes in one request (`MAX_UPLOAD_CHUNK_BYTES` in
 /// `world.mjs`, under the Worker's 100 MB request limit).
 pub const MAX_UPLOAD_CHUNK_BYTES: u64 = 95 * 1024 * 1024;
@@ -46,6 +50,8 @@ pub struct Listing {
     pub description: String,
     pub genre: String,
     pub is_public: bool,
+    /// "Share Source": the gallery offers Edit (open in Studio) on the listing.
+    pub open_source: bool,
 }
 
 impl Listing {
@@ -55,6 +61,7 @@ impl Listing {
             "description": self.description,
             "genre": self.genre,
             "is_public": self.is_public,
+            "open_source": self.open_source,
         })
     }
 }
@@ -124,11 +131,9 @@ fn folder_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".to_string())
 }
 
-/// Export the planned Spaces, or only `only`, with the Universe's assets.
-pub fn export(plan: &ExportPlan, only: Option<&str>) -> Result<ExportedWorld, String> {
-    if plan.after_save {
-        std::thread::sleep(SAVE_SETTLE);
-    }
+/// Export the planned Spaces, or only `only`, for `audience`: what players
+/// receive (with the Universe's assets), or the server-only services.
+pub fn export(plan: &ExportPlan, only: Option<&str>, audience: Audience) -> Result<ExportedWorld, String> {
     let inputs: Vec<SpaceInput> = plan
         .spaces
         .iter()
@@ -144,7 +149,7 @@ pub fn export(plan: &ExportPlan, only: Option<&str>) -> Result<ExportedWorld, St
     let standalone = plan.spaces.iter().any(|(_, folder)| *folder == plan.universe_root);
     let assets = if standalone { None } else { Some(plan.universe_root.as_path()) };
     let out_root = plan.universe_root.join(".eustress").join("publish");
-    export_world(&plan.universe, inputs, start, assets, &out_root, plan.big_space_threshold)
+    export_world(&plan.universe, inputs, start, assets, &out_root, plan.big_space_threshold, audience)
 }
 
 /// Where one Space's content is read from: the open Space's live database;
@@ -154,6 +159,7 @@ fn space_input(plan: &ExportPlan, name: &str, folder: &Path) -> SpaceInput {
         name: name.to_string(),
         source: SpaceSource::Db(db),
         folder: Some(folder.to_path_buf()),
+        terrain: None,
     };
     if name == plan.start_space {
         if let Some(db) = &plan.active_db {
@@ -170,7 +176,7 @@ fn space_input(plan: &ExportPlan, name: &str, folder: &Path) -> SpaceInput {
             Err(e) => warn!("publish: the database of {name} could not be opened ({e}); publishing its folder"),
         }
     }
-    SpaceInput { name: name.to_string(), source: SpaceSource::Disk(folder.to_path_buf()), folder: None }
+    SpaceInput { name: name.to_string(), source: SpaceSource::Disk(folder.to_path_buf()), folder: None, terrain: None }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -219,8 +225,9 @@ impl Api {
         }
     }
 
+    /// `path` on the API in use (`eustress_common::api_base`).
     fn url(path: &str) -> String {
-        format!("{PUBLISH_API}{path}")
+        eustress_common::api_base::api_url(path)
     }
 
     fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
@@ -330,6 +337,7 @@ fn create_listing(api: &Api, listing: &Listing, spaces: &[String]) -> Result<Str
         "max_players": 10,
         // The author's intent; the gallery lists it only once review approves.
         "is_public": listing.is_public,
+        "open_source": listing.open_source,
         "spaces": spaces,
     });
     let answer = api
@@ -359,31 +367,72 @@ pub fn publish(
         return Err("Publish the Universe first, then its Spaces one at a time.".into());
     }
 
+    if plan.after_save {
+        std::thread::sleep(SAVE_SETTLE);
+    }
+    let only = space_only.then_some(plan.start_space.as_str());
     progress("Baking the world...", 5.0);
-    let exported = export(plan, space_only.then_some(plan.start_space.as_str()))?;
-    let manifest = if space_only {
-        let id = sim_id.as_deref().unwrap_or_default();
-        let published = api.get_text(&format!("/api/simulations/{id}/world/manifest")).map_err(|e| {
-            if e.status == 409 {
-                "This listing was published before .echk. Publish the whole Universe once, then Spaces can be updated one at a time.".to_string()
-            } else {
-                format!("Reading the published world failed: {e}")
-            }
-        })?;
-        let published: WorldManifest =
-            serde_json::from_str(&published).map_err(|e| format!("The published world's manifest is unreadable: {e}"))?;
-        swap_space(published, &exported.manifest, &plan.start_space)?
+    let play = export(plan, only, Audience::Players)?;
+    // The server-only services leave this machine only for a listing whose
+    // author shares its source, and then only to Edit.
+    let server = if listing.open_source {
+        progress("Baking the source...", 9.0);
+        Some(export(plan, only, Audience::Server)?)
     } else {
-        exported.manifest.clone()
+        None
     };
-    refuse_oversized(&manifest, &exported)?;
+    refuse_webhooks(&play, server.as_ref())?;
+
+    let (manifest, source) = if space_only {
+        let id = sim_id.as_deref().unwrap_or_default();
+        let published = fetch_manifest(&api, id, "manifest")?.ok_or_else(|| {
+            "This listing was published before .echk. Publish the whole Universe once, then Spaces can be updated one at a time."
+                .to_string()
+        })?;
+        let manifest = swap_space(published, &play.manifest, &plan.start_space)?;
+        let source = match &server {
+            Some(server) => {
+                let base = fetch_manifest(&api, id, "source")?.ok_or_else(|| {
+                    "Share Source is new for this listing. Publish the whole Universe once so every Space's source goes up."
+                        .to_string()
+                })?;
+                Some(swap_space(base, &source_of(&play.manifest, &server.manifest)?, &plan.start_space)?)
+            }
+            None => None,
+        };
+        (manifest, source)
+    } else {
+        let source = server.as_ref().map(|s| source_of(&play.manifest, &s.manifest)).transpose()?;
+        (play.manifest.clone(), source)
+    };
+    // Everything that goes up: the source world names every player chunk too.
+    let upload = source.as_ref().unwrap_or(&manifest);
+    let read_chunk = |hash: &str| {
+        play.read_chunk(hash).or_else(|e| server.as_ref().map_or(Err(e), |s| s.read_chunk(hash)))
+    };
+    refuse_oversized(upload, &read_chunk)?;
 
     let manifest_json = serde_json::to_string(&manifest).map_err(|e| format!("Serializing the manifest failed: {e}"))?;
     let publish_hash = blake3::hash(manifest_json.as_bytes()).to_hex().to_string();
-    let listing_json = if space_only { serde_json::Value::Null } else { listing.to_json() };
+    let source_json = source
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| format!("Serializing the source manifest failed: {e}"))?;
+    let upload_json = source_json.as_ref().unwrap_or(&manifest_json);
+    // A Space-only publish sends only Share Source, which its dialog shows too.
+    let listing_json = if space_only {
+        serde_json::json!({ "open_source": listing.open_source })
+    } else {
+        listing.to_json()
+    };
 
-    // Nothing to do when this exact world and listing text went up last time.
-    let state = |id: &str| blake3::hash(format!("{id}\n{publish_hash}\n{listing_json}").as_bytes()).to_hex().to_string();
+    // Nothing to do when this exact world, source and listing text went up
+    // last time.
+    let source_hash = source_json.as_deref().map(|s| blake3::hash(s.as_bytes()).to_hex().to_string()).unwrap_or_default();
+    let state = |id: &str| {
+        blake3::hash(format!("{id}\n{publish_hash}\n{source_hash}\n{listing_json}").as_bytes()).to_hex().to_string()
+    };
     if let Some(id) = &sim_id {
         if read_state(&plan.universe_root, ".last_publish_state").as_deref() == Some(state(id).as_str()) {
             return Err(NO_CHANGES.into());
@@ -406,7 +455,7 @@ pub fn publish(
     };
 
     progress("Comparing with the published world...", 15.0);
-    let begin_body = serde_json::json!({ "manifest_json": manifest_json });
+    let begin_body = serde_json::json!({ "manifest_json": upload_json });
     let (id, begin) = match api.post_json(&format!("/api/simulations/{id}/world/begin"), &begin_body) {
         Ok(begin) => (id, begin),
         Err(e) if e.listing_gone() && !created && !space_only => {
@@ -426,7 +475,7 @@ pub fn publish(
         .map(|a| a.iter().filter_map(|h| h.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
     let sizes: std::collections::HashMap<&str, u64> =
-        manifest.all_chunks().map(|c| (c.blake3.as_str(), c.size)).collect();
+        upload.all_chunks().map(|c| (c.blake3.as_str(), c.size)).collect();
     let upload_bytes: u64 = missing.iter().filter_map(|h| sizes.get(h.as_str())).sum();
     let mut sent_bytes = 0u64;
     for (i, hash) in missing.iter().enumerate() {
@@ -435,7 +484,7 @@ pub fn publish(
         }
         // A Space-only publish holds only its own Space's chunks and the
         // assets; everything else must already be up.
-        let bytes = exported.read_chunk(hash).map_err(|_| {
+        let bytes = read_chunk(hash.as_str()).map_err(|_| {
             format!("The published world is missing chunk {hash}, which this machine does not have. Publish the whole Universe.")
         })?;
         let percent = 20.0 + 65.0 * (sent_bytes as f32 / upload_bytes.max(1) as f32);
@@ -456,6 +505,12 @@ pub fn publish(
     });
     api.post_json(&format!("/api/simulations/{id}/world/commit"), &commit_body)
         .map_err(|e| format!("Committing the world failed: {e}"))?;
+    if let Some(source_json) = &source_json {
+        progress("Committing the source...", 88.0);
+        let source_body = serde_json::json!({ "manifest_json": source_json, "kind": "source" });
+        api.post_json(&format!("/api/simulations/{id}/world/commit"), &source_body)
+            .map_err(|e| format!("Committing the source failed: {e}"))?;
+    }
 
     write_state(&plan.universe_root, ".last_publish_hash", &publish_hash);
     write_state(&plan.universe_root, ".last_publish_state", &state(&id));
@@ -499,12 +554,60 @@ fn swap_space(mut published: WorldManifest, fresh: &WorldManifest, space: &str) 
     Ok(published)
 }
 
+/// A manifest the listing already has: `which` is `manifest` (what players
+/// get) or `source` (what Edit gets). `None` when the listing has none: a
+/// `.pak` listing, or a listing whose source was never shared.
+fn fetch_manifest(api: &Api, sim_id: &str, which: &str) -> Result<Option<WorldManifest>, String> {
+    let text = match api.get_text(&format!("/api/simulations/{sim_id}/world/{which}")) {
+        Ok(text) => text,
+        Err(e) if e.status == 409 || e.status == 404 => return Ok(None),
+        Err(e) => return Err(format!("Reading the published world failed: {e}")),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("The published world's manifest is unreadable: {e}"))
+}
+
+/// The world Edit downloads: every player chunk, plus each Space's
+/// server-only chunks.
+fn source_of(play: &WorldManifest, server: &WorldManifest) -> Result<WorldManifest, String> {
+    let mut source = play.clone();
+    for space in &mut source.spaces {
+        if let Some(extra) = server.spaces.iter().find(|s| s.name == space.name) {
+            space.chunks.extend(extra.chunks.iter().cloned());
+        }
+    }
+    source.canonicalize();
+    source.validate().map_err(|e| format!("The source world failed its own check: {e}"))?;
+    Ok(source)
+}
+
+/// Refuse to publish a webhook URL in anything the public can download: the
+/// player world always, and the server-only services when Share Source is on.
+/// Names the files, never the URLs.
+fn refuse_webhooks(play: &ExportedWorld, server: Option<&ExportedWorld>) -> Result<(), String> {
+    let found: Vec<String> = std::iter::once(play)
+        .chain(server)
+        .flat_map(|exported| exported.stats.iter())
+        .flat_map(|(space, stats)| stats.webhook_paths.iter().map(move |p| format!("{space}/{p}")))
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    let shown = found.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+    let more = if found.len() > 8 { format!(" and {} more", found.len() - 8) } else { String::new() };
+    Err(format!(
+        "{} file(s) anyone could download hold a webhook URL: {shown}{more}. Whoever has the URL can post to that channel. Move the URL out of these files{}, then publish again.",
+        found.len(),
+        if server.is_some() { ", or turn off Share Source when they are in ServerScriptService or ServerStorage" } else { "" }
+    ))
+}
+
 /// Refuse, before any upload, a chunk the API cannot take in one request,
 /// naming the file that makes it that large.
-fn refuse_oversized(manifest: &WorldManifest, exported: &ExportedWorld) -> Result<(), String> {
+fn refuse_oversized(manifest: &WorldManifest, read_chunk: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Result<(), String> {
     let Some(chunk) = manifest.all_chunks().find(|c| c.size > MAX_UPLOAD_CHUNK_BYTES) else { return Ok(()) };
-    let biggest = exported
-        .read_chunk(&chunk.blake3)
+    let biggest = read_chunk(&chunk.blake3)
         .ok()
         .and_then(|bytes| eustress_echk::decode_chunk(&bytes).ok())
         .and_then(|records| records.into_iter().max_by_key(|(_, data)| data.len()))
@@ -549,6 +652,46 @@ mod tests {
     }
 
     #[test]
+    fn the_source_world_adds_each_spaces_server_chunks() {
+        let mut play = WorldManifest::new("U", "0.3.6", 256.0);
+        play.spaces.push(SpaceManifest { name: "City".into(), chunks: vec![entry(0, 'a', 10)] });
+        play.spaces.push(SpaceManifest { name: "Garage".into(), chunks: vec![entry(0, 'b', 10)] });
+        play.assets.push(entry(0, 'c', 10));
+        let mut server = WorldManifest::new("U", "0.3.6", 256.0);
+        server.spaces.push(SpaceManifest { name: "City".into(), chunks: vec![entry(0, 'd', 10)] });
+        server.spaces.push(SpaceManifest { name: "Garage".into(), chunks: vec![] });
+
+        let source = source_of(&play, &server).unwrap();
+        let city = source.spaces.iter().find(|s| s.name == "City").unwrap();
+        let hashes: Vec<&str> = city.chunks.iter().map(|c| &c.blake3[..1]).collect();
+        assert_eq!(hashes, vec!["a", "d"], "the server chunk joins its own Space");
+        assert_eq!(source.spaces.iter().find(|s| s.name == "Garage").unwrap().chunks.len(), 1);
+        assert_eq!(source.assets, play.assets);
+    }
+
+    #[test]
+    fn a_webhook_url_in_anything_public_stops_the_publish() {
+        let exported = |space: &str, paths: &[&str]| {
+            let stats = crate::space::echk_export::ExportStats {
+                webhook_paths: paths.iter().map(|p| p.to_string()).collect(),
+                ..Default::default()
+            };
+            ExportedWorld {
+                manifest: WorldManifest::new("U", "0.3.6", 256.0),
+                files: Default::default(),
+                stats: vec![(space.to_string(), stats)],
+            }
+        };
+        let clean = exported("City", &[]);
+        let server = exported("City", &["ServerScriptService/Report/Report.luau"]);
+        assert!(refuse_webhooks(&clean, None).is_ok());
+        let err = refuse_webhooks(&clean, Some(&server)).unwrap_err();
+        assert!(err.contains("City/ServerScriptService/Report/Report.luau"), "{err}");
+        assert!(!err.contains("discord.com"), "the refusal must never echo a URL");
+        assert!(refuse_webhooks(&exported("City", &["StarterGui/Menu/Menu.luau"]), None).is_err());
+    }
+
+    #[test]
     fn a_differently_baked_world_is_not_merged() {
         let mut published = WorldManifest::new("U", "0.3.5", 128.0);
         published.spaces.push(SpaceManifest { name: "City".into(), chunks: vec![entry(0, 'a', 10)] });
@@ -579,7 +722,7 @@ mod tests {
         assert!(gone(404, None));
         assert!(gone(403, None), "Not your simulation");
         assert!(!gone(403, Some("publish_frozen")), "a frozen account must not mint listings");
-        assert!(!gone(409, Some("quarantined")));
+        assert!(!gone(409, Some("in_review")), "a listing in review is kept, never replaced");
         assert!(!gone(0, None), "a network failure is not a missing listing");
     }
 }

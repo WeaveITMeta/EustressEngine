@@ -30,6 +30,10 @@
 //! reader of the heights alone (the water's height texture) follows
 //! [`TerrainDirtyChunks::height_seq`] instead, which paint strokes
 //! ([`TerrainDirtyChunks::mark_world_rect_materials`]) and volume edits leave.
+//! The Studio's Save follows the surface log too, to write only the chunks
+//! changed since its last save, and a brick log beside it
+//! ([`TerrainDirtyChunks::brick_changes_since`], stamped by every volume
+//! mark) for the bricks.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -101,6 +105,19 @@ pub struct TerrainDirtyChunks {
     /// Paint and volume marks leave it, so the water's height texture is not
     /// re-uploaded for them.
     height_seq: u64,
+    /// Rises by one with every volume mark ([`Self::mark_volume_edit`]).
+    brick_seq: u64,
+    /// Per brick, the `brick_seq` of the latest volume mark that created,
+    /// changed or removed it. Bounded by the bricks ever edited.
+    brick_marks: HashMap<IVec3, u64>,
+}
+
+/// What the volume marks changed since a reader last looked (see
+/// [`TerrainDirtyChunks::brick_changes_since`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BrickChanges {
+    /// The bricks created, changed or removed, in no particular order.
+    pub bricks: Vec<IVec3>,
 }
 
 /// What changed on the terrain surface since a reader last looked (see
@@ -150,6 +167,22 @@ impl TerrainDirtyChunks {
         SurfaceChanges { all: false, chunks }
     }
 
+    /// The brick change counter: rises with every volume mark.
+    pub fn brick_seq(&self) -> u64 {
+        self.brick_seq
+    }
+
+    /// The bricks the volume marks made since [`Self::brick_seq`] read
+    /// `seen` created, changed or removed. A reader then keeps the current
+    /// [`Self::brick_seq`] as its next `seen`.
+    pub fn brick_changes_since(&self, seen: u64) -> BrickChanges {
+        if self.brick_seq <= seen {
+            return BrickChanges::default();
+        }
+        let bricks = self.brick_marks.iter().filter(|(_, seq)| **seq > seen).map(|(coord, _)| *coord).collect();
+        BrickChanges { bricks }
+    }
+
     /// Stamp the chunks `lo..=hi` (inclusive chunk coordinates) with a new
     /// surface sequence number.
     fn note_surface_chunks(&mut self, lo: IVec2, hi: IVec2) {
@@ -175,9 +208,10 @@ impl TerrainDirtyChunks {
     fn note_surface_rect(&mut self, config: &TerrainConfig, lo: Vec2, hi: Vec2) {
         let size = config.chunk_size.max(1e-3);
         let cell = size / config.chunk_resolution.max(1) as f32;
-        let extent = IVec2::new(config.chunks_x as i32, config.chunks_z as i32);
-        let first = IVec2::new(((lo.x - cell) / size).floor() as i32, ((lo.y - cell) / size).floor() as i32).max(-extent);
-        let last = IVec2::new(((hi.x + cell) / size).floor() as i32, ((hi.y + cell) / size).floor() as i32).min(extent);
+        let first = IVec2::new(((lo.x - cell) / size).floor() as i32, ((lo.y - cell) / size).floor() as i32)
+            .max(config.chunk_min());
+        let last = IVec2::new(((hi.x + cell) / size).floor() as i32, ((hi.y + cell) / size).floor() as i32)
+            .min(config.chunk_max());
         if first.x <= last.x && first.y <= last.y {
             self.note_surface_chunks(first, last);
         }
@@ -231,12 +265,11 @@ impl TerrainDirtyChunks {
         let hi = min_xz.max(max_xz);
         self.note_surface_rect(config, lo, hi);
         let size = config.chunk_size.max(1e-3);
-        let extent_x = config.chunks_x as i32;
-        let extent_z = config.chunks_z as i32;
-        let x0 = ((lo.x / size).floor() as i32).saturating_sub(1).max(-extent_x);
-        let x1 = ((hi.x / size).floor() as i32).saturating_add(1).min(extent_x);
-        let z0 = ((lo.y / size).floor() as i32).saturating_sub(1).max(-extent_z);
-        let z1 = ((hi.y / size).floor() as i32).saturating_add(1).min(extent_z);
+        let (grid_min, grid_max) = (config.chunk_min(), config.chunk_max());
+        let x0 = ((lo.x / size).floor() as i32).saturating_sub(1).max(grid_min.x);
+        let x1 = ((hi.x / size).floor() as i32).saturating_add(1).min(grid_max.x);
+        let z0 = ((lo.y / size).floor() as i32).saturating_sub(1).max(grid_min.y);
+        let z1 = ((hi.y / size).floor() as i32).saturating_add(1).min(grid_max.y);
         for x in x0..=x1 {
             for z in z0..=z1 {
                 self.remesh.insert(IVec2::new(x, z));
@@ -274,13 +307,9 @@ impl TerrainDirtyChunks {
     fn mark_grid(&mut self, config: &TerrainConfig) {
         self.note_surface_all();
         self.height_seq += 1;
-        let extent_x = config.chunks_x as i32;
-        let extent_z = config.chunks_z as i32;
-        for x in -extent_x..=extent_x {
-            for z in -extent_z..=extent_z {
-                self.remesh.insert(IVec2::new(x, z));
-                self.recollide.insert(IVec2::new(x, z));
-            }
+        for chunk in config.grid_chunks() {
+            self.remesh.insert(chunk);
+            self.recollide.insert(chunk);
         }
     }
 
@@ -327,13 +356,7 @@ impl TerrainDirtyChunks {
     /// Mark every chunk's mesh stale but none of their colliders, for a
     /// change that only recolours the ground (the material slot palette).
     pub fn mark_all_meshes(&mut self, config: &TerrainConfig) {
-        let extent_x = config.chunks_x as i32;
-        let extent_z = config.chunks_z as i32;
-        for x in -extent_x..=extent_x {
-            for z in -extent_z..=extent_z {
-                self.remesh.insert(IVec2::new(x, z));
-            }
-        }
+        self.remesh.extend(config.grid_chunks());
     }
 
     /// Mark the chunks a volume edit changed: those its changed box overlaps
@@ -341,10 +364,15 @@ impl TerrainDirtyChunks {
     /// columns a brick it created, changed or removed reaches, since a brick
     /// appearing or going switches those chunks between heightfield and
     /// marching-cubes meshes and colliders. Remeshing starts under the edit.
-    /// Queues no layer bake: the raster did not change.
+    /// Queues no layer bake: the raster did not change. Stamps every brick
+    /// the edit lists in the brick log.
     pub fn mark_volume_edit(&mut self, config: &TerrainConfig, edit: &VolumeEdit) {
         if edit.is_empty() {
             return;
+        }
+        self.brick_seq += 1;
+        for coord in &edit.bricks {
+            self.brick_marks.insert(*coord, self.brick_seq);
         }
         let cell = lattice_cell_size(config);
         let bricks = edit.bricks.iter().map(|coord| {
@@ -669,6 +697,31 @@ mod tests {
         assert_eq!(dirty.surface_seq(), seen, "a recolour moves no ground");
         dirty.mark_all(&config);
         assert!(dirty.surface_changes_since(seen).all);
+    }
+
+    #[test]
+    fn the_brick_log_lists_each_edited_brick_once_per_reader() {
+        let config = config();
+        let mut dirty = TerrainDirtyChunks::default();
+        assert_eq!(dirty.brick_changes_since(0), BrickChanges::default());
+        let edit = |bricks: &[IVec3]| VolumeEdit { min: Vec3::ZERO, max: Vec3::ONE, bricks: bricks.to_vec() };
+
+        dirty.mark_volume_edit(&config, &edit(&[IVec3::new(0, 0, 0), IVec3::new(1, 0, 0)]));
+        let mut first = dirty.brick_changes_since(0).bricks;
+        first.sort_by_key(|c| (c.x, c.y, c.z));
+        assert_eq!(first, vec![IVec3::new(0, 0, 0), IVec3::new(1, 0, 0)]);
+        let seen = dirty.brick_seq();
+        assert!(dirty.brick_changes_since(seen).bricks.is_empty(), "nothing new since");
+
+        // A later edit of one of them lists it again for the reader that
+        // already saw it; an empty edit and raster marks leave the log.
+        dirty.mark_volume_edit(&config, &edit(&[IVec3::new(1, 0, 0), IVec3::new(0, -1, 2)]));
+        dirty.mark_volume_edit(&config, &edit(&[]));
+        dirty.mark_world_rect(&config, Vec2::ZERO, Vec2::splat(10.0));
+        let mut next = dirty.brick_changes_since(seen).bricks;
+        next.sort_by_key(|c| (c.x, c.y, c.z));
+        assert_eq!(next, vec![IVec3::new(0, -1, 2), IVec3::new(1, 0, 0)]);
+        assert_eq!(dirty.brick_changes_since(0).bricks.len(), 3, "a reader from the start sees all three");
     }
 
     #[test]

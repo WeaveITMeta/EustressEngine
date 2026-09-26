@@ -28,7 +28,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use super::climb::{AvatarClimb, ClimbPhase};
+use super::climb::{AvatarClimb, ClimbPhase, MantlePath};
+use super::climbable::{ClimbSurfaces, SurfaceRule};
 use super::rig::{AvatarRig, HumanoidBone};
 use super::spawn::{AvatarBody, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
@@ -38,6 +39,11 @@ const PLANT_SPEED_FRAC: f32 = 0.15;
 /// How close a foot must be to the ground beneath it to count as planted, m.
 /// Roughly a sole's thickness plus the clip's contact slop.
 const PLANT_GROUND_GAP: f32 = 0.09;
+/// How far a locked stance foot may trail where the clip puts it, as a
+/// fraction of the leg, before the lock slides after it. A body moving faster
+/// than its clip's feet then shows a little foot slide, never a leg dragged
+/// out behind it.
+const LOCK_TRAIL_FRAC: f32 = 0.35;
 /// How far below the foot to look for ground.
 const FOOT_PROBE_DOWN: f32 = 0.55;
 /// Maximum foot pitch when conforming to a slope.
@@ -54,20 +60,63 @@ const IK_FADE_ABOVE: f32 = 1.4;
 /// length puts the palm on the edge, which is what the grip is supposed to
 /// look like.
 const WRIST_BELOW_LIP_FRAC: f32 = -0.055;
-/// How far the sole target sits below the body centre, as a fraction of the
-/// capsule half-extent.
+/// How far a braced sole sits from its hip, as a fraction of the leg's own
+/// length.
 ///
-/// At 0.92 the legs hung nearly straight and the knees never bent — the pose
-/// read as a limp dangle rather than a braced hang. Bringing the feet up puts
-/// a real angle at the knee, which is what "feet planted on the wall" means.
-const CLIMB_SOLE_DROP_FRAC: f32 = 0.42;
-/// How much say the leg IK gets while hanging.
+/// The sole goes on the wall face straight below the knee's reach: far enough
+/// down that the leg meets it BENT, never folded past what a knee does and
+/// never locked straight. A fixed height could not promise that. Set just
+/// under the body (0.42 of the capsule half-extent) it sat inside the
+/// solver's fold limit, the solver refused it, and the feet hung in the
+/// air in front of a wall they were meant to be planted on.
+const BRACED_LEG_REACH: f32 = 0.66;
+/// How much say the leg IK gets on a braced hang, before the brace scales it.
 ///
-/// Small. The authored stance already puts the knees out and the feet tucked;
-/// a full-weight solve straightens all of that back out to reach whatever
-/// point on the wall the target happens to sit at. The IK is here to press the
-/// soles onto the face, not to decide the shape of the legs.
-const CLIMB_LEG_IK_WEIGHT: f32 = 0.30;
+/// High, because the target is now one the leg reaches bent (see
+/// [`BRACED_LEG_REACH`]) and agrees with the frogged stance the pose lays
+/// down. The solve only has to put the soles on the wall.
+const CLIMB_LEG_IK_WEIGHT: f32 = 0.75;
+/// How fast the authored climb pose blends in and out, per second. Slower
+/// than the grip: a hand closes on a ledge at once, a whole body takes a
+/// moment to change shape.
+const POSE_BLEND_RATE: f32 = 18.0;
+/// Mantle fraction over which the authored pose hands the body back to the
+/// clips. Last of all: the stand is still bending the legs until the body
+/// is nearly upright on the top.
+const MANTLE_POSE_RELEASE: (f32, f32) = (0.88, 1.0);
+/// How far above the top a pressing wrist sits, metres: the heel of the hand
+/// on the surface, the wrist just over it.
+const PALM_ABOVE_TOP: f32 = 0.035;
+/// How far above the top surface the knee joint sits when the knee rests on
+/// it, metres: the kneecap and the flesh under it.
+const KNEE_PAD: f32 = 0.06;
+/// How far above the top the lead sole sits as the body stands up onto it.
+const SOLE_ON_TOP: f32 = 0.05;
+/// Side-to-side sway of a free-hanging body as its hands walk along a lip,
+/// radians at full traverse.
+const FREE_SWAY: f32 = 0.08;
+/// How far below the feet the ground must fall away on both sides for the
+/// support underfoot to count as narrow, metres: a drop worth not falling off.
+const NARROW_DROP: f32 = 0.6;
+/// Slowest walk that balances, m/s. Standing still on a beam is standing.
+const BALANCE_MIN_SPEED: f32 = 0.3;
+/// Seconds on something narrow before the arms go out, so a stride across a
+/// gap between two slabs never flaps them.
+const BALANCE_DELAY: f32 = 0.15;
+/// How fast the arms go out and come back in, per second.
+const BALANCE_RATE: f32 = 6.0;
+/// The arms held out for balance: out to the sides, a little forward and
+/// below the shoulders, elbows soft, the left arm higher. Laid over the walk,
+/// and over its own mirror image as the seconds pass, so the high arm trades
+/// sides the way a person on a beam keeps correcting.
+const BALANCE_POSE: &[PoseDir] = &[
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.95, 0.30, -0.08]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.96, 0.22, -0.08]),
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.86, -0.30, -0.40]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.72, -0.12, -0.68]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.88, -0.42, -0.22]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.80, -0.36, -0.48]),
+];
 /// How much closer the ANCHORED hand's target sits to its shoulder, as a
 /// fraction of arm length — i.e. how much that elbow bends under load.
 const ANCHOR_ELBOW_FLEX: f32 = 0.16;
@@ -151,10 +200,25 @@ pub struct AvatarFootIk {
     // running against a stale pose, this does not fall.
     /// Blend weight currently applied to the arm chains, 0..1.
     pub hand_weight: f32,
+    /// Blend weight of the authored climb pose, 0..1.
+    ///
+    /// Separate from `hand_weight`: a vault poses the whole body while the
+    /// hands hold nothing, and tying the pose to the grip is what kept the
+    /// vault stride from ever showing.
+    pub pose_weight: f32,
+    /// The climb as it last was while attached, so the pose fades out of the
+    /// move that just ended instead of flashing through a hang.
+    pub last_climb: Option<AvatarClimb>,
     /// Worst of the two hands' distance-to-target after the solve, metres.
     pub hand_error_m: f32,
     /// Worst of the two feet's distance-to-target after the solve, metres.
     pub climb_foot_error_m: f32,
+    /// How far the arms are out for balance, 0..1.
+    pub balance: f32,
+    /// Seconds spent walking on something narrow.
+    pub narrow_for: f32,
+    /// Whether a non-finite pose on this avatar has been reported yet.
+    pub non_finite_reported: bool,
 }
 
 pub(crate) struct AvatarIkPlugin;
@@ -180,6 +244,19 @@ fn attach_ik_state(
 ) {
     for e in q.iter() {
         commands.entity(e).try_insert(AvatarFootIk::default());
+    }
+}
+
+/// Say once per avatar that its pose went non-finite, naming the avatar, what
+/// it drives it, and where, so the source can be found. The limb is skipped
+/// either way.
+fn report_non_finite(ik: &mut AvatarFootIk, root: Entity, body: &AvatarBody, what: &str, at: Vec3) {
+    if !ik.non_finite_reported {
+        ik.non_finite_reported = true;
+        warn!(
+            "🦴 limb IK skipped a non-finite {what} on {root:?} ({:?} avatar): {at:?}",
+            body.control
+        );
     }
 }
 
@@ -417,9 +494,28 @@ fn drive_two_bone_chain(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Keep a locked foot within `max_trail` (horizontally) of where the clip puts
+/// it, `animated_foot`: a lock the animated foot has moved away from slides
+/// after it, onto the ground height under it, `ground_y`. Continuous, so the
+/// foot never pops. Returns whether the lock moved.
+fn keep_lock_within_reach(lock: &mut FootLock, animated_foot: Vec3, ground_y: f32, max_trail: f32) -> bool {
+    if !lock.locked {
+        return false;
+    }
+    let trail = (lock.world_pos - animated_foot).with_y(0.0);
+    let distance = trail.length();
+    if !distance.is_finite() || distance <= max_trail {
+        return false;
+    }
+    let held = trail * (max_trail / distance);
+    lock.world_pos = Vec3::new(animated_foot.x + held.x, ground_y, animated_foot.z + held.z);
+    true
+}
+
 fn solve_limb_ik(
     time: Res<Time>,
     spatial: SpatialQuery,
+    surfaces: ClimbSurfaces,
     parents: Query<&ChildOf>,
     // ONE Transform access for bones, disjoint from the avatar-root query
     // below by `Without`/`With`. Used for both reads (via `.get`) and writes.
@@ -433,25 +529,51 @@ fn solve_limb_ik(
             &AvatarBody,
             &AvatarClimb,
             &mut AvatarFootIk,
+            Has<super::seat::AvatarSeated>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
 ) {
     let dt = time.delta_secs().max(1e-5);
 
-    for (root, root_tf, rig, loco, body, climb, mut ik) in q.iter_mut() {
+    for (root, root_tf, rig, loco, body, climb, mut ik, seated) in q.iter_mut() {
         if !rig.is_healthy() {
             continue;
         }
 
+        // A body whose own pose is not finite is not posed at all. A NaN or
+        // infinite point reaching a ray cast trips a debug assertion inside
+        // the BVH, which takes the whole app down from this system; a
+        // replicated avatar fed one bad frame is enough to get there.
+        if !root_tf.translation.is_finite() || !root_tf.rotation.is_finite() {
+            report_non_finite(&mut ik, root, body, "root", root_tf.translation);
+            continue;
+        }
+
+        // What this body may stand on or press against: never itself, never
+        // a trigger volume.
+        let rule = surfaces.for_climber(root);
+
         // ── Climbing: the limbs answer to the ledge, not to the ground ─────
         let hand_target_w = climb_hand_weight(climb);
         ik.hand_weight += (hand_target_w - ik.hand_weight) * (1.0 - (-GRIP_BLEND_RATE * dt).exp());
+        let pose_target_w = climb_pose_weight(climb);
+        ik.pose_weight += (pose_target_w - ik.pose_weight) * (1.0 - (-POSE_BLEND_RATE * dt).exp());
+        let attached = climb.phase.is_attached();
+        if attached {
+            ik.last_climb = Some(climb.clone());
+        }
 
-        if ik.hand_weight > 1e-3 {
+        if ik.hand_weight > 1e-3 || ik.pose_weight > 1e-3 {
+            // While the climb runs, pose it; once it has ended, fade out of
+            // the move it ended in.
+            let last = ik.last_climb.take();
+            let shown = if attached { climb } else { last.as_ref().unwrap_or(climb) };
             solve_climb_limbs(
-                &spatial, &mut writes, &parents, root, root_tf, rig, body, climb, &mut ik,
+                &spatial, &rule, &mut writes, &parents, root, root_tf, rig, body, shown, attached,
+                &mut ik,
             );
+            ik.last_climb = last;
             // The ground solver must not also be running: there is no ground
             // under a hanging character, and a half-faded foot lock left over
             // from the run-up would drag the legs back down.
@@ -462,6 +584,17 @@ fn solve_limb_ik(
 
         ik.hand_error_m = 0.0;
         ik.climb_foot_error_m = 0.0;
+
+        // Seated: the sit animation poses the legs, and there is no ground
+        // under a rider's feet to plant on (the seat's vehicle moves), nor a
+        // beam to balance on.
+        if seated {
+            ik.left = FootLock::default();
+            ik.right = FootLock::default();
+            ik.balance = 0.0;
+            ik.narrow_for = 0.0;
+            continue;
+        }
 
         // Fade IK out at speed and in the air.
         let speed_fade =
@@ -490,9 +623,23 @@ fn solve_limb_ik(
                 continue;
             };
 
-            // Ground under the animated foot.
+            // Ground under the animated foot. A trigger volume is not ground.
             let origin = foot_w.translation + Vec3::Y * 0.30;
-            let hit = spatial.cast_ray(origin, Dir3::NEG_Y, FOOT_PROBE_DOWN + 0.30, true, &filter);
+            // A finite root with a NaN bone below it: the pose itself went
+            // bad (a NaN clip time, a degenerate bone). Leave this foot to the
+            // clip rather than cast from nowhere.
+            if !origin.is_finite() {
+                report_non_finite(&mut ik, root, body, "foot", foot_w.translation);
+                continue;
+            }
+            let hit = spatial.cast_ray_predicate(
+                origin,
+                Dir3::NEG_Y,
+                FOOT_PROBE_DOWN + 0.30,
+                true,
+                &filter,
+                &|e| rule.surface(e).blocks(),
+            );
 
             let lock = if is_left { &mut ik.left } else { &mut ik.right };
 
@@ -529,6 +676,15 @@ fn solve_limb_ik(
             } else if !planted {
                 lock.locked = false;
             }
+            // The body can carry the hips on faster than the clip moves the
+            // feet (a gait played slower than the ground speed). A lock held
+            // where the foot landed would then pull the leg out behind.
+            keep_lock_within_reach(
+                lock,
+                foot_w.translation,
+                ground_pos.y,
+                LOCK_TRAIL_FRAC * body.metrics.leg_length.max(0.1),
+            );
 
             // ONLY the planted foot is corrected.
             //
@@ -583,6 +739,33 @@ fn solve_limb_ik(
                     ft.rotation = local_after_world_delta(foot_now.rotation, ft.rotation, blended);
                 }
             }
+        }
+
+        // ── Balance on something narrow ────────────────────────────────────
+        //
+        // Walking along a beam or the top of a wall, the arms go out. Only
+        // when the ground falls away on BOTH sides: along the edge of a
+        // rooftop one side is still solid, and nobody balances there.
+        let narrow = loco.grounded
+            && loco.planar_speed > BALANCE_MIN_SPEED
+            && on_narrow_support(
+                &spatial,
+                &filter,
+                &rule,
+                root_tf.translation - Vec3::Y * body.metrics.capsule_half_extent(),
+                root_tf.rotation * Vec3::X,
+                body,
+            );
+        ik.narrow_for = if narrow { ik.narrow_for + dt } else { 0.0 };
+        let want = if ik.narrow_for > BALANCE_DELAY { 1.0 } else { 0.0 };
+        ik.balance += (want - ik.balance) * (1.0 - (-BALANCE_RATE * dt).exp());
+        if ik.balance > 1e-3 {
+            let arms = ik.balance * 0.9;
+            // The high arm trades sides about every two seconds.
+            let trade = 0.5 - 0.5 * (ik.narrow_for * std::f32::consts::PI).cos();
+            let facing = root_tf.rotation;
+            apply_pose(&mut writes, &parents, root, root_tf, rig, BALANCE_POSE, arms, false, facing);
+            apply_pose(&mut writes, &parents, root, root_tf, rig, BALANCE_POSE, arms * trade, true, facing);
         }
 
         // ── Pelvis levelling ───────────────────────────────────────────────
@@ -640,8 +823,8 @@ fn solve_limb_ik(
 /// IK then adjusts only the hands and feet onto the real geometry.
 type PoseDir = (HumanoidBone, HumanoidBone, [f32; 3]);
 
-/// A dead hang: arms overhead and slightly out, torso long, knees soft, feet
-/// toward the wall.
+/// A braced hang: arms overhead and slightly out, torso long, the legs frogged
+/// out with the feet on the wall under the knees.
 const HANG_POSE: &[PoseDir] = &[
     // Spine counter-rotates against the pelvis: the chain leans progressively
     // to one side going up, so the shoulder line and the hip line are NOT
@@ -663,18 +846,36 @@ const HANG_POSE: &[PoseDir] = &[
     (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.10, 0.99, -0.06]),
     // A CLIMBER'S STANCE, not a dangle.
     //
-    // Knees splay outward and forward, shins come back inboard so the feet
-    // tuck up under the body against the wall. Straight legs with pointed toes
+    // The knees go out and forward toward the wall, the shins come back
+    // inboard, and the soles land on the face under the knees: the frog the
+    // reference holds on every braced hang. Straight legs with pointed toes
     // read as a corpse on a rope; this is what taking your weight on the wall
     // looks like.
     //
     // Deliberately ASYMMETRIC: one leg rides higher than the other. Perfectly
     // mirrored legs look posed, and a stagger is what a climber actually does
     // while searching for the next foothold.
-    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.62, -0.62, -0.48]),
-    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.30, -0.88, -0.37]),
-    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.52, -0.76, -0.39]),
-    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.24, -0.93, -0.28]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.50, -0.64, -0.56]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.20, -0.95, -0.24]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.44, -0.72, -0.53]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.18, -0.96, -0.20]),
+];
+
+/// Hanging with nothing under the feet: the body long under the hands, the
+/// legs together and hanging, knees soft, toes a little forward.
+///
+/// Laid over [`HANG_POSE`] by how little wall there is, so a body swinging
+/// off a bar and one braced on a wall are different shapes, and one moving
+/// from a wall to a bar passes between them.
+const FREE_HANG_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.03, 0.99, 0.06]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.05, 0.99, 0.04]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.06, 0.99, 0.00]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [-0.03, 0.97, -0.22]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.06, -0.98, -0.16]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.02, -0.97, 0.22]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.08, -0.97, -0.20]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.03, -0.98, 0.18]),
 ];
 
 /// Moving sideways, authored for travel toward the character's RIGHT (+X).
@@ -814,7 +1015,66 @@ const MANTLE_POSE: &[PoseDir] = &[
     (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.20, -0.94, -0.27]),
 ];
 
+/// The knee-up, authored for a RIGHT-knee lead and mirrored for the left.
+///
+/// The palms have turned over onto the top and the arms press straight down
+/// on it. The chest goes over the lip, pitched well forward with the head up.
+/// The lead knee comes onto the top (the solve in [`place_lead_knee`] lands it
+/// there exactly) with its shin trailing back over the edge, and the other leg
+/// hangs down the face.
+const MANTLE_KNEE_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.04, 0.70, -0.71]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.05, 0.64, -0.77]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.05, 0.70, -0.71]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [0.0, 0.90, -0.44]),
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.94, 0.20, -0.28]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.94, 0.20, -0.28]),
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.14, -0.94, -0.30]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.06, -0.97, -0.24]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.14, -0.94, -0.30]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.06, -0.97, -0.24]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.16, -0.72, -0.68]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [0.04, -0.72, 0.69]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.10, -0.97, 0.20]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.02, -0.92, -0.39]),
+];
+
+/// Standing up off the knee, authored for a right lead: the lead foot under
+/// the body on the top, the trailing knee coming up and through, the chest
+/// still forward and rising, the arms falling back to the sides.
+const MANTLE_STAND_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.02, 0.92, -0.39]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.03, 0.93, -0.36]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.03, 0.95, -0.30]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [0.0, 0.97, -0.24]),
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.97, 0.14, -0.18]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.97, 0.14, -0.18]),
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.20, -0.95, -0.24]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.10, -0.90, -0.42]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.20, -0.95, -0.24]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.10, -0.90, -0.42]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.12, -0.74, -0.66]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [0.04, -0.99, 0.12]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.08, -0.80, -0.59]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.02, -0.72, 0.69]),
+];
+
+/// The gather before a leap: knees drawn up under the body, shins back, the
+/// back rounding over them. Authored for a right-hand reach and mirrored.
+///
+/// A body crossing a gap with its legs hanging straight is being carried; one
+/// that tucks and then reaches with its whole length is jumping.
+const LEAP_TUCK_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.06, 0.96, -0.28]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.08, 0.96, -0.26]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.22, -0.70, -0.68]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.10, -0.80, 0.59]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.20, -0.72, -0.66]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.08, -0.83, 0.55]),
+];
+
 /// Aim `bone` so the segment toward `child` points along `want` (world space).
+#[allow(clippy::too_many_arguments)]
 fn aim_bone(
     writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
     parents: &Query<&ChildOf>,
@@ -843,7 +1103,12 @@ fn aim_bone(
     apply_world_delta(writes, bone, b.rotation, d);
 }
 
-/// Lay an authored pose over the skeleton, in the avatar's own frame.
+/// Lay an authored pose over the skeleton, in the frame `frame`: the avatar's
+/// own facing, or that facing swung with the body under its hands.
+///
+/// Rotation only: the pose is expressed relative to which way the body faces,
+/// so it follows the character around a corner for free.
+#[allow(clippy::too_many_arguments)]
 fn apply_pose(
     writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
     parents: &Query<&ChildOf>,
@@ -853,10 +1118,8 @@ fn apply_pose(
     pose: &[PoseDir],
     weight: f32,
     mirror: bool,
+    frame: Quat,
 ) {
-    // Rotation only: the pose is expressed relative to which way the body
-    // faces, so it follows the character around a corner for free.
-    let facing = root_tf.rotation;
     for entry in pose {
         let (bone, child, dir) = if mirror { mirror_pose_dir(*entry) } else { *entry };
         let (Some(b), Some(c)) = (rig.bone(bone), rig.bone(child)) else {
@@ -869,10 +1132,18 @@ fn apply_pose(
             root_tf,
             b,
             c,
-            facing * Vec3::from_array(dir),
+            frame * Vec3::from_array(dir),
             weight,
         );
     }
+}
+
+/// The authored direction of `bone` in `pose`, mirrored with the pose.
+fn pose_dir(pose: &[PoseDir], bone: HumanoidBone, mirror: bool) -> Option<Vec3> {
+    pose.iter()
+        .map(|e| if mirror { mirror_pose_dir(*e) } else { *e })
+        .find(|(b, _, _)| *b == bone)
+        .map(|(_, _, d)| Vec3::from_array(d))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -907,6 +1178,106 @@ pub(crate) fn climb_hand_weight(climb: &AvatarClimb) -> f32 {
     }
 }
 
+/// How much the authored climb pose owns the skeleton in the current phase.
+///
+/// Every attached phase is authored, the vault as much as the hang. The
+/// mantle hands the body back to the clips as it stands up on the top.
+pub(crate) fn climb_pose_weight(climb: &AvatarClimb) -> f32 {
+    match climb.phase {
+        ClimbPhase::None => 0.0,
+        ClimbPhase::Mantling => {
+            let (a, b) = MANTLE_POSE_RELEASE;
+            1.0 - smooth01((climb.t - a) / (b - a))
+        }
+        _ => 1.0,
+    }
+}
+
+fn smooth01(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// How much of the knee-up key shows at mantle progress `k`: in over the
+/// press, full as the knee reaches the top.
+pub(crate) fn mantle_knee_blend(path: &MantlePath, k: f32) -> f32 {
+    let (k1, k2) = (path.k[1], path.k[2]);
+    let from = k1 - 0.05;
+    smooth01((k - from) / (k2 - from).max(0.05))
+}
+
+/// How much of the stand key shows at mantle progress `k`: from the knee-up
+/// on, over the first part of the rise.
+pub(crate) fn mantle_stand_blend(path: &MantlePath, k: f32) -> f32 {
+    let k2 = path.k[2];
+    smooth01((k - k2) / ((1.0 - k2) * 0.6).max(0.05))
+}
+
+/// How far the legs gather under the body at this point of a crossing, 0..1:
+/// up as the body springs, out again to meet the hold. Only a real leap
+/// gathers; a short reach is all arms.
+fn transfer_gather(climb: &AvatarClimb) -> f32 {
+    let (Some(from), Some(to)) = (climb.grip, climb.target) else {
+        return 0.0;
+    };
+    let leap = ((from.point.distance(to.point) - 0.5) / 0.7).clamp(0.0, 1.0);
+    let k = climb.t.clamp(0.0, 1.0);
+    leap * (std::f32::consts::PI * (k * 1.6).min(1.0)).sin()
+}
+
+/// Where a knee lands when the thigh swings forward from `hip` until the knee
+/// rests at height `plane_y`: as far along `forward` as the thigh reaches.
+///
+/// Out of reach, too far below the top to rest on it, the knee rises toward
+/// it instead, which is what a knee coming up for the lip looks like.
+pub(crate) fn knee_on_top(hip: Vec3, thigh: f32, plane_y: f32, forward: Vec3) -> Vec3 {
+    let f = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+    let rise = plane_y - hip.y;
+    if rise.abs() < thigh {
+        let across = (thigh * thigh - rise * rise).sqrt();
+        Vec3::new(hip.x, plane_y, hip.z) + f * across
+    } else {
+        hip + (f * 0.6 + Vec3::Y * (0.3 * rise.signum())).normalize() * thigh
+    }
+}
+
+/// Is a body walking along something narrow: ground under its feet, and
+/// nothing to stand on a stride to either side of it?
+///
+/// `feet` is the sole height under the body, `right` the body's right.
+pub(crate) fn on_narrow_support(
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
+    feet: Vec3,
+    right: Vec3,
+    body: &AvatarBody,
+) -> bool {
+    let right = right.with_y(0.0).normalize_or_zero();
+    if right == Vec3::ZERO || !feet.is_finite() {
+        return false;
+    }
+    let solid = |e: Entity| rule.surface(e).blocks();
+    let ground = |at: Vec3| {
+        spatial
+            .cast_ray_predicate(at + Vec3::Y * 0.25, Dir3::NEG_Y, 0.25 + NARROW_DROP, true, filter, &solid)
+            .is_some()
+    };
+    let side = body.metrics.capsule_radius * 1.3;
+    ground(feet) && !ground(feet + right * side) && !ground(feet - right * side)
+}
+
+/// Where a braced sole goes: on the wall face at `face` (which already carries
+/// the stance's offset along the lip), low enough that a leg `span` long
+/// reaches it from `hip` at [`BRACED_LEG_REACH`] of its length.
+pub(crate) fn braced_sole(hip: Vec3, face: Vec3, n: Vec3, span: f32) -> Vec3 {
+    let at = face + n * SOLE_WALL_CLEARANCE;
+    let across = (at - hip).with_y(0.0).length();
+    let reach = span * BRACED_LEG_REACH;
+    let drop = (reach * reach - across * across).max(0.0).sqrt();
+    Vec3::new(at.x, hip.y - drop, at.z)
+}
+
 /// Look for an actual foothold on the wall, rather than pressing the sole flat
 /// against a blank face.
 ///
@@ -919,9 +1290,13 @@ pub(crate) fn climb_hand_weight(climb: &AvatarClimb) -> f32 {
 /// Casts down the wall face inside the band the leg can reach and returns the
 /// first up-facing surface found — a ledge, a step, a protrusion. `None` means
 /// the face really is blank there, and the caller falls back to pressing on it.
+/// A trigger volume is passed through, and a person or a loose prop is no
+/// foothold.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_foothold(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     face_xz: Vec3,
     normal: Vec3,
     from_y: f32,
@@ -938,7 +1313,12 @@ pub(crate) fn find_foothold(
     if !origin.is_finite() {
         return None;
     }
-    let hit = spatial.cast_ray(origin, Dir3::NEG_Y, span, true, filter)?;
+    let hit = spatial.cast_ray_predicate(origin, Dir3::NEG_Y, span, true, filter, &|e| {
+        rule.surface(e).blocks()
+    })?;
+    if !rule.surface(hit.entity).holds() {
+        return None;
+    }
     let n = Vec3::from(hit.normal);
     // Only a surface you could actually weight — a near-vertical hit is the
     // wall itself, not a foothold on it.
@@ -948,6 +1328,104 @@ pub(crate) fn find_foothold(
     Some(origin + Vec3::NEG_Y * hit.distance)
 }
 
+/// Lay the authored pose for the move under way over the skeleton.
+///
+/// Base pose FIRST, IK second. The solver only owns four end effectors;
+/// everything else — spine, neck, shoulders — had no one writing it once the
+/// clips were blended out, and sat frozen wherever the last frame of walking
+/// left it. Laying an authored pose down first gives the whole body a sensible
+/// shape, and the limb solve then adjusts the hands and feet onto the actual
+/// geometry instead of inventing the entire posture from four points.
+#[allow(clippy::too_many_arguments)]
+fn lay_climb_pose(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    rig: &AvatarRig,
+    climb: &AvatarClimb,
+    w: f32,
+) {
+    if w < 1e-3 {
+        return;
+    }
+    let facing = root_tf.rotation;
+    let k = climb.t.clamp(0.0, 1.0);
+    match climb.phase {
+        ClimbPhase::Vaulting => {
+            // A STRIDE, so the pose has to move. Two authored keys blended
+            // across the hop: a single static shape would hold one silhouette
+            // the whole way over and read as the body being carried rather
+            // than stepping.
+            //
+            // The lead leg alternates by which hand last reached, so
+            // consecutive blocks are not all taken off the same foot.
+            let mirror = climb.reaching == 0;
+            apply_pose(writes, parents, root, root_tf, rig, VAULT_LAUNCH_POSE, w, mirror, facing);
+            // Cross over in the back half, once the lead foot is near the surface.
+            let land = ((k - 0.35) / 0.65).clamp(0.0, 1.0);
+            if land > 0.01 {
+                apply_pose(
+                    writes, parents, root, root_tf, rig, VAULT_LAND_POSE,
+                    w * super::climb::ease_in_out(land), mirror, facing,
+                );
+            }
+        }
+        ClimbPhase::Mantling => {
+            // Pull, knee-up, stand: each key laid over the last as the move
+            // reaches it, so the body passes through them rather than
+            // switching between them. The lead knee alternates like a
+            // vault's lead leg.
+            let mirror = climb.reaching == 0;
+            apply_pose(writes, parents, root, root_tf, rig, MANTLE_POSE, w, false, facing);
+            let knee = mantle_knee_blend(&climb.mantle, k);
+            if knee > 0.01 {
+                apply_pose(writes, parents, root, root_tf, rig, MANTLE_KNEE_POSE, w * knee, mirror, facing);
+            }
+            let stand = mantle_stand_blend(&climb.mantle, k);
+            if stand > 0.01 {
+                apply_pose(writes, parents, root, root_tf, rig, MANTLE_STAND_POSE, w * stand, mirror, facing);
+            }
+        }
+        _ => {
+            // HANGING, in a frame swung with the body under its hands. The
+            // braced shape underneath, the free one over it by how little
+            // wall there is, the traverse lean over both by how hard the
+            // character is moving. Laying them over one another rather than
+            // switching means every change eases in and out instead of
+            // popping between two postures.
+            let brace = climb.brace.clamp(0.0, 1.0);
+            let travel = climb.travel.clamp(-1.0, 1.0);
+            // A free body sways side to side as its hands walk along the
+            // lip; feet on the wall hold it square.
+            let sway = FREE_SWAY
+                * (std::f32::consts::TAU * climb.cycle).sin()
+                * (1.0 - brace)
+                * travel.abs();
+            let frame = facing * Quat::from_rotation_x(climb.swing) * Quat::from_rotation_z(sway);
+            apply_pose(writes, parents, root, root_tf, rig, HANG_POSE, w, false, frame);
+            if brace < 0.99 {
+                apply_pose(writes, parents, root, root_tf, rig, FREE_HANG_POSE, w * (1.0 - brace), false, frame);
+            }
+            if travel.abs() > 0.02 {
+                apply_pose(
+                    writes, parents, root, root_tf, rig, SHIMMY_POSE,
+                    w * travel.abs(), travel < 0.0, frame,
+                );
+            }
+            if climb.phase == ClimbPhase::Transfer {
+                let gather = transfer_gather(climb);
+                if gather > 0.01 {
+                    apply_pose(
+                        writes, parents, root, root_tf, rig, LEAP_TUCK_POSE,
+                        w * gather, climb.reaching == 0, frame,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Plant both hands on the ledge edge and both soles on the wall face.
 ///
 /// The frame is built from the ledge itself, not from the character, so the
@@ -955,6 +1433,7 @@ pub(crate) fn find_foothold(
 #[allow(clippy::too_many_arguments)]
 fn solve_climb_limbs(
     spatial: &SpatialQuery,
+    rule: &dyn SurfaceRule,
     writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
     parents: &Query<&ChildOf>,
     root: Entity,
@@ -962,59 +1441,20 @@ fn solve_climb_limbs(
     rig: &AvatarRig,
     body: &AvatarBody,
     climb: &AvatarClimb,
+    attached: bool,
     ik: &mut AvatarFootIk,
 ) {
     let m = &body.metrics;
-    let w = ik.hand_weight;
+    lay_climb_pose(writes, parents, root, root_tf, rig, climb, ik.pose_weight);
 
-    // Base pose FIRST, IK second.
-    //
-    // The solver only owns four end effectors; everything else — spine, neck,
-    // shoulders — had no one writing it once the clips were blended out, and
-    // sat frozen wherever the last frame of walking left it. Laying an
-    // authored pose down first gives the whole body a sensible shape, and the
-    // limb solve then adjusts the hands and feet onto the actual geometry
-    // instead of inventing the entire posture from four points.
-    if climb.phase == ClimbPhase::Vaulting {
-        // A STRIDE, so the pose has to move. Two authored keys blended across
-        // the hop: a single static shape would hold one silhouette the whole
-        // way over and read as the body being carried rather than stepping.
-        //
-        // The lead leg alternates by which hand last reached, so consecutive
-        // blocks are not all taken off the same foot.
-        let mirror = climb.reaching == 0;
-        let k = climb.t.clamp(0.0, 1.0);
-        apply_pose(writes, parents, root, root_tf, rig, VAULT_LAUNCH_POSE, w, mirror);
-        // Cross over in the back half, once the lead foot is near the surface.
-        let land = ((k - 0.35) / 0.65).clamp(0.0, 1.0);
-        if land > 0.01 {
-            apply_pose(
-                writes, parents, root, root_tf, rig, VAULT_LAND_POSE,
-                w * super::climb::ease_in_out(land), mirror,
-            );
-        }
-    } else if climb.phase == ClimbPhase::Mantling {
-        apply_pose(writes, parents, root, root_tf, rig, MANTLE_POSE, w, false);
-    } else {
-        // Hang underneath, sideways lean over the top, blended by how hard the
-        // character is actually traversing. Laying the shimmy over the hang
-        // rather than switching between them means starting and stopping a
-        // traverse eases in and out instead of popping between two postures.
-        apply_pose(writes, parents, root, root_tf, rig, HANG_POSE, w, false);
-        let lean = climb.travel.clamp(-1.0, 1.0);
-        if lean.abs() > 0.02 {
-            apply_pose(
-                writes,
-                parents,
-                root,
-                root_tf,
-                rig,
-                SHIMMY_POSE,
-                w * lean.abs(),
-                lean < 0.0,
-            );
-        }
+    // Once the climb is over only the pose is still fading; the hands and
+    // feet have already let go of the wall.
+    if !attached {
+        ik.hand_error_m = 0.0;
+        ik.climb_foot_error_m = 0.0;
+        return;
     }
+    let w = ik.hand_weight;
 
     // Ledge frame: `n` points off the wall toward the character, `tangent`
     // runs along the lip. Taken from `hand_frame` rather than the raw grip so
@@ -1028,13 +1468,8 @@ fn solve_climb_limbs(
     let tangent = raw_t.with_y(0.0).normalize_or(Vec3::Y.cross(n).normalize_or(Vec3::X));
 
     let arm_len = m.height_m * super::climb::ARM_SPAN_FRAC;
-    let leg_len = m.leg_length.max(0.2);
-
-    // Both soles at ONE height, derived from the body rather than from wherever
-    // the playing clip happened to leave each foot. Following the clip left one
-    // leg tucked at knee height while the other hung straight, which reads as a
-    // stumble rather than a brace.
-    let sole_y = root_tf.translation.y - m.capsule_half_extent() * CLIMB_SOLE_DROP_FRAC;
+    // How far the palms have turned over from the lip onto the top.
+    let press = if climb.phase == ClimbPhase::Mantling { climb.press.clamp(0.0, 1.0) } else { 0.0 };
 
     // ── Hands ───────────────────────────────────────────────────────────────
     let mut worst_hand = 0.0_f32;
@@ -1051,6 +1486,10 @@ fn solve_climb_limbs(
             continue;
         };
 
+        // The wrist hangs a hand's length below a lip it holds, and sits just
+        // over a top it presses down on.
+        let wrist = m.height_m * WRIST_BELOW_LIP_FRAC * (1.0 - press) + PALM_ABOVE_TOP * press;
+
         // Each hand solves to ITS OWN hold, not to a shared point offset by
         // shoulder width. That symmetry is what made every pose read as
         // hanging: a climber anchors one hand and reaches with the other, and
@@ -1058,10 +1497,9 @@ fn solve_climb_limbs(
         let hand_idx = if side < 0.0 { 0 } else { 1 };
         let hold = climb.holds[hand_idx];
         let mut target = if hold.is_finite() && hold != Vec3::ZERO {
-            hold + Vec3::Y * (m.height_m * WRIST_BELOW_LIP_FRAC)
+            hold + Vec3::Y * wrist
         } else {
-            edge + tangent * (side * m.shoulder_half_width.max(0.10))
-                + Vec3::Y * (m.height_m * WRIST_BELOW_LIP_FRAC)
+            edge + tangent * (side * m.shoulder_half_width.max(0.10)) + Vec3::Y * wrist
         };
 
         // The two arms are never in the same state.
@@ -1070,24 +1508,22 @@ fn solve_climb_limbs(
         // the other is bent — elbow flexion IS the load signal, and it is on
         // the ANCHORED arm, which is pulling. Solving both to identical
         // extension is what makes a hang read as a gymnast's dead hang rather
-        // than a climber holding on.
+        // than a climber holding on. Pressing on a top, both arms push alike.
         //
         // Pulling the anchored hand's target slightly toward its shoulder
         // shortens that chain, which the solver resolves as a bent elbow.
-        if hand_idx != climb.reaching {
-            if let Some(sh) = rig.bone(arm_b).and_then(|e| world_of(e, root, root_tf, parents, writes))
-            {
-                let toward_shoulder = (sh.translation - target).normalize_or_zero();
-                target += toward_shoulder * (arm_len * ANCHOR_ELBOW_FLEX);
-            }
+        if hand_idx != climb.reaching && press < 0.5 {
+            let toward_shoulder = (shoulder.translation - target).normalize_or_zero();
+            target += toward_shoulder * (arm_len * ANCHOR_ELBOW_FLEX * (1.0 - press * 2.0));
         }
 
-        // Elbows hang low and flare outboard — the shape of a dead hang. A
-        // pole directly below would leave the solve free to pick an inward
-        // bend and the forearms would cross.
-        let pole = shoulder.translation
-            + Vec3::NEG_Y * (arm_len * 0.85)
-            + tangent * (side * arm_len * 0.55);
+        // Under a hang the elbows drop low and flare outboard — a pole
+        // directly below would leave the solve free to pick an inward bend
+        // and the forearms would cross. Pressing down on a top, they point
+        // back and out.
+        let hang_pole = Vec3::NEG_Y * (arm_len * 0.85) + tangent * (side * arm_len * 0.55);
+        let press_pole = n * (arm_len * 0.9) + tangent * (side * arm_len * 0.45);
+        let pole = shoulder.translation + hang_pole.lerp(press_pole, press);
 
         if let Some(err) = drive_two_bone_chain(
             writes, parents, root, root_tf, up_e, lo_e, end_e, target, pole, w,
@@ -1125,7 +1561,7 @@ fn solve_climb_limbs(
         // the sole uses a few lines below, where local +Y is the top of the
         // foot. Pointing it at world +Y therefore lays the palm flat and
         // downward on the top face of the ledge, which is the grip being
-        // asked for.
+        // asked for, and it is the same palm that presses on the top.
         if let Some(hand_now) = world_of(end_e, root, root_tf, parents, writes) {
             if let Ok(mut h) = writes.get_mut(end_e) {
                 // Two constraints, because one is not enough.
@@ -1150,36 +1586,109 @@ fn solve_climb_limbs(
         }
     }
 
-    // ── Soles ───────────────────────────────────────────────────────────────
-    //
-    // Weighted DOWN during a mantle: see `MANTLE_FOOT_WEIGHT`.
-    let foot_w = if climb.phase == ClimbPhase::Mantling {
-        w * MANTLE_FOOT_WEIGHT
-    } else {
-        w * CLIMB_LEG_IK_WEIGHT
+    // ── Feet ────────────────────────────────────────────────────────────────
+    let worst_foot = match climb.phase {
+        // A vault's legs are its stride; nothing below them to plant on yet.
+        ClimbPhase::Vaulting => 0.0,
+        ClimbPhase::Mantling => mantle_feet(
+            writes, parents, root, root_tf, rig, body, climb, ik.pose_weight, edge, n, tangent,
+        ),
+        _ => hang_feet(
+            spatial, rule, writes, parents, root, root_tf, rig, body, climb, w, edge, n, tangent,
+        ),
     };
-    //
-    // The wall is vertical, so its face at any height shares the edge's x/z.
-    let mut worst_foot = 0.0_f32;
-    for (side, up_b, lo_b, foot_b) in [
-        (-1.0_f32, HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, HumanoidBone::LeftFoot),
-        (1.0, HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, HumanoidBone::RightFoot),
-    ] {
+
+    ik.hand_error_m = worst_hand;
+    ik.climb_foot_error_m = worst_foot;
+}
+
+/// The two leg chains as `(side, thigh, shin, foot)`, side -1 left, +1 right.
+const LEGS: [(f32, HumanoidBone, HumanoidBone, HumanoidBone); 2] = [
+    (-1.0, HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, HumanoidBone::LeftFoot),
+    (1.0, HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, HumanoidBone::RightFoot),
+];
+
+/// Hip position and the lengths of the thigh and shin, measured from the live
+/// pose so a rescaled or non-Mixamo rig needs no table of constants.
+fn leg_measure(
+    writes: &Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    bones: (Entity, Entity, Entity),
+) -> Option<(Vec3, f32, f32)> {
+    let hip = world_of(bones.0, root, root_tf, parents, writes)?.translation;
+    let knee = world_of(bones.1, root, root_tf, parents, writes)?.translation;
+    let ankle = world_of(bones.2, root, root_tf, parents, writes)?.translation;
+    Some((hip, hip.distance(knee), knee.distance(ankle)))
+}
+
+/// Lay a sole flat on a surface whose outward normal is `up`, for the same
+/// reason the wrist needs orienting: nothing else is writing this bone while
+/// climbing.
+#[allow(clippy::too_many_arguments)]
+fn lay_sole(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    foot_e: Entity,
+    up: Vec3,
+    weight: f32,
+) {
+    if weight < 1e-3 {
+        return;
+    }
+    if let Some(foot_now) = world_of(foot_e, root, root_tf, parents, writes) {
+        if let Ok(mut f) = writes.get_mut(foot_e) {
+            // The foot's local +Y is its top, so pointing it along the surface
+            // normal lays the sole on the surface.
+            let want = Quat::from_rotation_arc(foot_now.rotation * Vec3::Y, up);
+            let blended = Quat::IDENTITY.slerp(want, (weight * 0.7).clamp(0.0, 1.0));
+            f.rotation = local_after_world_delta(foot_now.rotation, f.rotation, blended);
+        }
+    }
+}
+
+/// Soles on the wall while hanging, shimmying, reaching and lowering.
+///
+/// Only where there is wall: the leg solve is scaled by the brace, so a body
+/// hanging free keeps the hanging legs the pose gives it.
+#[allow(clippy::too_many_arguments)]
+fn hang_feet(
+    spatial: &SpatialQuery,
+    rule: &dyn SurfaceRule,
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    rig: &AvatarRig,
+    body: &AvatarBody,
+    climb: &AvatarClimb,
+    w: f32,
+    edge: Vec3,
+    n: Vec3,
+    tangent: Vec3,
+) -> f32 {
+    let m = &body.metrics;
+    let foot_w = w * CLIMB_LEG_IK_WEIGHT * climb.brace.clamp(0.0, 1.0);
+    if foot_w < 1e-3 {
+        return 0.0;
+    }
+    let leg_len = m.leg_length.max(0.2);
+    let filter = SpatialQueryFilter::default().with_excluded_entities([root]);
+    let mut worst = 0.0_f32;
+    for (side, up_b, lo_b, foot_b) in LEGS {
         let (Some(up_e), Some(lo_e), Some(foot_e)) =
             (rig.bone(up_b), rig.bone(lo_b), rig.bone(foot_b))
         else {
             continue;
         };
-        let Some(hip) = world_of(up_e, root, root_tf, parents, writes) else {
+        let Some((hip, thigh, shin)) = leg_measure(writes, parents, root, root_tf, (up_e, lo_e, foot_e))
+        else {
             continue;
         };
 
-        // Search the face for something to stand on before settling for it.
-        //
-        // The band runs from just under the hips down to the leg's reach, so a
-        // ledge, a step or any protrusion in that range wins over the blank
-        // wall — which is what makes the stance read as taking weight rather
-        // than hanging.
         // The SAME-SIDE leg tracks the reaching arm.
         //
         // Measured in the footage as a cross-body counterbalance: reach left
@@ -1212,10 +1721,18 @@ fn solve_climb_limbs(
         };
         let stride = travel.signum() * step_along * crate::avatar::climb::SHIMMY_STRIDE;
         let face_xz = edge + lateral + tangent * stride;
+
+        // Search the face for something to stand on before settling for it.
+        //
+        // The band runs from just under the hips down to the leg's reach, so a
+        // ledge, a step or any protrusion in that range wins over the blank
+        // wall — which is what makes the stance read as taking weight rather
+        // than hanging.
         let reach_low = root_tf.translation.y - m.capsule_half_extent() - leg_len * 0.45;
         let foothold = find_foothold(
             spatial,
-            &SpatialQueryFilter::default().with_excluded_entities([root]),
+            &filter,
+            rule,
             face_xz,
             n,
             root_tf.translation.y - m.capsule_half_extent() * 0.2,
@@ -1227,43 +1744,147 @@ fn solve_climb_limbs(
             // Stand ON it, a sole's thickness above the surface and pressed
             // back toward the wall.
             Some(p) => p + Vec3::Y * 0.03 + n * (SOLE_WALL_CLEARANCE * 0.5),
-            None => Vec3::new(face_xz.x, sole_y, face_xz.z) + n * SOLE_WALL_CLEARANCE,
+            // Blank face: on it, where the leg reaches it bent.
+            None => braced_sole(hip, face_xz, n, thigh + shin),
         };
         // Off the wall while swinging, back on it when planted.
         let target = target + Vec3::Y * (lift * FOOT_SWING_LIFT * travel.abs())
             + n * (lift * FOOT_SWING_LIFT * 0.6 * travel.abs());
 
-        // Knees drop and bulge AWAY from the wall.
+        // Knees splay OUT, the frog of a braced hang.
         //
-        // The pole decides which way the joint folds, and this pointed it at
-        // the wall (`-n`), so the knees bent inward — through the surface the
-        // feet are braced on. Hanging with the hips out from the face and the
-        // soles on it, the shin swings back from the thigh, which is away from
-        // the wall: `+n`.
-        let pole = hip.translation + Vec3::NEG_Y * leg_len + n * (leg_len * 0.35);
+        // The pole is mostly sideways, then down, then only a little toward
+        // the wall. Pointed straight at the wall it folded the knees in
+        // through the very face the feet are on; pointed away from it, the
+        // shins came back under the body and the soles left the wall. Out to
+        // the side, the knee has room to bend without meeting either.
+        let pole = hip + tangent * (side * leg_len * 0.45) - n * (leg_len * 0.30) + Vec3::NEG_Y * (leg_len * 0.30);
 
         if let Some(err) = drive_two_bone_chain(
             writes, parents, root, root_tf, up_e, lo_e, foot_e, target, pole, foot_w,
             NearTarget::Refuse,
         ) {
-            worst_foot = worst_foot.max(err);
+            worst = worst.max(err);
+        }
+        // Sole flat against the wall face.
+        lay_sole(writes, parents, root, root_tf, foot_e, n, foot_w);
+    }
+    worst
+}
+
+/// The legs through a pull-up.
+///
+/// In the pull both soles push on the face. As the chest goes over the lip the
+/// lead knee comes up and lands on the top while the trailing sole keeps
+/// pushing, and in the stand the lead foot comes under the body onto the top
+/// and the trailing leg follows through on the pose.
+#[allow(clippy::too_many_arguments)]
+fn mantle_feet(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    rig: &AvatarRig,
+    body: &AvatarBody,
+    climb: &AvatarClimb,
+    w: f32,
+    edge: Vec3,
+    n: Vec3,
+    tangent: Vec3,
+) -> f32 {
+    let m = &body.metrics;
+    let path = &climb.mantle;
+    let k = climb.t.clamp(0.0, 1.0);
+    let knee = mantle_knee_blend(path, k);
+    let stand = mantle_stand_blend(path, k);
+    let lead_left = climb.reaching == 0;
+    let leg_len = m.leg_length.max(0.2);
+    let mut worst = 0.0_f32;
+
+    for (side, up_b, lo_b, foot_b) in LEGS {
+        let (Some(up_e), Some(lo_e), Some(foot_e)) =
+            (rig.bone(up_b), rig.bone(lo_b), rig.bone(foot_b))
+        else {
+            continue;
+        };
+        let Some((hip, thigh, shin)) = leg_measure(writes, parents, root, root_tf, (up_e, lo_e, foot_e))
+        else {
+            continue;
+        };
+        let lead = (side < 0.0) == lead_left;
+
+        // On the face: both soles in the pull, the trailing one after it. The
+        // lead sole hands over to the knee as the knee comes up.
+        let on_face = w * MANTLE_FOOT_WEIGHT * (1.0 - stand) * if lead { 1.0 - knee } else { 1.0 };
+        if on_face > 1e-3 {
+            let face = edge + tangent * (side * m.foot_half_separation * 1.4);
+            let target = braced_sole(hip, face, n, thigh + shin);
+            let pole = hip + tangent * (side * leg_len * 0.45) - n * (leg_len * 0.30) + Vec3::NEG_Y * (leg_len * 0.30);
+            if let Some(err) = drive_two_bone_chain(
+                writes, parents, root, root_tf, up_e, lo_e, foot_e, target, pole, on_face,
+                NearTarget::Refuse,
+            ) {
+                worst = worst.max(err);
+            }
+            lay_sole(writes, parents, root, root_tf, foot_e, n, on_face);
+        }
+        if !lead {
+            continue;
         }
 
-        // Sole flat against the wall face, for the same reason the wrist needs
-        // orienting: nothing else is writing this bone while climbing.
-        if let Some(foot_now) = world_of(foot_e, root, root_tf, parents, writes) {
-            if let Ok(mut f) = writes.get_mut(foot_e) {
-                // The foot's "up" should point off the wall, i.e. along the
-                // face normal, so the sole lies on it.
-                let want = Quat::from_rotation_arc(foot_now.rotation * Vec3::Y, n);
-                let blended = Quat::IDENTITY.slerp(want, (foot_w * 0.7).clamp(0.0, 1.0));
-                f.rotation = local_after_world_delta(foot_now.rotation, f.rotation, blended);
+        // The lead KNEE onto the top.
+        let kneel = w * knee * (1.0 - stand);
+        if kneel > 1e-3 {
+            place_lead_knee(
+                writes, parents, root, root_tf, (up_e, lo_e, foot_e), hip, thigh, path.top_y + KNEE_PAD,
+                -n, pose_dir(MANTLE_KNEE_POSE, lo_b, lead_left).map(|d| root_tf.rotation * d),
+                kneel,
+            );
+        }
+
+        // Standing: the lead foot comes under the body onto the top.
+        let step = w * stand * 0.8;
+        if step > 1e-3 {
+            let target = Vec3::new(hip.x, path.top_y + SOLE_ON_TOP, hip.z) - n * (m.capsule_radius * 0.3);
+            let pole = hip - n * leg_len + Vec3::Y * (leg_len * 0.2);
+            if let Some(err) = drive_two_bone_chain(
+                writes, parents, root, root_tf, up_e, lo_e, foot_e, target, pole, step,
+                NearTarget::Refuse,
+            ) {
+                worst = worst.max(err);
             }
+            lay_sole(writes, parents, root, root_tf, foot_e, Vec3::Y, step);
         }
     }
+    worst
+}
 
-    ik.hand_error_m = worst_hand;
-    ik.climb_foot_error_m = worst_foot;
+/// Swing the lead thigh until the knee rests on the top, then trail the shin
+/// back over the edge in its authored direction.
+///
+/// The thigh has to be aimed at the geometry, not authored: how far forward
+/// the knee lands depends on how high the hips are over this particular lip,
+/// which no pose can know. Aiming the thigh carries the shin with it, so the
+/// shin is aimed again afterwards.
+#[allow(clippy::too_many_arguments)]
+fn place_lead_knee(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    bones: (Entity, Entity, Entity),
+    hip: Vec3,
+    thigh: f32,
+    plane_y: f32,
+    forward: Vec3,
+    shin_dir: Option<Vec3>,
+    weight: f32,
+) {
+    let knee = knee_on_top(hip, thigh, plane_y, forward);
+    aim_bone(writes, parents, root, root_tf, bones.0, bones.1, knee - hip, weight);
+    if let Some(dir) = shin_dir {
+        aim_bone(writes, parents, root, root_tf, bones.1, bones.2, dir, weight);
+    }
 }
 
 #[cfg(test)]
@@ -1448,6 +2069,51 @@ mod tests {
 }
 
 #[cfg(test)]
+mod foot_lock_tests {
+    use super::*;
+
+    /// A body moving faster than its clip's feet (Box Head walks at 8 m/s):
+    /// the stance foot follows within reach instead of being held where it
+    /// landed while the leg is dragged out behind.
+    #[test]
+    fn a_locked_foot_follows_a_body_that_outruns_its_clip() {
+        let leg = 0.9;
+        let max_trail = LOCK_TRAIL_FRAC * leg;
+        let (dt, speed) = (1.0 / 60.0, 8.0);
+        let mut lock = FootLock { locked: true, world_pos: Vec3::ZERO, normal: Vec3::Y, weight: 1.0 };
+        let mut previous = lock.world_pos;
+        let mut slid = false;
+        let mut animated_foot = Vec3::ZERO;
+        for frame in 1..=60 {
+            // The clip's foot stays under the hips; the hips travel with the body.
+            let hip = Vec3::new(0.0, 0.8 * leg, -speed * dt * frame as f32);
+            animated_foot = Vec3::new(0.0, 0.0, hip.z);
+            slid |= keep_lock_within_reach(&mut lock, animated_foot, 0.0, max_trail);
+            let trail = (lock.world_pos - animated_foot).with_y(0.0).length();
+            assert!(trail <= max_trail + 1e-4, "frame {frame}: the foot trails {trail} m");
+            let reach = hip.distance(lock.world_pos);
+            assert!(reach < leg, "frame {frame}: {reach} m from the hip, past a full {leg} m leg");
+            // It moves no faster than the body: a slide, never a pop.
+            assert!(lock.world_pos.distance(previous) <= speed * dt + 1e-4);
+            previous = lock.world_pos;
+        }
+        assert!(slid, "the lock followed the body");
+        assert!(lock.locked, "the foot stays planted while it follows");
+        // Held where it landed, the foot would be a second's travel behind.
+        assert!(animated_foot.distance(Vec3::ZERO) > 5.0 * leg);
+    }
+
+    #[test]
+    fn a_lock_within_reach_or_released_stays_put() {
+        let mut lock = FootLock { locked: true, world_pos: Vec3::new(0.0, 0.0, 0.1), normal: Vec3::Y, weight: 1.0 };
+        assert!(!keep_lock_within_reach(&mut lock, Vec3::ZERO, 0.0, 0.3));
+        assert_eq!(lock.world_pos, Vec3::new(0.0, 0.0, 0.1));
+        lock.locked = false;
+        assert!(!keep_lock_within_reach(&mut lock, Vec3::new(0.0, 0.0, -5.0), 0.0, 0.3), "a released foot is the clip's");
+    }
+}
+
+#[cfg(test)]
 mod limb_band_tests {
     use super::*;
 
@@ -1474,26 +2140,38 @@ mod limb_band_tests {
         assert!(MAX_CHAIN_EXTENSION < 1.0, "locks the joint straight");
     }
 
-    /// A hang tucks the feet UP under the body — a climber's stance, not a
-    /// dangle.
+    /// A braced sole is where the leg reaches it BENT.
     ///
-    /// This used to assert the opposite, that the soles hang low. That was a
-    /// misreading of an earlier bug: tucked feet looked like a seated pose
-    /// because the leg IK had full authority and folded the chain to reach its
-    /// target, not because the target height was wrong. With the authored
-    /// stance owning the shape and the solve reduced to a nudge, tucked is
-    /// correct — so the safeguard belongs on the IK's SHARE, not the height.
+    /// The seated and L-sit poses came from targets the leg could only reach
+    /// folded past what a knee does; the dangle came from a target so near the
+    /// hip that the solver refused it and the feet hung in the air. Placing the
+    /// sole at a fixed share of the leg's own length keeps every braced target
+    /// inside the band the solver accepts, whatever the hip's distance from the
+    /// wall, so the leg IK can have the say it needs to put the soles on it.
     #[test]
-    fn hanging_legs_are_owned_by_the_stance_not_the_solver() {
-        assert!(
-            CLIMB_SOLE_DROP_FRAC < 0.7,
-            "soles at {CLIMB_SOLE_DROP_FRAC} hang low — a dangle, not a brace"
-        );
-        assert!(
-            CLIMB_LEG_IK_WEIGHT < 0.5,
-            "leg IK at {CLIMB_LEG_IK_WEIGHT} outvotes the authored stance and              straightens the knees back out"
-        );
-        assert!(CLIMB_LEG_IK_WEIGHT > 0.0, "soles never reach the wall at all");
+    fn a_braced_sole_is_reached_bent_never_folded_or_locked() {
+        assert!(BRACED_LEG_REACH > MIN_CHAIN_EXTENSION + 0.04, "folds the knee past a real joint");
+        assert!(BRACED_LEG_REACH < MAX_CHAIN_EXTENSION - 0.1, "a braced leg is nearly straight");
+        let n = Vec3::Z;
+        for span in [0.70_f32, 0.83, 0.95] {
+            for away in [0.12_f32, 0.24, 0.34] {
+                let hip = Vec3::new(0.09, 1.0, away);
+                let face = Vec3::new(0.2, 0.0, 0.0);
+                let sole = braced_sole(hip, face, n, span);
+                let reach = sole.distance(hip) / span;
+                assert!(
+                    (reach - BRACED_LEG_REACH).abs() < 1e-3,
+                    "span {span}, hip {away} m off the wall: the sole is at {reach:.2} of the leg"
+                );
+                assert!(sole.y < hip.y, "a braced sole must be below its hip");
+                assert!(
+                    ((sole - face).dot(n) - SOLE_WALL_CLEARANCE).abs() < 1e-4,
+                    "the sole is not on the face"
+                );
+            }
+        }
+        assert!(CLIMB_LEG_IK_WEIGHT > 0.5, "the soles never reach the wall");
+        assert!(CLIMB_LEG_IK_WEIGHT < 1.0, "the pose has no say in the legs at all");
     }
 }
 
@@ -1509,7 +2187,14 @@ mod pose_tests {
     /// non-finite entry silently disables that bone and the pose half-applies.
     #[test]
     fn every_authored_direction_is_a_usable_direction() {
-        for (name, pose) in [("hang", HANG_POSE), ("mantle", MANTLE_POSE)] {
+        for (name, pose) in [
+            ("hang", HANG_POSE),
+            ("free-hang", FREE_HANG_POSE),
+            ("mantle", MANTLE_POSE),
+            ("mantle-knee", MANTLE_KNEE_POSE),
+            ("mantle-stand", MANTLE_STAND_POSE),
+            ("leap-tuck", LEAP_TUCK_POSE),
+        ] {
             for (bone, dir) in dirs(pose) {
                 assert!(dir.is_finite(), "{name}/{bone:?}: non-finite");
                 assert!(
@@ -1796,7 +2481,11 @@ mod pose_tests {
     fn no_authored_climb_pose_leaves_a_limb_horizontal() {
         for (name, pose) in [
             ("hang", HANG_POSE),
+            ("free-hang", FREE_HANG_POSE),
             ("mantle", MANTLE_POSE),
+            ("mantle-knee", MANTLE_KNEE_POSE),
+            ("mantle-stand", MANTLE_STAND_POSE),
+            ("leap-tuck", LEAP_TUCK_POSE),
             ("shimmy", SHIMMY_POSE),
             ("vault-launch", VAULT_LAUNCH_POSE),
             ("vault-land", VAULT_LAND_POSE),
@@ -1825,6 +2514,81 @@ mod pose_tests {
         }
     }
 
+    /// Out to the sides, below the shoulders, and a mirror image of itself
+    /// with the other arm high.
+    #[test]
+    fn the_balance_arms_go_out_and_trade_sides() {
+        let map: std::collections::HashMap<_, _> = dirs(BALANCE_POSE).into_iter().collect();
+        let (l, r) = (map[&HumanoidBone::LeftArm], map[&HumanoidBone::RightArm]);
+        assert!(l.x < -0.7 && r.x > 0.7, "the arms are not out to the sides: {l:?} {r:?}");
+        assert!(l.y < 0.0 && r.y < 0.0, "the arms rise above the shoulders: {l:?} {r:?}");
+        assert!(l.y > r.y, "the left arm should ride higher, so its mirror trades sides");
+        for e in BALANCE_POSE {
+            let back = mirror_pose_dir(mirror_pose_dir(*e));
+            assert_eq!(back.0, e.0);
+            assert_eq!(back.2, e.2);
+        }
+    }
 
+    /// The vault's stride is authored and has to show, while its hands hold
+    /// nothing. With one weight for both, the pose followed the grip to zero
+    /// and never appeared.
+    #[test]
+    fn the_pose_weight_is_not_the_grip_weight() {
+        let mut c = AvatarClimb::default();
+        c.phase = ClimbPhase::Vaulting;
+        assert_eq!(climb_hand_weight(&c), 0.0, "a vault grabbed the block");
+        assert_eq!(climb_pose_weight(&c), 1.0, "the vault stride is not shown");
 
+        c.phase = ClimbPhase::Mantling;
+        c.t = 0.5;
+        assert_eq!(climb_pose_weight(&c), 1.0);
+        c.t = 1.0;
+        assert!(climb_pose_weight(&c) < 1e-6, "still posed once standing on the top");
+
+        c.phase = ClimbPhase::None;
+        assert_eq!(climb_pose_weight(&c), 0.0);
+    }
+
+    /// The knee lands ON the top, a thigh's length from the hip, in front of
+    /// it; out of reach it rises toward the top rather than going through it.
+    #[test]
+    fn the_lead_knee_lands_on_the_top() {
+        let forward = Vec3::NEG_Z;
+        let thigh = 0.41;
+        let hip = Vec3::new(0.1, 2.0, 0.2);
+        let knee = knee_on_top(hip, thigh, 2.06, forward);
+        assert!((knee.y - 2.06).abs() < 1e-5, "the knee is not on the top: {knee:?}");
+        assert!((knee.distance(hip) - thigh).abs() < 1e-4, "the thigh changed length");
+        assert!(knee.z < hip.z, "the knee went back, not forward over the top");
+
+        let low = Vec3::new(0.1, 1.3, 0.2);
+        let reaching = knee_on_top(low, thigh, 2.06, forward);
+        assert!((reaching.distance(low) - thigh).abs() < 1e-4);
+        assert!(reaching.y > low.y && reaching.z < low.z, "a knee out of reach must rise toward the top");
+    }
+
+    /// Through a pull-up the keys come in order: the knee is fully up before
+    /// the stand begins, and the stand has taken over by the end.
+    #[test]
+    fn the_mantle_keys_come_in_order() {
+        let mut path = MantlePath::default();
+        path.k = [0.0, 0.35, 0.6, 1.0];
+        assert_eq!(mantle_knee_blend(&path, 0.0), 0.0);
+        assert!(mantle_knee_blend(&path, 0.25) < 1e-6, "the knee came up during the pull");
+        assert!((mantle_knee_blend(&path, 0.6) - 1.0).abs() < 1e-5, "the knee is not up at the knee key");
+        assert_eq!(mantle_stand_blend(&path, 0.6), 0.0, "stood up before kneeling");
+        assert!((mantle_stand_blend(&path, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// A knee-up leads with one knee, and the other side is the mirror of it.
+    #[test]
+    fn the_knee_up_leads_with_one_knee_and_mirrors() {
+        let right = pose_dir(MANTLE_KNEE_POSE, HumanoidBone::RightUpLeg, false).unwrap();
+        let left = pose_dir(MANTLE_KNEE_POSE, HumanoidBone::LeftUpLeg, false).unwrap();
+        assert!(right.z < -0.5, "the lead thigh does not come forward: {right:?}");
+        assert!(left.z > 0.0, "the trailing thigh should hang back down the face: {left:?}");
+        let mirrored = pose_dir(MANTLE_KNEE_POSE, HumanoidBone::LeftUpLeg, true).unwrap();
+        assert!((mirrored - Vec3::new(-right.x, right.y, right.z)).length() < 1e-6);
+    }
 }

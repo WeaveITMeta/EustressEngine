@@ -76,8 +76,7 @@ impl PersistenceConfig {
     ///
     /// ## Path resolution
     /// Preferred: `<universe_root>/knowledge/<space_name>/knowledge.db`
-    /// - The `knowledge/` directory lives at the Universe level and is already
-    ///   present in ARC-AGI-3 / similar universes.
+    /// - The `knowledge/` directory lives at the Universe level.
     /// - Each space gets its own subdirectory, so knowledge is separated per space
     ///   but co-located under the universe for easy cross-space introspection.
     ///
@@ -106,7 +105,7 @@ impl PersistenceConfig {
     pub fn resolve_db_path(space_root: &std::path::Path) -> std::path::PathBuf {
         // Try to find the universe root by walking up:
         // workspace/    ← Documents/Eustress/
-        //   <universe>/ ← ARC-AGI-3/ or Universe1/
+        //   <universe>/ ← Universe1/, for example
         //     spaces/
         //       <space>/ ← space_root
         let universe_root = Self::find_universe_root(space_root);

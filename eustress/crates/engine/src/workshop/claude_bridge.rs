@@ -585,7 +585,7 @@ Units and Scale:
   - Position [x, y, z]: world coordinates in meters
   - Size/Scale [x, y, z]: dimensions in meters
   - A human is ~1.8m tall. A table is ~0.75m tall. A building floor is ~3m.
-  - When the user says "studs" they mean meters (legacy Roblox terminology).
+  - A stud is 0.28 m (Roblox's stud). Convert anything the user gives in studs to meters, the engine unit, before calling a tool: 10 studs = 2.8 m.
   - Luau scripts: Vector3.new(x, y, z) values are in meters.
   - create_entity: position and size arrays are in meters.
 
@@ -979,9 +979,14 @@ pub fn poll_agentic_responses(
         match result {
             Ok(agentic) => {
                 // Estimate cost from token usage at the model that actually
-                // answered — Sonnet 5, Fable 5, and Grok 4.6 have distinct
-                // per-token pricing (see `WorkshopModel::estimate_cost`).
-                let cost = model.estimate_cost(agentic.input_tokens, agentic.output_tokens);
+                // answered; each has its own per-token price (see
+                // `WorkshopModel::estimate_cost`). A model whose provider
+                // publishes no price in its model list adds nothing here, and
+                // the picker says its price is not published rather than
+                // pretending it is free.
+                let cost = model
+                    .estimate_cost(agentic.input_tokens, agentic.output_tokens)
+                    .unwrap_or(0.0);
                 pipeline.total_cost += cost;
 
                 // 1. Emit the assistant's text reply if any, stamping which

@@ -1764,6 +1764,22 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
     return deps.json({ object: 'list', sim_id: sim.id, data, has_more: false }, 200, cacheHeaders);
   }
 
+  // ── A receipt by purchase id: what a host checks before granting ────────
+  // The id is the capability: it is unguessable, and only the buyer, the
+  // creator, and a host the buyer showed it to ever hold it. Reading is all it
+  // allows. A host grants a purchase only when the buyer is the player it
+  // verified (/api/identity/verify), and marks it granted through the
+  // authenticated fulfill route, which only the buyer and the creator may use:
+  // a host that is neither cannot consume a purchase it never granted.
+  const receiptMatch = path.match(/^\/api\/commerce\/receipts\/([a-f0-9-]{8,64})\/(pur_[A-Za-z0-9]{24})$/);
+  if (receiptMatch && method === 'GET') {
+    const sim = await loadSimulation(env, receiptMatch[1]);
+    if (!sim) return error(404, 'No such purchase', 'resource_missing');
+    const found = await callObject(hubStub(env, sim.author_id), 'get_sale', { account_id: sim.author_id, purchase_id: receiptMatch[2] });
+    if (!found.ok || found.raw.sim_id !== sim.id) return error(404, 'No such purchase', 'resource_missing');
+    return reply(capabilityReceipt(found.raw));
+  }
+
   if (caller.error) return error(caller.status, caller.error, caller.code);
   const account = caller.account_id;
   const hub = hubStub(env, account);
@@ -1963,6 +1979,32 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
     return fromObject(await call(wallet, 'entitlements', { sim_id: simId, livemode }), (x) => ({ object: 'list', data: x.entitlements, has_more: false }));
   }
 
+  // ── One player, as the creator's simulation sees them ────────────────────
+  // What the creator's multiplayer host reads when a verified player joins:
+  // the passes that player owns in this simulation, and the consumables it
+  // bought there that no session has granted yet. Only the simulation's
+  // creator may ask, and only about its own simulation; its sales list already
+  // names every buyer.
+  const playerMatch = path.match(/^\/api\/commerce\/players\/([A-Za-z0-9_-]{1,128})$/);
+  if (playerMatch && method === 'GET') {
+    const sim = await loadSimulation(env, url.searchParams.get('sim_id'));
+    if (!sim) return error(404, 'Simulation not found', 'simulation_not_found', { param: 'sim_id' });
+    if (sim.author_id !== account) return error(403, 'Only the creator of this simulation can read its players', 'not_simulation_owner');
+    const player = playerMatch[1];
+    // A wallet opens on first use: asking about an account that does not
+    // exist must not make one.
+    if (!(await env.USERS.get(`user:${player}`))) return error(404, 'No such player', 'resource_missing');
+    const theirs = walletStub(env, player);
+    const pending = await callObject(theirs, 'pending', { account_id: player, sim_id: sim.id, livemode });
+    if (!pending.ok) return fromObject(pending);
+    const owned = await callObject(theirs, 'entitlements', { account_id: player, sim_id: sim.id, livemode });
+    if (!owned.ok) return fromObject(owned);
+    return reply({
+      object: 'player', account_id: player, sim_id: sim.id, livemode,
+      pending: pending.receipts, entitlements: owned.entitlements,
+    });
+  }
+
   // ── Events ───────────────────────────────────────────────────────────────
   if (path === '/api/commerce/events' && method === 'GET') {
     const type = url.searchParams.get('type') || undefined;
@@ -2049,6 +2091,17 @@ function checkSpacePublished(sim, space) {
     return 'This simulation has no recorded Spaces. Republish the Universe from Studio so its Spaces are recorded, then try again';
   }
   return `Space "${space}" is not published in this simulation. Published: ${[...spaces].sort().join(', ')}`;
+}
+
+/// What a purchase id alone may learn about its purchase: enough for a host to
+/// grant it to the right player, nothing about the money beyond the price.
+function capabilityReceipt(sale) {
+  return {
+    object: 'receipt', purchase_id: sale.id, livemode: sale.livemode, sim_id: sale.sim_id,
+    space: sale.space || null, buyer_id: sale.buyer_id,
+    product: { number: sale.product.number, type: sale.product.type, name: sale.product.name },
+    amount: sale.amount, status: sale.status, fulfilled: !!sale.fulfilled, created: sale.created,
+  };
 }
 
 /// A reply without the object-call envelope fields.

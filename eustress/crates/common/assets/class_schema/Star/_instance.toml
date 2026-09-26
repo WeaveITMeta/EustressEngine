@@ -1,12 +1,26 @@
-# Star — Sun celestial body with day/night cycle (child of Lighting service)
-# Bevy: DirectionalLight + custom sky rotation
+# Star: the Sun (child of the Lighting service)
+# Bevy: DirectionalLight + SunDisk, read by common/src/plugins/celestial_sections.rs
+#
+# Where the sun stands is Lighting's: ClockTime, GeographicLatitude and the
+# day cycle live on the service. This section is the sun itself.
+#
+# intensity:    sunlight above the atmosphere, lux. The atmosphere dims and
+#               reddens it on the way down; Lighting.Brightness scales it.
+# color:        the sun's colour above the atmosphere.
+# angular_size: the disc, degrees across (the real sun is 0.53). A larger
+#               disc is not brighter, only larger.
+# cast_shadows: the sun's shadows; Lighting.GlobalShadows switches all off.
+# god_rays:     multiplier on the haze the sun's shafts are drawn in; 0 is off.
+# day_of_year:  the date the sun's path follows, 1 to 365 (172 is midsummer).
 
 [star]
-brightness = 1.0
-geographic_latitude = 41.733
-clock_time = 14.0
-ambient = [128, 128, 128]
-color = [255, 255, 255]
+enabled = true
+intensity = 130000.0
+color = [255, 250, 242]
+angular_size = 0.53
+cast_shadows = true
+god_rays = 1.0
+day_of_year = 172
 
 [metadata]
 class_name = "Star"

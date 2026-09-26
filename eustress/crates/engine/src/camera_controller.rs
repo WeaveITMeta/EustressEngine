@@ -867,30 +867,25 @@ fn ensure_camera_exists(
         .iter()
         .any(|target| !matches!(target, Some(bevy::camera::RenderTarget::Image(_))));
     if !has_window_camera {
-        info!("📷 No window camera found - spawning new editor camera");
-
-        // Create EustressCamera with proper initialization
-        let mut cam = EustressCamera::default();
-        cam.pivot = Vec3::ZERO;
-        cam.distance = 20.0;
-        cam.yaw = std::f32::consts::FRAC_PI_4;
-        cam.pitch = -0.5;
-        cam.enabled = true;
-
-        // Route through the ONE canonical bundle constructor (see its doc
-        // comment) instead of hand-rolling Camera3d/Tonemapping/Projection
-        // here: a second, independently-drifting camera build is exactly the
-        // mesh_view_bind_group hazard that function exists to prevent (this
-        // fallback previously used Tonemapping::AcesFitted + a different
-        // Projection far-plane than every other Studio camera).
-        commands.spawn((
-            crate::default_scene::studio_camera_bundle(
-                "Camera",
-                Transform::from_xyz(10.0, 10.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ),
-            cam,
-        ));
+        info!("📷 No window camera found - spawning new editor camera at the origin");
+        commands.spawn(respawned_editor_camera());
     }
+}
+
+/// The editor camera exactly as startup builds it: the ONE canonical bundle
+/// (`studio_camera_bundle`, which carries the `StudioCamera` marker that
+/// photoreal, the anti-aliasing preference, exposure and the sky key off)
+/// at the startup pose, with the controller `setup_camera_controller` gives
+/// the startup camera, orbiting the origin. Deleting the camera in the
+/// Explorer lands here too: this is the only place one is respawned.
+fn respawned_editor_camera() -> impl Bundle {
+    (
+        crate::default_scene::studio_camera_bundle(
+            "Camera",
+            crate::default_scene::editor_camera_start(),
+        ),
+        EustressCamera::default(),
+    )
 }
 
 // ============================================================================
@@ -1448,6 +1443,15 @@ fn eustress_camera_controls(
         .as_ref()
         .is_some_and(|s| s.drag_is_billboard_node && s.dragging && s.drag_started);
     if dragging_billboard_node {
+        scroll_delta = 0.0;
+    }
+
+    // And while the terrain tools are the current tool with `B` held: the
+    // wheel then sizes the brush (Roblox's `B`+scroll gesture), which
+    // `terrain_plugin` reads from the same notches.
+    let sizing_terrain_brush = keys.pressed(KeyCode::KeyB)
+        && studio_state.as_ref().is_some_and(|s| s.current_tool == crate::ui::Tool::Terrain);
+    if sizing_terrain_brush {
         scroll_delta = 0.0;
     }
 
@@ -2056,8 +2060,8 @@ fn apply_space_view(cam: &mut EustressCamera, state: SpaceViewState) {
 
 fn sync_space_view_file(
     space_root: Option<Res<crate::space::SpaceRoot>>,
-    mut cameras: Query<&mut EustressCamera, With<Camera3d>>,
-    mut applied_for: Local<Option<std::path::PathBuf>>,
+    mut cameras: Query<(Entity, &mut EustressCamera), With<Camera3d>>,
+    mut applied_for: Local<Option<(std::path::PathBuf, Entity)>>,
     mut last_saved: Local<Option<SpaceViewState>>,
 ) {
     let Some(space_root) = space_root else { return };
@@ -2065,10 +2069,14 @@ fn sync_space_view_file(
     if !crate::space::looks_like_space_root(root) {
         return;
     }
-    let Ok(mut cam) = cameras.single_mut() else { return };
+    let Ok((entity, mut cam)) = cameras.single_mut() else { return };
 
-    if applied_for.as_ref() != Some(root) {
-        *applied_for = Some(root.clone());
+    // A new Space, or a new camera in the same Space (the old one was
+    // deleted and respawned), restores the Space's saved view rather than
+    // overwriting it with the new camera's 3D perspective default.
+    let key = (root.clone(), entity);
+    if applied_for.as_ref() != Some(&key) {
+        *applied_for = Some(key);
         if let Some(state) = read_space_view(root) {
             apply_space_view(&mut cam, state);
             info!("📷 Restored {} {} view for this Space", state.0.label(), state.1.label());
@@ -2137,6 +2145,53 @@ pub fn setup_camera_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_the_editor_camera_respawns_one_controlled_camera_at_the_origin() {
+        use bevy::camera::RenderTarget;
+        let mut app = App::new();
+        app.add_systems(Update, ensure_camera_exists);
+        // The off-screen AI camera must neither keep the guard satisfied nor
+        // be given controls.
+        let off_screen = app
+            .world_mut()
+            .spawn((Camera3d::default(), RenderTarget::Image(Handle::<Image>::default().into())))
+            .id();
+        let editor = app.world_mut().spawn(respawned_editor_camera()).id();
+
+        let controlled = |app: &mut App| {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<
+                (Entity, &EustressCamera, Option<&RenderTarget>, &eustress_common::classes::Instance),
+                (With<Camera3d>, With<crate::default_scene::StudioCamera>),
+            >();
+            query
+                .iter(world)
+                .filter(|(_, _, target, _)| !matches!(target, Some(RenderTarget::Image(_))))
+                .map(|(entity, cam, _, instance)| (entity, cam.pivot, instance.class_name))
+                .collect::<Vec<_>>()
+        };
+
+        // A window camera exists: nothing spawns.
+        app.update();
+        assert_eq!(controlled(&mut app).len(), 1);
+
+        // Delete it, as the Explorer does: exactly one comes back, controlled,
+        // orbiting the origin, with the Camera row the Explorer shows.
+        app.world_mut().entity_mut(editor).despawn();
+        app.update();
+        let cameras = controlled(&mut app);
+        assert_eq!(cameras.len(), 1, "{cameras:?}");
+        let (respawned, pivot, class) = cameras[0];
+        assert_ne!(respawned, editor);
+        assert_eq!(pivot, Vec3::ZERO);
+        assert_eq!(class, eustress_common::classes::ClassName::Camera);
+        assert!(app.world().get::<EustressCamera>(off_screen).is_none());
+
+        // And it stays one.
+        app.update();
+        assert_eq!(controlled(&mut app).len(), 1);
+    }
 
     #[test]
     fn view_commands_parse_from_ui_strings() {

@@ -1,10 +1,33 @@
-# Moon — Moon with phases and night lighting (child of Lighting service)
-# Bevy: Custom moon shader / light contribution
+# Moon (child of the Lighting service)
+# Bevy: DirectionalLight + the lit moon disc, read by
+# common/src/plugins/celestial_sections.rs
+#
+# intensity:           full-moon illuminance above the atmosphere, lux. The
+#                      phase dims it (a quarter moon gives a tenth), and it is
+#                      raised for a legible night the way film shoots one.
+# color:               the moon's surface colour.
+# angular_size:        the disc, degrees across (the real moon is 0.52; 1.1
+#                      shows the maria at a normal field of view).
+# lunar_day:           days since new moon, 0 to 29.53; 14.76 is full.
+# glow:                the halo around the moon at night.
+# earthshine:          light on the moon's dark side.
+# orbital_inclination: the orbit's tilt to the ecliptic, degrees.
+# ascending_node:      where the orbit crosses the ecliptic, degrees.
+# follows_calendar:    the moon moves a day through its phases for each day
+#                      the day cycle completes.
 
 [moon]
-brightness = 0.25
-phase = 0
-color = [255, 255, 255]
+enabled = true
+intensity = 0.5
+color = [242, 242, 255]
+angular_size = 1.1
+lunar_day = 14.76
+cast_shadows = true
+glow = 0.2
+earthshine = 0.02
+orbital_inclination = 5.145
+ascending_node = 0.0
+follows_calendar = true
 
 [metadata]
 class_name = "Moon"

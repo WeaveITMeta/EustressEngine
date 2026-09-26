@@ -27,11 +27,7 @@ pub struct PartChanged {
     pub part_id: String,
 }
 
-/// Component to track which part this entity represents
-#[derive(Component)]
-pub struct PartEntity {
-    pub part_id: String,
-}
+pub use eustress_common::part_draw::PartEntity;
 
 /// Component for selection highlighting
 #[derive(Component)]

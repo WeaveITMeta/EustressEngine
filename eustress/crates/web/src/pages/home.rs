@@ -56,27 +56,10 @@ pub fn HomePage() -> impl IntoView {
                         </div>
                     </div>
 
-                    // The brand mark itself, lit by the accent. The previous version
-                    // framed it inside a fake application window with mock traffic
-                    // light buttons, showing a product that does not exist instead
-                    // of the one that does.
+                    // The demo reel: real Studio captures and live simulation, no
+                    // mock application chrome around it.
                     <div class="hero-visual-new">
-                        <figure
-                            class="hero-render"
-                            on:mousemove=move |ev| on_tilt_move(&ev)
-                            on:mouseleave=move |ev| on_tilt_leave(&ev)
-                        >
-                            <div class="hero-render-glow" aria-hidden="true"></div>
-                            <img
-                                src="/assets/hero-render.png"
-                                alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
-                                class="hero-render-img"
-                                width="1334"
-                                height="714"
-                                fetchpriority="high"
-                                decoding="async"
-                            />
-                        </figure>
+                        <HeroReel />
                     </div>
                 </div>
 
@@ -530,6 +513,437 @@ pub fn HomePage() -> impl IntoView {
         </div>
     }
 }
+
+// -----------------------------------------------------------------------------
+// Hero demo reel. Starts muted and loops in the tilted frame. Click the video
+// to pause or play, the speaker button for sound, and drag the timeline's head
+// to scrub; the corner button goes full screen with the browser's controls.
+// The timeline shows while a pointer or a finger is on the video and fades
+// once it goes idle.
+// -----------------------------------------------------------------------------
+
+/// Chapter starts in the reel, in seconds: the timeline's tick marks and the
+/// label over its head.
+const REEL_CHAPTERS: [(f64, &str); 7] = [
+    (0.0, "Intro"),
+    (1.15, "Idea"),
+    (7.7, "Build"),
+    (14.3, "Simulate"),
+    (21.05, "Iterate"),
+    (33.5, "Reality"),
+    (41.4, "Eustress"),
+];
+/// The reel's length before its metadata loads.
+const REEL_SECONDS: f64 = 48.0;
+/// How long the timeline stays up after the last pointer or touch activity
+/// on the reel, in milliseconds.
+const REEL_CONTROLS_IDLE_MS: f64 = 2500.0;
+
+fn reel_chapter_at(seconds: f64) -> &'static str {
+    REEL_CHAPTERS
+        .iter()
+        .rev()
+        .find(|(start, _)| seconds >= *start)
+        .map(|(_, name)| *name)
+        .unwrap_or("Intro")
+}
+
+fn reel_clock(seconds: f64) -> String {
+    let s = seconds.max(0.0).floor() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Whether the reel's timeline is showing, and what holds it up. Shared by
+/// the reel's event handlers and its idle timer.
+#[derive(Clone, Copy)]
+struct ReelControls {
+    shown: RwSignal<bool>,
+    dragging: RwSignal<bool>,
+    /// `Date.now()` at the last pointer or touch activity on the reel.
+    last_activity: StoredValue<f64>,
+    /// A mouse resting on the timeline keeps it up.
+    over_timeline: StoredValue<bool>,
+    /// At most one idle check is pending, however fast the pointer moves.
+    timer_armed: StoredValue<bool>,
+}
+
+impl ReelControls {
+    /// A pointer moved or a finger touched: show the timeline and restart
+    /// the idle countdown.
+    fn wake(self) {
+        self.last_activity.set_value(js_sys::Date::now());
+        if !self.shown.get_untracked() {
+            self.shown.set(true);
+        }
+        if !self.timer_armed.get_value() {
+            self.timer_armed.set_value(true);
+            self.check_after(REEL_CONTROLS_IDLE_MS);
+        }
+    }
+
+    /// The mouse left the reel: hide now, unless a drag is holding it.
+    fn hide(self) {
+        if !self.dragging.get_untracked() {
+            self.shown.set(false);
+        }
+    }
+
+    fn check_after(self, ms: f64) {
+        set_timeout(
+            move || self.check_idle(),
+            std::time::Duration::from_millis(ms.max(16.0) as u64),
+        );
+    }
+
+    /// Hide once the reel has gone REEL_CONTROLS_IDLE_MS without activity,
+    /// otherwise wait out the rest. A drag or a resting mouse holds it up
+    /// until the next pointer event starts a fresh countdown.
+    fn check_idle(self) {
+        // The reel may have unmounted since this was scheduled.
+        let Some(last) = self.last_activity.try_get_value() else { return };
+        let remaining = REEL_CONTROLS_IDLE_MS - (js_sys::Date::now() - last);
+        if remaining > 0.0 {
+            self.check_after(remaining);
+            return;
+        }
+        self.timer_armed.set_value(false);
+        if !self.dragging.get_untracked() && !self.over_timeline.get_value() {
+            self.shown.set(false);
+        }
+    }
+}
+
+#[component]
+fn HeroReel() -> impl IntoView {
+    let video_ref = NodeRef::<leptos::html::Video>::new();
+    let track_ref = NodeRef::<leptos::html::Div>::new();
+    let muted = RwSignal::new(true);
+    let progress = RwSignal::new(0.0_f64);
+    let duration = RwSignal::new(REEL_SECONDS);
+    let dragging = RwSignal::new(false);
+    // Set for one update when playback jumps back (the loop wrapping), so the
+    // head snaps to the start instead of sliding backwards across the track.
+    let jumped = RwSignal::new(false);
+    let controls = ReelControls {
+        shown: RwSignal::new(false),
+        dragging,
+        last_activity: StoredValue::new(0.0),
+        over_timeline: StoredValue::new(false),
+        timer_armed: StoredValue::new(false),
+    };
+    // Set by a touch that lands while the timeline is hidden. That tap only
+    // brings the timeline up, so reaching for it never pauses the reel.
+    let tap_reveals = StoredValue::new(false);
+
+    // Browser only: honour reduced motion, start the loop once it has a frame,
+    // and hide the browser's controls again when full screen ends (standard
+    // API on the element, WebKit's own event on iOS, where only the video
+    // element can go full screen).
+    #[cfg(not(feature = "ssr"))]
+    Effect::new(move |_| {
+        use wasm_bindgen::{closure::Closure, JsCast};
+
+        let Some(video) = video_ref.get() else { return };
+        // Autoplay policy reads the `muted` PROPERTY. An element built in the
+        // browser gets the attribute but starts unmuted, so the browser would
+        // refuse to autoplay it.
+        video.set_muted(true);
+        if crate::components::tilt::prefers_reduced_motion() {
+            video.set_autoplay(false);
+            let _ = video.pause();
+        } else {
+            // Start it once there is a frame to show. Calling play() here, at
+            // mount, runs before the <source> children exist: it fails, and a
+            // play() call also clears the element's autoplay and poster
+            // flags, which left a paused black frame.
+            let on_ready = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+                if let Some(v) = video_ref.get_untracked() {
+                    if v.paused() && document().fullscreen_element().is_none() {
+                        let _ = v.play();
+                    }
+                }
+            });
+            let _ = video.add_event_listener_with_callback("loadeddata", on_ready.as_ref().unchecked_ref());
+            on_ready.forget();
+            // HAVE_CURRENT_DATA already: `loadeddata` has fired, start now.
+            if video.ready_state() >= 2 {
+                let _ = video.play();
+            }
+        }
+        let on_exit = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            if document().fullscreen_element().is_some() {
+                return;
+            }
+            if let Some(v) = video_ref.get_untracked() {
+                v.set_controls(false);
+            }
+        });
+        for event in ["fullscreenchange", "webkitfullscreenchange", "webkitendfullscreen"] {
+            let _ = video.add_event_listener_with_callback(event, on_exit.as_ref().unchecked_ref());
+        }
+        on_exit.forget();
+    });
+
+    let open_fullscreen = move |_| {
+        #[cfg(not(feature = "ssr"))]
+        {
+            use wasm_bindgen::JsCast;
+
+            let Some(video) = video_ref.get_untracked() else { return };
+            // Keeps the viewer's place and sound choice; the browser's own
+            // controls take over while full screen.
+            video.set_controls(true);
+            if video.request_fullscreen().is_err() {
+                // iOS Safari has no element full screen; its video player does.
+                if let Ok(enter) = js_sys::Reflect::get(&video, &"webkitEnterFullscreen".into()) {
+                    if let Some(enter) = enter.dyn_ref::<js_sys::Function>() {
+                        let _ = enter.call0(&video);
+                    }
+                }
+            }
+        }
+    };
+
+    let toggle_sound = move |_| {
+        if let Some(v) = video_ref.get_untracked() {
+            let now_muted = !v.muted();
+            v.set_muted(now_muted);
+            muted.set(now_muted);
+            // Asking for sound means wanting to hear it: start a paused reel.
+            if !now_muted && v.paused() {
+                let _ = v.play();
+            }
+        }
+    };
+
+    // Move the head to a pointer's x position and seek there.
+    let seek_to_x = move |client_x: f64| {
+        let Some(track) = track_ref.get_untracked() else { return };
+        let rect = track.get_bounding_client_rect();
+        if rect.width() <= 0.0 {
+            return;
+        }
+        let frac = ((client_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        progress.set(frac);
+        if let Some(v) = video_ref.get_untracked() {
+            let d = v.duration();
+            if d.is_finite() && d > 0.0 {
+                v.set_current_time(frac * d);
+            }
+        }
+    };
+
+    let seek_by = move |delta: f64| {
+        if let Some(v) = video_ref.get_untracked() {
+            let d = v.duration();
+            if d.is_finite() && d > 0.0 {
+                let t = (v.current_time() + delta).clamp(0.0, d - 0.05);
+                v.set_current_time(t);
+                progress.set(t / d);
+            }
+        }
+    };
+
+    let head_left = move || format!("{:.3}%", progress.get() * 100.0);
+    let head_label = move || {
+        let t = progress.get() * duration.get();
+        format!("{} · {}", reel_chapter_at(t), reel_clock(t))
+    };
+
+    view! {
+        <figure
+            class="hero-render hero-reel"
+            class:show-controls=move || controls.shown.get()
+            on:pointerdown=move |ev: web_sys::PointerEvent| {
+                tap_reveals.set_value(ev.pointer_type() == "touch" && !controls.shown.get_untracked());
+                controls.wake();
+            }
+            on:pointermove=move |_| controls.wake()
+            on:pointerup=move |_| controls.wake()
+            on:mousemove=move |ev| {
+                // Hold the tilt still while the timeline head is being dragged.
+                if !dragging.get_untracked() {
+                    on_tilt_move(&ev)
+                }
+            }
+            on:mouseleave=move |ev| {
+                on_tilt_leave(&ev);
+                controls.hide();
+            }
+        >
+            <div class="hero-render-glow" aria-hidden="true"></div>
+            <video
+                node_ref=video_ref
+                class="hero-render-video"
+                poster="/assets/demo/eustress-demo-poster.jpg"
+                muted=true
+                prop:muted=true
+                on:click=move |_| {
+                    // On touch, the tap that brings the timeline up does
+                    // only that.
+                    if tap_reveals.get_value() {
+                        return;
+                    }
+                    // Click toggles play. In full screen the browser's own
+                    // controls handle it.
+                    #[cfg(not(feature = "ssr"))]
+                    if let Some(v) = video_ref.get_untracked() {
+                        if document().fullscreen_element().is_none() {
+                            if v.paused() {
+                                let _ = v.play();
+                            } else {
+                                let _ = v.pause();
+                            }
+                        }
+                    }
+                }
+                on:loadedmetadata=move |_| {
+                    if let Some(v) = video_ref.get_untracked() {
+                        let d = v.duration();
+                        if d.is_finite() && d > 0.0 {
+                            duration.set(d);
+                        }
+                    }
+                }
+                on:timeupdate=move |_| {
+                    if dragging.get_untracked() {
+                        return;
+                    }
+                    if let Some(v) = video_ref.get_untracked() {
+                        let d = v.duration();
+                        if d.is_finite() && d > 0.0 {
+                            let next = v.current_time() / d;
+                            jumped.set(next < progress.get_untracked());
+                            progress.set(next);
+                        }
+                    }
+                }
+                on:volumechange=move |_| {
+                    if let Some(v) = video_ref.get_untracked() {
+                        muted.set(v.muted());
+                    }
+                }
+                autoplay=true
+                loop=true
+                playsinline=true
+                preload="auto"
+                width="1920"
+                height="1080"
+                aria-label="Eustress demo: an idea for a canyon footbridge is built in Eustress Studio, fails a live rockfall simulation, gets a redesigned canopy, passes the same test, and comes out costed and ready to build"
+            >
+                <source src="/assets/demo/eustress-demo.webm" type="video/webm" />
+                <source src="/assets/demo/eustress-demo.mp4" type="video/mp4" />
+            </video>
+            <div class="hero-reel-scrim" aria-hidden="true"></div>
+            <div
+                class="hero-timeline"
+                class:dragging=move || dragging.get()
+                class:jumped=move || jumped.get()
+                role="slider"
+                tabindex="0"
+                aria-label="Demo timeline"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow=move || format!("{:.0}", progress.get() * 100.0)
+                aria-valuetext=head_label
+                on:pointerdown=move |ev: web_sys::PointerEvent| {
+                    ev.prevent_default();
+                    dragging.set(true);
+                    if let Some(track) = track_ref.get_untracked() {
+                        let _ = track.set_pointer_capture(ev.pointer_id());
+                    }
+                    seek_to_x(ev.client_x() as f64);
+                }
+                on:pointermove=move |ev: web_sys::PointerEvent| {
+                    if dragging.get_untracked() {
+                        seek_to_x(ev.client_x() as f64);
+                    }
+                }
+                on:pointerup=move |_| dragging.set(false)
+                on:pointercancel=move |_| dragging.set(false)
+                on:lostpointercapture=move |_| dragging.set(false)
+                on:pointerenter=move |ev: web_sys::PointerEvent| {
+                    if ev.pointer_type() == "mouse" {
+                        controls.over_timeline.set_value(true);
+                    }
+                }
+                on:pointerleave=move |_| controls.over_timeline.set_value(false)
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    controls.wake();
+                    match ev.key().as_str() {
+                        "ArrowLeft" => {
+                            ev.prevent_default();
+                            seek_by(-5.0);
+                        }
+                        "ArrowRight" => {
+                            ev.prevent_default();
+                            seek_by(5.0);
+                        }
+                        "Home" => {
+                            ev.prevent_default();
+                            seek_by(-1.0e6);
+                        }
+                        "End" => {
+                            ev.prevent_default();
+                            seek_by(1.0e6);
+                        }
+                        _ => {}
+                    }
+                }
+            >
+                <div class="hero-timeline-track" node_ref=track_ref>
+                    <div class="hero-timeline-fill" style:width=head_left></div>
+                    {REEL_CHAPTERS
+                        .iter()
+                        .skip(1)
+                        .map(|&(start, name)| {
+                            view! {
+                                <span
+                                    class="hero-timeline-tick"
+                                    style:left=move || format!("{:.3}%", start / duration.get() * 100.0)
+                                    title=name
+                                ></span>
+                            }
+                        })
+                        .collect_view()}
+                    <div class="hero-timeline-head" style:left=head_left>
+                        <span class="hero-timeline-label">{head_label}</span>
+                    </div>
+                </div>
+            </div>
+            <button
+                type="button"
+                class="hero-fullscreen hero-sound"
+                class:is-muted=move || muted.get()
+                aria-label=move || if muted.get() { "Turn the sound on" } else { "Mute" }
+                aria-pressed=move || if muted.get() { "false" } else { "true" }
+                title=move || if muted.get() { "Sound on" } else { "Mute" }
+                on:click=toggle_sound
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" />
+                    {move || if muted.get() {
+                        view! { <path d="M16 9.5l5 5M21 9.5l-5 5" /> }.into_any()
+                    } else {
+                        view! { <path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11" /> }.into_any()
+                    }}
+                </svg>
+            </button>
+            <button
+                type="button"
+                class="hero-fullscreen"
+                aria-label="Watch the demo full screen"
+                title="Watch full screen"
+                on:click=open_fullscreen
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+                </svg>
+            </button>
+        </figure>
+    }
+}
+
 
 // -----------------------------------------------------------------------------
 // "What's Inside" tabbed panel: consolidates Games & Worlds, Systems That

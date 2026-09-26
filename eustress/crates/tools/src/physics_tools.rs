@@ -232,7 +232,7 @@ impl ToolHandler for CalculatePhysicsTool {
             "buoyancy_force" => {
                 let rho = get_f64("fluid_density");
                 let v = get_f64("displaced_volume");
-                let g = 9.80665;
+                let g = eustress_common::units::STANDARD_GRAVITY;
                 (rho * g * v, format!("Fb = {:.2} * g * {:.6}", rho, v))
             }
             "escape_velocity" => {

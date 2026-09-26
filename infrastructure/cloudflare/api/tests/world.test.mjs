@@ -210,6 +210,7 @@ test('a publish uploads only missing chunks, then commits', async () => {
 
   const sim = listing(env);
   assert.equal(sim.format, 'echk');
+  assert.equal(sim.open_source, undefined, 'a listing never marked open source is not');
   assert.equal(sim.r2_key, manifestKey(SIM, sha), 'moderation submit heads this key');
   assert.equal(sim.pak_etag, null);
   assert.equal(sim.scene_size_bytes, C1.length + C2.length);
@@ -296,8 +297,9 @@ test('the manifest and its chunks follow the download gate', async () => {
   assert.equal(res.headers.get('ETag'), `"${H1}"`);
 
   env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), moderation: { status: 'quarantined' } }));
-  assert.equal((await call(env, 'GET', `chunks/${H1}`)).status, 451);
-  assert.equal((await call(env, 'GET', `chunks/${H1}`, { who: 'author' })).status, 451);
+  // 403 for everyone, author included: a distinct 451 would reveal the hold.
+  assert.equal((await call(env, 'GET', `chunks/${H1}`)).status, 403);
+  assert.equal((await call(env, 'GET', `chunks/${H1}`, { who: 'author' })).status, 403);
 });
 
 test('only chunks the committed manifest names are served, and they cannot be replaced', async () => {
@@ -331,6 +333,89 @@ test('committing the same world twice keeps its review; new content goes back to
   await call(env, 'POST', 'commit', { who: 'author', body: publish(moved) });
   assert.equal(listing(env).moderation.status, 'pending');
   assert.equal(listing(env).version, 2);
+});
+
+test('Share Source travels with the listing and counts as a listing change', async () => {
+  const env = environment();
+  const m = await committed(env);
+  approve(env);
+
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
+  assert.equal(listing(env).open_source, true);
+  assert.equal(listing(env).moderation.status, 'pending', 'what the gallery offers changed, so it is reviewed again');
+
+  approve(env);
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
+  assert.equal(listing(env).moderation.status, 'approved', 'the same flag again is no change');
+
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: 'yes' } }) });
+  assert.equal(listing(env).open_source, true, 'only a boolean sets it');
+});
+
+test('the source world adds server-only chunks, and only an open-source listing shares it', async () => {
+  const env = environment();
+  const m = await committed(env);
+  const H4 = 'd'.repeat(64);
+  const S1 = chunk('[metadata]\nclass_name = "Script"\n');
+  assert.equal((await call(env, 'PUT', `chunks/${H4}`, { who: 'author', bytes: S1 })).status, 201);
+  const source = manifest({
+    spaces: [
+      { name: 'City', chunks: [...m.spaces[0].chunks, { cx: 0, cz: 0, file: 'server.echk', size: S1.length, count: 1, blake3: H4 }] },
+      m.spaces[1],
+    ],
+  });
+  const commitSource = () => call(env, 'POST', 'commit', { who: 'author', body: publish(source, { kind: 'source' }) });
+
+  let res = await commitSource();
+  assert.equal(res.status, 409, 'no source without Share Source');
+  assert.equal((await res.json()).code, 'not_open_source');
+
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
+  assert.equal((await commitSource()).status, 200);
+  approve(env);
+
+  // Open source: anyone who can see the listing reads the source and its
+  // server-only chunk; the player world still does not name that chunk.
+  res = await call(env, 'GET', 'source');
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), JSON.stringify(source));
+  assert.equal((await call(env, 'GET', `chunks/${H4}`)).status, 200);
+  assert.equal((await (await call(env, 'GET', 'manifest')).text()).includes(H4), false);
+  // A chunk only the source names cannot be replaced either.
+  assert.equal((await call(env, 'PUT', `chunks/${H4}`, { who: 'author', bytes: C2 })).status, 409);
+
+  // Share Source off: the source is dropped, and its chunk is private again.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: false } }) });
+  approve(env);
+  assert.equal((await call(env, 'GET', 'source')).status, 404);
+  assert.equal((await call(env, 'GET', `chunks/${H4}`)).status, 404);
+  assert.equal((await commitSource()).status, 409);
+});
+
+test('a source left behind on a listing that no longer shares it stays private', async () => {
+  // Share Source switched off without a new commit (an admin edit, say):
+  // the source is still stored, and only the author or an admin may read it.
+  const env = environment();
+  const m = await committed(env);
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
+  assert.equal((await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { kind: 'source' }) })).status, 200);
+  env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), open_source: false, moderation: { status: 'approved' } }));
+
+  assert.equal((await call(env, 'GET', 'source')).status, 404);
+  assert.equal((await call(env, 'GET', 'source', { who: 'someone' })).status, 404);
+  assert.equal((await call(env, 'GET', 'source', { who: 'author' })).status, 200);
+  assert.equal((await call(env, 'GET', 'source', { who: 'admin' })).status, 200);
+});
+
+test('a new world drops the old source until Studio commits the new one', async () => {
+  const env = environment();
+  const m = await committed(env);
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
+  assert.equal((await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { kind: 'source' }) })).status, 200);
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(manifest({ start_space: 'Garage' })) });
+  approve(env);
+  assert.equal((await call(env, 'GET', 'source')).status, 404, 'a source never outlives its world');
+  assert.equal((await call(env, 'GET', 'source', { who: 'author' })).status, 404);
 });
 
 test('a listing published as a .pak answers 409 so the Player falls back', async () => {

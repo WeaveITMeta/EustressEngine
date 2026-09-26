@@ -36,6 +36,9 @@ export component CommandBar inherits Rectangle {
     callback on-select-suggestion(int);
     callback on-clear-output();
 
+    // The language's one tint: Rune orange, Luau the accent text blue.
+    property <color> lang-tint: root.language == "luau" ? Theme.text-accent : Theme.accent-orange;
+
     width: 100%;
     // Bar grows with content up to 200px, then scrolls. Single-line use
     // collapses to the original ~28px height.
@@ -51,16 +54,20 @@ export component CommandBar inherits Rectangle {
         padding-bottom: 3px;
         spacing: 4px;
 
-        // Language selector — fixed width, top-aligned
+        // Language selector: a chip that flips Rune and Luau. Fixed width,
+        // top-aligned so it stays on the first line as the input grows.
         VerticalLayout {
             alignment: start;
             Rectangle {
-                width: 48px;
+                width: 54px;
                 height: 22px;
-                background: lang-touch.has-hover ? Theme.button-hover : Theme.input-background;
-                border-radius: 3px;
+                background: lang-touch.pressed ? root.lang-tint.with-alpha(0.26)
+                    : lang-touch.has-hover ? root.lang-tint.with-alpha(0.2)
+                    : root.lang-tint.with-alpha(0.12);
+                border-radius: Theme.radius-sm;
                 border-width: 1px;
-                border-color: Theme.input-border;
+                border-color: root.lang-tint.with-alpha(0.45);
+                animate background { duration: 100ms; }
 
                 lang-touch := TouchArea {
                     mouse-cursor: pointer;
@@ -69,47 +76,71 @@ export component CommandBar inherits Rectangle {
                     }
                 }
 
-                Text {
-                    width: 100%;
-                    height: 100%;
-                    text: root.language == "luau" ? "Luau" : "Rune";
-                    color: root.language == "luau" ? Theme.text-accent : Theme.accent-orange;
-                    font-size: 11px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                HorizontalLayout {
+                    padding-left: 7px;
+                    padding-right: 6px;
+                    spacing: 4px;
+                    Text {
+                        text: root.language == "luau" ? "Luau" : "Rune";
+                        color: root.lang-tint;
+                        font-size: 11px;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Image {
+                            width: 9px;
+                            height: 9px;
+                            source: @image-url("../../assets/icons/ui/swap.svg");
+                            image-fit: contain;
+                            colorize: root.lang-tint.with-alpha(0.8);
+                        }
+                    }
                 }
             }
         }
 
-        // Prompt chevron — fixed width, top-aligned
-        VerticalLayout {
-            alignment: start;
-            Text {
-                width: 14px;
-                height: 22px;
-                text: ">";
-                color: root.language == "luau" ? Theme.text-accent : Theme.accent-orange;
-                font-size: 14px;
-                font-weight: 700;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-            }
-        }
-
-        // Multi-line input — stretches to fill all remaining space between
-        // the ">" prompt and the Execute button.
+        // The input field: a prompt icon inside the field on the left, then
+        // the multi-line input, which stretches to fill the space before the
+        // Run button. Focus draws the selection cyan ring.
         Rectangle {
             horizontal-stretch: 1;
             border-width: 1px;
-            border-color: input-area.has-focus ? Theme.accent-blue : Theme.input-border;
+            border-color: input-area.has-focus ? Theme.accent-cyan : Theme.input-border;
             background: Theme.input-background;
-            border-radius: 3px;
+            border-radius: Theme.radius-sm;
+
+            Image {
+                x: 7px;
+                y: 5px;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/terminal.svg");
+                image-fit: contain;
+                colorize: input-area.has-focus ? root.lang-tint : Theme.text-secondary;
+            }
+
+            // Placeholder while empty.
+            if root.command-text == "": Text {
+                x: 26px;
+                y: 2px;
+                height: 18px;
+                width: parent.width - 32px;
+                text: root.language == "luau"
+                    ? "Run Luau in the open Space. Enter runs, Shift+Enter adds a line."
+                    : "Run Rune in the open Space. Enter runs, Shift+Enter adds a line.";
+                color: Theme.text-disabled;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
 
             scroll := ScrollView {
-                x: 4px;
+                x: 26px;
                 y: 2px;
-                width: parent.width - 8px;
+                width: parent.width - 30px;
                 height: parent.height - 4px;
                 viewport-width: self.width;
                 viewport-height: max(self.height, input-area.preferred-height);
@@ -117,6 +148,7 @@ export component CommandBar inherits Rectangle {
                 input-area := TextInput {
                     width: parent.width;
                     color: Theme.text-primary;
+                    selection-background-color: Theme.accent-cyan.with-alpha(0.35);
                     font-size: 12px;
                     text <=> root.command-text;
                     single-line: false;
@@ -146,18 +178,22 @@ export component CommandBar inherits Rectangle {
             }
         }
 
-        // Execute button — fixed width, right-aligned in the layout,
-        // bottom-pinned so it stays near the text baseline as the
-        // input grows taller with multi-line content.
+        // Run button: fixed width, bottom-pinned so it stays by the last
+        // line as the input grows taller with multi-line content. Dimmed
+        // while there is nothing to run.
         VerticalLayout {
             alignment: end;
             Rectangle {
-                width: 22px;
+                width: 26px;
                 height: 22px;
-                background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
-                border-radius: 3px;
+                background: root.command-text == "" ? Theme.input-background
+                    : run-touch.pressed ? Theme.accent-green.with-alpha(0.32)
+                    : run-touch.has-hover ? Theme.accent-green.with-alpha(0.24)
+                    : Theme.accent-green.with-alpha(0.14);
+                border-radius: Theme.radius-sm;
                 border-width: 1px;
-                border-color: Theme.input-border;
+                border-color: root.command-text == "" ? Theme.input-border : Theme.accent-green.with-alpha(0.5);
+                animate background { duration: 100ms; }
 
                 run-touch := TouchArea {
                     mouse-cursor: pointer;
@@ -170,11 +206,11 @@ export component CommandBar inherits Rectangle {
                 }
 
                 Image {
-                    width: 12px;
-                    height: 12px;
+                    width: 11px;
+                    height: 11px;
                     source: @image-url("../../assets/icons/ui/play.svg");
                     image-fit: contain;
-                    colorize: Theme.accent-green;
+                    colorize: root.command-text == "" ? Theme.text-disabled : Theme.accent-green;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                 }

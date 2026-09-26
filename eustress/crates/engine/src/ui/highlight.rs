@@ -329,3 +329,103 @@ pub fn highlight_to_lines(source: &str, language: &str) -> Vec<HighlightLine> {
         })
         .collect()
 }
+
+// ─── Language-service highlighting ──────────────────────────────────────────
+
+/// Token spans from a language service, coloured by the editor theme. Each
+/// line is lexed from the state the previous line ended in. Token offsets are
+/// bytes within the line; the overlay wants character columns, so each line is
+/// walked once to convert them. Whitespace carries no token and draws nothing:
+/// the text field underneath is transparent while spans exist, and gaps are
+/// only positions.
+pub fn service_token_spans(
+    source: &str,
+    service: &dyn crate::script_editor::language::LanguageService,
+    palette: &crate::script_editor::theme::EditorPalette,
+) -> Vec<TokenSpanData> {
+    let mut out = Vec::new();
+    let mut state = service.initial_state();
+    for (line_idx, line) in source.split('\n').enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let (tokens, next) = service.tokenize_line(line, state);
+        state = next;
+        let mut col = 0usize;
+        let mut byte = 0usize;
+        for t in tokens {
+            let start = t.start as usize;
+            let end = start + t.len as usize;
+            // The contract says tokens are ordered, non-overlapping and on
+            // character boundaries; a token that breaks it is skipped rather
+            // than allowed to panic the UI thread.
+            if start < byte || end > line.len() || !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+                continue;
+            }
+            col += line[byte..start].chars().count();
+            let text = &line[start..end];
+            let style = crate::script_editor::theme::style_for(t.class, palette);
+            out.push(TokenSpanData {
+                line: line_idx as i32,
+                x: col as f32,
+                text: text.to_string(),
+                r: style.color.0 as f32 / 255.0,
+                g: style.color.1 as f32 / 255.0,
+                b: style.color.2 as f32 / 255.0,
+                bold: style.bold,
+            });
+            col += text.chars().count();
+            byte = end;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod service_span_tests {
+    use super::*;
+    use crate::script_editor::rune_service::RuneService;
+    use crate::script_editor::theme::EditorPalette;
+
+    #[test]
+    fn columns_count_characters_not_bytes() {
+        let spans = service_token_spans("let é = \"ü\"; x", &RuneService, &EditorPalette::DARK);
+        let at = |text: &str| spans.iter().find(|s| s.text == text).map(|s| s.x);
+        assert_eq!(at("let"), Some(0.0));
+        assert_eq!(at("é"), Some(4.0));
+        assert_eq!(at("x"), Some(13.0), "`\"ü\";` is four characters but five bytes");
+    }
+
+    #[test]
+    fn span_colours_are_readable_on_the_editor_background() {
+        use crate::script_editor::theme::{contrast, Rgb, MIN_CONTRAST};
+        // Span channels are 0..1. Slint's rgb() takes 0..255 and truncates,
+        // so the overlay must scale them, or every token draws black.
+        let overlay = include_str!("../../ui/slint/script_editor.slint");
+        assert!(
+            overlay.contains("rgb(span.r * 255, span.g * 255, span.b * 255)"),
+            "the token overlay scales 0..1 channels to 0..255",
+        );
+        let src = "pub fn main() {\n    let s = \"x\"; // note\n    MAX\n}";
+        for palette in [EditorPalette::DARK, EditorPalette::MODERN] {
+            for s in service_token_spans(src, &RuneService, &palette) {
+                assert!((0.0..=1.0).contains(&s.r) && (0.0..=1.0).contains(&s.g) && (0.0..=1.0).contains(&s.b));
+                // As Slint draws it: the scaled channel, truncated.
+                let drawn = Rgb((s.r * 255.0) as u8, (s.g * 255.0) as u8, (s.b * 255.0) as u8);
+                assert!(
+                    contrast(drawn, palette.background) >= MIN_CONTRAST - 0.05,
+                    "{:?} drawn as {drawn:?} on {:?}",
+                    s.text,
+                    palette.background,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn line_state_carries_across_lines() {
+        let spans = service_token_spans("/* a\nb */ c", &RuneService, &EditorPalette::DARK);
+        let b_line = spans.iter().find(|s| s.text.contains("b */")).expect("comment tail");
+        let c = spans.iter().find(|s| s.text == "c").expect("identifier after the comment");
+        assert_eq!(b_line.line, 1);
+        assert_ne!((b_line.r, b_line.g, b_line.b), (c.r, c.g, c.b), "the comment tail is coloured as a comment");
+    }
+}

@@ -37,6 +37,7 @@ use crate::pages::{
     community::CommunityPage,
     contact::ContactPage,
     cookies::CookiesPage,
+    creator::CreatorPage,
     dashboard::DashboardPage,
     dmca::DmcaPage,
     docs_audio::DocsAudioPage,
@@ -310,6 +311,8 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/profile/:username") view=ProfilePage />
                 <Route path=path!("/profile") view=ProfilePage />
                 <Route path=path!("/purchases") view=PurchasesPage />
+                <Route path=path!("/creator") view=CreatorPage />
+                <Route path=path!("/creator/:sim_id") view=CreatorPage />
                 
                 // Legal pages
                 <Route path=path!("/terms") view=TermsPage />
@@ -411,42 +414,98 @@ fn jurisdiction_name(iso2: &str) -> String {
 #[cfg(not(feature = "ssr"))]
 const SITE_TITLE: &str = "Eustress Engine | Simulation & Data Platform";
 
-/// Keeps `document.title` in step with the page as the router moves.
+/// Keeps `document.title` in step with the page: "<first h1> | Eustress
+/// Engine", or the site title on the home page and on a page without a
+/// heading.
 ///
-/// A prerendered page lands with its own `<title>` (src/bin/prerender.rs
-/// names it after the first `<h1>`), and before this the app never touched
-/// the title, so the title of the page a visitor landed on would have
-/// followed them to every page after it. This applies the prerender's rule at
-/// runtime; the first run reproduces the title the page arrived with.
+/// This is the prerender's rule (src/bin/prerender.rs names each page after
+/// its first `<h1>`) applied at runtime, so the first run reproduces the
+/// title the page arrived with, and the title of the page a visitor landed on
+/// does not follow them to the next. It runs after each navigation and again
+/// whenever the heading changes: a page that loads its data after navigation,
+/// such as a simulation listing, replaces its loading view's heading when the
+/// data arrives.
 #[component]
 fn TitleSync() -> impl IntoView {
     #[cfg(not(feature = "ssr"))]
     {
-        let location = leptos_router::hooks::use_location();
+        use wasm_bindgen::{closure::Closure, JsCast};
+
+        let pathname = leptos_router::hooks::use_location().pathname;
+        let sync = move || {
+            let doc = document();
+            let heading = doc
+                .query_selector("h1")
+                .ok()
+                .flatten()
+                .and_then(|h| h.text_content())
+                .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|t| !t.is_empty());
+            let title = match heading {
+                Some(h) if pathname.get_untracked() != "/" => format!("{h} | Eustress Engine"),
+                _ => SITE_TITLE.to_string(),
+            };
+            if doc.title() != title {
+                doc.set_title(&title);
+            }
+        };
+
         Effect::new(move |_| {
-            let path = location.pathname.get();
+            pathname.track();
             // The route's view is swapped in during the same reactive pass
             // that fires this effect; read the heading once that pass is done.
-            set_timeout(
-                move || {
-                    let doc = document();
-                    let heading = doc
-                        .query_selector("h1")
-                        .ok()
-                        .flatten()
-                        .and_then(|h| h.text_content())
-                        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
-                        .filter(|t| !t.is_empty());
-                    doc.set_title(&match heading {
-                        Some(h) if path != "/" => format!("{h} | Eustress Engine"),
-                        _ => SITE_TITLE.to_string(),
-                    });
-                },
-                std::time::Duration::ZERO,
-            );
+            set_timeout(sync, std::time::Duration::ZERO);
+        });
+
+        // Any later change in the page, such as a heading that arrives with
+        // the page's data. The app mounts on <body> (lib.rs mount_app empties
+        // the prerender's #app), so <body> is what changes. Attributes are not
+        // watched: styles and classes change far more often than text and
+        // never change the heading.
+        let callback = Closure::<dyn FnMut()>::new(sync);
+        let observer = dom::MutationObserver::new(callback.as_ref().unchecked_ref());
+        if let Some(body) = document().body() {
+            let options = js_sys::Object::new();
+            for key in ["childList", "subtree", "characterData"] {
+                let _ = js_sys::Reflect::set(&options, &key.into(), &true.into());
+            }
+            let _ = observer.observe(&body, &options);
+        }
+        let held = StoredValue::new_local(Some((observer, callback)));
+        on_cleanup(move || {
+            held.update_value(|slot| {
+                if let Some((observer, _callback)) = slot.take() {
+                    observer.disconnect();
+                }
+            });
         });
     }
     ()
+}
+
+/// The DOM's MutationObserver. Bound here because web-sys has it only behind a
+/// feature this crate does not enable.
+#[cfg(not(feature = "ssr"))]
+mod dom {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        pub type MutationObserver;
+
+        #[wasm_bindgen(constructor)]
+        pub fn new(callback: &js_sys::Function) -> MutationObserver;
+
+        #[wasm_bindgen(method, catch)]
+        pub fn observe(
+            this: &MutationObserver,
+            target: &web_sys::Node,
+            options: &js_sys::Object,
+        ) -> Result<(), JsValue>;
+
+        #[wasm_bindgen(method)]
+        pub fn disconnect(this: &MutationObserver);
+    }
 }
 
 // ── Blocked Page ────────────────────────────────────────────────────────────

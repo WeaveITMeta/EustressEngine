@@ -19,8 +19,9 @@
 //!
 //! - **v1.00 / v1.01**: ASCII body. Whitespace-free triples of bracketed
 //!   `[x,y,z]` vectors, three vectors per vertex (position, normal,
-//!   uv-with-w). A `u32` face count precedes the data on one line. v1.01
-//!   positions are stored at 2× scale → multiplied by `0.5`.
+//!   uv-with-w). A `u32` face count precedes the data on one line. v1.00
+//!   stores positions at twice their size, so they are halved; v1.01 does
+//!   not. Legacy v1 normals are not always unit length and are normalised.
 //! - **v2.00**: binary. A small header gives `sizeof_vertex` /
 //!   `sizeof_face`; the vertex array is `pos f32×3, normal f32×3, uv
 //!   f32×2`, then a tangent when the stride is 36 or more and an RGBA colour
@@ -214,7 +215,11 @@ pub fn decode_mesh(blob: &[u8]) -> Result<CsgMesh, MeshError> {
 /// third component, when present, is a texture scale we drop). Three
 /// consecutive vertices form a triangle (the face count = triangles).
 ///
-/// v1.01 stores positions at 2× the true scale → multiply by `0.5`.
+/// v1.00 stores positions at twice their size (the format spec: "Meshes that
+/// use version 1.00 are 2x bigger than they should be ... This is corrected
+/// in version 1.01"), so its positions are halved. Normals are normalised:
+/// legacy v1 files carry lengths well off 1 (2.8 to 3.5 in cached mesh
+/// 1028713), which shade wrong.
 fn decode_v1(body: &[u8], minor: u32) -> Result<CsgMesh, MeshError> {
     let text = std::str::from_utf8(body)
         .map_err(|_| MeshError::Malformed("v1 body is not valid UTF-8".into()))?;
@@ -262,7 +267,7 @@ fn decode_v1(body: &[u8], minor: u32) -> Result<CsgMesh, MeshError> {
         )));
     }
     let vertex_count = groups.len() / 3;
-    let pos_scale = if minor >= 1 { 0.5 } else { 1.0 };
+    let pos_scale = if minor == 0 { 0.5 } else { 1.0 };
 
     let mut mesh = CsgMesh::default();
     mesh.positions.reserve(vertex_count);
@@ -279,7 +284,12 @@ fn decode_v1(body: &[u8], minor: u32) -> Result<CsgMesh, MeshError> {
         }
         mesh.positions
             .push([p[0] * pos_scale, p[1] * pos_scale, p[2] * pos_scale]);
-        mesh.normals.push([n[0], n[1], n[2]]);
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        mesh.normals.push(if len > 1e-6 {
+            [n[0] / len, n[1] / len, n[2] / len]
+        } else {
+            [n[0], n[1], n[2]]
+        });
         // uv: Roblox stores V flipped relative to glTF; keep raw — the
         // renderer's sampler handles convention. Drop the optional w.
         mesh.uvs.push([t[0], t[1]]);
@@ -894,7 +904,7 @@ mod tests {
     #[test]
     fn decodes_v1_ascii_triangle() {
         // One triangle = 3 vertices = 9 vectors (pos/normal/uv each).
-        // v1.00 (no 0.5 scale).
+        // v1.01: positions as stored.
         let mut body = String::from("1\n"); // face count line
         // vertex 0
         body.push_str("[1,0,0][0,0,1][0,0,0]");
@@ -902,7 +912,7 @@ mod tests {
         body.push_str("[0,1,0][0,0,1][1,0,0]");
         // vertex 2
         body.push_str("[0,0,1][0,0,1][0,1,0]");
-        let blob = format!("version 1.00\n{body}");
+        let blob = format!("version 1.01\n{body}");
         let mesh = decode_mesh(blob.as_bytes()).expect("decode v1");
         assert_eq!(mesh.positions.len(), 3);
         assert_eq!(mesh.indices, vec![0, 1, 2]);
@@ -910,15 +920,29 @@ mod tests {
         assert_eq!(mesh.uvs[1], [1.0, 0.0]);
     }
 
+    /// Version 1.00 stores positions at twice their size; 1.01 fixed that.
     #[test]
-    fn v1_01_halves_positions() {
+    fn v1_00_halves_positions_and_v1_01_does_not() {
         let body = "[2,0,0][0,0,1][0,0,0][0,2,0][0,0,1][1,0,0][0,0,2][0,0,1][0,1,0]";
-        let blob = format!("version 1.01\n{body}");
-        let mesh = decode_mesh(blob.as_bytes()).expect("decode v1.01");
-        // Positions are halved.
-        assert_eq!(mesh.positions[0], [1.0, 0.0, 0.0]);
-        assert_eq!(mesh.positions[1], [0.0, 1.0, 0.0]);
-        assert_eq!(mesh.positions[2], [0.0, 0.0, 1.0]);
+        let v100 = decode_mesh(format!("version 1.00\n{body}").as_bytes()).expect("decode v1.00");
+        assert_eq!(v100.positions[0], [1.0, 0.0, 0.0]);
+        assert_eq!(v100.positions[1], [0.0, 1.0, 0.0]);
+        assert_eq!(v100.positions[2], [0.0, 0.0, 1.0]);
+        let v101 = decode_mesh(format!("version 1.01\n{body}").as_bytes()).expect("decode v1.01");
+        assert_eq!(v101.positions[0], [2.0, 0.0, 0.0]);
+    }
+
+    /// Legacy v1 normals are not always unit length (cached mesh 1028713
+    /// stores `[0,-2.79253,0]`); they are normalised.
+    #[test]
+    fn v1_normals_are_normalised() {
+        let body = "[1,0,0][0,-2.79253,0][0,0,0][0,1,0][0,0,3][1,0,0][0,0,1][0.6,0.8,0][0,1,0]";
+        let mesh = decode_mesh(format!("version 1.01\n{body}").as_bytes()).expect("decode v1");
+        for n in &mesh.normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal {n:?} is not unit length");
+        }
+        assert!((mesh.normals[0][1] + 1.0).abs() < 1e-6, "direction kept");
     }
 
     #[test]

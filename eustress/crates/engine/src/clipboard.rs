@@ -1584,15 +1584,15 @@ fn patch_root_toml_with_live_state(
         data.rotation[2].to_radians(),
     );
     let floats = |v: &[f32]| toml::Value::Array(v.iter().map(|f| toml::Value::Float(*f as f64)).collect());
+    // The pose and size in the copied file's own unit (`[metadata] unit`),
+    // so a copy of a part imported in feet stays in feet.
+    let _ = crate::space::instance_loader::set_authored_transform_toml(
+        &mut doc,
+        new_pos,
+        rot,
+        Some(Vec3::from_array(data.scale)),
+    );
     if let Some(table) = doc.as_table_mut() {
-        let tform = table
-            .entry("transform")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        if let Some(tform_table) = tform.as_table_mut() {
-            tform_table.insert("position".to_string(), floats(&[new_pos.x, new_pos.y, new_pos.z]));
-            tform_table.insert("rotation".to_string(), floats(&[rot.x, rot.y, rot.z, rot.w]));
-            tform_table.insert("scale".to_string(), floats(&data.scale));
-        }
         let meta = table
             .entry("metadata")
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
@@ -1810,7 +1810,6 @@ fn spawn_pasted_entity(
 
             // Build InstanceDefinition (same structure as toolbox insert)
             let instance_def = crate::space::instance_loader::InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: Some(crate::space::instance_loader::AssetReference {
                     mesh: mesh_path.to_string(),
@@ -1929,15 +1928,28 @@ fn spawn_pasted_entity(
             let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
             Some(spawn_folder(commands, instance))
         }
-        ClassName::PointLight => {
+        ClassName::PointLight
+        | ClassName::SpotLight
+        | ClassName::SurfaceLight
+        | ClassName::DirectionalLight => {
+            // No source folder to copy (the usual path): rebuild the light
+            // from its source file's `[light]` when the copy carried one, so
+            // the paste keeps the copied values instead of class defaults.
             let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
-            let transform = Transform { translation: pos, rotation: rot, scale };
-            Some(spawn_point_light(commands, instance, EustressPointLight::default(), transform))
-        }
-        ClassName::SpotLight => {
-            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
-            let transform = Transform { translation: pos, rotation: rot, scale };
-            Some(spawn_spot_light(commands, instance, EustressSpotLight::default(), transform))
+            let _ = scale; // a light is never scaled
+            let transform = Transform { translation: pos, rotation: rot, scale: Vec3::ONE };
+            let section = data
+                .source_toml
+                .as_deref()
+                .and_then(|t| t.parse::<toml::Value>().ok())
+                .map(|doc| eustress_common::plugins::light_classes::LightSection::from_document(&doc))
+                .unwrap_or_default();
+            Some(match class_name {
+                ClassName::PointLight => spawn_point_light(commands, instance, section.point(), transform),
+                ClassName::SpotLight => spawn_spot_light(commands, instance, section.spot(), transform),
+                ClassName::SurfaceLight => spawn_surface_light(commands, instance, section.surface(), transform),
+                _ => spawn_directional_light(commands, instance, section.directional(), transform),
+            })
         }
         _ if !data.service_folder.is_empty() && data.source_toml.is_some() => {
             // Generic service child (Sky, Atmosphere, Star/Sun, Moon, or any
