@@ -298,8 +298,18 @@ fn parse_rune_functions(
                 k += 1;
             }
             if k < lines.len() {
-                let fn_line = lines[k].trim();
-                if let Some(entry) = parse_rune_fn_signature(fn_line, &doc, &current_category, status_map) {
+                // A long signature spans lines (rustfmt breaks it after the
+                // `(`), so join it up to the line that closes the parameter
+                // list; otherwise `fn workspace_raycast(` alone has no `)` and
+                // the function drops out of the catalog.
+                let mut fn_line = lines[k].trim().to_string();
+                let mut m = k + 1;
+                while !fn_line.contains(')') && m < lines.len() && m < k + 32 {
+                    fn_line.push(' ');
+                    fn_line.push_str(lines[m].trim());
+                    m += 1;
+                }
+                if let Some(entry) = parse_rune_fn_signature(&fn_line, &doc, &current_category, status_map) {
                     entries.push(entry);
                 }
             }
