@@ -840,3 +840,174 @@ impl ToolHandler for GenerateDocsTool {
         }
     }
 }
+
+/// Static reference for the Rune sim-value telemetry API — the three
+/// functions a script uses to read/write simulation watchpoint values
+/// (`crates/engine/src/soul/rune_ecs_module.rs`).
+///
+/// This exists because that API was reachable only by reading engine
+/// source: no MCP tool surfaced it, so an AI driving a script purely
+/// through MCP (no filesystem access to the engine repo — the common
+/// case for a sandboxed connector) had no way to discover the correct
+/// function names and would either guess wrong or fall back to
+/// host-injected values instead of genuine in-script computation.
+///
+/// Deliberately narrow: this covers the verified, exact sim-value API,
+/// not the full Rune stdlib (100+ functions across ECS/GUI/audio/physics
+/// bindings). Expanding this into a comprehensive, auto-generated
+/// reference (e.g. a build.rs step that extracts every `#[rune::function]`
+/// signature + doc comment) is real follow-up work; a hand-maintained
+/// partial list covering everything would risk silently drifting out of
+/// sync with the source and is intentionally out of scope here.
+pub struct RuneApiReferenceTool;
+
+impl ToolHandler for RuneApiReferenceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "rune_sim_value_api_reference",
+            description: "Return the Rune scripting API for reading/writing simulation telemetry values — the functions a script calls to publish computed results (e.g. a PDE solver's field values) so they reach runtime-snapshot.json, watchpoints, and the get_sim_value/list_sim_values MCP tools. Use this before writing a Rune script that needs to emit telemetry, instead of guessing function names or relying on host-injected values. Static reference; does not require the engine to be running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        let content = r#"# Rune sim-value telemetry API
+
+Source: `crates/engine/src/soul/rune_ecs_module.rs`. These three functions
+are the ONLY way a Rune script publishes a number to the rest of the
+engine — there is no other telemetry-emission call.
+
+**Verified against a live engine run** (not just read from source): a
+script using the exact form below was hot-loaded, compiled, executed in
+play mode, and its value was read back successfully over the engine
+bridge (`sim.read`). Two things are easy to get wrong and will silently
+fail if skipped — both included below.
+
+## Required: import + entrypoint
+
+The functions are registered under `Module::with_crate("eustress")`
+(`crates/engine/src/soul/rune_ecs_module.rs`), so they are NOT ambient —
+a bare `set_sim_value(...)` call fails to compile with
+`error: Missing item set_sim_value` unless you import it first.
+
+Separately, a play-mode script's entrypoints are validated by a kernel
+law (`crates/engine/src/soul/kernel/laws.rs`) that only recognizes
+`on_init/0`, `on_update/1`, `on_ready/0`, `on_exit/0` — a bare `update(dt)`
+or `init()` (no `on_` prefix) fails with `NO_ENTRYPOINT`. Both mistakes
+produce a compile-time error surfaced via `query_stream_events` on the
+`rune.compile.error` topic (see `execute_rune`'s own docs), not a silent
+no-op — but the error can be easy to miss if you're not polling that
+topic.
+
+```rune
+use eustress::set_sim_value;
+
+pub fn on_update(dt) {
+    set_sim_value("concentration_u", 0.42);
+    set_sim_value("cell_12_v", 0.87);
+}
+```
+
+## set_sim_value(key: String, value: Float)
+
+Write (or overwrite) a simulation watchpoint value. Call this once per
+tick (or whenever a value changes) with the result of your in-script
+computation — e.g. a PDE solver's field value at a given cell, an
+aggregate concentration, an error metric.
+
+Writes are merged into the engine's `SimValuesResource` once per frame
+by the play-mode driver — from there they reach:
+- `runtime-snapshot.json` (`.eustress/runtime-snapshot.json` under the
+  live Space)
+- Watchpoints (Simulation panel in the Studio UI)
+- The MCP tools `get_sim_value` / `list_sim_values`
+- The engine bridge's `sim.read` method
+- Recordings
+
+A key only counts for the frame it was written in — call `set_sim_value`
+every tick you want the value to persist, don't assume a one-time write
+sticks forever.
+
+## get_sim_value(key: String) -> Float
+
+Read a currently-set watchpoint value (0.0 if the key doesn't exist yet).
+Works for both script-written values and values the engine/MCP seeded
+before the script ran — useful for reading a parameter the host set via
+`set_sim_value` from outside the script (e.g. a swept experiment
+parameter) and then publishing a derived result back under a different
+key.
+
+```rune
+use eustress::get_sim_value;
+
+let diffusion_rate = get_sim_value("param_diffusion_rate");
+```
+
+## list_sim_values() -> Vec<(String, Float)>
+
+Return every currently-set key/value pair as a list of tuples. Useful
+for a script that wants to snapshot or iterate the full sim-value table
+rather than reading known keys one at a time.
+
+```rune
+use eustress::list_sim_values;
+
+for pair in list_sim_values() {
+    let key = pair.0;
+    let value = pair.1;
+    // ...
+}
+```
+
+## Scope note
+
+This is the verified sim-value API only, not a full Rune stdlib
+reference — the engine exposes 100+ additional Rune functions (ECS
+queries/mutation, GUI, simulation clock, audio, physics) across several
+other binding modules. This tool intentionally does not attempt to
+catalog those from memory; treat this as the accurate, narrow answer
+to "how do I emit telemetry from a Rune script," not as engine-wide
+API documentation.
+"#;
+
+        ToolResult {
+            tool_name: "rune_sim_value_api_reference".to_string(),
+            tool_use_id: String::new(),
+            success: true,
+            content: content.to_string(),
+            structured_data: Some(serde_json::json!({
+                "module_path": "eustress",
+                "required_entrypoints": ["on_init/0", "on_update/1", "on_ready/0", "on_exit/0"],
+                "functions": [
+                    {
+                        "signature": "set_sim_value(key: String, value: Float)",
+                        "import": "use eustress::set_sim_value;",
+                        "returns": null,
+                        "description": "Write/overwrite a simulation watchpoint value. Merged into SimValuesResource once per frame; reaches runtime-snapshot.json, watchpoints, the engine bridge's sim.read, and the get_sim_value/list_sim_values MCP tools."
+                    },
+                    {
+                        "signature": "get_sim_value(key: String) -> Float",
+                        "import": "use eustress::get_sim_value;",
+                        "returns": "Float",
+                        "description": "Read a currently-set watchpoint value. Returns 0.0 if the key does not exist."
+                    },
+                    {
+                        "signature": "list_sim_values() -> Vec<(String, Float)>",
+                        "import": "use eustress::list_sim_values;",
+                        "returns": "Vec<(String, Float)>",
+                        "description": "Return every currently-set key/value pair."
+                    }
+                ],
+                "source_file": "crates/engine/src/soul/rune_ecs_module.rs",
+                "verified": "Live-tested: hot-loaded, compiled, executed in play mode, value read back via the engine bridge sim.read method."
+            })),
+            stream_topic: None,
+        }
+    }
+}
