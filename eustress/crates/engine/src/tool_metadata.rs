@@ -18,6 +18,11 @@ pub struct ToolMeta {
     /// has no dispatch arm, so the UI must say so honestly and the
     /// click is counted as demand (see `usage_telemetry.rs`).
     pub wired: bool,
+    /// True when using this tool charges Delta. Free is the default:
+    /// only ids listed in `PREMIUM` in scripts/gen_tool_metadata.py
+    /// are premium, and only wired tools may be listed. Prices live
+    /// in the Worker catalog (GET /api/delta/catalog), not here.
+    pub premium: bool,
 }
 
 /// Every icon id referenced by the table below or by a submode `icon`
@@ -2550,5 +2555,9 @@ pub fn tool_meta(id: &str) -> Option<ToolMeta> {
         "ussf:tle_catalog" => ("Tle Catalog", "Catalog of tle", "database", false),
         _ => return None,
     };
-    Some(ToolMeta { label, tooltip, icon, wired })
+    Some(ToolMeta { label, tooltip, icon, wired, premium: PREMIUM_TOOL_IDS.contains(&id) })
 }
+
+/// Tool ids that charge Delta per use. Everything else is free.
+pub const PREMIUM_TOOL_IDS: &[&str] = &[
+];

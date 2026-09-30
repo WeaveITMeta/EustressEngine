@@ -34,7 +34,44 @@ pub struct RuneRuntimeState {
     /// Whether on_init has been called for each script
     pub initialized: HashMap<u32, bool>,
     /// Errors from last frame (for display in output panel)
-    pub last_errors: Vec<(String, String)>,
+    pub last_errors: Vec<ScriptError>,
+}
+
+/// A script error for the Output panel: which script, what went wrong, and
+/// where, when known. Compile errors carry their formatted diagnostics in
+/// `message`; runtime errors carry the line and the call frames.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptError {
+    pub script: String,
+    pub message: String,
+    /// The script's source file, as an absolute path.
+    pub file: Option<String>,
+    /// 1-based line of the innermost frame.
+    pub line: Option<u32>,
+    /// Call frames, innermost first (`"on_update (line 12)"`).
+    pub stack: Vec<String>,
+}
+
+impl ScriptError {
+    pub fn new(script: impl Into<String>, message: impl Into<String>) -> Self {
+        Self { script: script.into(), message: message.into(), ..Default::default() }
+    }
+
+    /// The error as text: the message, then one `at <frame>` line per frame.
+    pub fn text(&self) -> String {
+        let mut out = self.message.clone();
+        for frame in &self.stack {
+            out.push_str("\n    at ");
+            out.push_str(frame);
+        }
+        out
+    }
+}
+
+impl From<(String, String)> for ScriptError {
+    fn from((script, message): (String, String)) -> Self {
+        Self::new(script, message)
+    }
 }
 
 /// A compiled Rune script ready for execution
@@ -43,6 +80,11 @@ pub struct CompiledScript {
     pub unit: std::sync::Arc<rune::Unit>,
     pub context: std::sync::Arc<rune::runtime::RuntimeContext>,
     pub name: String,
+    /// The source file, as an absolute path, when known.
+    pub file: Option<String>,
+    /// The source the unit was built from, for turning a runtime error's
+    /// instruction pointer into a line.
+    pub sources: std::sync::Arc<rune::Sources>,
 }
 
 // ============================================================================
@@ -227,6 +269,8 @@ pub struct ScriptSource {
     pub name: String,
     /// Rune source code
     pub source: String,
+    /// The source file, as an absolute path, when the script came from one.
+    pub file: Option<String>,
 }
 
 // ============================================================================
@@ -249,7 +293,7 @@ pub fn compile_scripts(
         Ok(ctx) => ctx,
         Err(e) => {
             error!("Failed to build Rune context: {}", e);
-            runtime.last_errors.push(("runtime".to_string(), e));
+            runtime.last_errors.push(ScriptError::new("runtime", e));
             return;
         }
     };
@@ -258,7 +302,7 @@ pub fn compile_scripts(
         Ok(r) => std::sync::Arc::new(r),
         Err(e) => {
             error!("Failed to build runtime context: {}", e);
-            runtime.last_errors.push(("runtime".to_string(), e.to_string()));
+            runtime.last_errors.push(ScriptError::new("runtime", e.to_string()));
             return;
         }
     };
@@ -268,12 +312,12 @@ pub fn compile_scripts(
         let source = match rune::Source::memory(&script.source) {
             Ok(s) => s,
             Err(e) => {
-                runtime.last_errors.push((script.name.clone(), format!("Source error: {}", e)));
+                runtime.last_errors.push(ScriptError::new(script.name.clone(), format!("Source error: {}", e)));
                 continue;
             }
         };
         if let Err(e) = sources.insert(source) {
-            runtime.last_errors.push((script.name.clone(), format!("Insert error: {}", e)));
+            runtime.last_errors.push(ScriptError::new(script.name.clone(), format!("Insert error: {}", e)));
             continue;
         }
 
@@ -289,6 +333,8 @@ pub fn compile_scripts(
                     unit: std::sync::Arc::new(unit),
                     context: runtime_ctx.clone(),
                     name: script.name.clone(),
+                    file: script.file.clone(),
+                    sources: std::sync::Arc::new(sources),
                 });
                 info!("✅ Compiled Rune script '{}'", script.name);
             }
@@ -308,7 +354,10 @@ pub fn compile_scripts(
                     &script.name, &diagnostics, &sources, Some(&e as &dyn std::fmt::Display),
                 );
                 tracing::debug!("rune compile failed for '{}' — see Output panel", script.name);
-                runtime.last_errors.push((script.name.clone(), msg));
+                runtime.last_errors.push(ScriptError {
+                    file: script.file.clone(),
+                    ..ScriptError::new(script.name.clone(), msg)
+                });
             }
         }
     }
@@ -362,12 +411,16 @@ pub fn hot_recompile_one_script(
         .build()
     {
         Ok(unit) => {
+            // A recompile keeps the file the script was first loaded from.
+            let file = runtime.compiled.get(&entity_index).and_then(|c| c.file.clone());
             runtime.compiled.insert(
                 entity_index,
                 CompiledScript {
                     unit: std::sync::Arc::new(unit),
                     context: runtime_ctx,
                     name: name.to_string(),
+                    file,
+                    sources: std::sync::Arc::new(sources),
                 },
             );
             // Reset the per-entity initialisation flag so `on_init` fires
@@ -388,9 +441,10 @@ pub fn hot_recompile_one_script(
                 name, &diagnostics, &sources, Some(&e as &dyn std::fmt::Display),
             );
             tracing::debug!("rune hot-recompile failed for '{}' — see Output panel", name);
+            let file = runtime.compiled.get(&entity_index).and_then(|c| c.file.clone());
             runtime
                 .last_errors
-                .push((name.to_string(), msg.clone()));
+                .push(ScriptError { file, ..ScriptError::new(name, msg.clone()) });
             Err(msg)
         }
     }
@@ -402,7 +456,7 @@ pub fn hot_recompile_one_script(
 
 /// The callback names any Eustress Rune program may define as an entrypoint.
 /// Kept in lock-step with `engine::soul::kernel::laws::EntrypointContract`.
-pub const RUNE_ENTRYPOINTS: &[&str] = &["main", "on_init", "on_update", "on_ready", "on_exit"];
+pub const RUNE_ENTRYPOINTS: &[&str] = &["main", "on_init", "on_update", "on_ready", "on_exit", "process_receipt"];
 
 /// Wrap a bare command-bar snippet in `pub fn main() { … }` so it is a valid
 /// Rune *program*.
@@ -623,6 +677,39 @@ fn is_missing_callback(msg: &str) -> bool {
     msg.starts_with("Missing entry ")
 }
 
+/// A runtime error with where it happened: the innermost frame's line, and
+/// every frame innermost first as `"function (line N)"`, from the unit's
+/// debug info and the script's sources.
+#[cfg(feature = "realism-scripting")]
+fn vm_error(e: &rune::runtime::VmError, compiled: &CompiledScript, during: &str) -> ScriptError {
+    let mut error = ScriptError {
+        file: compiled.file.clone(),
+        ..ScriptError::new(compiled.name.clone(), format!("{during}: {e}"))
+    };
+    let Some(loc) = e.first_location() else { return error };
+    let Some(debug) = loc.unit.debug_info() else { return error };
+    let place = |ip: usize| -> Option<(u32, String)> {
+        let inst = debug.instruction_at(ip)?;
+        let source = compiled.sources.get(inst.source_id)?;
+        let (line, _col) = source.pos_to_utf8_linecol(inst.span.start.into_usize());
+        let function = debug
+            .function_at(ip)
+            .map(|(_, sig)| sig.path.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        Some((line as u32 + 1, function))
+    };
+    if let Some((line, function)) = place(loc.ip) {
+        error.line = Some(line);
+        error.stack.push(format!("{function} (line {line})"));
+    }
+    for frame in loc.frames.iter().rev() {
+        if let Some((line, function)) = place(frame.ip) {
+            error.stack.push(format!("{function} (line {line})"));
+        }
+    }
+    error
+}
+
 // ── Plain-Rust callback drivers ──────────────────────────────────────────────
 //
 // These are the real implementations. They take `&mut RuneRuntimeState`
@@ -648,15 +735,21 @@ pub fn call_script_init(runtime: &mut RuneRuntimeState) {
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
 
             match vm.call(["on_init"], ()) {
-                Ok(_) => info!("📜 on_init() called for '{}'", compiled.name),
+                Ok(_) => {
+                    info!("📜 on_init() called for '{}'", compiled.name);
+                    crate::gui::push_script_log(crate::gui::ScriptLogLevel::Info, "started".to_string());
+                }
                 Err(e) => {
                     let msg = e.to_string();
-                    if !is_missing_callback(&msg) {
-                        let name = compiled.name.clone();
-                        warn!("⚠ on_init() error in '{}': {}", name, msg);
-                        runtime.last_errors.push((name, format!("on_init: {msg}")));
+                    if is_missing_callback(&msg) {
+                        crate::gui::push_script_log(crate::gui::ScriptLogLevel::Info, "started".to_string());
+                    } else {
+                        warn!("⚠ on_init() error in '{}': {}", compiled.name, msg);
+                        let error = vm_error(&e, compiled, "on_init");
+                        runtime.last_errors.push(error);
                     }
                 }
             }
@@ -681,14 +774,15 @@ pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             match vm.call(["on_ready"], ()) {
                 Ok(_) => info!("📜 on_ready() called for '{}'", compiled.name),
                 Err(e) => {
                     let msg = e.to_string();
                     if !is_missing_callback(&msg) {
-                        let name = compiled.name.clone();
-                        warn!("⚠ on_ready() error in '{}': {}", name, msg);
-                        runtime.last_errors.push((name, format!("on_ready: {msg}")));
+                        warn!("⚠ on_ready() error in '{}': {}", compiled.name, msg);
+                        let error = vm_error(&e, compiled, "on_ready");
+                        runtime.last_errors.push(error);
                     }
                 }
             }
@@ -706,10 +800,11 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
 
         for (_idx, compiled) in runtime.compiled.iter() {
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             if let Err(e) = vm.call(["on_update"], (dt,)) {
                 let msg = e.to_string();
                 if !is_missing_callback(&msg) {
-                    errors.push((compiled.name.clone(), msg));
+                    errors.push(vm_error(&e, compiled, "on_update"));
                 }
             }
         }
@@ -729,6 +824,7 @@ pub fn call_script_exit(runtime: &RuneRuntimeState) {
     {
         for (_idx, compiled) in runtime.compiled.iter() {
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             match vm.call(["on_exit"], ()) {
                 Ok(_) => info!("📜 on_exit() called for '{}'", compiled.name),
                 Err(e) => {

@@ -5,10 +5,10 @@
 //!
 //! ## Components attached on spawn
 //!
-//! - `bevy_pbr::PointLight` — the live rendered light
-//!   (`color/intensity/range/radius/shadow_maps_enabled`).
 //! - `eustress_common::classes::EustressPointLight` — the Eustress
 //!   authoring component (the one the Properties panel + scripts mutate).
+//!   The rendered `bevy_pbr::PointLight` is built from it by
+//!   `eustress_common::plugins::light_classes`, as for every spawn path.
 //! - `eustress_common::classes::Instance` — class identity + name.
 //! - `bevy::prelude::Transform` — pose.
 //! - `bevy::core::Name` — Bevy diagnostic name (mirrors `Instance.name`).
@@ -21,8 +21,8 @@
 //!
 //! ## apply_edit — never respawns
 //!
-//! Every PointLight authoring property maps to a cheap mutation on the
-//! existing `bevy_pbr::PointLight` component. Per spec §2.1 +
+//! Every PointLight authoring property is a cheap mutation of the
+//! authoring component, which `light_classes` follows. Per spec §2.1 +
 //! LIGHTING_AUDIT.md §4.2 "Hot-reload contract", `apply_edit` returns
 //! `false` for every prop.
 //!
@@ -75,12 +75,11 @@ impl ClassSpawner for PointLightSpawner {
         let uuid = props.get_uuid().unwrap_or("").to_string();
 
         let color = color_from_bag(props, "light.color").unwrap_or(Color::WHITE);
-        let brightness = props
-            .get_f32("light.brightness")
-            .unwrap_or(EustressPointLight::default().brightness);
-        let range = props.get_f32("light.range").unwrap_or(60.0);
-        let radius = props.get_f32("light.radius").unwrap_or(0.0);
-        let shadows = props.get_bool("light.shadows").unwrap_or(true);
+        let defaults = EustressPointLight::default();
+        let brightness = props.get_f32("light.brightness").unwrap_or(defaults.brightness);
+        let range = props.get_f32("light.range").unwrap_or(defaults.range);
+        let radius = props.get_f32("light.radius").unwrap_or(defaults.radius);
+        let shadows = props.get_bool("light.shadows").unwrap_or(defaults.shadows);
         // Roblox `Light.Enabled`; a disabled light emits nothing.
         let enabled = props.get_bool("light.enabled").unwrap_or(true);
         let texture = props
@@ -92,15 +91,8 @@ impl ClassSpawner for PointLightSpawner {
 
         ctx.commands
             .spawn((
-                PointLight {
-                    color,
-                    intensity: if enabled { brightness } else { 0.0 },
-                    range,
-                    radius,
-                    shadow_maps_enabled: shadows && enabled,
-                    ..default()
-                },
                 transform,
+                Visibility::default(),
                 Instance {
                     name: name.clone(),
                     class_name: ClassName::PointLight,
@@ -191,10 +183,8 @@ impl ClassSpawner for PointLightSpawner {
     }
 
     fn apply_edit(&self, world: &mut World, entity: Entity, props: &PropertyBag) -> bool {
-        // Sync the Eustress authoring component first so a downstream
-        // Changed<EustressPointLight> watcher (spec'd in
-        // LIGHTING_AUDIT.md §4.2 — not yet built) sees the same view as
-        // the renderer's PointLight gets in the same frame.
+        // Only the authoring component is written: `light_classes` rebuilds
+        // the rendered PointLight from it on `Changed<EustressPointLight>`.
         if let Some(mut e) = world.entity_mut(entity).get_mut::<EustressPointLight>() {
             if let Some(c) = read_color(props, "light.color") {
                 e.color = c;
@@ -214,22 +204,8 @@ impl ClassSpawner for PointLightSpawner {
             if let Some(t) = props.get_string("appearance.texture") {
                 e.texture = if t.is_empty() { None } else { Some(t.to_string()) };
             }
-        }
-        if let Some(mut pl) = world.entity_mut(entity).get_mut::<PointLight>() {
-            if let Some(c) = read_color(props, "light.color") {
-                pl.color = c;
-            }
-            if let Some(b) = props.get_f32("light.brightness") {
-                pl.intensity = b;
-            }
-            if let Some(r) = props.get_f32("light.range") {
-                pl.range = r;
-            }
-            if let Some(r) = props.get_f32("light.radius") {
-                pl.radius = r;
-            }
-            if let Some(s) = props.get_bool("light.shadows") {
-                pl.shadow_maps_enabled = s;
+            if let Some(en) = props.get_bool("light.enabled") {
+                e.enabled = en;
             }
         }
         // Per spec §2.1 + LIGHTING_AUDIT.md §4.2 — every PointLight prop
@@ -254,14 +230,15 @@ impl ClassSpawner for PointLightSpawner {
         let mut bag = PropertyBag::with_capacity(8);
         bag.set("metadata.name", PropertyValue::String(rbx.name().into()));
         bag.set("metadata.archivable", PropertyValue::Bool(true));
-        // Roblox `Brightness` is a unitless 0..N multiplier; multiply by
-        // 800 to land in physically-based lumens — matches the worked
-        // example in CLASS_REGISTRY.md Appendix B §B.2.
+        // Roblox `Brightness` is the same 0..N dial the authoring component
+        // holds (`light_classes` turns it into lumens), so it carries over
+        // unscaled.
         if let Some(b) = rbx.property("Brightness").and_then(|p| p.as_f32()) {
-            bag.set("light.brightness", PropertyValue::Float(b * 800.0));
+            bag.set("light.brightness", PropertyValue::Float(b));
         }
         if let Some(r) = rbx.property("Range").and_then(|p| p.as_f32()) {
-            bag.set("light.range", PropertyValue::Float(r));
+            // Studs to metres (1 stud = 1 ft), as the importer converts it.
+            bag.set("light.range", PropertyValue::Float(r * 0.3048));
         }
         if let Some(s) = rbx.property("Shadows").and_then(|p| p.as_bool()) {
             bag.set("light.shadows", PropertyValue::Bool(s));
@@ -491,9 +468,12 @@ mod tests {
             !respawn,
             "no PointLight prop should require a respawn — LIGHTING_AUDIT.md §4.2"
         );
-        let pl = world.entity(entity).get::<PointLight>().unwrap();
-        assert_eq!(pl.intensity, 12345.0);
-        assert!(pl.shadow_maps_enabled);
+        // The authoring component carries the edit; the rendered light is
+        // `light_classes`' to rebuild from it.
+        let light = world.entity(entity).get::<EustressPointLight>().unwrap();
+        assert_eq!(light.brightness, 12345.0);
+        assert_eq!(light.range, 42.0);
+        assert!(light.shadows);
     }
 
     #[test]

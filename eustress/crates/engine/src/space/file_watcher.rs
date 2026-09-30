@@ -456,6 +456,10 @@ pub fn process_file_changes(
     // Buffering to quiescence puts every event for a path in the same batch,
     // which is what the ordering pass below then relies on.
     let polled = watcher.poll_settled_events();
+    // A revert just put this Space's files back (`checkpoint`), and the
+    // reopen reads every one of them, so their events are dropped rather
+    // than hot-applied to the World being replaced.
+    let polled = if super::checkpoint::watcher_quiet() { None } else { polled };
     if polled.is_none() && injected.0.is_empty() {
         return;
     }
@@ -800,6 +804,56 @@ fn is_instance_file(path: &std::path::Path) -> bool {
         || name == "_instance.toml"
 }
 
+/// Whether `changed` is the source file of an entity whose loader recorded
+/// `loaded` (its `LoadedFromFile.path`). An entity with no recorded file
+/// accepts any file, as before this check existed.
+fn is_entity_source(loaded: Option<&Path>, changed: &Path) -> bool {
+    let Some(loaded) = loaded else { return true };
+    match (loaded.file_name(), changed.file_name()) {
+        (Some(a), Some(b)) => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => false,
+    }
+}
+
+/// A service's marker file, `<service>/_service.toml`.
+fn is_service_marker(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "_service.toml")
+}
+
+#[cfg(test)]
+mod service_marker_tests {
+    use super::is_service_marker;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_marker_file_is_a_service_marker() {
+        assert!(is_service_marker(Path::new("Space/Lighting/_service.toml")));
+        assert!(is_service_marker(Path::new("Space/Workspace/_service.toml")));
+        assert!(!is_service_marker(Path::new("Space/Lighting/Sky.instance.toml")));
+        assert!(!is_service_marker(Path::new("Space/Workspace/Bases/_instance.toml")));
+        assert!(!is_service_marker(Path::new("Space/Workspace/my_service.toml")));
+    }
+}
+
+#[cfg(test)]
+mod script_source_tests {
+    use super::is_entity_source;
+    use std::path::Path;
+
+    #[test]
+    fn a_summary_beside_the_source_is_not_the_source() {
+        let src = Path::new("S/ClientController/ClientController.client.luau");
+        assert!(!is_entity_source(Some(src), Path::new("S/ClientController/ClientController.md")));
+        assert!(!is_entity_source(Some(src), Path::new("S/ClientController/Other.luau")));
+        assert!(is_entity_source(Some(src), Path::new("S/ClientController/ClientController.client.luau")));
+    }
+
+    #[test]
+    fn an_entity_without_a_recorded_file_accepts_the_change() {
+        assert!(is_entity_source(None, Path::new("S/X/X.rune")));
+    }
+}
+
 fn handle_file_modified(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,
@@ -837,11 +891,24 @@ fn handle_file_modified(
             // start complete against a 25 C cell, and stopped the run before it
             // started. Fall back to the sibling `_instance.toml` so a folder
             // script reloads like a bare one.
+            //
+            // The fallback resolves ANY script-ish file in the folder to the
+            // script entity, including the Summary `.md` that sits beside the
+            // source (`.md` is `FileType::Soul`). Only the file the loader read
+            // for the entity (`LoadedFromFile.path`) is its source, so the
+            // fallback is kept to that file; a Summary edit reloading here would
+            // replace the running code with markdown.
             let entity = registry.get_entity(&event.path).or_else(|| {
                 event.path.parent()
                     .map(|p| p.join("_instance.toml"))
                     .filter(|p| p.exists())
                     .and_then(|p| registry.get_entity(&p))
+                    .filter(|e| {
+                        is_entity_source(
+                            file_entities.get(*e).ok().map(|(_, loaded)| loaded.path.as_path()),
+                            &event.path,
+                        )
+                    })
             });
             if let Some(entity) = entity {
                 if let Ok(mut script_data) = soul_scripts.get_mut(entity) {
@@ -968,6 +1035,19 @@ fn handle_file_modified(
                                             entity,
                                             &toml_content,
                                         );
+                                        // A light's `[light]` section: an MCP,
+                                        // text-editor or Properties edit
+                                        // re-lights it live.
+                                        if let Ok(class) = eustress_common::classes::ClassName::from_str(
+                                            &instance_def.metadata.class_name,
+                                        ) {
+                                            eustress_common::plugins::light_classes::queue_light_reload(
+                                                commands,
+                                                entity,
+                                                class,
+                                                &toml_content,
+                                            );
+                                        }
                                         // A standalone Decal's `[decal]`
                                         // section: its image, tint and fade
                                         // redraw live.
@@ -1260,6 +1340,38 @@ fn folder_entity(
     Some(entity)
 }
 
+/// The raw class name of a folder-form instance file that must load as the
+/// inert Folder Space-open makes of it: a class the engine does not know
+/// (returned as written) or no class at all (returned empty). `None` for
+/// every known class, `Folder` included, and for a file that does not parse,
+/// which keeps the typed path, so a half-written file is retried by its next
+/// event rather than frozen as a Folder.
+fn unknown_folder_form_class(parsed: &super::file_loader::ParsedInstance) -> Option<String> {
+    if parsed.class_name != eustress_common::classes::ClassName::Folder {
+        return None;
+    }
+    let doc = parsed.value.as_ref()?;
+    let raw = doc
+        .get("metadata")
+        .or_else(|| doc.get("Metadata"))
+        .and_then(|m| m.get("class_name").or_else(|| m.get("ClassName")))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    (raw != "Folder").then(|| raw.to_string())
+}
+
+/// Whether a folder-form instance file that appears while Studio runs loads
+/// through `spawn_general_entity`, as Space open loads it: every class the
+/// `General` arm of `file_loader::folder_load` takes (a Folder, a Model, a
+/// Tool, an Attachment, a Luau script folder, and a class that is unknown or
+/// missing, both of which parse as Folder). A file that does not parse keeps
+/// the typed path, so a half-written file is retried by its next event
+/// rather than frozen as a Folder.
+fn loads_as_general_folder(parsed: &super::file_loader::ParsedInstance) -> bool {
+    parsed.value.is_some()
+        && super::file_loader::folder_load(parsed.class_name) == super::file_loader::FolderLoad::General
+}
+
 /// Handle new file creation
 fn handle_file_created(
     event: &FileChangeEvent,
@@ -1277,7 +1389,17 @@ fn handle_file_created(
     if !event.file_type.spawns_entity_in_service(&event.service) {
         return;
     }
-    
+
+    // A service's `_service.toml` is the service itself, which the loader
+    // spawned from its folder. Every save of it (Lighting seeding its
+    // properties, a Workspace setting) arrives as a same-path Remove + Create,
+    // and nothing is registered under the marker's own path, so without this
+    // the flat-file branch below spawned a Folder named "_service" in the
+    // service.
+    if is_service_marker(&event.path) {
+        return;
+    }
+
     // Check if already loaded
     if registry.is_loaded(&event.path) {
         return;
@@ -1641,9 +1763,125 @@ fn handle_file_created(
                 }
             }
 
+            // A folder-form file of a class with no loader of its own loads
+            // the way Space open loads it (`loads_as_general_folder`): the
+            // same parser, the same `spawn_general_entity`, registered under
+            // the folder and its marker. Through `spawn_instance` below an
+            // unknown or missing class became a full, writable Part that
+            // demote, the save fallback and the typed writers then saved to
+            // disk as a Part, and a Model, Folder or Tool took a pose and
+            // components Space open does not give it.
+            if is_instance_marker {
+                let parsed = std::fs::read_to_string(&event.path)
+                    .ok()
+                    .map(|text| super::file_loader::parse_instance_text(&text))
+                    .filter(loads_as_general_folder);
+                if let (Some(parsed), Some(folder)) = (parsed, event.path.parent()) {
+                    let written = unknown_folder_form_class(&parsed);
+                    match written.as_deref() {
+                        Some("") => warn!(
+                            "{:?} names no class; loading it as a Folder, as Space open does",
+                            event.path
+                        ),
+                        Some(raw) => eustress_common::datamodel::record::warn_unknown_class(
+                            raw,
+                            eustress_common::classes::ClassName::Folder,
+                        ),
+                        None => {}
+                    }
+                    let dir_meta = super::file_loader::FileMetadata {
+                        path: folder.to_path_buf(),
+                        file_type: super::file_loader::FileType::Directory,
+                        service: event.service.clone(),
+                        name: folder
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Folder")
+                            .to_string(),
+                        size: 0,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    };
+                    let entity = super::file_loader::spawn_general_entity(
+                        commands,
+                        &dir_meta,
+                        parsed.value.as_ref(),
+                        parsed.class_name,
+                        parsed.uuid.clone(),
+                    );
+                    let owner = match folder.parent() {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
+                    }
+                    registry.register(folder.to_path_buf(), entity, dir_meta.clone());
+                    registry.register(event.path.clone(), entity, dir_meta);
+                    // The one-shot create record the typed path below makes.
+                    match eustress_common::instance_create::uuid_hex_to_bytes(&parsed.uuid) {
+                        Some(uuid_bytes) => {
+                            let rel = event
+                                .path
+                                .strip_prefix(space_root)
+                                .ok()
+                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                .unwrap_or_default();
+                            let class = written
+                                .filter(|w| !w.is_empty())
+                                .unwrap_or_else(|| parsed.class_name.as_str().to_string());
+                            super::active_db::record_disk_create(&uuid_bytes, &class, &rel, None);
+                        }
+                        None => warn!(
+                            "op-log: new _instance.toml {:?} has no valid uuid; create not recorded",
+                            event.path
+                        ),
+                    }
+                    info!("✅ Loaded new {} folder: {:?}", parsed.class_name.as_str(), event.path);
+                    return;
+                }
+            }
+
+            // A flat file (`Crate.part.toml`) follows Space open's flat rules:
+            // a class the engine does not know loads as the inert Folder, and
+            // a file that names no class takes the class its extension names.
+            let flat_text = if is_instance_marker {
+                None
+            } else {
+                std::fs::read_to_string(&event.path).ok()
+            };
+            if let Some(text) = flat_text.as_deref() {
+                let typed = super::instance_loader::load_instance_definition_from_str(text);
+                if let Some(raw) = super::file_loader::flat_unknown_class(Ok(text), &typed) {
+                    let file_meta = super::file_loader::FileMetadata {
+                        path: event.path.clone(),
+                        file_type: event.file_type,
+                        service: event.service.clone(),
+                        name: super::file_loader::flat_stem(&event.path),
+                        size: 0,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    };
+                    let entity = super::file_loader::spawn_flat_unknown_class(commands, &file_meta, Some(text), &raw);
+                    let owner = match event.path.parent() {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
+                    }
+                    registry.register(event.path.clone(), entity, file_meta);
+                    info!("✅ Loaded new flat instance file as an inert Folder: {:?}", event.path);
+                    return;
+                }
+            }
+
             // Load .part.toml, .model.toml, .instance.toml files
             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
-                Ok(instance) => {
+                Ok(mut instance) => {
+                    if let Some(text) = flat_text.as_deref() {
+                        super::file_loader::apply_flat_extension_class(&event.path, text, &mut instance);
+                    }
                     // Capture identity BEFORE `instance` is moved into spawn_instance
                     // (used by the op-log create record below, after registration).
                     let create_uuid = instance
@@ -1854,6 +2092,22 @@ fn handle_file_created(
                         event.path.clone(),
                         &definition,
                     );
+                    // Tag the source file and parent to the folder it sits in,
+                    // up to MaterialService, like every other hot-loaded file.
+                    // The Explorer places an entity by its parent, then by
+                    // `LoadedFromFile.service`, then by class.
+                    commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+                        path: event.path.clone(),
+                        file_type: event.file_type,
+                        service: event.service.clone(),
+                    });
+                    let owner = match event.path.parent() {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
+                    }
                     registry.register(
                         event.path.clone(),
                         entity,
@@ -2109,6 +2363,70 @@ pub fn setup_file_watcher(
         }
         Err(e) => {
             error!("❌ Failed to initialize file watcher: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod unknown_class_tests {
+    use super::*;
+
+    fn route(text: &str) -> Option<String> {
+        unknown_folder_form_class(&crate::space::file_loader::parse_instance_text(text))
+    }
+
+    /// Unknown or missing classes become the inert Folder, as at Space open.
+    #[test]
+    fn unknown_and_missing_classes_load_as_the_inert_folder() {
+        assert_eq!(route("[metadata]\nclass_name = \"Gizmo\"\n").as_deref(), Some("Gizmo"));
+        assert_eq!(route("[Metadata]\nClassName = \"Gizmo\"\n").as_deref(), Some("Gizmo"));
+        assert_eq!(route("[metadata]\nname = \"NoClass\"\n").as_deref(), Some(""));
+        assert_eq!(route("[transform]\nposition = [0.0, 0.0, 0.0]\n").as_deref(), Some(""));
+    }
+
+    /// Known classes keep their typed load, whatever the spelling.
+    #[test]
+    fn known_classes_keep_the_typed_path() {
+        for text in [
+            "[metadata]\nclass_name = \"Part\"\n",
+            "[metadata]\nclass_name = \"Folder\"\n",
+            "[metadata]\nclass_name = \"Model\"\n",
+            "[metadata]\nclass_name = \"Script\"\n",
+            "[Metadata]\nClassName = \"Part\"\n",
+        ] {
+            assert_eq!(route(text), None, "{text}");
+        }
+    }
+
+    /// A file that does not parse (a half-written save) is left to the typed
+    /// path, which fails and waits for the file's next event.
+    #[test]
+    fn unparsable_text_is_not_frozen_as_a_folder() {
+        assert_eq!(route("[metadata\nclass_name = "), None);
+        assert!(!general("[metadata\nclass_name = "));
+    }
+
+    fn general(text: &str) -> bool {
+        loads_as_general_folder(&crate::space::file_loader::parse_instance_text(text))
+    }
+
+    /// The watcher's folder route takes exactly the classes Space open spawns
+    /// through `spawn_general_entity`, and nothing with a loader of its own.
+    #[test]
+    fn the_general_arm_is_the_watchers_folder_route() {
+        for (text, expected) in [
+            ("[metadata]\nclass_name = \"Model\"\n", true),
+            ("[metadata]\nclass_name = \"Folder\"\n", true),
+            ("[metadata]\nclass_name = \"Tool\"\n", true),
+            ("[metadata]\nclass_name = \"Gizmo\"\n", true),
+            ("[metadata]\nname = \"NoClass\"\n", true),
+            ("[metadata]\nclass_name = \"Part\"\n", false),
+            ("[metadata]\nclass_name = \"PointLight\"\n", false),
+            ("[metadata]\nclass_name = \"Sky\"\n", false),
+            ("[metadata]\nclass_name = \"Script\"\n", false),
+            ("[metadata]\nclass_name = \"TextLabel\"\n", false),
+        ] {
+            assert_eq!(general(text), expected, "{text}");
         }
     }
 }

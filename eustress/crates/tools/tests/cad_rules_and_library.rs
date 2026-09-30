@@ -398,3 +398,14 @@ fn a_definition_that_does_not_evaluate_is_not_published() {
         "a refused publish still wrote to the library"
     );
 }
+
+/// A stud is Roblox's 0.28 m in every crate. eustress-cad cannot name
+/// common's `Unit::Stud`, so the two definitions meet here, in a crate that
+/// depends on both.
+#[test]
+fn cad_and_common_agree_on_the_stud() {
+    let cad = eustress_cad::quantity::STUD_METERS;
+    let common = eustress_common::units::Unit::Stud.to_meters();
+    assert!((cad - common).abs() < 1e-12, "cad says {cad} m, common says {common} m");
+    assert!((cad - 0.28).abs() < 1e-12, "a stud is 0.28 m, not {cad} m");
+}

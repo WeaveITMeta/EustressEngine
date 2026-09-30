@@ -14,8 +14,8 @@
 //!   for properties without a first-class slot.
 //! - **`physics_extras`** — `toml::Value` entries that get written under
 //!   `[properties.physics]` (PhysicalProperties decomposition).
-//! - **`tags`** — values for `[metadata.tags]`.
-//! - **`attributes`** — values for `[properties.attributes]`.
+//! - **`tags`** — values for the root `tags` array.
+//! - **`attributes`**: values for the root `[attributes]` table.
 //! - **`refs`** — Roblox `Ref` properties keyed by Roblox property name;
 //!   resolved by the materializer's second pass via the
 //!   referent → uuid map.
@@ -71,7 +71,7 @@ use rbx_dom_weak::types::{
 /// A mapped property set, ready to feed `create_instance` (well-known
 /// slots) and to emit into the `_instance.toml`'s
 /// `[properties.extras]` / `[properties.physics]` /
-/// `[metadata.tags]` / `[properties.attributes]` /
+/// root `tags` / root `[attributes]` /
 /// `[references]` blocks.
 ///
 /// Build with [`map_properties`]; consume via [`PropertyBag::into_overrides`]
@@ -94,11 +94,11 @@ pub struct PropertyBag {
     pub physics_extras: HashMap<String, toml::Value>,
 
     /// CollectionService tag values. Written under
-    /// `[metadata.tags]` as an array of strings.
+    /// the document's root `tags` array, where the engine reads them.
     pub tags: Vec<String>,
 
-    /// Roblox `Attributes` payload. Written under
-    /// `[properties.attributes]`.
+    /// Roblox `Attributes` payload and folded value objects. Written to the
+    /// document's root `[attributes]` table, where the engine reads them.
     pub attributes: HashMap<String, toml::Value>,
 
     /// Roblox `Ref` properties, keyed by Roblox property name. Resolved
@@ -187,13 +187,37 @@ pub fn map_properties(
     // Post-loop (property HashMap iteration order isn't guaranteed, so
     // this can't be done inline when "Shape" happens to be read):
     // a Shape=Cylinder part needs its rotation corrected for the
-    // Roblox-vs-Eustress cylinder-axis mismatch. `asset_mesh` can only be
+    // Roblox-vs-Eustress cylinder-axis mismatch, and its size turned with
+    // it. `asset_mesh` can only be
     // "parts/cylinder.glb" here via the `Shape` property (`try_part_property`)
     // — the OTHER cylinder source, `CylinderMesh`/`SpecialMesh` child-folding,
     // runs later in the materializer, outside this function.
+    // An imported script is Roblox code: its runtime reads and writes of
+    // lengths are in studs, which the Luau boundary converts (mlua).
+    if matches!(
+        target_class,
+        ClassName::LuauScript | ClassName::LuauLocalScript | ClassName::LuauModuleScript
+    ) {
+        put_section(&mut bag, "script", "origin", toml::Value::String(ROBLOX_SCRIPT_ORIGIN.to_string()));
+    }
+    // A part at Roblox's default physical properties carries its material's
+    // Roblox values, so every imported part has its Roblox mass, friction
+    // and bounce in the file.
+    if bag.physics_extras.get("preset").and_then(|v| v.as_str()) == Some("Default")
+        && !bag.physics_extras.contains_key("density")
+    {
+        let material = bag.overrides.material.clone().unwrap_or_else(|| "Plastic".to_string());
+        insert_physical_properties(&mut bag.physics_extras, roblox_default_physical_properties(&material));
+    }
     if bag.overrides.asset_mesh.as_deref() == Some("parts/cylinder.glb") {
         let base_rotation = bag.overrides.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]);
         bag.overrides.rotation = Some(quat_mul(base_rotation, CYLINDER_AXIS_CORRECTION));
+        // The turn puts the mesh's Y (its axis) on Roblox's X and the mesh's
+        // X on Roblox's -Y, so Roblox's length (Size.X) is the mesh's Y and
+        // Size.Y its X. The part then fills exactly Roblox's box.
+        if let Some([x, y, z]) = bag.overrides.scale {
+            bag.overrides.scale = Some([y, x, z]);
+        }
     }
     bag
 }
@@ -327,20 +351,30 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
         return;
     }
     if let Variant::Attributes(attrs) = variant {
-        // First-class attribute promotion: every (name, value) pair
-        // becomes a typed `[attributes]` TOML key (bool / number / string /
-        // Vector3 / Color3 / …) via the same `variant_to_toml` encoder the
-        // extras path uses — so `GetAttribute`/`SetAttribute` bindings
-        // survive the import with real values instead of an opaque
-        // debug-string blob.
+        // Every (name, value) pair becomes a key of the root `[attributes]`
+        // table, in the form the engine's attribute reader takes
+        // ([`attribute_value_to_toml`]), so `GetAttribute` returns it.
         for (name, value) in attrs.iter() {
-            let v = variant_to_toml(value, bag);
-            bag.attributes.insert(name.to_string(), v);
+            match attribute_value_to_toml(value, bag) {
+                Some(v) => {
+                    bag.attributes.insert(name.to_string(), v);
+                }
+                None => bag.approximation_notes.push(format!(
+                    "attribute '{name}' of type {:?} has no attribute form; not imported",
+                    value.ty()
+                )),
+            }
         }
         return;
     }
 
     // ── PhysicalProperties decomposition ───────────────────────────
+    // Every part's physics lands in `[properties.physics]` in the engine
+    // loader's vocabulary and units (`insert_physical_properties`), so an
+    // import weighs, slides and bounces as it does in Roblox: a
+    // CustomPhysicalProperties as authored, a Default one as its material's
+    // Roblox default (filled in by `map_properties` once the part's Material
+    // is known, since property order is not).
     if let Variant::PhysicalProperties(pp) = variant {
         match pp {
             PhysicalProperties::Default => {
@@ -348,36 +382,15 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
                     .insert("preset".to_string(), toml::Value::String("Default".into()));
             }
             PhysicalProperties::Custom(c) => {
-                // Emit keys matching the engine loader's physics vocabulary
-                // (`engine::space::instance_loader` reads these at the Avian
-                // collider-insert sites). Roblox has a single scalar
-                // `friction()`; Avian distinguishes static vs kinetic, so we
-                // seed both from the one Roblox value. `elasticity()` maps to
-                // Avian's `restitution`.
-                bag.physics_extras
-                    .insert("density".to_string(), toml::Value::Float(c.density() as f64));
-                bag.physics_extras.insert(
-                    "friction_static".to_string(),
-                    toml::Value::Float(c.friction() as f64),
-                );
-                bag.physics_extras.insert(
-                    "friction_kinetic".to_string(),
-                    toml::Value::Float(c.friction() as f64),
-                );
-                bag.physics_extras.insert(
-                    "restitution".to_string(),
-                    toml::Value::Float(c.elasticity() as f64),
-                );
-                // Round-trip Roblox's weight knobs too — no Avian cognate
-                // today, but preserved under `[properties.physics]` so a
-                // re-export keeps them.
-                bag.physics_extras.insert(
-                    "friction_weight".to_string(),
-                    toml::Value::Float(c.friction_weight() as f64),
-                );
-                bag.physics_extras.insert(
-                    "elasticity_weight".to_string(),
-                    toml::Value::Float(c.elasticity_weight() as f64),
+                insert_physical_properties(
+                    &mut bag.physics_extras,
+                    RobloxPhysicalProperties {
+                        density: shortest(c.density()),
+                        elasticity: shortest(c.elasticity()),
+                        elasticity_weight: shortest(c.elasticity_weight()),
+                        friction: shortest(c.friction()),
+                        friction_weight: shortest(c.friction_weight()),
+                    },
                 );
             }
         }
@@ -662,16 +675,17 @@ fn deg_to_rad(v: toml::Value) -> toml::Value {
     }
 }
 
-/// Meters per Roblox stud. Roblox studs are feet (1 stud = 1 ft).
-const STUD_TO_M: f64 = 0.3048;
+/// Meters per Roblox stud: a Roblox stud is the Eustress stud
+/// (`units::Unit::Stud`, 0.28 m), which imported files are written in.
+const STUD_TO_M: f64 = eustress_common::units::Unit::Stud.to_meters();
 
 /// A Roblox stud length (or stud-per-second speed) as engine meters.
 ///
-/// Which values convert follows who reads them. `metadata.unit = "ft"` covers
-/// the transform block only: the loader converts `position`, `scale` and
-/// `mesh_offset`, and nothing else. Class sections are read as engine-native
-/// meters, so a world-space length written in studs came out 3.28x too large
-/// (a 16-stud light reached 16 m). Every world-space length therefore goes
+/// Which values convert follows who reads them. `metadata.unit = "stud"`
+/// covers the transform block only: the loader converts `position`, `scale`
+/// and `mesh_offset`, and nothing else. Class sections are read as
+/// engine-native meters, so a world-space length written in studs would come
+/// out 3.6x too large (a 16-stud light reaching 16 m). Every world-space length therefore goes
 /// through here: texture tiling, light range, sound rolloff, particle size
 /// and speed, beam width, billboard offsets, constraint lengths and joint
 /// offsets. Gameplay values the engine keeps in Roblox's units, such as
@@ -710,6 +724,107 @@ fn normal_id_label(variant: &Variant) -> Option<toml::Value> {
         _ => return None,
     };
     Some(toml::Value::String(label.to_string()))
+}
+
+/// A part's physical properties as Roblox gives them: density in g/cm3
+/// (water = 1), friction and elasticity with their blend weights.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RobloxPhysicalProperties {
+    density: f64,
+    elasticity: f64,
+    elasticity_weight: f64,
+    friction: f64,
+    friction_weight: f64,
+}
+
+/// Roblox's default physical properties per material, from the Creator Hub's
+/// "Default physical properties" table (docs/parts/materials): name, density
+/// (g/cm3), elasticity, elasticity weight, friction, friction weight.
+/// SmoothPlastic shares Plastic's.
+const ROBLOX_MATERIAL_PHYSICS: &[(&str, f64, f64, f64, f64, f64)] = &[
+    ("Asphalt", 2.36, 0.2, 1.0, 0.8, 0.3),
+    ("Basalt", 2.691, 0.15, 1.0, 0.7, 0.3),
+    ("Brick", 1.922, 0.15, 1.0, 0.8, 0.3),
+    ("Cardboard", 0.7, 0.05, 2.0, 0.5, 1.0),
+    ("Carpet", 1.1, 0.25, 2.0, 0.4, 1.0),
+    ("CeramicTiles", 2.4, 0.2, 1.0, 0.51, 1.0),
+    ("ClayRoofTiles", 2.0, 0.2, 1.0, 0.51, 1.0),
+    ("Cobblestone", 2.691, 0.17, 1.0, 0.5, 1.0),
+    ("Concrete", 2.403, 0.2, 1.0, 0.7, 0.3),
+    ("CorrodedMetal", 7.85, 0.2, 1.0, 0.7, 1.0),
+    ("CrackedLava", 2.691, 0.15, 1.0, 0.65, 1.0),
+    ("DiamondPlate", 7.85, 0.25, 1.0, 0.35, 1.0),
+    ("Fabric", 0.7, 0.05, 1.0, 0.35, 1.0),
+    ("Foil", 2.7, 0.25, 1.0, 0.4, 1.0),
+    ("ForceField", 2.403, 0.2, 1.0, 0.25, 1.0),
+    ("Glacier", 0.919, 0.15, 1.0, 0.05, 2.0),
+    ("Glass", 2.403, 0.2, 1.0, 0.25, 1.0),
+    ("Granite", 2.691, 0.2, 1.0, 0.4, 1.0),
+    ("Grass", 0.9, 0.1, 1.5, 0.4, 1.0),
+    ("Ground", 0.9, 0.1, 1.0, 0.45, 1.0),
+    ("Ice", 0.919, 0.15, 1.0, 0.02, 3.0),
+    ("LeafyGrass", 0.9, 0.1, 2.0, 0.4, 2.0),
+    ("Leather", 0.86, 0.25, 1.0, 0.35, 1.0),
+    ("Limestone", 2.691, 0.15, 1.0, 0.5, 1.0),
+    ("Marble", 2.563, 0.17, 1.0, 0.2, 1.0),
+    ("Metal", 7.85, 0.25, 1.0, 0.4, 1.0),
+    ("Mud", 0.9, 0.07, 4.0, 0.3, 3.0),
+    ("Neon", 0.7, 0.2, 1.0, 0.3, 1.0),
+    ("Pavement", 2.691, 0.17, 1.0, 0.5, 0.3),
+    ("Pebble", 2.403, 0.17, 1.5, 0.4, 1.0),
+    ("Plaster", 0.75, 0.2, 1.0, 0.6, 0.3),
+    ("Plastic", 0.7, 0.5, 1.0, 0.3, 1.0),
+    ("Rock", 2.691, 0.17, 1.0, 0.5, 1.0),
+    ("RoofShingles", 2.36, 0.2, 1.0, 0.8, 0.3),
+    ("Rubber", 1.3, 0.95, 2.0, 1.5, 3.0),
+    ("Salt", 2.165, 0.05, 1.0, 0.5, 1.0),
+    ("Sand", 1.602, 0.05, 2.5, 0.5, 5.0),
+    ("Sandstone", 2.691, 0.15, 1.0, 0.5, 5.0),
+    ("Slate", 2.691, 0.2, 1.0, 0.4, 1.0),
+    ("SmoothPlastic", 0.7, 0.5, 1.0, 0.3, 1.0),
+    ("Snow", 0.9, 0.03, 4.0, 0.3, 3.0),
+    ("Wood", 0.35, 0.2, 1.0, 0.48, 1.0),
+    ("WoodPlanks", 0.35, 0.2, 1.0, 0.48, 1.0),
+];
+
+/// A material's Roblox default physical properties, by its Roblox name. An
+/// unlisted one (Air, Water, an unknown name) takes Plastic's.
+fn roblox_default_physical_properties(material: &str) -> RobloxPhysicalProperties {
+    let row = ROBLOX_MATERIAL_PHYSICS
+        .iter()
+        .find(|row| row.0.eq_ignore_ascii_case(material))
+        .or_else(|| ROBLOX_MATERIAL_PHYSICS.iter().find(|row| row.0 == "Plastic"))
+        .expect("Plastic is in the table");
+    RobloxPhysicalProperties {
+        density: row.1,
+        elasticity: row.2,
+        elasticity_weight: row.3,
+        friction: row.4,
+        friction_weight: row.5,
+    }
+}
+
+/// `[properties.physics]` in the engine loader's vocabulary: density in
+/// kg/m3 (Roblox's g/cm3 x 1000, tagged `density_unit`), Roblox's single
+/// friction as both Avian coefficients, elasticity as `restitution`, and the
+/// blend weights for a round trip.
+fn insert_physical_properties(extras: &mut HashMap<String, toml::Value>, p: RobloxPhysicalProperties) {
+    extras.insert("density".to_string(), toml::Value::Float(round4(p.density * 1000.0)));
+    extras.insert("density_unit".to_string(), toml::Value::String("kg/m3".into()));
+    extras.insert("friction_static".to_string(), toml::Value::Float(p.friction));
+    extras.insert("friction_kinetic".to_string(), toml::Value::Float(p.friction));
+    extras.insert("restitution".to_string(), toml::Value::Float(p.elasticity));
+    extras.insert("friction_weight".to_string(), toml::Value::Float(p.friction_weight));
+    extras.insert("elasticity_weight".to_string(), toml::Value::Float(p.elasticity_weight));
+}
+
+/// An f32 as the f64 it prints as: 0.3, not 0.30000001192092896.
+fn shortest(v: f32) -> f64 {
+    v.to_string().parse().unwrap_or(v as f64)
+}
+
+fn round4(v: f64) -> f64 {
+    (v * 1e4).round() / 1e4
 }
 
 fn val_float(v: &Variant) -> Option<toml::Value> {
@@ -1363,15 +1478,23 @@ fn try_decal_mesh_property(bag: &mut PropertyBag, target_class: ClassName, key: 
             }
             false
         }
-        ClassName::SpecialMesh => {
+        // A DataMesh child's `[mesh]`: what its part draws (common::data_mesh).
+        ClassName::SpecialMesh | ClassName::BlockMesh | ClassName::CylinderMesh => {
             let mapped: Option<(&str, toml::Value)> = match key {
-                "MeshType" => enum_u32(variant).map(|e| {
-                    // rbx-700 MeshType: 0=Head 1=Torso 2=Wedge 3=Sphere 4=Cylinder 5=FileMesh 6=Brick.
-                    let s = match e { 0 => "Head", 1 => "Torso", 3 => "Sphere", 4 => "Cylinder", 6 => "Brick", _ => "FileMesh" };
+                "MeshType" if target_class == ClassName::SpecialMesh => enum_u32(variant).map(|e| {
+                    // Every Roblox MeshType by number (Head = 0 ... CornerWedge = 11).
+                    let s = eustress_common::classes::MeshType::from_roblox(e).map_or("FileMesh", |t| t.as_str());
                     ("mesh_type", toml::Value::String(s.to_string()))
                 }),
                 "Scale" => match variant { Variant::Vector3(v) => Some(("scale", f32_triple(v.x, v.y, v.z))), _ => None },
-                "Offset" => match variant { Variant::Vector3(v) => Some(("offset", f32_triple(v.x, v.y, v.z))), _ => None },
+                // A length: metres, like every class section.
+                "Offset" => match variant {
+                    Variant::Vector3(v) => {
+                        let m = STUD_TO_M as f32;
+                        Some(("offset", f32_triple(v.x * m, v.y * m, v.z * m)))
+                    }
+                    _ => None,
+                },
                 "VertexColor" => match variant {
                     Variant::Vector3(v) => Some(("vertex_color", toml::Value::Array(vec![
                         toml::Value::Integer((v.x * 255.0).round().clamp(0.0, 255.0) as i64),
@@ -1426,7 +1549,7 @@ fn try_character_property(bag: &mut PropertyBag, target_class: ClassName, key: &
                     ))),
                     _ => None,
                 },
-                "HumanoidStateMachine" => val_bool(variant).map(|v| ("humanoid_state_machine", v)),
+                "EvaluateStateMachine" => val_bool(variant).map(|v| ("evaluate_state_machine", v)),
                 "RequiresNeck" => val_bool(variant).map(|v| ("requires_neck", v)),
                 "BreakJointsOnDeath" => val_bool(variant).map(|v| ("break_joints_on_death", v)),
                 _ => None,
@@ -1701,9 +1824,11 @@ fn try_spawn_seat_vehicle_team_property(bag: &mut PropertyBag, target_class: Cla
 /// CFrame is left to try_well_known (pose).
 fn try_camera_model_worldmodel_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, variant: &Variant) -> bool {
     let is_camera = matches!(target_class, ClassName::Camera);
+    // An Actor is a Model subclass; only its pivot is read here.
+    let is_actor = matches!(target_class, ClassName::Actor);
     let is_model = matches!(target_class, ClassName::Model);
     let is_world_model = matches!(target_class, ClassName::WorldModel);
-    if !(is_camera || is_model || is_world_model) {
+    if !(is_camera || is_model || is_world_model || is_actor) {
         return false;
     }
     // Archivable -> [metadata].archivable (all three).
@@ -1752,20 +1877,31 @@ fn try_camera_model_worldmodel_property(bag: &mut PropertyBag, target_class: Cla
         put_section(bag, section, k, v);
         return true;
     }
-    // Model.WorldPivot -> [model].world_pivot table {position,rotation,scale}.
-    if is_model && key == "WorldPivot" {
-        if let Variant::CFrame(cf) = variant {
-            let (t, q) = cframe_to_translation_quat(cf);
-            let mut pivot = toml::value::Table::new();
-            pivot.insert("position".to_string(), f32_triple(t[0], t[1], t[2]));
-            pivot.insert("rotation".to_string(), toml::Value::Array(vec![
-                toml::Value::Float(q[0] as f64), toml::Value::Float(q[1] as f64),
-                toml::Value::Float(q[2] as f64), toml::Value::Float(q[3] as f64),
-            ]));
-            pivot.insert("scale".to_string(), f32_triple(1.0, 1.0, 1.0));
-            put_section(bag, "model", "world_pivot", toml::Value::Table(pivot));
-            return true;
-        }
+    // The pivot -> `world_pivot = { position, rotation, scale }` in the class
+    // section. A place stores it as `WorldPivotData`, an OptionalCFrame
+    // (`WorldPivot` is the computed property scripts read). `None` means no
+    // stored pivot: Roblox then uses the PrimaryPart, else the centre of the
+    // bounds, so nothing is written. The position is in metres, as every
+    // class section is read; only `[transform]` converts from
+    // `metadata.unit`.
+    if (is_model || is_world_model || is_actor) && (key == "WorldPivotData" || key == "WorldPivot") {
+        let cf = match variant {
+            Variant::OptionalCFrame(Some(cf)) | Variant::CFrame(cf) => cf,
+            Variant::OptionalCFrame(None) => return true,
+            _ => return false,
+        };
+        let (t, q) = cframe_to_translation_quat(cf);
+        let m = STUD_TO_M as f32;
+        let mut pivot = toml::value::Table::new();
+        pivot.insert("position".to_string(), f32_triple(t[0] * m, t[1] * m, t[2] * m));
+        pivot.insert("rotation".to_string(), toml::Value::Array(vec![
+            toml::Value::Float(q[0] as f64), toml::Value::Float(q[1] as f64),
+            toml::Value::Float(q[2] as f64), toml::Value::Float(q[3] as f64),
+        ]));
+        pivot.insert("scale".to_string(), f32_triple(1.0, 1.0, 1.0));
+        let section = if is_world_model { "world_model" } else { "model" };
+        put_section(bag, section, "world_pivot", toml::Value::Table(pivot));
+        return true;
     }
     false
 }
@@ -1904,7 +2040,9 @@ fn try_part_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, 
     // (rotate the mesh's local Y onto Roblox's expected X, i.e. -90°
     // about local Z) is applied once every property has been read — see
     // the post-loop step in `map_properties`, since `Shape` and `CFrame`
-    // can arrive in either order from the property HashMap.
+    // can arrive in either order from the property HashMap. The size turns
+    // with it (Roblox's length, Size.X, becomes the mesh's Y), and the
+    // materializer gives the round sides Roblox's smallest (`round_sides`).
     if key == "Shape" {
         if let Variant::Enum(e) = variant {
             // `Enum.PartType`: Ball=0, Block=1, Cylinder=2, Wedge=3,
@@ -1934,10 +2072,49 @@ fn try_part_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, 
     false
 }
 
+/// `[script] origin` of every script the importer writes: Roblox code, whose
+/// lengths the Luau boundary converts from studs.
+pub const ROBLOX_SCRIPT_ORIGIN: &str = "roblox";
+
 /// -90° rotation about the local Z axis, as `[x, y, z, w]`. Corrects a
 /// Shape=Cylinder part's axis convention — see `try_part_property`'s
 /// `"Shape"` arm for the full explanation.
 const CYLINDER_AXIS_CORRECTION: [f32; 4] = [0.0, 0.0, -std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2];
+
+/// Gives a Shape=Cylinder part's mapped pose and size back to Roblox's: the
+/// inverse of the turn in [`map_properties`]. For a part that no longer draws
+/// as the engine's cylinder, because a SpecialMesh FileMesh draws it.
+pub(crate) fn unturn_cylinder(overrides: &mut InstanceOverrides) {
+    if let Some(rotation) = overrides.rotation {
+        let [x, y, z, w] = CYLINDER_AXIS_CORRECTION;
+        overrides.rotation = Some(quat_mul(rotation, [-x, -y, -z, w]));
+    }
+    if let Some([x, y, z]) = overrides.scale {
+        overrides.scale = Some([y, x, z]);
+    }
+}
+
+/// Roblox draws a Shape=Cylinder part's round section at the smaller of its
+/// two round sides and a Ball at the smallest of its three sides, and
+/// collides with the same shapes, while the engine's cylinder and ball fill
+/// their size on every axis. So a mapped cylinder's round sides (X and Z,
+/// after the turn) and a ball's three sides take that smallest value.
+/// Returns the size it replaced when a side changed by more than 1%, for the
+/// report.
+pub(crate) fn round_sides(overrides: &mut InstanceOverrides) -> Option<[f32; 3]> {
+    let size = overrides.scale?;
+    let [x, y, z] = size;
+    let round = match overrides.asset_mesh.as_deref()? {
+        "parts/cylinder.glb" => {
+            let d = x.min(z);
+            [d, y, d]
+        }
+        "parts/ball.glb" => [x.min(y).min(z); 3],
+        _ => return None,
+    };
+    overrides.scale = Some(round);
+    size.iter().zip(round).any(|(a, b)| (a - b).abs() > 0.01 * a.abs()).then_some(size)
+}
 
 /// Hamilton product `a * b` for `[x, y, z, w]` quaternions — applying the
 /// combined rotation means "apply `b` first, in `a`'s own local frame,
@@ -1958,18 +2135,24 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 // Light properties (PointLight / SpotLight / SurfaceLight → extras)
 // ---------------------------------------------------------------------------
 
-/// Route a Roblox light property into the PropertyBag's `properties_extras`
-/// bucket under a stable `light_*` key. Returns `true` when the
-/// `(class, key)` pair is a recognised light property (and was consumed).
+/// Route a Roblox light property into the light's `[light]` section.
+/// Returns `true` when the `(class, key)` pair is a recognised light
+/// property (and was consumed).
 ///
-/// The engine's light-load arm (`file_loader::spawn_directory_entry`)
-/// reads these `light_*` extras back over the class template's `[Light]`
-/// section defaults, building `EustressPointLight` / `EustressSpotLight` /
-/// `SurfaceLight` and calling `spawn::spawn_*`.
+/// The section is what the engine's light loaders read
+/// (`light_classes::LightSection`), what the Properties panel edits and what
+/// every writer preserves. The keys and units are the class template's:
 ///
-/// `Brightness` is scaled ×800 to convert Roblox's unitless multiplier to
-/// physically-based lumens — matching the convention in
-/// `engine::spawners::lights::point_light::import_from_roblox`.
+/// - `brightness`: Roblox's Brightness as is. It is the same dial; the
+///   engine turns it into lumens against the camera's exposure.
+/// - `range`: metres (studs × the stud, 0.28 m).
+/// - `color`: the 0-1 channels.
+/// - `angle`: Roblox's Angle, the cone's full apex angle in degrees.
+/// - `face`: the NormalId label (Top, Bottom, Front, Back, Left, Right).
+///
+/// Imports made before this wrote `[properties.extras]` `light_*` keys with
+/// brightness ×800 "lumens"; the engine still reads those and folds them into
+/// `[light]` when it heals the file.
 fn try_light_property(
     bag: &mut PropertyBag,
     target_class: ClassName,
@@ -1982,90 +2165,43 @@ fn try_light_property(
     ) {
         return false;
     }
-    match key {
-        "Brightness" => {
-            if let Variant::Float32(b) = variant {
-                // Roblox unitless multiplier → lumens (×800).
-                bag.properties_extras.insert(
-                    "light_brightness".to_string(),
-                    toml::Value::Float((*b * 800.0) as f64),
-                );
-                return true;
-            }
-        }
-        "Range" => {
-            // Bevy's light range is in world meters.
-            if let Some(m) = val_studs_to_m(variant) {
-                bag.properties_extras.insert("light_range".to_string(), m);
-                return true;
-            }
-        }
+    let mapped: Option<(&str, toml::Value)> = match key {
+        "Brightness" => val_float(variant).map(|v| ("brightness", v)),
+        "Range" => val_studs_to_m(variant).map(|v| ("range", v)),
         "Color" => match variant {
-            Variant::Color3(c) => {
-                bag.properties_extras.insert(
-                    "light_color".to_string(),
-                    toml::Value::Array(vec![
-                        toml::Value::Float(c.r as f64),
-                        toml::Value::Float(c.g as f64),
-                        toml::Value::Float(c.b as f64),
-                    ]),
-                );
-                return true;
-            }
-            Variant::Color3uint8(c) => {
-                bag.properties_extras.insert(
-                    "light_color".to_string(),
-                    toml::Value::Array(vec![
-                        toml::Value::Float(c.r as f64 / 255.0),
-                        toml::Value::Float(c.g as f64 / 255.0),
-                        toml::Value::Float(c.b as f64 / 255.0),
-                    ]),
-                );
-                return true;
-            }
-            _ => {}
+            Variant::Color3(c) => Some((
+                "color",
+                toml::Value::Array(vec![
+                    toml::Value::Float(c.r as f64),
+                    toml::Value::Float(c.g as f64),
+                    toml::Value::Float(c.b as f64),
+                ]),
+            )),
+            Variant::Color3uint8(c) => Some((
+                "color",
+                toml::Value::Array(vec![
+                    toml::Value::Integer(c.r as i64),
+                    toml::Value::Integer(c.g as i64),
+                    toml::Value::Integer(c.b as i64),
+                ]),
+            )),
+            _ => None,
         },
-        // Spotlight cone half-angle (degrees).
-        "Angle" => {
-            if let Variant::Float32(a) = variant {
-                bag.properties_extras
-                    .insert("light_angle".to_string(), toml::Value::Float(*a as f64));
-                return true;
-            }
+        // SpotLight / SurfaceLight cone: the full apex angle, in degrees.
+        "Angle" => val_float(variant).map(|v| ("angle", v)),
+        "Shadows" => val_bool(variant).map(|v| ("shadows", v)),
+        "Enabled" => val_bool(variant).map(|v| ("enabled", v)),
+        // SpotLight / SurfaceLight face, as its label.
+        "Face" => normal_id_label(variant).map(|v| ("face", v)),
+        _ => None,
+    };
+    match mapped {
+        Some((k, v)) => {
+            put_section(bag, "light", k, v);
+            true
         }
-        "Shadows" => {
-            if let Variant::Bool(s) = variant {
-                bag.properties_extras
-                    .insert("light_shadows".to_string(), toml::Value::Boolean(*s));
-                return true;
-            }
-        }
-        "Enabled" => {
-            if let Variant::Bool(e) = variant {
-                bag.properties_extras
-                    .insert("light_enabled".to_string(), toml::Value::Boolean(*e));
-                return true;
-            }
-        }
-        // SurfaceLight face — string or enum; store the raw label.
-        "Face" => match variant {
-            Variant::String(s) => {
-                bag.properties_extras
-                    .insert("light_face".to_string(), toml::Value::String(s.clone()));
-                return true;
-            }
-            Variant::Enum(e) => {
-                bag.properties_extras.insert(
-                    "light_face".to_string(),
-                    toml::Value::Integer(e.to_u32() as i64),
-                );
-                return true;
-            }
-            _ => {}
-        },
-        _ => {}
+        None => false,
     }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -2352,6 +2488,116 @@ fn rect_to_toml(r: &Rect) -> toml::Value {
         toml::Value::Float(r.max.x as f64),
         toml::Value::Float(r.max.y as f64),
     ])
+}
+
+/// A Roblox attribute's value in the form the engine's attribute reader
+/// (`eustress_common::datamodel::record::toml_to_attribute`) takes: scalars
+/// bare, `Vector2` and `Vector3` as bare arrays, and every other kind as a
+/// one-key table named for its type, the form a folded value object takes.
+/// The reader reads a bare array by its length (three floats are a
+/// `Vector3`, four an RGBA colour), so a bare `Color3`, `UDim2` or
+/// `NumberRange` came back as the wrong type. A string arrives as a
+/// `BinaryString` (rbx_types reads attribute strings as bytes) and is written
+/// as text; bytes that are not UTF-8 are `{ Bytes = "<hex>" }`, so nothing
+/// reads them as a string. An `EnumItem` carries its item's name, which the
+/// DataModel's `EnumItem` holds, looked up in the reflection database.
+fn attribute_value_to_toml(value: &Variant, bag: &mut PropertyBag) -> Option<toml::Value> {
+    fn tagged(tag: &str, v: toml::Value) -> toml::Value {
+        let mut t = toml::value::Table::new();
+        t.insert(tag.to_string(), v);
+        toml::Value::Table(t)
+    }
+    fn floats(xs: &[f64]) -> toml::Value {
+        toml::Value::Array(xs.iter().map(|x| toml::Value::Float(*x)).collect())
+    }
+    Some(match value {
+        Variant::Bool(b) => toml::Value::Boolean(*b),
+        Variant::String(s) => toml::Value::String(s.clone()),
+        Variant::BinaryString(bs) => {
+            let bytes: &[u8] = bs.as_ref();
+            match std::str::from_utf8(bytes) {
+                Ok(s) => toml::Value::String(s.to_string()),
+                Err(_) => tagged("Bytes", toml::Value::String(hex::encode(bytes))),
+            }
+        }
+        Variant::Int32(i) => toml::Value::Integer(*i as i64),
+        Variant::Int64(i) => toml::Value::Integer(*i),
+        Variant::Float32(f) => toml::Value::Float(*f as f64),
+        Variant::Float64(f) => toml::Value::Float(*f),
+        Variant::Vector2(v) => floats(&[v.x as f64, v.y as f64]),
+        Variant::Vector3(v) => floats(&[v.x as f64, v.y as f64, v.z as f64]),
+        Variant::Color3(c) => tagged("Color3", floats(&[c.r as f64, c.g as f64, c.b as f64])),
+        Variant::Color3uint8(c) => tagged(
+            "Color3",
+            floats(&[c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0]),
+        ),
+        Variant::BrickColor(bc) => tagged("BrickColor", toml::Value::Integer(*bc as u16 as i64)),
+        Variant::CFrame(cf) => {
+            let (t, q) = cframe_to_translation_quat(cf);
+            tagged(
+                "CFrame",
+                floats(&[
+                    t[0] as f64, t[1] as f64, t[2] as f64,
+                    q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64,
+                ]),
+            )
+        }
+        Variant::UDim(u) => tagged("UDim", floats(&[u.scale as f64, u.offset as f64])),
+        Variant::UDim2(u) => tagged(
+            "UDim2",
+            floats(&[u.x.scale as f64, u.x.offset as f64, u.y.scale as f64, u.y.offset as f64]),
+        ),
+        Variant::NumberRange(r) => tagged("NumberRange", floats(&[r.min as f64, r.max as f64])),
+        Variant::Rect(r) => tagged(
+            "Rect",
+            floats(&[r.min.x as f64, r.min.y as f64, r.max.x as f64, r.max.y as f64]),
+        ),
+        Variant::NumberSequence(ns) => tagged(
+            "NumberSequence",
+            toml::Value::Array(
+                ns.keypoints
+                    .iter()
+                    .map(|k| floats(&[k.time as f64, k.value as f64, k.envelope as f64]))
+                    .collect(),
+            ),
+        ),
+        Variant::ColorSequence(cs) => tagged(
+            "ColorSequence",
+            toml::Value::Array(
+                cs.keypoints
+                    .iter()
+                    .map(|k| floats(&[k.time as f64, k.color.r as f64, k.color.g as f64, k.color.b as f64]))
+                    .collect(),
+            ),
+        ),
+        Variant::EnumItem(e) => {
+            let name = rbx_reflection_database::get()
+                .ok()
+                .and_then(|db| db.enums.get(e.ty.as_str()))
+                .and_then(|en| en.items.iter().find(|(_, v)| **v == e.value))
+                .map(|(n, _)| n.to_string());
+            let Some(name) = name else {
+                bag.approximation_notes.push(format!(
+                    "EnumItem attribute {}.{} is not in the reflection database; not imported",
+                    e.ty, e.value
+                ));
+                return None;
+            };
+            let mut t = toml::value::Table::new();
+            t.insert("type".to_string(), toml::Value::String(e.ty.clone()));
+            t.insert("name".to_string(), toml::Value::String(name));
+            t.insert("value".to_string(), toml::Value::Integer(e.value as i64));
+            tagged("EnumItem", toml::Value::Table(t))
+        }
+        Variant::Font(f) => {
+            let mut t = toml::value::Table::new();
+            t.insert("family".to_string(), toml::Value::String(f.family.clone()));
+            t.insert("weight".to_string(), toml::Value::Integer(f.weight.as_u16() as i64));
+            t.insert("style".to_string(), toml::Value::String(format!("{:?}", f.style)));
+            tagged("Font", toml::Value::Table(t))
+        }
+        _ => return None,
+    })
 }
 
 fn binary_string_to_toml(bs: &BinaryString) -> toml::Value {
@@ -2692,6 +2938,77 @@ mod tests {
     }
 
     #[test]
+    fn attributes_take_the_forms_the_engine_reader_reads() {
+        use rbx_dom_weak::types::{Attributes, BinaryString, BrickColor, NumberRange, UDim, UDim2};
+        let attrs = Attributes::new()
+            .with("Title", Variant::BinaryString(BinaryString::from(b"Aquatic Dealership".to_vec())))
+            .with("Speed", Variant::Float64(12.5))
+            .with("Owned", Variant::Bool(true))
+            .with("Offset", Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)))
+            .with("Tint", Variant::Color3(Color3::new(1.0, 0.5, 0.0)))
+            .with("Paint", Variant::BrickColor(BrickColor::ReallyRed))
+            .with("Seat", Variant::CFrame(CFrame::new(Vector3::new(4.0, 5.0, 6.0), Matrix3::identity())))
+            .with("Slot", Variant::UDim2(UDim2::new(UDim::new(0.5, 10), UDim::new(0.25, -4))))
+            .with("Gears", Variant::NumberRange(NumberRange::new(1.0, 6.0)))
+            .with("Blob", Variant::BinaryString(BinaryString::from(vec![0xff_u8, 0xfe])))
+            .with("Mat", Variant::EnumItem(rbx_dom_weak::types::EnumItem { ty: "Material".to_string(), value: 256 }));
+        let bag = map_properties(&props_with(vec![("Attributes", Variant::Attributes(attrs))]), ClassName::Part);
+        let a = &bag.attributes;
+        assert_eq!(a["Title"].as_str(), Some("Aquatic Dealership"), "a string attribute is text, not hex");
+        assert_eq!(a["Speed"].as_float(), Some(12.5));
+        assert_eq!(a["Owned"].as_bool(), Some(true));
+        assert_eq!(a["Offset"].as_array().map(|v| v.len()), Some(3));
+        let tag = |k: &str, t: &str| a[k].as_table().and_then(|tbl| tbl.get(t)).cloned();
+        assert_eq!(tag("Tint", "Color3").and_then(|v| v.as_array().map(|v| v.len())), Some(3));
+        assert_eq!(tag("Paint", "BrickColor").and_then(|v| v.as_integer()), Some(BrickColor::ReallyRed as u16 as i64));
+        assert_eq!(tag("Seat", "CFrame").and_then(|v| v.as_array().map(|v| v.len())), Some(7));
+        assert_eq!(tag("Slot", "UDim2").and_then(|v| v.as_array().map(|v| v.len())), Some(4));
+        assert_eq!(tag("Gears", "NumberRange").and_then(|v| v.as_array().map(|v| v.len())), Some(2));
+        assert_eq!(tag("Blob", "Bytes").and_then(|v| v.as_str().map(str::to_string)).as_deref(), Some("fffe"), "bytes that are not UTF-8 are tagged hex, not a string");
+        let mat = tag("Mat", "EnumItem").and_then(|v| v.as_table().cloned()).expect("EnumItem tagged");
+        assert_eq!(mat.get("type").and_then(|v| v.as_str()), Some("Material"));
+        assert_eq!(mat.get("name").and_then(|v| v.as_str()), Some("Plastic"), "the item's name, from the reflection database");
+        assert_eq!(mat.get("value").and_then(|v| v.as_integer()), Some(256));
+        assert!(
+            !bag.approximation_notes.iter().any(|n| n.contains("Float64")),
+            "a number attribute is f64 on both sides; nothing is downcast"
+        );
+    }
+
+    #[test]
+    fn model_world_pivot_data_lands_in_the_model_section_in_metres() {
+        let cf = CFrame::new(Vector3::new(10.0, -2.0, 4.0), Matrix3::identity());
+        let bag = map_properties(
+            &props_with(vec![("WorldPivotData", Variant::OptionalCFrame(Some(cf)))]),
+            ClassName::Model,
+        );
+        let pivot = bag
+            .section_props
+            .get("model")
+            .and_then(|s| s.get("world_pivot"))
+            .and_then(|v| v.as_table())
+            .expect("[model].world_pivot written");
+        let pos: Vec<f64> = pivot["position"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_float().unwrap())
+            .collect();
+        for (got, studs) in pos.iter().zip([10.0, -2.0, 4.0]) {
+            assert!((got - studs * STUD_TO_M).abs() < 1e-5, "position {pos:?} is not in metres");
+        }
+        assert!(bag.unmapped.iter().all(|u| u.property != "WorldPivotData"));
+
+        // No stored pivot: nothing written, and nothing left for extras.
+        let none = map_properties(
+            &props_with(vec![("WorldPivotData", Variant::OptionalCFrame(None))]),
+            ClassName::Model,
+        );
+        assert!(none.section_props.get("model").map_or(true, |s| !s.contains_key("world_pivot")));
+        assert!(none.unmapped.iter().all(|u| u.property != "WorldPivotData"));
+    }
+
+    #[test]
     fn cframe_position_carries_through() {
         let cf = CFrame::new(Vector3::new(1.5, -2.0, 7.25), Matrix3::identity());
         let (t, _) = cframe_to_translation_quat(&cf);
@@ -2958,10 +3275,41 @@ mod tests {
             )]),
             ClassName::Part,
         );
-        assert!(bag.physics_extras.contains_key("density"));
-        assert!(bag.physics_extras.contains_key("friction_static"));
-        assert!(bag.physics_extras.contains_key("friction_kinetic"));
-        assert!(bag.physics_extras.contains_key("restitution"));
+        let get = |k: &str| bag.physics_extras.get(k).and_then(|v| v.as_float());
+        // 1.5 g/cm3 is written as 1500 kg/m3, tagged; the rest as authored.
+        assert_eq!(get("density"), Some(1500.0));
+        assert_eq!(bag.physics_extras.get("density_unit").and_then(|v| v.as_str()), Some("kg/m3"));
+        assert_eq!(get("friction_static"), Some(0.3));
+        assert_eq!(get("friction_kinetic"), Some(0.3));
+        assert_eq!(get("restitution"), Some(0.0));
+    }
+
+    /// A part at Roblox's default physical properties carries its material's
+    /// Roblox values in the engine's units, so it weighs what it weighs in
+    /// Roblox: Wood is 0.35 g/cm3 there, 350 kg/m3 here, not the engine's
+    /// own Wood.
+    #[test]
+    fn default_physical_properties_take_the_materials_roblox_values() {
+        let default_pp = || ("CustomPhysicalProperties", Variant::PhysicalProperties(PhysicalProperties::Default));
+        let wood = map_properties(
+            &props_with(vec![default_pp(),("Material", Variant::Enum(Enum::from_u32(512)))]),
+            ClassName::Part,
+        );
+        let get = |bag: &PropertyBag, k: &str| bag.physics_extras.get(k).and_then(|v| v.as_float());
+        assert_eq!(get(&wood, "density"), Some(350.0));
+        assert_eq!(wood.physics_extras.get("density_unit").and_then(|v| v.as_str()), Some("kg/m3"));
+        assert_eq!(get(&wood, "friction_static"), Some(0.48));
+        assert_eq!(get(&wood, "restitution"), Some(0.2));
+        assert_eq!(wood.physics_extras.get("preset").and_then(|v| v.as_str()), Some("Default"));
+        // No Material property is Roblox's Plastic.
+        let plastic = map_properties(&props_with(vec![default_pp()]), ClassName::Part);
+        assert_eq!(get(&plastic, "density"), Some(700.0));
+        // Every row converts cleanly: g/cm3 x 1000, no float residue.
+        for row in ROBLOX_MATERIAL_PHYSICS {
+            let d = roblox_default_physical_properties(row.0).density * 1000.0;
+            assert_eq!(round4(d), (row.1 * 1000.0_f64).round(), "{}", row.0);
+        }
+        assert_eq!(roblox_default_physical_properties("Air"), roblox_default_physical_properties("Plastic"));
     }
 
     #[test]
@@ -3219,6 +3567,97 @@ mod tests {
         }
     }
 
+    /// Rotates `v` by the unit quaternion `q` (`[x, y, z, w]`).
+    fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let p = quat_mul(quat_mul(q, [v[0], v[1], v[2], 0.0]), [-q[0], -q[1], -q[2], q[3]]);
+        [p[0], p[1], p[2]]
+    }
+
+    /// A part's three edges in world space: each side of `size` along its
+    /// own axis, turned by `q`, in thousandths and without sign.
+    fn edges(q: [f32; 4], size: [f32; 3]) -> [[i64; 3]; 3] {
+        let edge = |i: usize| {
+            let mut e = [0.0f32; 3];
+            e[i] = size[i];
+            rotate(q, e).map(|c| (c.abs() * 1000.0).round() as i64)
+        };
+        [edge(0), edge(1), edge(2)]
+    }
+
+    /// A Shape=Cylinder part fills exactly Roblox's box: its size turns with
+    /// its axis, so Roblox's length (Size.X) runs along the mesh's Y. The
+    /// three sides differ, so a missing or wrong swap shows.
+    #[test]
+    fn a_cylinder_part_fills_its_roblox_box() {
+        let size = Variant::Vector3(Vector3::new(1.4, 30.0, 20.0));
+        // Unturned, and a quarter turn about Z (a helipad lying flat).
+        let quarter = Matrix3::new(
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        );
+        for rotation in [Matrix3::identity(), quarter] {
+            let cf = Variant::CFrame(CFrame::new(Vector3::new(0.0, 0.0, 0.0), rotation));
+            let block = map_properties(&props_with(vec![("CFrame", cf.clone()), ("Size", size.clone())]), ClassName::Part);
+            let cylinder = map_properties(
+                &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(2))), ("CFrame", cf), ("Size", size.clone())]),
+                ClassName::Part,
+            );
+            let identity = [0.0, 0.0, 0.0, 1.0];
+            let roblox = edges(block.overrides.rotation.unwrap_or(identity), block.overrides.scale.unwrap());
+            let ours = edges(cylinder.overrides.rotation.unwrap(), cylinder.overrides.scale.unwrap());
+            assert_eq!(ours[1], roblox[0], "the mesh's Y is Roblox's length");
+            let (mut a, mut b) = (roblox.to_vec(), ours.to_vec());
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "the same box");
+        }
+    }
+
+    #[test]
+    fn round_sides_take_the_smallest_side_as_roblox_draws_it() {
+        let with = |mesh: Option<&str>, scale: [f32; 3]| InstanceOverrides {
+            asset_mesh: mesh.map(str::to_string),
+            scale: Some(scale),
+            ..Default::default()
+        };
+        // A cylinder's round sides are X and Z after the turn.
+        let mut lights = with(Some("parts/cylinder.glb"), [40.0, 60.0, 30.0]);
+        assert_eq!(round_sides(&mut lights), Some([40.0, 60.0, 30.0]), "reported");
+        assert_eq!(lights.scale, Some([30.0, 60.0, 30.0]));
+        let mut lamp = with(Some("parts/ball.glb"), [6.5, 1.25, 7.75]);
+        assert!(round_sides(&mut lamp).is_some());
+        assert_eq!(lamp.scale, Some([1.25; 3]));
+        // Within 1%: rounded, not reported.
+        let mut road = with(Some("parts/cylinder.glb"), [10.0, 140.0, 9.9998]);
+        assert_eq!(round_sides(&mut road), None);
+        assert_eq!(road.scale, Some([9.9998, 140.0, 9.9998]));
+        // A block is left alone.
+        let mut block = with(None, [1.0, 2.0, 3.0]);
+        assert_eq!(round_sides(&mut block), None);
+        assert_eq!(block.scale, Some([1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn unturning_a_cylinder_gives_back_the_roblox_pose_and_size() {
+        let cf = Variant::CFrame(CFrame::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Matrix3::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+        ));
+        let size = Variant::Vector3(Vector3::new(60.0, 40.0, 30.0));
+        let block = map_properties(&props_with(vec![("CFrame", cf.clone()), ("Size", size.clone())]), ClassName::Part).overrides;
+        let mut cylinder = map_properties(
+            &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(2))), ("CFrame", cf), ("Size", size)]),
+            ClassName::Part,
+        )
+        .overrides;
+        unturn_cylinder(&mut cylinder);
+        assert_eq!(cylinder.scale, block.scale);
+        let (a, b) = (cylinder.rotation.unwrap(), block.rotation.unwrap());
+        let dot: f32 = (0..4).map(|i| a[i] * b[i]).sum();
+        assert!(dot.abs() > 1.0 - 1e-5, "{a:?} vs {b:?}");
+    }
+
     #[test]
     fn quat_mul_identity_is_no_op() {
         let identity = [0.0, 0.0, 0.0, 1.0];
@@ -3332,27 +3771,25 @@ mod tests {
         }
     }
 
+    /// RollOffMode 2 is LinearSquare and 3 is InverseTapered (reflection
+    /// database). Neither has an engine cognate: each approximates to its
+    /// nearest mode and says so.
     #[test]
-    fn sound_rolloff_mode_enum_2_approximates_to_inverse() {
-        let bag = map_properties(
-            &props_with(vec![("RollOffMode", Variant::Enum(Enum::from_u32(2)))]),
-            ClassName::Sound,
-        );
-        let sound = bag.section_props.get("sound").expect("sound section");
-        assert_eq!(
-            sound.get("roll_off_mode"),
-            Some(&toml::Value::String("Inverse".to_string()))
-        );
-        assert_eq!(
-            sound.get("rolloff_mode"),
-            Some(&toml::Value::String("Inverse".to_string()))
-        );
-        assert!(
-            bag.approximation_notes
-                .iter()
-                .any(|n| n.contains("InverseTapered")),
-            "RollOffMode enum 2 should log an approximation note"
-        );
+    fn sound_rolloff_modes_2_and_3_approximate_and_say_so() {
+        for (ordinal, label, roblox_name) in [(2, "Linear", "LinearSquare"), (3, "Inverse", "InverseTapered")] {
+            let bag = map_properties(
+                &props_with(vec![("RollOffMode", Variant::Enum(Enum::from_u32(ordinal)))]),
+                ClassName::Sound,
+            );
+            let sound = bag.section_props.get("sound").expect("sound section");
+            let expected = Some(&toml::Value::String(label.to_string()));
+            assert_eq!(sound.get("roll_off_mode"), expected, "ordinal {ordinal}");
+            assert_eq!(sound.get("rolloff_mode"), expected, "ordinal {ordinal}");
+            assert!(
+                bag.approximation_notes.iter().any(|n| n.contains(roblox_name)),
+                "RollOffMode {ordinal} should note the {roblox_name} approximation"
+            );
+        }
     }
 
     #[test]
@@ -3541,16 +3978,44 @@ mod tests {
             ClassName::Texture,
         );
         let t = section(&bag, "texture");
-        assert!((float(t.get("studs_per_tile_u")) - 0.9144).abs() < 1e-6);
-        assert!((float(t.get("studs_per_tile_v")) - 3.048).abs() < 1e-6);
-        assert!((float(t.get("offset_studs_u")) - 0.3048).abs() < 1e-6);
-        assert!((float(t.get("offset_studs_v")) - 0.1524).abs() < 1e-6);
+        assert!((float(t.get("studs_per_tile_u")) - 3.0 * STUD_TO_M).abs() < 1e-6);
+        assert!((float(t.get("studs_per_tile_v")) - 10.0 * STUD_TO_M).abs() < 1e-6);
+        assert!((float(t.get("offset_studs_u")) - STUD_TO_M).abs() < 1e-6);
+        assert!((float(t.get("offset_studs_v")) - 0.5 * STUD_TO_M).abs() < 1e-6);
         assert_eq!(t.get("face").and_then(|v| v.as_str()), Some("Right"));
         assert_eq!(float(t.get("transparency")), 0.25);
         assert!(t.contains_key("color3"));
         // Transparency belongs to the texture, not to a part colour.
         assert!(bag.overrides.color_rgba.is_none());
         assert!(bag.unmapped.is_empty(), "left unmapped: {:?}", bag.unmapped);
+    }
+
+    /// A light's Roblox values land in its `[light]` section under the class
+    /// template's keys: Brightness unscaled (it is the engine's dial too) and
+    /// Face as its label.
+    #[test]
+    fn lights_map_into_the_light_section() {
+        let spot = map_properties(
+            &props_with(vec![
+                ("Brightness", Variant::Float32(2.0)),
+                ("Angle", Variant::Float32(60.0)),
+                ("Face", Variant::Enum(Enum::from_u32(4))),
+                ("Shadows", Variant::Bool(true)),
+                ("Enabled", Variant::Bool(false)),
+            ]),
+            ClassName::SpotLight,
+        );
+        let l = section(&spot, "light");
+        assert_eq!(float(l.get("brightness")), 2.0);
+        assert_eq!(float(l.get("angle")), 60.0);
+        assert_eq!(l.get("face").and_then(|v| v.as_str()), Some("Bottom"));
+        assert_eq!(l.get("shadows").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(l.get("enabled").and_then(|v| v.as_bool()), Some(false));
+        assert!(
+            !spot.properties_extras.keys().any(|k| k.starts_with("light_")),
+            "left in extras: {:?}",
+            spot.properties_extras
+        );
     }
 
     /// World-space lengths become meters; gameplay values the engine keeps in
@@ -3561,25 +4026,34 @@ mod tests {
             &props_with(vec![("Range", Variant::Float32(16.0))]),
             ClassName::PointLight,
         );
-        assert!((float(light.properties_extras.get("light_range")) - 4.8768).abs() < 1e-5);
+        assert!((float(section(&light, "light").get("range")) - 16.0 * STUD_TO_M).abs() < 1e-5);
 
         let rope = map_properties(
             &props_with(vec![("Length", Variant::Float32(10.0))]),
             ClassName::RopeConstraint,
         );
-        assert!((float(section(&rope, "constraint").get("length")) - 3.048).abs() < 1e-6);
+        assert!((float(section(&rope, "constraint").get("length")) - 10.0 * STUD_TO_M).abs() < 1e-6);
 
         let beam = map_properties(
             &props_with(vec![("Width0", Variant::Float32(2.0))]),
             ClassName::Beam,
         );
-        assert!((float(section(&beam, "beam").get("width0")) - 0.6096).abs() < 1e-6);
+        assert!((float(section(&beam, "beam").get("width0")) - 2.0 * STUD_TO_M).abs() < 1e-6);
 
         let humanoid = map_properties(
             &props_with(vec![("WalkSpeed", Variant::Float32(16.0))]),
             ClassName::Humanoid,
         );
-        assert_eq!(float(section(&humanoid, "humanoid").get("walk_speed")), 16.0);
+        assert_eq!(float(section(&humanoid, "humanoid").get("walk_speed")), 16.0, "raw, read in the file's stud");
+    }
+
+    /// Every imported Luau script is marked as Roblox code.
+    #[test]
+    fn an_imported_script_is_marked_as_roblox_code() {
+        let bag = map_properties(&props_with(vec![]), ClassName::LuauScript);
+        assert_eq!(section(&bag, "script").get("origin").and_then(|v| v.as_str()), Some(ROBLOX_SCRIPT_ORIGIN));
+        let part = map_properties(&props_with(vec![]), ClassName::Part);
+        assert!(part.section_props.get("script").is_none());
     }
 
     /// A disabled script imports disabled, and a client-context Script says so.
@@ -3618,8 +4092,8 @@ mod tests {
         );
         let g = section(&bb, "gui");
         let uo = g.get("units_offset").and_then(|v| v.as_array()).expect("units_offset");
-        assert!((uo[1].as_float().unwrap() - 3.048).abs() < 1e-5);
-        assert!((float(g.get("max_distance")) - 30.48).abs() < 1e-4);
+        assert!((uo[1].as_float().unwrap() - 10.0 * STUD_TO_M).abs() < 1e-5);
+        assert!((float(g.get("max_distance")) - 100.0 * STUD_TO_M).abs() < 1e-4);
 
         let sg = map_properties(
             &props_with(vec![
@@ -3632,7 +4106,7 @@ mod tests {
         let g = section(&sg, "gui");
         assert_eq!(g.get("face").and_then(|v| v.as_str()), Some("Top"));
         assert!(g.contains_key("canvas_size"));
-        assert!((float(g.get("pixels_per_unit")) - 50.0 / 0.3048).abs() < 1e-3);
+        assert!((float(g.get("pixels_per_unit")) - 50.0 / STUD_TO_M).abs() < 1e-3);
     }
 
     /// Every `Enum.Material` value maps to Roblox's own name for it. The table
@@ -3701,7 +4175,7 @@ mod tests {
         );
         let c = section(&bag, "constraint");
         let offset = c.get("c0").and_then(|v| v.as_array()).expect("c0");
-        assert!((offset[0].as_float().unwrap() - 0.6096).abs() < 1e-6);
+        assert!((offset[0].as_float().unwrap() - 2.0 * STUD_TO_M).abs() < 1e-6);
         let q = c.get("c0_rotation").and_then(|v| v.as_array()).expect("c0_rotation");
         assert!((q[1].as_float().unwrap() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-5, "yaw lost: {q:?}");
     }

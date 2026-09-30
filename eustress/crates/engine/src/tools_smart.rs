@@ -82,7 +82,6 @@ impl NewPartDescriptor {
     pub fn to_definition(&self) -> InstanceDefinition {
         let color = self.color_rgba.unwrap_or([163.0/255.0, 162.0/255.0, 165.0/255.0, 1.0]);
         InstanceDefinition {
-            nuclear: None,
             plasma: None,
             asset: Some(AssetReference {
                 mesh: self.mesh.clone(),
@@ -428,15 +427,6 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
     let Some(transform) = world.get::<Transform>(entity).cloned() else {
         return;
     };
-    // Authored unit of the source file. The on-entity MeasureUnit is
-    // the live source of truth (it tracks any unit changes since load).
-    // Falls back to engine-native meters when the entity has no
-    // MeasureUnit — that means it pre-dates Stage 1 plumbing and the
-    // file is also unit-less, so identity is correct.
-    let authored_unit = world.get::<eustress_common::units::MeasureUnit>(entity)
-        .map(|m| m.0)
-        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
-
     // Load existing def, mutate, write back. Preserves all other fields
     // (color, material, physics, tags, attributes, etc.).
     let mut def = match load_instance_definition(&inst_path) {
@@ -446,16 +436,8 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
             return;
         }
     };
-    // Convert engine-native (meter) translation back to the file's
-    // authored unit before serialising. Rotation is angular — never
-    // a length — so it passes through untouched.
-    def.transform.position = eustress_common::units::engine_to_authored_vec3_f32(
-        transform.translation.to_array(), authored_unit,
-    );
-    def.transform.rotation = [
-        transform.rotation.x, transform.rotation.y,
-        transform.rotation.z, transform.rotation.w,
-    ];
+    // The pose in the file's own unit (`[metadata] unit`).
+    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, None);
 
     let stamp = world.get_resource::<crate::auth::AuthState>()
         .and_then(current_stamp);
@@ -470,7 +452,6 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
 /// source TOML to inherit from.
 fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDefinition {
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset: Some(AssetReference {
             mesh: "parts/block.glb".to_string(),
@@ -903,11 +884,7 @@ impl ModalTool for ModelReflect {
             let (instance, class_name) = if let Some(ref path) = source_toml {
                 match crate::space::instance_loader::load_instance_definition(path) {
                     Ok(mut def) => {
-                        def.transform.position = reflected_pos.to_array();
-                        def.transform.rotation = [
-                            reflected_rot.x, reflected_rot.y,
-                            reflected_rot.z, reflected_rot.w,
-                        ];
+                        crate::space::instance_loader::set_authored_transform(&mut def, reflected_pos, reflected_rot, None);
                         // Mark as a new entity — clear audit chain from source.
                         def.metadata.created_by = None;
                         def.metadata.modifications.clear();
@@ -1760,10 +1737,6 @@ pub fn persist_transform_and_size_to_toml(world: &mut World, entity: Entity, siz
         return;
     };
     let Some(transform) = world.get::<Transform>(entity).cloned() else { return };
-    let authored_unit = world.get::<eustress_common::units::MeasureUnit>(entity)
-        .map(|m| m.0)
-        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
-
     let mut def = match load_instance_definition(&inst_path) {
         Ok(d) => d,
         Err(e) => {
@@ -1771,20 +1744,9 @@ pub fn persist_transform_and_size_to_toml(world: &mut World, entity: Entity, siz
             return;
         }
     };
-    // Engine-native (meter) → authored unit on both translation and
-    // size. Rotation passes through.
-    def.transform.position = eustress_common::units::engine_to_authored_vec3_f32(
-        transform.translation.to_array(), authored_unit,
-    );
-    def.transform.rotation = [
-        transform.rotation.x, transform.rotation.y,
-        transform.rotation.z, transform.rotation.w,
-    ];
-    // `transform.scale` in the TOML is BasePart.size for primitive parts
-    // — see the instance_loader docs. Writing the new size here.
-    def.transform.scale = eustress_common::units::engine_to_authored_vec3_f32(
-        size.to_array(), authored_unit,
-    );
+    // The pose and size in the file's own unit (`[metadata] unit`); the
+    // TOML's `scale` is BasePart.size for primitive parts.
+    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, Some(size));
 
     let stamp = world.get_resource::<crate::auth::AuthState>().and_then(current_stamp);
     if let Err(e) = write_instance_definition_signed(&inst_path, &mut def, stamp.as_ref()) {

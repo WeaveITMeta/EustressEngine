@@ -1,13 +1,15 @@
 // ============================================================================
-// Rename Tag dialog — renames a CollectionService tag across EVERY entity
-// carrying it. Modeled exactly on NewSpaceDialog (the proven, crash-free modal
-// pattern): created at the StudioWindow root via `if show-rename-tag-dialog`,
-// so it never mutates the tag-chip subtree or reflows the chip row — which is
-// what crashed every inline attempt (tree mutation during mouse/render).
+// Rename Tag dialog: renames a CollectionService tag across EVERY entity
+// carrying it. Created at the StudioWindow root via `if show-rename-tag-dialog`,
+// so it never mutates the tag-chip subtree or reflows the chip row (a tree
+// mutation during mouse/render is what crashed every inline attempt).
+// Law 1 chrome: DialogScrim > DialogCard > DialogFooter (dialog_kit.slint).
+// Enter renames, Escape cancels; Rename waits for a name.
 // ============================================================================
 
-import { LineEdit, Button } from "std-widgets.slint";
+import { LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton } from "dialog_kit.slint";
 
 export component RenameTagDialog inherits Rectangle {
     in property <string> old-name: "";
@@ -18,112 +20,67 @@ export component RenameTagDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    TouchArea {
-        clicked => { root.on-cancel(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-cancel(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 400px;
-        height: 220px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(400px, parent.width - 32px);
+            height: min(card.preferred-height, parent.height - 32px);
+            icon: @image-url("../../assets/icons/ui/tag.svg");
+            title: "Rename tag";
+            subtitle: "Renames '" + root.old-name + "' on every tagged object";
+            close => { root.on-cancel(); }
 
-        TouchArea { scroll-event(event) => { return accept; } }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // Title bar
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Rename Tag";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no palette token
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+            keys := FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        root.on-cancel();
+                        return accept;
                     }
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-cancel(); }
+                    return reject;
+                }
+
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
+
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 14px;
+                        padding-bottom: 16px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        Text {
+                            text: "New name";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+
+                        name-edit := LineEdit {
+                            text <=> root.new-name;
+                            placeholder-text: "New tag name";
+                            init => { self.focus(); }
+                            accepted(t) => { if t != "" { root.on-rename(t); } }
+                        }
                     }
-                }
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
 
-            // Body
-            VerticalLayout {
-                padding: 20px;
-                spacing: 12px;
-
-                Text {
-                    text: "Rename '" + root.old-name + "' across all tagged objects:";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle {
-                    height: 32px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    name-edit := LineEdit {
-                        x: 0px; y: 0px; width: 100%; height: 100%;
-                        text <=> root.new-name;
-                        placeholder-text: "New tag name";
-                        accepted(t) => { if t != "" { root.on-rename(t); } }
-                    }
-                }
-
-                Rectangle { height: 2px; }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Cancel";
-                        width: 84px;
-                        clicked => { root.on-cancel(); }
-                    }
-                    Button {
-                        text: "Rename";
-                        primary: true;
-                        width: 84px;
-                        clicked => { if root.new-name != "" { root.on-rename(root.new-name); } }
+                    DialogFooter {
+                        KitButton {
+                            text: "Cancel";
+                            clicked => { root.on-cancel(); }
+                        }
+                        KitButton {
+                            text: "Rename";
+                            kind: "primary";
+                            enabled: root.new-name != "";
+                            clicked => { if root.new-name != "" { root.on-rename(root.new-name); } }
+                        }
                     }
                 }
             }

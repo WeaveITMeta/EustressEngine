@@ -111,7 +111,7 @@ fn fetch_profile(token: &str) -> Result<AvatarDescriptor, String> {
     let response = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .get("https://api.eustress.dev/api/avatar")
+        .get(&crate::api_base::api_url("/api/avatar"))
         .set("Authorization", &format!("Bearer {}", token.trim()))
         .call()
         .map_err(|e| format!("profile request failed: {e}"))?;

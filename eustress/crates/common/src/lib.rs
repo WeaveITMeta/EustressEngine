@@ -39,6 +39,8 @@ pub mod dimension;
 pub mod adornments;
 pub mod assets;
 pub mod attributes;
+/// Where the Eustress API is: `EUSTRESS_API_URL`, checked, else production.
+pub mod api_base;
 // Roblox-parity 2D UI types: UDim, UDim2 with serde round-trip.
 pub mod ui_types;
 // Native Eustress BrickColor palette: sRGB-keyed swatches in 7 wheels, the
@@ -70,6 +72,9 @@ pub mod datamodel;
 // Play Mode and the Client. See `avatar::AvatarRuntimePlugin` for why this
 // replaces the convention-based `plugins::SharedCharacterPlugin`.
 pub mod avatar;
+// Animation built from instances (Animator, AnimationTrack, KeyframeSequence):
+// the pose evaluator both shells add, and the local character both share.
+pub mod animation;
 // Authoritative per-class TOML schema — embedded templates + self-heal +
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.
@@ -93,8 +98,31 @@ pub mod parameters;
 pub mod plugins;
 pub mod pointcloud;
 pub mod project_manifest;
+/// What a part's DataMesh child (SpecialMesh, BlockMesh, CylinderMesh) draws,
+/// the same in Studio and the Player.
+pub mod data_mesh;
 /// Reading a Space's geometry — the Part subset both shells share.
 pub mod space_read;
+/// Reading a world's records (or a Space on disk) into that tree.
+pub mod tree_read;
+pub mod pose_migration;
+/// A Play session's tree, frame sets and draw markers, shared by both apps.
+pub mod play_session;
+/// What a drawn part carries: its mesh file and the part it stands for.
+pub mod part_draw;
+/// Whether a Space is still loading, for work that waits until it settles.
+pub mod space_load;
+/// Property changes as undoable commands, shared by the editor and Play.
+pub mod property_command;
+/// The editor's named actions, shared by the engine and the permission gate.
+pub mod editor_action;
+/// Running a replicated DataModel tree's LocalScripts on a Player.
+#[cfg(feature = "luau")]
+pub mod tree_scripts;
+/// This machine's input, camera and cursor into a Play tree, the same on
+/// both apps.
+#[cfg(feature = "luau")]
+pub mod machine_input;
 pub mod properties;
 pub mod scene;
 pub mod scene_ops;
@@ -135,25 +163,108 @@ pub mod streaming;
 // directory beside the executable as `common/assets/`, and `assets_dir`
 // prefers that copy whenever it is there.
 
+/// The folders a shipped app keeps its files in, best first: beside the
+/// executable (the Windows and Linux installs), then a macOS bundle's
+/// `Contents/Resources` (the executable runs from `Contents/MacOS`).
+pub fn shipped_bases() -> Vec<std::path::PathBuf> {
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    shipped_bases_from(exe_dir.as_deref())
+}
+
+fn shipped_bases_from(exe_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let Some(dir) = exe_dir else { return Vec::new() };
+    let mut bases = vec![dir.to_path_buf()];
+    if let Some(contents) = dir.parent() {
+        bases.push(contents.join("Resources"));
+    }
+    bases
+}
+
+/// Where an app finds a folder it ships, `relative` to a shipped base (such
+/// as `assets` or `common/assets`), recognised by `marker` inside it so a
+/// stray folder of the same name never wins: beside the executable, then in
+/// a macOS bundle's `Contents/Resources`, else `source_tree` for a run from
+/// a checkout. `CARGO_MANIFEST_DIR` is the BUILD machine's path, baked in at
+/// compile time, so as the only answer it worked on that machine alone.
+pub fn locate_shipped(relative: &str, marker: &str, source_tree: std::path::PathBuf) -> std::path::PathBuf {
+    locate_in(&shipped_bases(), relative, marker, source_tree)
+}
+
+fn locate_in(
+    bases: &[std::path::PathBuf],
+    relative: &str,
+    marker: &str,
+    source_tree: std::path::PathBuf,
+) -> std::path::PathBuf {
+    bases
+        .iter()
+        .map(|base| base.join(relative))
+        .find(|dir| dir.join(marker).exists())
+        .unwrap_or(source_tree)
+}
+
 /// Path to the `common/assets/` directory — the single source of truth for
 /// bundled engine templates (class schemas, service templates, service
 /// properties) and the shared material and character assets.
 ///
-/// Prefers `<exe dir>/common/assets`, where the installer puts it, and falls
-/// back to this crate's source tree for `cargo run`. `CARGO_MANIFEST_DIR` is
-/// the BUILD machine's path, baked in at compile time, so on its own it only
-/// ever worked on the machine that compiled the binary. Requiring
-/// `class_schema` inside keeps a stray empty folder from winning. Decided
-/// once per process.
+/// Found by [`locate_shipped`] (`class_schema` must be inside): the
+/// installer's copy beside the executable or in a macOS bundle's
+/// Resources, else this crate's source tree. Decided once per process.
 pub fn assets_dir() -> std::path::PathBuf {
     static DIR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("common").join("assets")))
-            .filter(|dir| dir.join("class_schema").is_dir())
-            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
+        locate_shipped(
+            "common/assets",
+            "class_schema",
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
+        )
     });
     DIR.clone()
+}
+
+#[cfg(test)]
+mod shipped_tests {
+    use super::{locate_in, shipped_bases_from};
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress-shipped-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_shipped_folder_is_found_in_each_layout() {
+        let source = PathBuf::from("source-tree-assets");
+        let find = |exe_dir: &PathBuf| locate_in(&shipped_bases_from(Some(exe_dir)), "common/assets", "class_schema", source.clone());
+
+        // Windows and Linux: beside the executable.
+        let flat = scratch("flat");
+        std::fs::create_dir_all(flat.join("common/assets/class_schema")).unwrap();
+        assert_eq!(find(&flat), flat.join("common/assets"));
+
+        // macOS: the executable runs from Contents/MacOS, the files sit in
+        // Contents/Resources.
+        let mac = scratch("mac");
+        let macos = mac.join("Eustress.app/Contents/MacOS");
+        let resources = mac.join("Eustress.app/Contents/Resources");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(resources.join("common/assets/class_schema")).unwrap();
+        assert_eq!(find(&macos), resources.join("common/assets"));
+
+        // A checkout: nothing shipped, so the source tree; a folder without
+        // the marker never wins.
+        let dev = scratch("dev").join("target/debug");
+        std::fs::create_dir_all(&dev).unwrap();
+        assert_eq!(find(&dev), source);
+        std::fs::create_dir_all(dev.join("common/assets")).unwrap();
+        assert_eq!(find(&dev), source);
+
+        for dir in [flat, mac] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let _ = std::fs::remove_dir_all(dev.parent().unwrap().parent().unwrap());
+    }
 }
 
 /// `common/assets/class_schema/` — per-class default TOMLs.

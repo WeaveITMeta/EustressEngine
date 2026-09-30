@@ -36,9 +36,19 @@
 //! "does the lip continue over there", and [`edge_extent`] walks that offset
 //! outward to find where the ledge ends. A detector hardwired to the body's
 //! own position cannot answer either question.
+//!
+//! ## What a probe may take hold of
+//!
+//! Both casts ask a [`SurfaceRule`] about every collider they meet (see
+//! [`super::climbable`]). A trigger volume or the climber's own body is passed
+//! through. Another character, a moving part or an invisible wall stops the
+//! cast without becoming a grip, so a face found behind a person is no face
+//! at that height, and a lip with a crate sitting on it is no lip.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+use super::climbable::SurfaceRule;
 
 /// What kind of feature was found. Only ledges exist today; the enum is here
 /// so a pipe or a rail becomes a new variant rather than a parallel system.
@@ -103,6 +113,14 @@ const MAX_FACE_TILT: f32 = 0.5;
 
 /// A lip steeper than this is a slope you would slide off, not a floor.
 const MAX_STANDABLE_SLOPE_DEG: f32 = 40.0;
+/// How far a LIP may lean from horizontal and still be an edge to hold, as
+/// the smallest `normal.y` of the surface the down-cast lands on.
+///
+/// cos(63°) ≈ 0.45. A top that falls away steeper than that is the face
+/// carrying on round a curve, the upper half of a ball or a pipe, with no edge
+/// for fingers to close over. Deliberately far looser than standability: a
+/// 45° roof edge is a fine thing to hang from and a poor thing to stand on.
+const MIN_LIP_FLATNESS: f32 = 0.45;
 /// How far past the face to start the down-cast, as a fraction of body radius.
 const LIP_OVERSHOOT: f32 = 0.6;
 /// Headroom above `reach_max` for the down-cast to start from.
@@ -114,9 +132,12 @@ const DOWNCAST_HEADROOM: f32 = 0.35;
 /// Returns `None` when there is no face, no lip, or the lip falls outside the
 /// reach band. It does **not** return `None` merely because the top is not
 /// standable — that is reported as [`Grip::standable`].
+///
+/// `rule` decides what the casts may use; see the module doc.
 pub fn probe(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     from: Vec3,
     dir: Vec3,
     cfg: &ProbeConfig,
@@ -147,10 +168,17 @@ pub fn probe(
     //    has to sit at the floor itself, not a fraction above it.
     let scan = [0.0_f32, 0.25, 0.5, 0.8];
     let mut found: Option<(Vec3, Vec3)> = None;
+    let solid = |e: Entity| rule.surface(e).blocks();
     for frac in scan {
         let h = cfg.feet_y + (cfg.reach_min + (cfg.reach_max - cfg.reach_min) * frac).min(cfg.body_height * 0.95);
         let from_h = Vec3::new(from.x, h, from.z);
-        if let Some(hit) = spatial.cast_ray(from_h, dir, cfg.forward_reach, true, filter) {
+        if let Some(hit) = spatial.cast_ray_predicate(from_h, dir, cfg.forward_reach, true, filter, &solid) {
+            // Something is in front of the face at this height that is not
+            // for holding: a person, a loose crate. Reaching through it to
+            // whatever stands behind would be climbing the person.
+            if !rule.surface(hit.entity).holds() {
+                continue;
+            }
             let raw = Vec3::from(hit.normal);
             // The face has to BE a wall.
             //
@@ -177,7 +205,12 @@ pub fn probe(
     // Only cast as far as the reach band; a hit below `reach_min` is a lip we
     // could not use anyway, and stopping short is cheaper than filtering.
     let span = (cfg.reach_max + DOWNCAST_HEADROOM) - cfg.reach_min;
-    let down = spatial.cast_ray(probe_from, Dir3::NEG_Y, span.max(0.01), true, filter)?;
+    let down = spatial.cast_ray_predicate(probe_from, Dir3::NEG_Y, span.max(0.01), true, filter, &solid)?;
+    // The first thing on top is what the hand would close on. A crate sitting
+    // on the wall, or someone standing at its edge, is not the wall's lip.
+    if !rule.surface(down.entity).holds() {
+        return None;
+    }
     let top = probe_from + Vec3::NEG_Y * down.distance;
 
     let height = top.y - cfg.feet_y;
@@ -185,10 +218,14 @@ pub fn probe(
         return None;
     }
 
-    // Standability is recorded, never required.
     let top_normal = Vec3::from(down.normal);
+    if top_normal.y < MIN_LIP_FLATNESS {
+        return None;
+    }
+
+    // Standability is recorded, never required.
     let flat = top_normal.angle_between(Vec3::Y).to_degrees() <= MAX_STANDABLE_SLOPE_DEG;
-    let standable = flat && has_standing_room(spatial, filter, top, cfg);
+    let standable = flat && has_standing_room(spatial, filter, rule, top, cfg);
 
     Some(Grip {
         point: Vec3::new(face_point.x, top.y, face_point.z),
@@ -201,16 +238,21 @@ pub fn probe(
 }
 
 /// Is there room for the body to stand on `top`?
+///
+/// Anything solid takes up room, a person as much as a wall. A trigger
+/// volume does not: a checkpoint zone on a rooftop is not a reason to refuse
+/// the climb onto it.
 fn has_standing_room(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     top: Vec3,
     cfg: &ProbeConfig,
 ) -> bool {
     let half = cfg.capsule_cylinder_len * 0.5 + cfg.capsule_radius;
     let centre = top + Vec3::Y * (half + 0.02);
     spatial
-        .cast_shape(
+        .cast_shape_predicate(
             // Slightly under-size: a probe the exact width of the body reports
             // a blocked stand for any surface it is already flush against.
             &Collider::capsule(cfg.capsule_radius * 0.9, cfg.capsule_cylinder_len * 0.9),
@@ -219,6 +261,7 @@ fn has_standing_room(
             Dir3::Y,
             &ShapeCastConfig::from_max_distance(0.01),
             filter,
+            &|e| rule.surface(e).blocks(),
         )
         .is_none()
 }
@@ -234,6 +277,7 @@ fn has_standing_room(
 pub fn edge_extent(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     grip: &Grip,
     cfg: &ProbeConfig,
     max_dist: f32,
@@ -249,7 +293,7 @@ pub fn edge_extent(
                 // Stand off the face so the forward cast has room to run.
                 + grip.normal * (cfg.capsule_radius * 1.5);
 
-            match probe(spatial, filter, probe_at, -grip.normal, cfg) {
+            match probe(spatial, filter, rule, probe_at, -grip.normal, cfg) {
                 // The lip must continue at the SAME height to count as the
                 // same ledge; a step up or down is a different feature and
                 // shimmying onto it would teleport the hands.
@@ -396,5 +440,21 @@ mod face_tests {
         }
         // A box side is exactly vertical.
         assert!(0.0 <= MAX_FACE_TILT);
+    }
+
+    /// A lip is an edge a hand can close over. The upper half of a ball has
+    /// none, while a pitched roof edge does.
+    #[test]
+    fn a_rounded_top_is_not_a_lip_but_a_roof_edge_is() {
+        assert!(45.0_f32.to_radians().cos() >= MIN_LIP_FLATNESS, "a 45° roof edge must hold");
+        for deg in [70.0_f32, 80.0, 89.0] {
+            assert!(
+                deg.to_radians().cos() < MIN_LIP_FLATNESS,
+                "a top falling away at {deg}° is the face curving on, not a lip"
+            );
+        }
+        // Looser than standing, or every lip you can hang from but not stand
+        // on would vanish, and with it the dead-end kick off the wall.
+        assert!(MAX_STANDABLE_SLOPE_DEG.to_radians().cos() > MIN_LIP_FLATNESS);
     }
 }

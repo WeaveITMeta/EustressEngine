@@ -51,6 +51,7 @@
 // Core services
 pub mod player;
 pub mod lighting;
+pub mod lighting_properties;
 pub mod workspace;
 pub mod sound;
 pub mod animation;

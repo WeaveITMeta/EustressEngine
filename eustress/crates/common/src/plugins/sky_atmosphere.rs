@@ -45,8 +45,9 @@
 //!
 //! Bevy's atmosphere has no stars, so the cubemap still earns its place — but
 //! only for stars. It is black everywhere else, so it never double-counts
-//! against the atmosphere's own sky. It is built **once** at startup and faded
-//! with a single `Skybox::brightness` write. The previous implementation rebuilt
+//! against the atmosphere's own sky. It is built **once**, on a thread, and
+//! drawn by the sky dome (`sky_dome`) on every sky path, faded with the sun and
+//! twinkling. The previous implementation rebuilt
 //! a 1024x1024x6 RGBA8 cubemap (6.29M pixels, per-pixel `sin`/`fract` hashing,
 //! ~25 MB) on the main thread every 60 frames for as long as the sun was moving.
 //! The field turns about the celestial pole with the time of day, the way the
@@ -132,6 +133,7 @@ impl Plugin for SkyAtmospherePlugin {
                         .after(SkyLightSet),
                     sync_camera_atmosphere_settings.after(attach_sky_to_cameras),
                     apply_custom_skybox.after(attach_sky_to_cameras),
+                    sync_cubemap_sky_brightness.after(apply_custom_skybox),
                     sync_environment_intensity.after(attach_sky_to_cameras),
                     attach_exposure_to_opted_out_cameras.after(attach_sky_to_cameras),
                     sync_camera_exposure
@@ -221,7 +223,9 @@ impl Default for SkyConfig {
     fn default() -> Self {
         Self {
             mode_override: sky_mode_override(),
-            star_brightness: env_f32("EUSTRESS_STAR_BRIGHTNESS", 2600.0),
+            // Twice the 2600 it was: with the richer star spread, stars read
+            // like the point stars the sky had before (McKale, 2026-09-25).
+            star_brightness: env_f32("EUSTRESS_STAR_BRIGHTNESS", 5200.0),
             environment_map_size: 512,
             base_ev100: env_f32("EUSTRESS_EV100", 13.0),
             exposure_adaptation: env_flag("EUSTRESS_EXPOSURE_ADAPT", true),
@@ -770,10 +774,11 @@ fn attach_sky_to_cameras(
                 // Both cubemap paths get their IBL from bevy's GPU filtering
                 // chain rather than a raw cubemap. `apply_custom_skybox` fills
                 // in the image; until then the camera has a sky-less but valid
-                // component set.
+                // component set. `sync_cubemap_sky_brightness` owns the
+                // brightness from the next frame on.
                 ec.insert(Skybox {
                     image: None,
-                    brightness: 1000.0,
+                    brightness: 0.0,
                     rotation: Quat::IDENTITY,
                 });
                 info!("🌅 Cubemap sky attached to camera {camera:?} (mode {:?})", active.0);
@@ -859,12 +864,13 @@ fn sync_camera_exposure(
     }
 }
 
-/// Track `environment_intensity` / `environment_specular_scale` edits.
+/// Track `environment_intensity` / `environment_specular_scale` edits on the
+/// atmosphere path. The cubemap paths' `GeneratedEnvironmentMapLight` follows
+/// the sky's brightness, so [`sync_cubemap_sky_brightness`] owns it.
 fn sync_environment_intensity(
     scene: Res<SceneAtmosphere>,
     lighting: Res<LightingService>,
     mut atmosphere_lights: Query<&mut AtmosphereEnvironmentMapLight>,
-    mut generated: Query<&mut GeneratedEnvironmentMapLight, Without<AtmosphereEnvironmentMapLight>>,
 ) {
     if !scene.is_changed() && !lighting.is_changed() {
         return;
@@ -875,13 +881,70 @@ fn sync_environment_intensity(
             light.intensity = intensity;
         }
     }
-    // The cubemap paths carry `GeneratedEnvironmentMapLight` directly. On the
-    // atmosphere path bevy inserts one too, derived from
-    // `AtmosphereEnvironmentMapLight`, which is why that case is filtered out
-    // above: writing both would fight.
-    for mut light in generated.iter_mut() {
-        if (light.intensity - intensity).abs() > f32::EPSILON {
-            light.intensity = intensity;
+}
+
+/// The `Skybox::brightness` a cubemap sky runs at. Its environment map runs
+/// at the same multiplier, so what surfaces reflect is the sky they show.
+///
+/// The gradient is a physical sky: it gives a level surface the sky light
+/// [`SkyLight`] computes for this sun, the light the atmosphere path's sky
+/// gives, and exposure and night adaptation treat it as they treat that sky.
+/// It used to sit at a fixed 1,000 nits, which the daylight exposure
+/// (EV100 13) shows as a dark navy at noon.
+///
+/// An authored cubemap is a painting: its white shows as white at any time
+/// of day and through night adaptation, the way a Roblox skybox does. Bevy's
+/// exposure is `2^-ev100 / 1.2`, so this is its inverse at the adapted EV,
+/// and the author's `exposure_compensation` still reaches it.
+fn cubemap_sky_brightness(
+    authored: bool,
+    gradient_unit_irradiance: f32,
+    sky_light: &SkyLight,
+    exposure: &SkyExposure,
+) -> f32 {
+    if authored {
+        1.2 * exposure.adapted_ev100.exp2()
+    } else {
+        (sky_light.sky_lux + AIRGLOW_LUX) / gradient_unit_irradiance.max(1e-3)
+    }
+}
+
+/// Keep a cubemap sky, and the environment map made from it, at the
+/// brightness [`cubemap_sky_brightness`] gives for this frame's light.
+fn sync_cubemap_sky_brightness(
+    active: Res<ActiveSkyMode>,
+    scene: Res<SceneAtmosphere>,
+    lighting: Res<LightingService>,
+    sky_light: Res<SkyLight>,
+    exposure: Res<SkyExposure>,
+    skies: Query<&Sky>,
+    mut cameras: Query<(&mut Skybox, Option<&mut GeneratedEnvironmentMapLight>), With<SkyCamera>>,
+    mut unit_irradiance: Local<Option<(u64, f32)>>,
+) {
+    if active.0 == SkyMode::Atmosphere {
+        return;
+    }
+    let authored = skies.iter().any(has_authored_skybox);
+    let key = fingerprint(&scene.atmosphere);
+    let irradiance = match *unit_irradiance {
+        Some((k, value)) if k == key => value,
+        _ => {
+            let value = gradient_unit_irradiance(&scene.atmosphere);
+            *unit_irradiance = Some((key, value));
+            value
+        }
+    };
+    let brightness = cubemap_sky_brightness(authored, irradiance, &sky_light, &exposure);
+    let intensity = brightness * environment_intensity(&scene.atmosphere, &lighting);
+    let differs = |current: f32, wanted: f32| (current - wanted).abs() > (wanted * 0.01).max(1e-4);
+    for (mut skybox, environment) in cameras.iter_mut() {
+        if differs(skybox.brightness, brightness) {
+            skybox.brightness = brightness;
+        }
+        if let Some(mut environment) = environment {
+            if differs(environment.intensity, intensity) {
+                environment.intensity = intensity;
+            }
         }
     }
 }
@@ -903,6 +966,8 @@ fn apply_custom_skybox(
     mut images: ResMut<Assets<Image>>,
     lighting: Res<LightingService>,
     scene: Res<SceneAtmosphere>,
+    sky_light: Res<SkyLight>,
+    exposure: Res<SkyExposure>,
     all_skies: Query<&Sky>,
     changed_skies: Query<(), (With<Sky>, Changed<Sky>)>,
     mut cameras: Query<(Entity, &mut Skybox), With<SkyCamera>>,
@@ -931,14 +996,23 @@ fn apply_custom_skybox(
         warn_once_on_multiface(&path);
         asset_server.load(path)
     } else {
-        create_gradient_skybox(&mut images, &lighting, &scene.atmosphere)
+        create_gradient_skybox(&mut images, &scene.atmosphere)
     };
 
+    // Inserted at the brightness `sync_cubemap_sky_brightness` keeps it at,
+    // so a switch to this path never shows a frame of the wrong light.
+    let brightness = cubemap_sky_brightness(
+        authored.is_some(),
+        gradient_unit_irradiance(&scene.atmosphere),
+        &sky_light,
+        &exposure,
+    );
     for (entity, mut skybox) in cameras.iter_mut() {
         skybox.image = Some(image.clone());
+        skybox.brightness = brightness;
         commands.entity(entity).insert(GeneratedEnvironmentMapLight {
             environment_map: image.clone(),
-            intensity: environment_intensity(&scene.atmosphere, &lighting),
+            intensity: brightness * environment_intensity(&scene.atmosphere, &lighting),
             rotation: Quat::IDENTITY,
             affects_lightmapped_mesh_diffuse: false,
         });
@@ -984,7 +1058,14 @@ pub struct SkyBillboard;
 pub const MOONLIGHT_GAIN: f32 = 30.0;
 
 /// The most the exposure opens up for the night, EV.
-pub const MAX_NIGHT_ADAPTATION_EV: f32 = 9.0;
+///
+/// Seven, not the nine it was: nine stops lifted a moonlit scene to an
+/// overcast-day grey, so night never read as night. At seven, moonlit
+/// ground sits low on the curve under a deep-blue sky, the stars (whose
+/// brightness divides the adaptation back out) and the moon (drawn in
+/// display terms) stay bright, and lamps, which are display-referred
+/// against this exposure, keep their glow.
+pub const MAX_NIGHT_ADAPTATION_EV: f32 = 7.0;
 
 /// The key illuminance, lux, at which the exposure sits at
 /// [`SkyConfig::base_ev100`]: a clear sky with the sun high.
@@ -1219,7 +1300,9 @@ fn update_sky_light(
         Some(s) => s.direction(),
         None => lighting.sun_direction(),
     };
-    let sun_light = linear_rgb(sun_class.noon_color) * sun_class.noon_intensity.max(0.0) * scale;
+    // A switched-off Sun lights nothing: no sky, no ground, the night's key.
+    let sun_on = if sun_class.enabled { 1.0 } else { 0.0 };
+    let sun_light = linear_rgb(sun_class.noon_color) * sun_class.noon_intensity.max(0.0) * scale * sun_on;
     let sun_ground = sun_light
         * medium.transmittance(0.0, sun_direction.y)
         * disc_visibility(sun_direction.y, (sun_class.angular_size * 0.5).to_radians());
@@ -1345,6 +1428,10 @@ const GOD_RAY_DENSITY: f32 = 0.0006;
 /// it, so a shorter cascade range shrinks the box to match.
 const GOD_RAY_REACH: f32 = 450.0;
 
+/// The haze's forward-scattering `g`: the glow and the shafts gather toward
+/// the sun. A SunRays object's `spread` moves it.
+const GOD_RAY_ASYMMETRY: f32 = 0.65;
+
 /// Keep the god ray haze and every sky camera's `VolumetricFog` in step with
 /// the sun.
 fn sync_god_rays(
@@ -1354,11 +1441,23 @@ fn sync_god_rays(
     scene: Res<SceneAtmosphere>,
     sky_light: Res<SkyLight>,
     suns: Query<(&SunClass, Option<&CascadeShadowConfig>), With<SunMarker>>,
+    sun_rays: Query<&crate::classes::SunRaysEffect>,
     cameras: Query<(Entity, &Camera, &GlobalTransform, Has<VolumetricFog>), With<SkyCamera>>,
     mut haze: Query<(Entity, &mut FogVolume, &mut Transform), With<GodRayHaze>>,
 ) {
     let sun = suns.iter().next();
-    let authored = sun.map_or(1.0, |(s, _)| s.god_rays_intensity.max(0.0));
+    // An enabled SunRays object (Roblox's `SunRaysEffect`) is the artistic
+    // control over the shafts: `intensity` scales them (0.25 is Roblox's
+    // default and this renderer's), `spread` widens them. Without one, or
+    // with it disabled, the shafts keep their physical default.
+    let (rays_gain, asymmetry) = match sun_rays.iter().find(|r| r.enabled) {
+        Some(rays) => (
+            (rays.intensity.max(0.0) / 0.25).min(8.0),
+            (0.85 - 0.45 * rays.spread.clamp(0.0, 1.0)).clamp(0.2, 0.9),
+        ),
+        None => (1.0, GOD_RAY_ASYMMETRY),
+    };
+    let authored = sun.map_or(1.0, |(s, _)| s.god_rays_intensity.max(0.0)) * rays_gain;
     let elevation = sky_light.sun_direction.y.clamp(-1.0, 1.0).asin().to_degrees();
     // Shafts need a sun to cast them. Fade in over the first degrees of
     // daylight rather than switching on at the horizon.
@@ -1411,6 +1510,9 @@ fn sync_god_rays(
             if (volume.density_factor - density).abs() > density * 0.01 {
                 volume.density_factor = density;
             }
+            if (volume.scattering_asymmetry - asymmetry).abs() > 1e-3 {
+                volume.scattering_asymmetry = asymmetry;
+            }
             if transform.translation.distance_squared(center) > 1.0
                 || transform.scale.distance_squared(scale) > 1.0
             {
@@ -1428,7 +1530,7 @@ fn sync_god_rays(
                     scattering: 0.55,
                     // Forward-peaked, as haze is: the glow and the shafts
                     // gather toward the sun.
-                    scattering_asymmetry: 0.65,
+                    scattering_asymmetry: asymmetry,
                     ..default()
                 },
                 Transform::from_translation(center).with_scale(scale),
@@ -1455,15 +1557,28 @@ pub const STAR_FIELD_SIZE: u32 = 1024;
 /// Edge length in pixels of one star candidate cell.
 const STAR_CELL: u32 = 8;
 
-/// Draw a star's magnitude from a uniform sample.
+/// Draw a star's magnitude from a uniform sample: four tiers, jittered
+/// within each. Half the stars are faint, three in ten medium, three in
+/// twenty bright and one in twenty brilliant.
 ///
-/// A real sky gains roughly 3x more stars per magnitude step fainter, so the
-/// visible population is overwhelmingly faint with a handful of bright ones.
-/// The fifth power reproduces that tail: the median lands near 3% of peak.
+/// That is the spread the sky had when stars were point meshes, which read
+/// better than the physically steep fifth-power tail that replaced it (whose
+/// median star sat at 3% of peak, so the sky looked empty). A real sky is
+/// steeper; a rendered one at night exposure wants enough stars that read.
 #[inline]
 fn star_magnitude(uniform: f32) -> f32 {
-    let m = uniform.clamp(0.0, 1.0);
-    m * m * m * m * m
+    let u = uniform.clamp(0.0, 1.0);
+    // (first u of the tier, its width in u, its lowest magnitude, its span)
+    let (u0, width, m0, span) = if u >= 0.95 {
+        (0.95, 0.05, 0.85, 0.15)
+    } else if u >= 0.80 {
+        (0.80, 0.15, 0.50, 0.25)
+    } else if u >= 0.50 {
+        (0.50, 0.30, 0.25, 0.20)
+    } else {
+        (0.0, 0.50, 0.06, 0.14)
+    };
+    m0 + span * ((u - u0) / width).clamp(0.0, 1.0)
 }
 
 /// Core brightness for a magnitude, before the skybox's own scaling.
@@ -1485,17 +1600,40 @@ fn star_magnitude(uniform: f32) -> f32 {
 /// part of the curve where the eye can still see a difference.
 #[inline]
 fn star_peak(magnitude: f32) -> f32 {
-    0.12 + magnitude * 1.30
+    0.20 + magnitude * 1.0
 }
 
-/// Peak radius of the very brightest star, in texels.
+/// Peak radius of the very brightest star, in texels (0.088 degrees each).
 ///
-/// Real stars are point sources: even Sirius is under a thousandth of a degree,
-/// far below one texel. A star is therefore drawn as a sub-texel core with just
-/// enough spill to anti-alias it, and its *brightness* — not its size — is what
-/// carries magnitude. Bloom supplies the halo, which is what the eye actually
-/// sees around a bright star.
-const STAR_MAX_RADIUS: f32 = 0.62;
+/// Real stars are point sources, far below one texel, but the eye sees the
+/// brightest as larger: they are where the old point stars earned their
+/// look. So the faint stay a sub-texel core with just enough spill to
+/// anti-alias it, and size grows with magnitude up to one texel for the
+/// brilliant few, still a fifth of the moon's disc. Bloom adds the halo.
+const STAR_MAX_RADIUS: f32 = 1.0;
+
+/// A star's colour for its class (`class` a uniform sample) and magnitude.
+///
+/// Most stars read white; one in eight is blue-white, three in ten yellow
+/// and three in twenty orange, the range the old point stars showed. Colour
+/// needs light to be seen, so the faintest are held closer to white.
+fn star_tint(class: f32, magnitude: f32) -> (f32, f32, f32) {
+    let (r, g, b) = if class < 0.12 {
+        (0.78, 0.88, 1.0)
+    } else if class < 0.55 {
+        (1.0, 1.0, 1.0)
+    } else if class < 0.85 {
+        (1.0, 0.94, 0.78)
+    } else {
+        (1.0, 0.80, 0.60)
+    };
+    let saturation = 0.55 + 0.45 * magnitude.clamp(0.0, 1.0);
+    (
+        1.0 + (r - 1.0) * saturation,
+        1.0 + (g - 1.0) * saturation,
+        1.0 + (b - 1.0) * saturation,
+    )
+}
 
 /// Build the star cubemap once at startup.
 fn build_star_field(mut stars: ResMut<StarField>) {
@@ -1582,65 +1720,39 @@ fn rebuild_star_field_on_sky_change(
     info!("✨ Star field rebuild started for star_count = {}", sky.star_count);
 }
 
-/// Fade the star field with the sun, keep it at its calibrated brightness
-/// through night adaptation, and turn it with the sky.
-///
-/// One float and one quaternion per camera per frame, against the previous
-/// implementation's 25 MB cubemap rebuild every 60 frames.
-fn fade_star_field(
-    sky: Res<SkyConfig>,
-    active: Res<ActiveSkyMode>,
-    lighting: Res<LightingService>,
-    exposure: Res<SkyExposure>,
-    sun: Query<&SunClass, With<SunMarker>>,
-    skies: Query<&Sky>,
-    mut cameras: Query<(&mut Skybox, Option<&Projection>), With<SkyCamera>>,
-) {
+/// Keep the atmosphere path's skybox dark. The sky dome (`sky_dome`) draws
+/// the stars on every sky path, faded with the sun, turned with the sky and
+/// twinkling, so the stars look the same whichever path draws the sky; the
+/// skybox only still holds the field it was given.
+fn fade_star_field(active: Res<ActiveSkyMode>, mut cameras: Query<&mut Skybox, With<SkyCamera>>) {
     if active.0 != SkyMode::Atmosphere {
-        // On the cubemap paths the skybox IS the sky (an authored cubemap or
-        // the gradient), at its own brightness and orientation; fading it
-        // like a star field blacked the gradient out by day.
+        // On the cubemap paths the skybox IS the sky, at its own brightness.
         return;
     }
-    let sun_class = sun.iter().next();
-    let sun_dir = sun_class
-        .map(|s| s.direction())
-        .unwrap_or_else(|| lighting.sun_direction());
-
-    // Full brightness once the sun is 6 degrees below the horizon (civil dusk),
-    // gone by the time it is 3 degrees above.
-    let elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
-    let night = ((3.0 - elevation) / 9.0).clamp(0.0, 1.0);
-    let shown = skies.iter().next().map_or(true, |s| s.celestial_bodies_shown);
-    // Bevy multiplies the skybox by the camera's exposure, so as the exposure
-    // opens up for the night the stars would brighten with it, 512 times over
-    // at full adaptation. Scaling by the adaptation keeps them where their
-    // brightness was calibrated. Only the adaptation is taken out:
-    // `exposure_compensation` is the author's, and should reach the stars.
-    let adaptation = (exposure.adapted_ev100 - sky.base_ev100).exp2();
-    let brightness = if shown { sky.star_brightness * night * night * adaptation } else { 0.0 };
-
-    let rotation = match sun_class {
-        Some(s) => star_sky_rotation(s.latitude, sidereal_angle(s)),
-        None => star_sky_rotation(lighting.geographic_latitude, lighting.time_of_day * 360.0),
-    };
-
-    for (mut skybox, projection) in cameras.iter_mut() {
-        // An orthographic view's rays are parallel, so every pixel would show
-        // the one texel of the star map straight ahead: black, or a star
-        // flooding the view as the camera turns. It shows none.
-        let brightness = if matches!(projection, Some(Projection::Orthographic(_))) {
-            0.0
-        } else {
-            brightness
-        };
-        if (skybox.brightness - brightness).abs() > (brightness * 0.01).max(1e-3) {
-            skybox.brightness = brightness;
-        }
-        if skybox.rotation.angle_between(rotation) > 1e-5 {
-            skybox.rotation = rotation;
+    for mut skybox in cameras.iter_mut() {
+        if skybox.brightness != 0.0 {
+            skybox.brightness = 0.0;
         }
     }
+}
+
+/// The star field's brightness multiplier, cd/m^2 per unit texel, for a sun
+/// at `sun_elevation_deg`: full once the sun is 6 degrees below the horizon
+/// (civil dusk), gone by the time it is 3 degrees above. One rule for the
+/// atmosphere path's skybox and the sky dome (`sky_dome`).
+///
+/// Bevy multiplies the skybox by the camera's exposure, so as the exposure
+/// opens up for the night the stars would brighten with it, 512 times over
+/// at full adaptation. Scaling by the adaptation keeps them where their
+/// brightness was calibrated. Only the adaptation is taken out:
+/// `exposure_compensation` is the author's, and should reach the stars.
+pub fn star_field_brightness(sky: &SkyConfig, sun_elevation_deg: f32, shown: bool, exposure: &SkyExposure) -> f32 {
+    if !shown {
+        return 0.0;
+    }
+    let night = ((3.0 - sun_elevation_deg) / 9.0).clamp(0.0, 1.0);
+    let adaptation = (exposure.adapted_ev100 - sky.base_ev100).exp2();
+    sky.star_brightness * night * night * adaptation
 }
 
 /// The local sidereal angle, degrees: how far the sky has turned about the
@@ -1747,15 +1859,9 @@ pub fn create_star_field(star_count: u32) -> Image {
                 // Brightness carries magnitude; size barely moves. Letting size
                 // track magnitude is what produced moon-sized discs.
                 let peak = star_peak(magnitude);
-                let radius = 0.34 + magnitude * (STAR_MAX_RADIUS - 0.34);
+                let radius = 0.40 + magnitude * (STAR_MAX_RADIUS - 0.40);
 
-                // Colour. Stars span blue-white to amber in principle, but at
-                // night-adapted vision almost all read white — only the very
-                // brightest show any tint at all, so saturation scales with
-                // magnitude and stays subtle even there.
-                let warmth = rand01(seed ^ 0x27d4_eb2f) * 2.0 - 1.0; // -1 cool .. +1 warm
-                let tint = warmth * 0.10 * (0.35 + 0.65 * magnitude);
-                let (sr, sg, sb) = (1.0 + tint, 1.0 - tint.abs() * 0.25, 1.0 - tint);
+                let (sr, sg, sb) = star_tint(rand01(seed ^ 0x27d4_eb2f), magnitude);
 
                 let reach = (radius * 2.5).ceil().max(1.0) as i32;
                 let cxi = fx as i32;
@@ -1818,29 +1924,19 @@ pub fn create_star_field(star_count: u32) -> Image {
 ///
 /// Reachable with `EUSTRESS_SKY=gradient`, and used automatically when a
 /// cubemap path has no authored faces.
+///
+/// The texture holds the daylight sky's colours only. The time of day is its
+/// brightness, which [`sync_cubemap_sky_brightness`] sets every frame from
+/// [`SkyLight`], so the image never goes stale as the sun moves: it used to
+/// bake the sun's position in at build time and keep it, a noon sky at
+/// midnight or a night sky at noon, until the Sky was next edited.
 pub fn create_gradient_skybox(
     images: &mut Assets<Image>,
-    lighting: &LightingService,
     atmosphere: &EustressAtmosphere,
 ) -> Handle<Image> {
     const SIZE: u32 = 512;
     let size = SIZE as usize;
-
-    let sun_dir = lighting.sun_direction();
-    let night = (-sun_dir.y).clamp(0.0, 0.3) / 0.3;
-
-    let zenith = lerp3([0.16, 0.32, 0.75], [0.01, 0.01, 0.03], night);
-    let mid = lerp3([0.40, 0.60, 0.92], [0.02, 0.02, 0.06], night);
-    let horizon = lerp3(
-        [atmosphere.color[0], atmosphere.color[1], atmosphere.color[2]],
-        [0.04, 0.04, 0.08],
-        night,
-    );
-    let ground = lerp3(
-        [atmosphere.decay[0], atmosphere.decay[1], atmosphere.decay[2]],
-        [0.02, 0.02, 0.03],
-        night,
-    );
+    let colors = GradientColors::daylight(atmosphere);
 
     let mut data = vec![0u8; size * size * 6 * 4];
     for face in 0..6usize {
@@ -1849,19 +1945,7 @@ pub fn create_gradient_skybox(
             for px in 0..size {
                 let u = (px as f32 + 0.5) / size as f32 * 2.0 - 1.0;
                 let v = (py as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-                let dir = face_direction(face, u, v);
-                let y = dir.y;
-
-                let c = if y > 0.15 {
-                    let t = ((y - 0.15) / 0.85).min(1.0);
-                    lerp3(mid, zenith, t * t)
-                } else if y > -0.05 {
-                    let t = ((y + 0.05) / 0.20).clamp(0.0, 1.0);
-                    lerp3(horizon, mid, t)
-                } else {
-                    let t = ((-y - 0.05) / 0.35).min(1.0).sqrt();
-                    lerp3(horizon, ground, t)
-                };
+                let c = colors.at(face_direction(face, u, v).y);
 
                 let i = base + (py * size + px) * 4;
                 data[i] = to_u8(c[0]);
@@ -1884,6 +1968,64 @@ pub fn create_gradient_skybox(
         ..default()
     });
     images.add(image)
+}
+
+/// The gradient sky's colours, sRGB: the zenith, the band above the horizon,
+/// the horizon, and the ground below it.
+#[derive(Clone, Copy, Debug)]
+struct GradientColors {
+    zenith: [f32; 3],
+    mid: [f32; 3],
+    horizon: [f32; 3],
+    ground: [f32; 3],
+}
+
+impl GradientColors {
+    /// A clear day's sky, its horizon and ground taken from the authored
+    /// atmosphere's `color` and `decay`.
+    fn daylight(atmosphere: &EustressAtmosphere) -> Self {
+        Self {
+            zenith: [0.16, 0.32, 0.75],
+            mid: [0.40, 0.60, 0.92],
+            horizon: [atmosphere.color[0], atmosphere.color[1], atmosphere.color[2]],
+            ground: [atmosphere.decay[0], atmosphere.decay[1], atmosphere.decay[2]],
+        }
+    }
+
+    /// The colour toward a direction whose elevation has sine `y`.
+    fn at(&self, y: f32) -> [f32; 3] {
+        if y > 0.15 {
+            let t = ((y - 0.15) / 0.85).min(1.0);
+            lerp3(self.mid, self.zenith, t * t)
+        } else if y > -0.05 {
+            let t = ((y + 0.05) / 0.20).clamp(0.0, 1.0);
+            lerp3(self.horizon, self.mid, t)
+        } else {
+            let t = ((-y - 0.05) / 0.35).min(1.0).sqrt();
+            lerp3(self.horizon, self.ground, t)
+        }
+    }
+}
+
+/// Illuminance on a level surface, lux, from the gradient sky's upper half at
+/// `Skybox::brightness` 1.
+///
+/// The gradient varies with elevation alone, so the cosine-weighted integral
+/// over the hemisphere is one dimensional: `2 pi` times the integral, over
+/// `y` the sine of the elevation, of the texel's linear luminance times `y`.
+pub fn gradient_unit_irradiance(atmosphere: &EustressAtmosphere) -> f32 {
+    const STEPS: usize = 256;
+    let colors = GradientColors::daylight(atmosphere);
+    let sum: f32 = (0..STEPS)
+        .map(|i| {
+            let y = (i as f32 + 0.5) / STEPS as f32;
+            let [r, g, b] = colors.at(y);
+            // The texture stores these as sRGB bytes; sample what the GPU reads.
+            let texel = linear_rgb([r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0]);
+            luminance(texel) * y
+        })
+        .sum();
+    (std::f32::consts::TAU * sum / STEPS as f32).max(1e-3)
 }
 
 // ============================================================================
@@ -2135,7 +2277,7 @@ mod tests {
         // pins what that star is worth.
         let median_peak = star_peak(star_magnitude(0.5));
         assert!(
-            median_peak > 0.10,
+            median_peak > 0.30,
             "the median star renders at {:.0}/255 before scaling — invisible",
             median_peak * 255.0
         );
@@ -2187,33 +2329,32 @@ mod tests {
 
         const MOON_DEGREES: f32 = 0.52;
         assert!(
-            brightest_diameter < MOON_DEGREES / 4.0,
+            brightest_diameter < MOON_DEGREES / 2.5,
             "brightest star is {brightest_diameter:.3} deg across; the moon is {MOON_DEGREES} \
              and a star should be a point"
         );
     }
 
     #[test]
-    fn faint_stars_vastly_outnumber_bright_ones() {
-        // A real sky gains roughly 3x more stars per magnitude step fainter. A
-        // flat distribution gives a field of equally-bright dots, which reads as
-        // noise rather than as a sky.
+    fn most_stars_are_faint_and_a_real_share_read_clearly() {
+        // The old point stars' spread: half faint, a fifth bright or
+        // brilliant. Steeper (the fifth-power tail) and the sky looks empty;
+        // flatter and it is a field of equally bright dots.
         //
-        // Tested on the DISTRIBUTION, not on lit texels. Counting texels cannot
-        // see this: every star above the clamp renders an identical white core,
-        // so a sky of uniformly blinding stars and a properly graded one produce
-        // the same pixel histogram.
+        // Tested on the DISTRIBUTION, not on lit texels: every star above the
+        // clamp renders an identical white core, so pixel counts cannot tell.
         let n = 20_000;
         let mags: Vec<f32> =
             (0..n).map(|i| star_magnitude(i as f32 / n as f32)).collect();
 
         let median = mags[n / 2];
-        assert!(median < 0.06, "median magnitude {median:.3} — the sky is too uniformly bright");
-
-        let bright = mags.iter().filter(|m| **m > 0.5).count();
+        assert!(median < 0.30, "median magnitude {median:.3}: the sky is too uniformly bright");
+        let faint = mags.iter().filter(|m| **m < 0.25).count();
+        assert!(faint * 2 >= n - n / 50, "{faint} of {n} faint: the faint half is missing");
+        let bright = mags.iter().filter(|m| **m >= 0.5).count();
         assert!(
-            bright * 5 < n,
-            "{bright} of {n} stars are in the top half of brightness; the tail is too flat"
+            bright * 10 >= n && bright * 4 <= n,
+            "{bright} of {n} bright: not the one-in-five that reads as a full sky"
         );
     }
 
@@ -2237,25 +2378,24 @@ mod tests {
     }
 
     #[test]
-    fn stars_read_as_white_not_amber() {
-        // The first version's colour ramp reached (1.0, 0.78, 0.68), which is
-        // why the night sky came out full of orange blobs. Night-adapted vision
-        // sees almost all stars as white.
-        let image = create_star_field(9000);
+    fn stars_carry_colour_without_turning_into_orange_blobs() {
+        // Colour classes the eye can tell apart (the old point stars' blue
+        // white to warm yellow), never the saturated amber of the first
+        // version, whose ramp reached (1.0, 0.78, 0.68).
+        let image = create_star_field(5000);
         let data = image.data.as_ref().unwrap();
-        let worst = data
+        let spreads: Vec<i32> = data
             .chunks_exact(4)
             .filter(|p| p[0].max(p[1]).max(p[2]) > 60)
             .map(|p| {
                 let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
                 (r - b).abs().max((r - g).abs()).max((g - b).abs())
             })
-            .max()
-            .unwrap_or(0);
-        assert!(
-            worst < 60,
-            "a visible star deviates {worst}/255 between channels — too saturated to read as white"
-        );
+            .collect();
+        let worst = spreads.iter().copied().max().unwrap_or(0);
+        assert!(worst < 110, "a star deviates {worst}/255 between channels: an orange blob");
+        let tinted = spreads.iter().filter(|s| **s > 25).count();
+        assert!(tinted * 20 > spreads.len(), "only {tinted} of {} visible texels carry colour", spreads.len());
     }
 
     #[test]
@@ -2528,5 +2668,57 @@ mod tests {
             (environment_intensity(&a, &lighting) - base * 2.0).abs() < 1e-5,
             "environment_specular_scale was parsed and read by nothing before this"
         );
+    }
+
+    /// What a gradient texel of linear luminance `texel` shows as on screen,
+    /// before tone mapping, at this sky light and exposure.
+    fn gradient_on_screen(texel: f32, sky_light: &SkyLight, exposure: &SkyExposure) -> f32 {
+        let a = EustressAtmosphere::default();
+        let brightness = cubemap_sky_brightness(false, gradient_unit_irradiance(&a), sky_light, exposure);
+        texel * brightness * (-exposure.camera_ev100).exp2() / 1.2
+    }
+
+    #[test]
+    fn the_gradient_sky_is_bright_at_noon() {
+        // The fixed 1,000 nit gradient put its mid-sky band at 0.03 under the
+        // daylight exposure, a dark navy.
+        let exposure = SkyExposure::default();
+        let mid = luminance(linear_rgb([0.40, 0.60, 0.92, 1.0]));
+        let shown = gradient_on_screen(mid, &SkyLight::default(), &exposure);
+        assert!((0.3..2.0).contains(&shown), "a noon sky's mid band shows at {shown:.3}");
+    }
+
+    #[test]
+    fn the_gradient_sky_gives_the_sky_light_it_is_lit_by() {
+        // Brightness times the unit irradiance is the level-surface
+        // illuminance, so the gradient lights a scene as the atmosphere does.
+        let a = EustressAtmosphere::default();
+        let unit = gradient_unit_irradiance(&a);
+        assert!(unit > 0.1 && unit < std::f32::consts::PI, "unit irradiance {unit}");
+        let sky_light = SkyLight::default();
+        let brightness = cubemap_sky_brightness(false, unit, &sky_light, &SkyExposure::default());
+        let lux = brightness * unit;
+        assert!((lux - (sky_light.sky_lux + AIRGLOW_LUX)).abs() < 1.0, "{lux} lux");
+    }
+
+    #[test]
+    fn the_gradient_sky_darkens_at_night() {
+        let exposure = SkyExposure::default();
+        let noon = gradient_on_screen(1.0, &SkyLight::default(), &exposure);
+        let night = SkyLight { sky_lux: clear_sky_lux(-18.0), night: 1.0, ..SkyLight::default() };
+        let adapted = adapted_ev100(SkyConfig::default().base_ev100, AIRGLOW_LUX);
+        let night_exposure = SkyExposure { adapted_ev100: adapted, camera_ev100: adapted, settled: true };
+        let dark = gradient_on_screen(1.0, &night, &night_exposure);
+        assert!(dark < noon * 0.01, "night sky {dark} against noon {noon}");
+    }
+
+    #[test]
+    fn an_authored_skybox_shows_as_painted() {
+        for ev in [13.0f32, 8.5, 4.0] {
+            let exposure = SkyExposure { adapted_ev100: ev, camera_ev100: ev, settled: true };
+            let brightness = cubemap_sky_brightness(true, 1.0, &SkyLight::default(), &exposure);
+            let shown = brightness * (-exposure.camera_ev100).exp2() / 1.2;
+            assert!((shown - 1.0).abs() < 1e-3, "white shows at {shown} at EV100 {ev}");
+        }
     }
 }

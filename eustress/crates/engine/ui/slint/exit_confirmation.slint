@@ -1,24 +1,61 @@
 // ============================================================================
 // Eustress Engine Studio - Exit Confirmation Dialog
-// Confirm exit with unsaved changes
+// Offered on exit when there are edits since the last snapshot. The edits are
+// already stored either way; a snapshot adds a restore point to History.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+
+// A dialog button sized to its label. `primary` fills it with the Eustress
+// accent (the Mode's colour when a Mode overrides it).
+component DialogButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked();
+
+    height: 32px;
+    width: max(84px, label-text.preferred-width + 32px);
+    border-radius: 6px;
+    background: root.primary
+        ? (touch.pressed ? Theme.accent-eustress.darker(0.15)
+            : touch.has-hover ? Theme.accent-eustress.brighter(0.12)
+            : Theme.accent-eustress)
+        : (touch.pressed ? Theme.button-pressed
+            : touch.has-hover ? Theme.button-hover
+            : Theme.button-background);
+    border-width: root.primary ? 0px : 1px;
+    border-color: Theme.border-color;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    label-text := Text {
+        text: root.label;
+        color: root.primary ? #ffffff : Theme.text-primary;
+        font-size: 13px;
+        font-weight: root.primary ? 600 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component ExitConfirmationDialog inherits Rectangle {
     // Properties
     in property <string> scene-name: "Untitled";
-    
+
     // Callbacks
     callback on-save-and-exit();
     callback on-exit-without-saving();
     callback on-cancel();
-    
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
+    // The backdrop takes every click and scroll, so nothing behind it
+    // reacts; a click on it cancels.
     TouchArea {
         clicked => { root.on-cancel(); }
         scroll-event(event) => {
@@ -26,117 +63,110 @@ export component ExitConfirmationDialog inherits Rectangle {
         }
     }
 
-    Rectangle {
+    // Enter takes the snapshot and exits, Escape cancels.
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.on-cancel();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.on-save-and-exit();
+                return accept;
+            }
+            accept
+        }
+    }
+
+    card := Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 400px;
-        height: 200px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
+        width: 440px;
+        // Sized to its content, so the buttons always sit inside the card.
+        height: body.preferred-height;
+        background: Theme.dialog-background;
+        border-radius: 10px;
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
         drop-shadow-color: Theme.shadow-color;
+        clip: true;
 
+        // Clicks inside the card stay in the card.
         TouchArea {
             scroll-event(event) => {
                 return accept;
             }
         }
-        
-        VerticalBox {
+
+        body := VerticalLayout {
             padding: 24px;
-            spacing: 16px;
-            
-            // Icon and message
-            HorizontalBox {
+            spacing: 20px;
+
+            HorizontalLayout {
                 spacing: 16px;
-                
-                Image {
-                    width: 32px;
-                    height: 32px;
-                    source: @image-url("../../assets/icons/ui/warning.svg");
-                    image-fit: contain;
-                }
-                
-                VerticalBox {
-                    spacing: 8px;
-                    
-                    Text {
-                        text: "Edits since the last snapshot";
-                        color: Theme.text-primary;
-                        font-size: 18px;
-                        font-weight: 600;
+
+                // Icon badge, top-aligned with the title.
+                VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: Theme.accent-eustress.with-alpha(0.16);
+
+                        Image {
+                            width: 20px;
+                            height: 20px;
+                            source: @image-url("../../assets/icons/ui/history.svg");
+                            colorize: Theme.accent-eustress;
+                            image-fit: contain;
+                        }
                     }
-                    
+                }
+
+                VerticalLayout {
+                    spacing: 6px;
+                    horizontal-stretch: 1;
+
                     Text {
-                        text: "Take a snapshot of \"" + root.scene-name + "\" before closing? Your edits are already stored; a snapshot adds a restore point to History.";
+                        text: "Take a snapshot before closing?";
+                        color: Theme.text-primary;
+                        font-size: 16px;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "\"" + root.scene-name + "\" has edits since its last snapshot. They are already stored; a snapshot adds a restore point to History.";
                         color: Theme.text-secondary;
+                        font-size: 13px;
                         wrap: word-wrap;
                     }
                 }
             }
-            
-            Rectangle { vertical-stretch: 1; }
-            
-            // Buttons
-            HorizontalBox {
+
+            // Cancel on the left, the two exits on the right.
+            HorizontalLayout {
                 spacing: 8px;
-                alignment: end;
-                
-                Rectangle {
-                    width: 140px;
-                    height: 36px;
-                    background: Theme.accent-red;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-exit-without-saving(); }
-                    }
-                    
-                    Text {
-                        text: "Skip";
-                        color: white;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+
+                DialogButton {
+                    label: "Cancel";
+                    clicked => { root.on-cancel(); }
                 }
-                
-                Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-cancel(); }
-                    }
-                    
-                    Text {
-                        text: "Cancel";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                DialogButton {
+                    label: "Skip & Exit";
+                    clicked => { root.on-exit-without-saving(); }
                 }
-                
-                Rectangle {
-                    width: 100px;
-                    height: 36px;
-                    background: Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-save-and-exit(); }
-                    }
-                    
-                    Text {
-                        text: "Snapshot & Exit";
-                        color: white;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+
+                DialogButton {
+                    label: "Snapshot & Exit";
+                    primary: true;
+                    clicked => { root.on-save-and-exit(); }
                 }
             }
         }

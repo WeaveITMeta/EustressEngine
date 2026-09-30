@@ -1,0 +1,35 @@
+[package]
+name = "eustress-play-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "The draw side of a Play session, shared by Studio's Play and the Player: the tree-to-ECS apply step, the scripted camera, sounds, particles, part materials and colliders."
+authors = ["EustressEngine Contributors"]
+license = "PolyForm-Shield-1.0.0"
+
+[dependencies]
+# Only features the Player already builds with, so linking this crate adds
+# nothing to its Bevy.
+bevy = { workspace = true, features = ["bevy_render", "bevy_pbr", "bevy_asset", "bevy_audio", "bevy_color", "bevy_log"] }
+avian3d = { workspace = true }
+eustress-common = { path = "../common", features = ["physics", "gui", "realism"] }
+# `ReplicationTap`: a hosting session hands the frame's writes to replication.
+eustress-networking = { path = "../common/eustress-networking" }
+texture-gen = { path = "../texture-gen" }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"
+bytemuck = { version = "1.16", features = ["derive"] }
+# The billboard pipeline's specialization key.
+bitflags = "2"
+# The material registry hashes texture sources for its cache.
+sha2 = "0.10"
+# Billboard and HUD rasterizing: shapes, and shaped text.
+tiny-skia = "0.11"
+cosmic-text = "0.12"
+# ImageLabel and ImageButton files. PNG only: what the Player already decodes.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# The tests build trees with common's Luau-side helpers (the Terrain
+# instance); the apps turn `luau` on anyway, the library alone does not.
+eustress-common = { path = "../common", features = ["physics", "gui", "realism", "luau"] }

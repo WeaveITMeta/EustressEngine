@@ -1213,12 +1213,14 @@ impl PreparedLayers {
 
     /// A base with no height raster (procedural terrain) gives layers nothing
     /// to act on, so its bake is the base. Copied only when `out` differs in
-    /// shape, so a bake of such a terrain does not dirty every chunk each time.
+    /// shape or in its sparse flag (a runtime Clear leaves nothing to draw),
+    /// so a bake of such a terrain does not dirty every chunk each time.
     fn take_rasterless_base(&self, base: &TerrainData, out: &mut TerrainData) -> bool {
         let same = out.cache_width == base.cache_width
             && out.cache_height == base.cache_height
             && out.height_cache.len() == base.height_cache.len()
-            && out.material_cache.len() == base.material_cache.len();
+            && out.material_cache.len() == base.material_cache.len()
+            && out.sparse_surface == base.sparse_surface;
         if same {
             return false;
         }
@@ -1230,7 +1232,9 @@ impl PreparedLayers {
     /// and a material layer when `base` has one or a layer paints (all Grass
     /// under the paint where `base` has none, as painting the base itself
     /// would allocate). Rebuilds `out` from `base` and returns `true` when it
-    /// had another layout. Keeps its slot palette `base`'s either way.
+    /// had another layout. Keeps its slot palette and its sparse flag
+    /// `base`'s either way, so a bake shows the same holes as its base (a
+    /// runtime Clear makes every cell one without changing the layout).
     fn prepare_layout(&self, base: &TerrainData, out: &mut TerrainData) -> bool {
         let wants_material = base.has_material_layer() || self.paints_materials();
         let fits = out.cache_width == base.cache_width
@@ -1241,6 +1245,7 @@ impl PreparedLayers {
             if out.slot_palette != base.slot_palette {
                 out.slot_palette = base.slot_palette.clone();
             }
+            out.sparse_surface = base.sparse_surface;
             return false;
         }
         let mut fresh = base.clone();

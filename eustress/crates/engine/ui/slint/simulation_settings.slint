@@ -1,312 +1,223 @@
 // ============================================================================
-// Eustress Engine Studio - Simulation Settings Dialog
-// Configure initial conditions, step time, recording, and result outputs
+// Eustress Studio: Simulation settings dialog
+// Initial conditions, stepping, recording, and result bindings.
+//
+// Shape (DRAFTING_UX.md Law 1): DialogScrim > DialogCard, a left sidebar of
+// NavItems for the four sections, each section a column of SettingsGroup
+// cards, and a DialogFooter with Save rightmost. Esc closes.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, ScrollView, LineEdit, CheckBox, ComboBox, Slider } from "std-widgets.slint";
+import { ScrollView, LineEdit, ComboBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import {
+    DialogScrim, DialogCard, DialogFooter, KitDivider, KitButton, KitSwitch,
+    SettingsGroup, SettingRow, NavItem, KitNotice, KitSectionLabel,
+} from "dialog_kit.slint";
 
-// ── Shared sub-components ────────────────────────────────────────────────────
+// ── Private parts ────────────────────────────────────────────────────────────
 
-// Section header with left accent bar and label
-component SimSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
-
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-    }
-
-    Text {
-        x: 10px;
-        text: root.title;
-        color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
-    }
-}
-
-// Hint text row beneath a field
-component SimHint inherits Rectangle {
-    in property <string> text: "";
-    height: 16px;
-    background: transparent;
-    Text {
-        x: 0px;
-        text: root.text;
-        color: Theme.text-disabled;
-        font-size: 10px;
-        vertical-alignment: center;
-        wrap: word-wrap;
-        width: parent.width;
-    }
-}
-
-// Compact input field: fixed label + editable input + optional unit
-component SimField inherits Rectangle {
-    in property <string> label: "";
+// A text field with an optional unit after it, for the right side of a
+// SettingRow. Two-way on `value`.
+component SimField inherits HorizontalLayout {
     in-out property <string> value: "";
     in property <string> unit: "";
-    callback changed(string);
+    in property <string> placeholder: "";
+    in property <length> field-width: 120px;
 
-    height: 28px;
-    background: transparent;
+    spacing: 8px;
 
-    HorizontalLayout {
-        spacing: 8px;
-        alignment: start;
+    LineEdit {
+        width: root.field-width;
+        text <=> root.value;
+        placeholder-text: root.placeholder;
+    }
 
-        Text {
-            width: 148px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
-
-        Rectangle {
-            width: 120px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-
-            LineEdit {
-                x: 0px; y: 0px;
-                width: 100%; height: 100%;
-                text: root.value;
-                edited(t) => { root.value = t; root.changed(t); }
-            }
-        }
-
-        if root.unit != "": Text {
-            width: 44px;
-            text: root.unit;
-            color: Theme.text-disabled;
-            font-size: 10px;
-            vertical-alignment: center;
-        }
+    Text {
+        width: 36px;
+        text: root.unit;
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
     }
 }
 
-// Compact toggle row with optional hint
-component SimToggle inherits Rectangle {
-    in property <string> label: "";
-    in property <string> hint: "";
-    in-out property <bool> value: false;
-    callback changed(bool);
+// A small square icon button for removing a row. Red marks it destructive,
+// and only on hover.
+component RemoveButton inherits Rectangle {
+    callback clicked();
 
-    height: root.hint != "" ? 44px : 28px;
-    background: transparent;
+    width: 26px;
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: rm-touch.has-hover ? Theme.accent-red.with-alpha(0.16) : transparent;
 
-    VerticalLayout {
-        spacing: 2px;
-        alignment: start;
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px;
+        height: 13px;
+        source: @image-url("../../assets/icons/ui/delete.svg");
+        image-fit: contain;
+        colorize: rm-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
+    }
 
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: start;
-            height: 28px;
-
-            Text {
-                width: 148px;
-                text: root.label;
-                color: Theme.text-secondary;
-                font-size: 11px;
-                vertical-alignment: center;
-            }
-
-            // Toggle pill
-            Rectangle {
-                width: 36px;
-                height: 18px;
-                border-radius: 9px;
-                background: root.value ? Theme.accent-blue : Theme.button-background;
-                y: (28px - self.height) / 2;
-
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.value = !root.value;
-                        root.changed(root.value);
-                    }
-                }
-
-                Rectangle {
-                    x: root.value ? 18px : 2px;
-                    y: 2px;
-                    width: 14px;
-                    height: 14px;
-                    border-radius: 7px;
-                    background: white;
-                    animate x { duration: 120ms; easing: ease-out; }
-                }
-            }
-
-            Text {
-                text: root.value ? "On" : "Off";
-                color: root.value ? Theme.text-primary : Theme.text-secondary;
-                font-size: 10px;
-                vertical-alignment: center;
-            }
-        }
-
-        if root.hint != "": Text {
-            x: 156px;
-            text: root.hint;
-            color: Theme.text-disabled;
-            font-size: 10px;
-            wrap: word-wrap;
-            width: 340px;
-        }
+    rm-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
-// Compact dropdown row.
-//
-// `selected-value` is the string form of the picked option — this is
-// what callers should bind to their own string property (e.g.
-// `sim-time-scale-preset`). `current` tracks the index internally and
-// is seeded from `selected-value` on init so the combo reflects the
-// value the host already stored. `changed(string)` fires after the
-// user picks so callers can react beyond property bindings.
-component SimCombo inherits Rectangle {
-    in property <string> label: "";
-    in property <[string]> options: [];
-    in-out property <string> selected-value: "";
-    in-out property <int> current: 0;
-    callback changed(string);
+// A unit or format chip in a list row.
+component MonoChip inherits Rectangle {
+    in property <string> text;
 
-    // `current` is driven by ComboBox.selected below — it writes both
-    // current-index and selected-value. (A prior attempt used a
-    // `changed selected-value` handler with `for opt[i] in options` to
-    // resync the index when the host pushed a new preset; Slint's `for`
-    // is element-generation syntax only, not imperative iteration in a
-    // callback body, so it refused to parse. No Rust path currently
-    // pushes selected-value back anyway — if that's ever needed, the
-    // host should set `current` explicitly alongside `selected-value`.)
+    height: 20px;
+    min-width: max(chip-text.preferred-width + 12px, 36px);
+    border-radius: Theme.radius-sm;
+    background: Theme.background-tertiary;
+    border-width: 1px;
+    border-color: Theme.border-color;
 
-    height: 28px;
-    background: transparent;
-
-    HorizontalLayout {
-        spacing: 8px;
-        alignment: start;
-
-        Text {
-            width: 148px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
-
-        ComboBox {
-            width: 200px;
-            model: root.options;
-            current-index: root.current;
-            selected(v) => {
-                root.current = self.current-index;
-                root.selected-value = v;
-                root.changed(v);
-            }
-        }
+    chip-text := Text {
+        text: root.text;
+        color: Theme.text-accent;
+        font-size: Theme.font-sm;
+        font-family: "Consolas";
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
-// ── Watchpoint row — polished table row ──────────────────────────────────────
-component WatchpointRow inherits Rectangle {
+// Column headings above a list inside a SettingsGroup.
+component ColumnHead inherits Text {
+    color: Theme.text-disabled;
+    font-size: Theme.font-xs;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    vertical-alignment: center;
+}
+
+// One watchpoint in the Recording list.
+component WatchpointRow inherits VerticalLayout {
     in property <string> name: "";
     in property <string> label: "";
     in property <string> unit: "";
+    in property <bool> divider: true;
     callback remove();
 
-    height: 32px;
-    background: wpt-touch.has-hover ? Theme.explorer-item-hover : transparent;
-    border-radius: 3px;
-
-    wpt-touch := TouchArea { }
+    if root.divider: KitDivider { }
 
     Rectangle {
-        x: 0px; y: 0px;
-        width: 3px; height: parent.height;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-        opacity: 0.6;
-    }
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 0px;
-        alignment: start;
-
-        Text {
-            width: 130px;
-            text: root.name;
-            color: Theme.text-primary;
-            font-size: 11px;
-            font-weight: 600;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        Text {
-            width: 160px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        Rectangle {
-            width: 54px;
-            height: 18px;
-            background: Theme.selection-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.border-color;
+        height: 36px;
+        HorizontalLayout {
+            spacing: 10px;
 
             Text {
-                width: 100%;
-                text: root.unit;
-                color: Theme.accent-blue;
-                font-size: 10px;
+                width: 140px;
+                text: root.name;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
                 font-family: "Consolas";
-                horizontal-alignment: center;
                 vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.label;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            VerticalLayout {
+                alignment: center;
+                width: 64px;
+                HorizontalLayout {
+                    alignment: start;
+                    MonoChip { text: root.unit; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                RemoveButton { clicked => { root.remove(); } }
             }
         }
+    }
+}
 
-        Rectangle { horizontal-stretch: 1; }
+// One result binding in the Results list.
+component BindingRow inherits VerticalLayout {
+    in property <string> instance-name: "";
+    in property <string> property-name: "";
+    in property <string> watchpoint: "";
+    in property <string> format: "";
+    in property <bool> divider: true;
+    callback remove();
 
-        // Remove button
-        Rectangle {
-            width: 24px; height: 24px;
-            border-radius: 4px;
-            background: rm-touch.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
+    if root.divider: KitDivider { }
 
-            rm-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.remove(); }
-            }
+    Rectangle {
+        height: 36px;
+        HorizontalLayout {
+            spacing: 10px;
 
             Text {
-                text: "×";
-                color: rm-touch.has-hover ? Theme.text-error : Theme.text-secondary;
-                font-size: 15px;
-                horizontal-alignment: center;
+                width: 140px;
+                text: root.instance-name;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
                 vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                width: 90px;
+                text: root.property-name;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                width: 110px;
+                text: root.watchpoint;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-family: "Consolas";
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                HorizontalLayout {
+                    alignment: start;
+                    MonoChip { text: root.format; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                RemoveButton { clicked => { root.remove(); } }
             }
         }
+    }
+}
+
+// The quiet line shown in an empty list.
+component EmptyLine inherits Rectangle {
+    in property <string> text;
+
+    height: 52px;
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
     }
 }
 
@@ -369,767 +280,447 @@ export component SimulationSettingsDialog inherits Rectangle {
     callback on-add-output-binding();
     callback on-remove-output-binding(int);
 
-    width: 100%;
-    height: 100%;
-    background: Theme.modal-backdrop;
+    // The preset strings are matched verbatim by the host's Save handler
+    // (slint_ui.rs, SaveSimulationSettings), so they must not change.
+    property <[string]> preset-options: [
+        "Realtime (1×)",
+        "1 min / sec (60×)",
+        "1 hr / sec (3,600×)",
+        "1 day / sec (86,400×)",
+        "1 week / sec (604,800×)",
+        "1 month / sec (2.63M×)",
+        "1 year / sec (31.5M×)",
+        "Custom",
+    ];
+    property <[string]> format-options: ["JSON", "CSV", "JSON + CSV", "Binary (.simdata)"];
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => {
-            return accept;
-        }
+    // The combo index for a stored preset. The host treats any string it
+    // does not know as Custom, so an unknown value shows Custom here too;
+    // the bare "Realtime" default is realtime.
+    pure function preset-index(v: string) -> int {
+        if (v == "Realtime (1×)" || v == "Realtime") { return 0; }
+        if (v == "1 min / sec (60×)") { return 1; }
+        if (v == "1 hr / sec (3,600×)") { return 2; }
+        if (v == "1 day / sec (86,400×)") { return 3; }
+        if (v == "1 week / sec (604,800×)") { return 4; }
+        if (v == "1 month / sec (2.63M×)") { return 5; }
+        if (v == "1 year / sec (31.5M×)") { return 6; }
+        return 7;
     }
 
-    // ── Modal card ──
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 600px;
-        height: 530px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.modal-backdrop;
+    pure function format-index(v: string) -> int {
+        if (v == "JSON") { return 0; }
+        if (v == "CSV") { return 1; }
+        if (v == "Binary (.simdata)") { return 3; }
+        return 2;
+    }
 
-        TouchArea {
-            scroll-event(event) => {
-                return accept;
-            }
-        }
+    width: 100%;
+    height: 100%;
+    background: transparent;
 
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-            // ── Title bar ── centered icon + title, close X top-right ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
+        keys := FocusScope {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(780px, parent.width - 48px);
+            height: min(600px, parent.height - 48px);
 
-                // Centered icon + text — absolute position for true visual center
-                Image {
-                    x: (parent.width - 16px - 8px - 138px) / 2;
-                    y: (parent.height - 16px) / 2;
-                    width: 16px;
-                    height: 16px;
-                    source: @image-url("../../assets/icons/ui/sim-settings.svg");
-                    image-fit: contain;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.on-close();
+                    return accept;
                 }
-
-                Text {
-                    x: (parent.width - 16px - 8px - 138px) / 2 + 16px + 8px;
-                    y: 0px;
-                    height: parent.height;
-                    text: "Simulation Settings";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-
-                // Close X — top-right, standard OS position
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
-                    }
-
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
+                reject
             }
 
-            // ── Tab bar ──
-            Rectangle {
-                height: 36px;
-                background: Theme.background-primary;
+            DialogCard {
+                width: 100%;
+                height: 100%;
+                icon: @image-url("../../assets/icons/ui/sim-settings.svg");
+                title: "Simulation settings";
+                subtitle: "Time, stepping, recording and result bindings";
+                close => { root.on-close(); }
 
                 HorizontalLayout {
-                    padding-left: 12px;
-                    spacing: 4px;
-                    alignment: start;
+                    vertical-stretch: 1;
+                    padding: 0;
+                    spacing: 0;
 
-                    for tab-def[i] in [
-                        { name: "Conditions" },
-                        { name: "Step" },
-                        { name: "Recording" },
-                        { name: "Results" },
-                    ] : Rectangle {
-                        width: tab-t.preferred-width + 24px;
-                        height: 36px;
+                    // ── Sidebar ──
+                    Rectangle {
+                        width: 176px;
+                        background: Theme.background-primary.with-alpha(0.35);
 
-                        Rectangle {
-                            y: parent.height - 2px;
-                            height: 2px;
-                            width: parent.width;
-                            background: root.active-tab == i ? Theme.accent-blue : transparent;
-                        }
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 2px;
+                            alignment: start;
 
-                        tab-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-tab = i; }
-                        }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-top: 4px;
+                                padding-bottom: 6px;
+                                KitSectionLabel { text: "SIMULATION"; }
+                            }
 
-                        tab-t := Text {
-                            text: tab-def.name;
-                            color: root.active-tab == i ? Theme.text-primary : Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: root.active-tab == i ? 600 : 400;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content area ──
-            Rectangle {
-                vertical-stretch: 1;
-                background: transparent;
-                clip: true;
-
-                // ════════════════════════════════════════════════════════
-                // TAB 0 — Initial Conditions
-                // ════════════════════════════════════════════════════════
-                if root.active-tab == 0: ScrollView {
-                    width: 100%; height: 100%;
-
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-                        width: 560px;
-
-                        SimSection { title: "TIME COMPRESSION"; }
-
-                        SimCombo {
-                            label: "Preset";
-                            options: [
-                                "Realtime (1×)",
-                                "1 min / sec (60×)",
-                                "1 hr / sec (3,600×)",
-                                "1 day / sec (86,400×)",
-                                "1 week / sec (604,800×)",
-                                "1 month / sec (2.63M×)",
-                                "1 year / sec (31.5M×)",
-                                "Custom",
-                            ];
-                            selected-value <=> root.time-scale-preset;
-                        }
-
-                        SimField {
-                            label: "Custom Time Scale";
-                            value <=> root.custom-time-scale;
-                            unit: "×";
-                        }
-
-                        Rectangle { height: 8px; }
-                        SimSection { title: "ENGINE"; }
-
-                        SimField {
-                            label: "Tick Rate";
-                            value <=> root.tick-rate;
-                            unit: "Hz";
-                        }
-
-                        SimHint { text: "Simulation ticks per real-world second. Higher values increase accuracy at the cost of CPU load."; }
-
-                        Rectangle { height: 4px; }
-
-                        SimField {
-                            label: "Max Ticks / Frame";
-                            value <=> root.max-ticks-per-frame;
-                            unit: "ticks";
-                        }
-
-                        SimHint { text: "Maximum simulation ticks allowed per rendered frame. Prevents spiral-of-death when the sim outruns the renderer."; }
-
-                        Rectangle { height: 8px; }
-                        SimSection { title: "STARTUP"; }
-
-                        SimToggle {
-                            label: "Auto-start on Play";
-                            value <=> root.auto-start;
-                            hint: "When enabled, the simulation begins running automatically as soon as Play mode starts. Disable to start manually via the Run button or sim.start() in Rune.";
+                            NavItem {
+                                icon: @image-url("../../assets/icons/ui/clock.svg");
+                                text: "Conditions";
+                                selected: root.active-tab == 0;
+                                clicked => { root.active-tab = 0; }
+                            }
+                            NavItem {
+                                icon: @image-url("../../assets/icons/ui/play.svg");
+                                text: "Step";
+                                selected: root.active-tab == 1;
+                                clicked => { root.active-tab = 1; }
+                            }
+                            NavItem {
+                                icon: @image-url("../../assets/icons/ui/database.svg");
+                                text: "Recording";
+                                selected: root.active-tab == 2;
+                                clicked => { root.active-tab = 2; }
+                            }
+                            NavItem {
+                                icon: @image-url("../../assets/icons/ui/chart-line.svg");
+                                text: "Results";
+                                selected: root.active-tab == 3;
+                                clicked => { root.active-tab = 3; }
+                            }
                         }
                     }
-                }
 
-                // ════════════════════════════════════════════════════════
-                // TAB 1 — Step Settings
-                // ════════════════════════════════════════════════════════
-                if root.active-tab == 1: ScrollView {
-                    width: 100%; height: 100%;
+                    Rectangle { width: 1px; background: Theme.ribbon-separator; }
 
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-                        width: 560px;
+                    // ── Content ──
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
 
-                        SimSection { title: "MANUAL STEP"; }
-
-                        SimField {
-                            label: "Step Duration";
-                            value <=> root.step-duration;
-                            unit: "sim-s";
-                        }
-
-                        SimHint { text: "Simulated seconds advanced per sim.step() call or Step button press. Default: 1.0 simulated second per step."; }
-
-                        Rectangle { height: 12px; }
-                        SimSection { title: "AUTO-STOP CONDITIONS"; }
-
-                        SimField {
-                            label: "Run Until Sim Time";
-                            value <=> root.run-until-time;
-                            unit: "sim-s";
-                        }
-
-                        SimHint { text: "Stop the simulation automatically when simulated time reaches this value. Leave blank to run indefinitely."; }
-
-                        Rectangle { height: 4px; }
-
-                        SimField {
-                            label: "Run Until Tick";
-                            value <=> root.run-until-tick;
-                            unit: "ticks";
-                        }
-
-                        SimHint { text: "Stop automatically after this many total simulation ticks. Leave blank to run indefinitely."; }
-
-                        Rectangle { height: 12px; }
-                        SimSection { title: "RUNE API REFERENCE"; }
-
-                        Rectangle {
-                            height: 84px;
-                            background: Theme.background-primary;
-                            border-radius: 5px;
-                            border-width: 1px;
-                            border-color: Theme.border-color;
+                        // ════ Section 0: initial conditions ════
+                        if root.active-tab == 0: ScrollView {
+                            width: 100%;
+                            height: 100%;
 
                             VerticalLayout {
-                                padding: 10px;
-                                spacing: 3px;
+                                padding: 18px;
+                                spacing: 16px;
+                                alignment: start;
 
-                                Text {
-                                    text: "sim.set_time_scale(3600.0);   // 1 hr / simulated-sec";
-                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
-                                }
-                                Text {
-                                    text: "sim.run_until_time(86400.0);  // stop at 24 h";
-                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
-                                }
-                                Text {
-                                    text: "sim.step_n(100);              // advance 100 ticks";
-                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
-                                }
-                                Text {
-                                    text: "sim.run_hours(24.0);          // run 24 simulated hours";
-                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
-                                }
-                            }
-                        }
-                    }
-                }
+                                SettingsGroup {
+                                    title: "TIME COMPRESSION";
 
-                // ════════════════════════════════════════════════════════
-                // TAB 2 — Recording
-                // ════════════════════════════════════════════════════════
-                if root.active-tab == 2: VerticalLayout {
-                    padding: 0px;
-                    spacing: 0px;
-
-                    // Output settings
-                    ScrollView {
-                        width: 100%;
-                        height: 190px;
-
-                        VerticalLayout {
-                            padding: 20px;
-                            spacing: 4px;
-                            alignment: start;
-                            width: 560px;
-
-                            SimSection { title: "OUTPUT"; }
-
-                            SimToggle {
-                                label: "Enable Recording";
-                                value <=> root.recording-enabled;
-                            }
-
-                            SimField {
-                                label: "Output Directory";
-                                value <=> root.output-dir;
-                            }
-
-                            SimCombo {
-                                label: "Export Format";
-                                options: ["JSON", "CSV", "JSON + CSV", "Binary (.simdata)"];
-                                current: 2;
-                            }
-
-                            SimToggle {
-                                label: "Auto-export on Stop";
-                                value <=> root.auto-export;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.border-color; }
-
-                    // Watchpoints section header
-                    Rectangle {
-                        height: 32px;
-                        background: Theme.background-primary;
-
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 10px;
-                            alignment: start;
-
-                            Text {
-                                horizontal-stretch: 1;
-                                text: "WATCHPOINTS";
-                                color: Theme.text-secondary;
-                                font-size: 9px;
-                                font-weight: 700;
-                                letter-spacing: 0.8px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: "Variable name · Display label · Unit";
-                                color: Theme.text-disabled;
-                                font-size: 9px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.border-color; }
-
-                    // Watchpoint column headers
-                    Rectangle {
-                        height: 22px;
-                        background: Theme.background-primary;
-
-                        HorizontalLayout {
-                            padding-left: 14px; padding-right: 8px;
-
-                            Text { width: 130px; text: "Name"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
-                            Text { width: 160px; text: "Label"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
-                            Text { width: 60px; text: "Unit"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
-                        }
-                    }
-
-                    // Watchpoints list
-                    ScrollView {
-                        width: 100%;
-                        vertical-stretch: 1;
-
-                        VerticalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            padding-top: 4px;
-                            padding-bottom: 4px;
-                            spacing: 2px;
-                            alignment: start;
-
-                            for wp[i] in root.watchpoints: WatchpointRow {
-                                name: wp.name;
-                                label: wp.label;
-                                unit: wp.unit;
-                                remove => { root.on-remove-watchpoint(i); }
-                            }
-
-                            if root.watchpoints.length == 0: Rectangle {
-                                height: 48px;
-                                Text {
-                                    text: "No watchpoints defined. Add a variable below to record simulation data.";
-                                    color: Theme.text-disabled;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    wrap: word-wrap;
-                                    width: parent.width - 40px;
-                                    x: 20px;
-                                }
-                            }
-                        }
-                    }
-
-                    // Add watchpoint form
-                    Rectangle { height: 1px; background: Theme.border-color; }
-                    Rectangle {
-                        height: 50px;
-                        background: Theme.background-primary;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            padding-top: 12px;
-                            padding-bottom: 12px;
-                            spacing: 8px;
-                            alignment: center;
-                            height: parent.height;
-
-                            Rectangle {
-                                width: 110px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "variable_name";
-                                    text <=> root.new-wp-name;
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "Display label";
-                                    text <=> root.new-wp-label;
-                                }
-                            }
-
-                            Rectangle {
-                                width: 64px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "unit";
-                                    text <=> root.new-wp-unit;
-                                }
-                            }
-
-                            Rectangle {
-                                width: 80px; height: 28px;
-                                border-radius: 4px;
-                                background: add-wp-ta.has-hover ? Theme.selection-background : Theme.button-background;
-                                border-width: 1px;
-                                border-color: add-wp-ta.has-hover ? Theme.accent-blue : Theme.border-color;
-
-                                add-wp-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-add-watchpoint(); }
-                                }
-
-                                Text {
-                                    text: "+ Add";
-                                    color: add-wp-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ════════════════════════════════════════════════════════
-                // TAB 3 — Results / UI Bindings
-                // ════════════════════════════════════════════════════════
-                if root.active-tab == 3: VerticalLayout {
-                    padding: 0px;
-                    spacing: 0px;
-
-                    // Explainer
-                    Rectangle {
-                        height: 48px;
-                        background: Theme.background-primary;
-
-                        HorizontalLayout {
-                            padding: 12px;
-                            spacing: 8px;
-                            alignment: start;
-
-                            // Info icon accent
-                            Rectangle {
-                                width: 3px;
-                                height: 24px;
-                                background: Theme.accent-blue;
-                                border-radius: 1.5px;
-                            }
-
-                            Text {
-                                horizontal-stretch: 1;
-                                text: "Bind watchpoint variables to UI instance properties. Values are updated each sim tick via the Rune on_tick() hook.";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                wrap: word-wrap;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.border-color; }
-
-                    // Column headers
-                    Rectangle {
-                        height: 26px;
-                        background: Theme.background-primary;
-
-                        HorizontalLayout {
-                            padding-left: 14px; padding-right: 12px;
-                            spacing: 0px;
-                            alignment: start;
-
-                            Text { width: 140px; text: "Instance"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
-                            Text { width: 90px; text: "Property"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
-                            Text { width: 120px; text: "Watchpoint"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
-                            Text { horizontal-stretch: 1; text: "Format"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.border-color; }
-
-                    // Bindings list
-                    ScrollView {
-                        width: 100%;
-                        vertical-stretch: 1;
-
-                        VerticalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            padding-top: 4px;
-                            padding-bottom: 4px;
-                            spacing: 2px;
-                            alignment: start;
-
-                            for bind[i] in root.output-bindings: Rectangle {
-                                height: 32px;
-                                background: bind-hover.has-hover ? Theme.explorer-item-hover : transparent;
-                                border-radius: 3px;
-
-                                bind-hover := TouchArea { }
-
-                                Rectangle {
-                                    x: 0px; y: 0px;
-                                    width: 3px; height: parent.height;
-                                    border-radius: 1.5px;
-                                    background: Theme.accent-green;
-                                    opacity: 0.6;
-                                }
-
-                                HorizontalLayout {
-                                    padding-left: 12px; padding-right: 8px;
-                                    spacing: 0px;
-                                    alignment: start;
-
-                                    Text { width: 140px; text: bind.instance-name; color: Theme.text-primary; font-size: 11px; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                                    Text { width: 90px; text: bind.property-name; color: Theme.accent-blue; font-size: 11px; vertical-alignment: center; overflow: elide; }
-                                    Text { width: 120px; text: bind.watchpoint; color: Theme.accent-green; font-size: 11px; vertical-alignment: center; overflow: elide; }
-                                    Text { horizontal-stretch: 1; text: bind.format; color: Theme.text-secondary; font-size: 10px; font-family: "Consolas"; vertical-alignment: center; }
-
-                                    Rectangle {
-                                        width: 24px; height: 24px;
-                                        border-radius: 4px;
-                                        background: rm2-touch.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
-
-                                        rm2-touch := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.on-remove-output-binding(i); }
+                                    SettingRow {
+                                        label: "Preset";
+                                        description: "How much simulated time passes per real second.";
+                                        divider: false;
+                                        ComboBox {
+                                            width: 210px;
+                                            model: root.preset-options;
+                                            current-index: root.preset-index(root.time-scale-preset);
+                                            selected(v) => { root.time-scale-preset = v; }
                                         }
+                                    }
+                                    SettingRow {
+                                        label: "Custom time scale";
+                                        description: "Used when the preset is Custom.";
+                                        SimField { value <=> root.custom-time-scale; unit: "×"; }
+                                    }
+                                }
 
-                                        Text { text: "×"; color: rm2-touch.has-hover ? Theme.text-error : Theme.text-secondary; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                                SettingsGroup {
+                                    title: "ENGINE";
+
+                                    SettingRow {
+                                        label: "Tick rate";
+                                        description: "Simulation ticks per real second. Higher is more accurate and costs more CPU.";
+                                        divider: false;
+                                        SimField { value <=> root.tick-rate; unit: "Hz"; }
+                                    }
+                                    SettingRow {
+                                        label: "Max ticks per frame";
+                                        description: "Caps the ticks run in one rendered frame, so a slow frame cannot snowball.";
+                                        SimField { value <=> root.max-ticks-per-frame; unit: "ticks"; }
+                                    }
+                                }
+
+                                SettingsGroup {
+                                    title: "STARTUP";
+
+                                    SettingRow {
+                                        label: "Auto-start on Play";
+                                        description: "Start the simulation as soon as Play begins. Off: start it with the Run button or sim.start() in Rune.";
+                                        divider: false;
+                                        KitSwitch { checked <=> root.auto-start; }
                                     }
                                 }
                             }
+                        }
 
-                            if root.output-bindings.length == 0: Rectangle {
-                                height: 52px;
-                                Text {
-                                    text: "No bindings defined. Use the form below to bind a watchpoint variable to a UI instance property.";
-                                    color: Theme.text-disabled;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    wrap: word-wrap;
-                                    width: parent.width - 40px;
-                                    x: 20px;
+                        // ════ Section 1: stepping ════
+                        if root.active-tab == 1: ScrollView {
+                            width: 100%;
+                            height: 100%;
+
+                            VerticalLayout {
+                                padding: 18px;
+                                spacing: 16px;
+                                alignment: start;
+
+                                SettingsGroup {
+                                    title: "MANUAL STEP";
+
+                                    SettingRow {
+                                        label: "Step duration";
+                                        description: "Simulated seconds per sim.step() call or Step press.";
+                                        divider: false;
+                                        SimField { value <=> root.step-duration; unit: "sim-s"; }
+                                    }
+                                }
+
+                                SettingsGroup {
+                                    title: "AUTO-STOP";
+                                    note: "Leave a field blank to run with no limit.";
+
+                                    SettingRow {
+                                        label: "Run until sim time";
+                                        description: "Stop when simulated time reaches this value.";
+                                        divider: false;
+                                        SimField { value <=> root.run-until-time; unit: "sim-s"; placeholder: "No limit"; }
+                                    }
+                                    SettingRow {
+                                        label: "Run until tick";
+                                        description: "Stop after this many simulation ticks.";
+                                        SimField { value <=> root.run-until-tick; unit: "ticks"; placeholder: "No limit"; }
+                                    }
+                                }
+
+                                SettingsGroup {
+                                    title: "RUNE API";
+
+                                    VerticalLayout {
+                                        padding-top: 10px;
+                                        padding-bottom: 10px;
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: "sim.set_time_scale(3600.0);   // 1 hr per real second";
+                                            color: Theme.text-accent; font-size: 11px; font-family: "Consolas";
+                                        }
+                                        Text {
+                                            text: "sim.run_until_time(86400.0);  // stop at 24 h";
+                                            color: Theme.text-accent; font-size: 11px; font-family: "Consolas";
+                                        }
+                                        Text {
+                                            text: "sim.step_n(100);              // advance 100 ticks";
+                                            color: Theme.text-accent; font-size: 11px; font-family: "Consolas";
+                                        }
+                                        Text {
+                                            text: "sim.run_hours(24.0);          // run 24 simulated hours";
+                                            color: Theme.text-accent; font-size: 11px; font-family: "Consolas";
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Add binding form
-                    Rectangle { height: 1px; background: Theme.border-color; }
-                    Rectangle {
-                        height: 50px;
-                        background: Theme.background-primary;
+                        // ════ Section 2: recording ════
+                        if root.active-tab == 2: ScrollView {
+                            width: 100%;
+                            height: 100%;
 
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            padding-top: 12px;
-                            padding-bottom: 12px;
-                            spacing: 8px;
-                            alignment: center;
-                            height: parent.height;
+                            VerticalLayout {
+                                padding: 18px;
+                                spacing: 16px;
+                                alignment: start;
 
-                            Rectangle {
-                                width: 120px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "Instance name";
-                                    text <=> root.new-bind-instance;
+                                SettingsGroup {
+                                    title: "OUTPUT";
+
+                                    SettingRow {
+                                        label: "Enable recording";
+                                        description: "Record watchpoint values while the simulation runs.";
+                                        divider: false;
+                                        KitSwitch { checked <=> root.recording-enabled; }
+                                    }
+                                    SettingRow {
+                                        label: "Output folder";
+                                        description: "Where recordings are written, relative to the Space.";
+                                        SimField { value <=> root.output-dir; field-width: 180px; }
+                                    }
+                                    SettingRow {
+                                        label: "Export format";
+                                        ComboBox {
+                                            width: 180px;
+                                            model: root.format-options;
+                                            current-index: root.format-index(root.export-format);
+                                            selected(v) => { root.export-format = v; }
+                                        }
+                                    }
+                                    SettingRow {
+                                        label: "Export on Stop";
+                                        description: "Write the recording out when the simulation stops.";
+                                        KitSwitch { checked <=> root.auto-export; }
+                                    }
+                                }
+
+                                SettingsGroup {
+                                    title: "WATCHPOINTS";
+                                    note: "A watchpoint records one script variable by name.";
+
+                                    HorizontalLayout {
+                                        height: 30px;
+                                        spacing: 10px;
+                                        ColumnHead { width: 140px; text: "NAME"; }
+                                        ColumnHead { horizontal-stretch: 1; text: "LABEL"; }
+                                        ColumnHead { width: 64px; text: "UNIT"; }
+                                        Rectangle { width: 26px; }
+                                    }
+
+                                    for wp[i] in root.watchpoints: WatchpointRow {
+                                        name: wp.name;
+                                        label: wp.label;
+                                        unit: wp.unit;
+                                        remove => { root.on-remove-watchpoint(i); }
+                                    }
+
+                                    if root.watchpoints.length == 0: VerticalLayout {
+                                        KitDivider { }
+                                        EmptyLine { text: "No watchpoints yet. Add a variable below to record it."; }
+                                    }
+
+                                    KitDivider { }
+                                    HorizontalLayout {
+                                        padding-top: 10px;
+                                        padding-bottom: 10px;
+                                        spacing: 8px;
+
+                                        LineEdit {
+                                            width: 140px;
+                                            placeholder-text: "variable_name";
+                                            text <=> root.new-wp-name;
+                                        }
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            placeholder-text: "Display label";
+                                            text <=> root.new-wp-label;
+                                        }
+                                        LineEdit {
+                                            width: 72px;
+                                            placeholder-text: "Unit";
+                                            text <=> root.new-wp-unit;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            KitButton {
+                                                text: "Add";
+                                                has-icon: true;
+                                                icon: @image-url("../../assets/icons/ui/plus.svg");
+                                                clicked => { root.on-add-watchpoint(); }
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                        }
 
-                            Rectangle {
-                                width: 80px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "Property";
-                                    text <=> root.new-bind-property;
-                                }
-                            }
+                        // ════ Section 3: result bindings ════
+                        if root.active-tab == 3: ScrollView {
+                            width: 100%;
+                            height: 100%;
 
-                            Rectangle {
-                                width: 100px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "watchpoint";
-                                    text <=> root.new-bind-watchpoint;
-                                }
-                            }
+                            VerticalLayout {
+                                padding: 18px;
+                                spacing: 16px;
+                                alignment: start;
 
-                            Rectangle {
-                                width: 80px; height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    placeholder-text: "{:.2}";
-                                    text <=> root.new-bind-format;
-                                }
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-
-                            Rectangle {
-                                width: 80px; height: 28px;
-                                border-radius: 4px;
-                                background: add-bind-ta.has-hover ? Theme.selection-background : Theme.button-background;
-                                border-width: 1px;
-                                border-color: add-bind-ta.has-hover ? Theme.accent-blue : Theme.border-color;
-
-                                add-bind-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-add-output-binding(); }
+                                KitNotice {
+                                    kind: "info";
+                                    text: "Bind a watchpoint to a UI instance property. The value updates every sim tick through the Rune on_tick() hook.";
                                 }
 
-                                Text {
-                                    text: "+ Bind";
-                                    color: add-bind-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                SettingsGroup {
+                                    title: "BINDINGS";
+
+                                    HorizontalLayout {
+                                        height: 30px;
+                                        spacing: 10px;
+                                        ColumnHead { width: 140px; text: "INSTANCE"; }
+                                        ColumnHead { width: 90px; text: "PROPERTY"; }
+                                        ColumnHead { width: 110px; text: "WATCHPOINT"; }
+                                        ColumnHead { horizontal-stretch: 1; text: "FORMAT"; }
+                                        Rectangle { width: 26px; }
+                                    }
+
+                                    for bind[i] in root.output-bindings: BindingRow {
+                                        instance-name: bind.instance-name;
+                                        property-name: bind.property-name;
+                                        watchpoint: bind.watchpoint;
+                                        format: bind.format;
+                                        remove => { root.on-remove-output-binding(i); }
+                                    }
+
+                                    if root.output-bindings.length == 0: VerticalLayout {
+                                        KitDivider { }
+                                        EmptyLine { text: "No bindings yet. Use the row below to bind a watchpoint to a property."; }
+                                    }
+
+                                    KitDivider { }
+                                    HorizontalLayout {
+                                        padding-top: 10px;
+                                        padding-bottom: 10px;
+                                        spacing: 8px;
+
+                                        LineEdit {
+                                            horizontal-stretch: 1;
+                                            placeholder-text: "Instance name";
+                                            text <=> root.new-bind-instance;
+                                        }
+                                        LineEdit {
+                                            width: 84px;
+                                            placeholder-text: "Property";
+                                            text <=> root.new-bind-property;
+                                        }
+                                        LineEdit {
+                                            width: 100px;
+                                            placeholder-text: "Watchpoint";
+                                            text <=> root.new-bind-watchpoint;
+                                        }
+                                        LineEdit {
+                                            width: 70px;
+                                            placeholder-text: "{:.2}";
+                                            text <=> root.new-bind-format;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            KitButton {
+                                                text: "Bind";
+                                                has-icon: true;
+                                                icon: @image-url("../../assets/icons/ui/link.svg");
+                                                clicked => { root.on-add-output-binding(); }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // ── Footer — Save only (auto-applies on save) ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.background-primary;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    spacing: 10px;
-                    alignment: end;
-                    // Centre the 32px buttons in the 52px footer. A HorizontalLayout
-                    // does NOT centre a fixed-height child: lower_layout pins it at
-                    // y = padding.top and leaves its height alone, so with no vertical
-                    // padding the row sat flush against the top with 20px of dead space
-                    // beneath it. That is the uneven gap in the Publish dialog.
-                    padding-top: 10px;
-                    padding-bottom: 10px;
-
-                    // Save button
-                    Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        border-radius: 5px;
-                        background: save-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: no success/positive button-background token defined
-                        border-width: 1px;
-                        border-color: save-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: #2a5a32 has no dark-green border token
-
-                        save-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-save(); }
-                        }
-
-                        Text {
-                            text: "Save";
-                            color: save-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: #a5d6a7 (light green hover) has no matching token
-                            font-size: 12px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                // ── Footer: Save applies and writes simulation.toml ──
+                DialogFooter {
+                    KitButton {
+                        text: "Close";
+                        clicked => { root.on-close(); }
+                    }
+                    KitButton {
+                        text: "Save";
+                        kind: "primary";
+                        clicked => { root.on-save(); }
                     }
                 }
             }

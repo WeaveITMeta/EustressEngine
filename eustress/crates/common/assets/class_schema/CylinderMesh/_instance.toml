@@ -1,0 +1,12 @@
+# CylinderMesh: its parent part draws as a cylinder standing on the part's Y
+# axis at the part's Size times Scale, moved by Offset; the part still collides
+# as its own shape (Roblox CylinderMesh)
+
+[mesh]
+scale = [1.0, 1.0, 1.0]
+offset = [0.0, 0.0, 0.0]
+vertex_color = [255, 255, 255]
+
+[metadata]
+class_name = "CylinderMesh"
+archivable = true

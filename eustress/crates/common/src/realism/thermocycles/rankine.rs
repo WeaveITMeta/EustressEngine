@@ -90,9 +90,24 @@ pub fn thermal_efficiency(w_net: f32, q_in: f32) -> f32 {
     w_net / q_in
 }
 
+/// Efficiency of two heat engines in series, where the second (bottoming)
+/// engine runs on the heat the first (topping) engine rejects:
+/// eta = eta_top + eta_bottom * (1 - eta_top). A gas turbine over a steam
+/// cycle combines this way.
+pub fn combined_cycle_efficiency(eta_topping: f32, eta_bottoming: f32) -> f32 {
+    eta_topping + eta_bottoming * (1.0 - eta_topping)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_cycle_adds_the_bottoming_share_of_rejected_heat() {
+        // 0.4 + 0.3 * 0.6 = 0.58
+        let eta = combined_cycle_efficiency(0.4, 0.3);
+        assert!((eta - 0.58).abs() < 1e-6);
+    }
 
     #[test]
     fn carnot_between_800k_and_300k() {

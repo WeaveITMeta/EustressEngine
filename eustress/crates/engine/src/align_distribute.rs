@@ -209,11 +209,7 @@ fn handle_align_events(
         for (entity, transform, _) in query.iter().map(|(e, t, _)| (e, t, ())) {
             if let Ok(inst_file) = instance_files.get(entity) {
                 if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                    def.transform.position = transform.translation.to_array();
-                    def.transform.rotation = [
-                        transform.rotation.x, transform.rotation.y,
-                        transform.rotation.z, transform.rotation.w,
-                    ];
+                    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, None);
                     let _ = crate::space::instance_loader::write_instance_definition_signed(
                         &inst_file.toml_path, &mut def, stamp.as_ref(),
                     );
@@ -349,11 +345,7 @@ fn handle_distribute_events(
         for (entity, transform, _) in query.iter().map(|(e, t, _)| (e, t, ())) {
             if let Ok(inst_file) = instance_files.get(entity) {
                 if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                    def.transform.position = transform.translation.to_array();
-                    def.transform.rotation = [
-                        transform.rotation.x, transform.rotation.y,
-                        transform.rotation.z, transform.rotation.w,
-                    ];
+                    crate::space::instance_loader::set_authored_transform(&mut def, transform.translation, transform.rotation, None);
                     let _ = crate::space::instance_loader::write_instance_definition_signed(
                         &inst_file.toml_path, &mut def, stamp.as_ref(),
                     );

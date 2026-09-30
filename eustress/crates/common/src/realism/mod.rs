@@ -243,7 +243,7 @@ impl PhysicsDomain {
                 "The divergence free SPH solver used by ParticleSimulation objects."
             }
             PhysicsDomain::Nuclear => {
-                "Reactor kinetics, thermal hydraulics, control, and safety."
+                "Nuclear systems that step every frame. The nuclear laws scripts call run either way."
             }
             PhysicsDomain::Visualizers => {
                 "Overlays that draw simulation state such as stress and vector fields into the viewport."
@@ -292,7 +292,6 @@ impl Plugin for RealismPlugin {
                 visualizers::VisualizersPlugin,
                 deformation::DeformationPlugin,
                 thermal_conduction::ThermalConductionPlugin,
-                nuclear::NuclearPlugin,
                 // STEM Stack — Phases A-D
                 numerics::NumericsPlugin,
                 electrical::ElectricalPlugin,

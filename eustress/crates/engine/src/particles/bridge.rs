@@ -104,8 +104,14 @@ pub fn save_class_section<T: FieldTable>(toml_path: &Path, value: &T) -> Result<
 /// Set one field from its text form on the instance whose file is
 /// `toml_path`, and persist it unless a Play session is running. The undo
 /// stack's `ChangeClassField` replays through here, for the terrain layer
-/// classes too (see `terrain_layers::set_field_text`, which always saves).
+/// classes and the light classes too (see `terrain_layers::set_field_text`
+/// and `ui::light_panel::set_field_text`, which always save).
 pub fn apply_class_field_text(world: &mut World, toml_path: &Path, property: &str, text: &str) {
+    // A Sound (`sound_panel`), found by its file whether flat or in folder
+    // form (which has no InstanceFile).
+    if crate::ui::sound_panel::replay_field(world, toml_path, property, text) {
+        return;
+    }
     let mut files = world.query::<(Entity, &InstanceFile)>();
     let Some(entity) = files.iter(world).find(|(_, f)| f.toml_path == toml_path).map(|(e, _)| e) else {
         warn!("undo: no instance loaded from {}", toml_path.display());
@@ -117,6 +123,12 @@ pub fn apply_class_field_text(world: &mut World, toml_path: &Path, property: &st
     } else if let Some(mut c) = world.get_mut::<ParticleSpecies>(entity) {
         c.set_text(property, text).map(|_| (!playing).then(|| save_class_section(toml_path, &*c)))
     } else if let Some(saved) = crate::terrain_layers::set_field_text(world, entity, toml_path, property, text) {
+        saved
+    } else if let Some(saved) = crate::ui::light_panel::set_field_text(world, entity, toml_path, property, text) {
+        // Light classes (`light_panel`), saved like the terrain layers.
+        saved
+    } else if let Some(saved) = crate::ui::celestial_panel::set_field_text(world, entity, toml_path, property, text) {
+        // Sun, Moon, Sky and Atmosphere (`celestial_panel`), saved the same way.
         saved
     } else {
         return;

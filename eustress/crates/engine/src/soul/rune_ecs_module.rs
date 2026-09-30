@@ -344,15 +344,21 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(sound_stop)?;
     module.function_meta(sound_set_volume)?;
 
-    // MarketplaceService — Roblox-compatible marketplace API (Tickets currency)
+    // MarketplaceService on the live Play tree (Tickets currency). A script's
+    // `pub fn process_receipt(receipt)` grants what players bought.
     module.ty::<ProductInfoRune>()?;
     module.ty::<PlayerRune>()?;
+    module.ty::<ReceiptRune>()?;
     module.function_meta(marketplace_prompt_purchase)?;
+    module.function_meta(marketplace_prompt_product_purchase)?;
+    module.function_meta(marketplace_prompt_game_pass_purchase)?;
     module.function_meta(marketplace_get_product_info)?;
     module.function_meta(marketplace_player_owns_game_pass)?;
-    module.function_meta(marketplace_get_ticket_balance)?;
+    module.function_meta(marketplace_passes_pending)?;
+    module.function_meta(marketplace_status)?;
     module.function_meta(players_get_player_by_user_id)?;
     module.function_meta(players_get_local_player)?;
+    module.function_meta(players_get_players)?;
 
     // RunService API — environment queries
     module.function_meta(run_service_is_client)?;
@@ -3652,169 +3658,299 @@ fn sound_set_volume(sound: &mut SoundRune, volume: f64) {
 }
 
 // ============================================================================
-// MarketplaceService — Roblox-compatible marketplace API for Tickets
+// MarketplaceService: the simulation's products, on the live Play tree
 // ============================================================================
+//
+// The same commerce state Luau's MarketplaceService uses
+// (`eustress_common::datamodel::CommerceState`): the engine loads the
+// simulation's catalog, sells what a script prompts for, and hands each
+// purchase to a script's `pub fn process_receipt(receipt)`. Products are named
+// by their number in the simulation and players by `UserId`, as in Luau.
+// Outside Play every call returns its empty value.
+//
+// A prompt counts only from a Play frame (`on_update`, a button click). The
+// editor's analyzer dry-runs `on_update` for diagnostics against whatever tree
+// is live, and must never put a purchase in front of a player.
 
-/// Product info returned by MarketplaceService:GetProductInfo()
+thread_local! {
+    static RUNE_PLAY_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread as running a Play frame's scripts. Set and cleared with
+/// the Play bridges (`rune_play::install_bridges` / `clear_bridges`).
+pub fn set_rune_play_frame(on: bool) {
+    RUNE_PLAY_FRAME.with(|frame| frame.set(on));
+}
+
+#[cfg(feature = "realism-scripting")]
+fn in_play_frame() -> bool {
+    RUNE_PLAY_FRAME.with(|frame| frame.get())
+}
+
+#[cfg(feature = "realism-scripting")]
+fn with_play_tree<R>(default: R, f: impl FnOnce(&mut eustress_common::datamodel::DataModel) -> R) -> R {
+    match eustress_common::datamodel::active() {
+        Some(dm) => f(&mut dm.lock()),
+        None => default,
+    }
+}
+
+/// Product info returned by `marketplace_get_product_info`.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, rune::Any)]
 #[rune(item = ::eustress)]
 struct ProductInfoRune {
+    /// The product's number in the simulation.
     #[rune(get)] product_id: i64,
     #[rune(get)] name: String,
     #[rune(get)] description: String,
     #[rune(get)] price_in_tickets: i64,
+    /// On sale to players. A draft is for the creator's test purchases only.
     #[rune(get)] is_for_sale: bool,
-    #[rune(get)] product_type: String, // "GamePass" | "DeveloperProduct"
+    /// "GamePass" (owned once) or "DeveloperProduct" (granted each purchase).
+    #[rune(get)] product_type: String,
 }
 
-/// Player info for scripting
+/// A player in the Play session.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, rune::Any)]
 #[rune(item = ::eustress)]
 struct PlayerRune {
     #[rune(get)] user_id: i64,
     #[rune(get)] name: String,
-    #[rune(get)] entity_id: i64,
-    #[rune(get)] ticket_balance: i64,
+    /// The `Player` instance, for `eustress::dm`.
+    #[rune(get)] instance: i64,
 }
 
-/// Thread-local marketplace bridge
-thread_local! {
-    static MARKETPLACE_BRIDGE: std::cell::RefCell<Option<MarketplaceBridge>> = std::cell::RefCell::new(None);
+/// What `process_receipt(receipt)` receives: Roblox's `receiptInfo`.
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
+pub struct ReceiptRune {
+    /// Unique per purchase: grant each id once (keep it in a DataStore).
+    #[rune(get)] purchase_id: String,
+    /// The buyer's `UserId`.
+    #[rune(get)] player_id: i64,
+    /// The product's number.
+    #[rune(get)] product_id: i64,
+    /// Tickets spent.
+    #[rune(get)] currency_spent: i64,
+    #[rune(get)] simulation_id: String,
+    /// The Space it was bought in; empty when not recorded.
+    #[rune(get)] space: String,
 }
 
-/// Marketplace bridge data — set by the Bevy system before script execution
-#[derive(Clone)]
-pub struct MarketplaceBridge {
-    pub game_passes: std::collections::HashMap<i64, (String, String, i64, bool)>, // id → (name, desc, price, for_sale)
-    pub dev_products: std::collections::HashMap<i64, (String, String, i64, bool)>,
-    pub player_passes: std::collections::HashMap<i64, std::collections::HashSet<i64>>, // entity_id → owned pass IDs
-    pub player_tickets: std::collections::HashMap<i64, i64>, // entity_id → ticket balance
-    pub player_info: std::collections::HashMap<i64, (i64, String)>, // entity_id → (user_id, username)
+#[cfg(feature = "realism-scripting")]
+impl ReceiptRune {
+    fn from_receipt(receipt: &eustress_common::datamodel::Receipt) -> Self {
+        Self {
+            purchase_id: receipt.purchase_id.clone(),
+            player_id: receipt.user_id as i64,
+            product_id: receipt.product as i64,
+            currency_spent: receipt.price as i64,
+            simulation_id: receipt.sim_id.clone(),
+            space: receipt.space.clone().unwrap_or_default(),
+        }
+    }
 }
 
-pub fn set_marketplace_bridge(bridge: MarketplaceBridge) {
-    MARKETPLACE_BRIDGE.with(|cell| *cell.borrow_mut() = Some(bridge));
+/// Queue a purchase prompt for the engine to show: to Studio's own player in
+/// a dialog, to a joined player on its Player.
+#[cfg(feature = "realism-scripting")]
+fn queue_prompt(user_id: i64, product: i64, expects: Option<eustress_common::datamodel::ProductKind>) -> bool {
+    if !in_play_frame() || user_id <= 0 || product <= 0 {
+        return false;
+    }
+    with_play_tree(false, |g| {
+        g.commerce.wake();
+        g.commerce.prompts.push(eustress_common::datamodel::PurchasePrompt {
+            user_id: user_id as f64,
+            product: product as u64,
+            expects,
+        });
+        true
+    })
 }
 
-pub fn clear_marketplace_bridge() {
-    MARKETPLACE_BRIDGE.with(|cell| *cell.borrow_mut() = None);
+/// `MarketplaceService:PromptPurchase(player, product)`: offer either kind of
+/// product. `true` when the prompt was queued; a consumable the player buys
+/// arrives at `process_receipt`, a pass shows in
+/// `marketplace_player_owns_game_pass`.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_prompt_purchase(user_id: i64, product: i64) -> bool {
+    queue_prompt(user_id, product, None)
 }
 
-fn with_marketplace<F, R>(fallback: R, callback: F) -> R
-where F: FnOnce(&MarketplaceBridge) -> R {
-    MARKETPLACE_BRIDGE.with(|cell| {
-        match cell.borrow().as_ref() {
-            Some(bridge) => callback(bridge),
-            None => {
-                warn!("[Rune Script] MarketplaceService not available");
-                fallback
+/// `MarketplaceService:PromptProductPurchase(player, product)`: offer a
+/// consumable, granted through `process_receipt`.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_prompt_product_purchase(user_id: i64, product: i64) -> bool {
+    queue_prompt(user_id, product, Some(eustress_common::datamodel::ProductKind::Consumable))
+}
+
+/// `MarketplaceService:PromptGamePassPurchase(player, pass)`: offer a pass.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_prompt_game_pass_purchase(user_id: i64, pass: i64) -> bool {
+    queue_prompt(user_id, pass, Some(eustress_common::datamodel::ProductKind::Pass))
+}
+
+/// `MarketplaceService:GetProductInfo(product)`. `None` for a product the
+/// simulation does not sell, and while the catalog is still loading
+/// (`marketplace_status() == "loading"`: ask again on a later frame).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_get_product_info(product: i64) -> Option<ProductInfoRune> {
+    use eustress_common::datamodel::ProductKind;
+    with_play_tree(None, |g| {
+        g.commerce.wake();
+        let p = g.commerce.product(u64::try_from(product).ok()?)?;
+        Some(ProductInfoRune {
+            product_id: p.number as i64,
+            name: p.name.clone(),
+            description: p.description.clone(),
+            price_in_tickets: p.price as i64,
+            is_for_sale: p.active,
+            product_type: match p.kind {
+                ProductKind::Pass => "GamePass",
+                ProductKind::Consumable => "DeveloperProduct",
             }
+            .to_string(),
+        })
+    })
+}
+
+/// `MarketplaceService:UserOwnsGamePassAsync(user, pass)`: whether player
+/// `user_id` owns pass `pass`. A player who just joined a host has its passes
+/// read first; until they arrive (`marketplace_passes_pending`) this answers
+/// false.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_player_owns_game_pass(user_id: i64, pass: i64) -> bool {
+    let Ok(pass) = u64::try_from(pass) else { return false };
+    with_play_tree(false, |g| {
+        g.commerce.wake();
+        let local = g
+            .local_player
+            .and_then(|p| g.get_prop(p, "UserId"))
+            .and_then(|v| v.as_number());
+        g.commerce.owns_pass(user_id as f64, local, pass)
+    })
+}
+
+/// Whether player `user_id`'s passes are still on their way (it just joined
+/// a host). Ask `marketplace_player_owns_game_pass` once this is false.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_passes_pending(user_id: i64) -> bool {
+    with_play_tree(false, |g| g.commerce.passes_pending(user_id as f64))
+}
+
+/// `"loading"`, `"ready"`, or `"unavailable: <why>"` (not published, not
+/// signed in, the API unreachable). Asking starts the catalog loading.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_status() -> String {
+    use eustress_common::datamodel::CommerceStatus;
+    with_play_tree("unavailable: not in Play".to_string(), |g| {
+        g.commerce.wake();
+        match &g.commerce.status {
+            CommerceStatus::Idle | CommerceStatus::Loading => "loading".to_string(),
+            CommerceStatus::Ready => "ready".to_string(),
+            CommerceStatus::Unavailable(why) => format!("unavailable: {why}"),
         }
     })
 }
 
-/// MarketplaceService:PromptPurchase(player, productId)
-/// Triggers a purchase prompt for the player. Returns true if the prompt was shown.
+#[cfg(feature = "realism-scripting")]
+fn player_rune(g: &eustress_common::datamodel::DataModel, player: eustress_common::datamodel::InstanceId) -> Option<PlayerRune> {
+    let instance = g.get(player)?;
+    if instance.class_name != "Player" {
+        return None;
+    }
+    let user_id = g.get_prop(player, "UserId").and_then(|v| v.as_number())?;
+    Some(PlayerRune { user_id: user_id as i64, name: instance.name.clone(), instance: player.0 as i64 })
+}
+
+/// `Players:GetPlayers()`: Studio's own player and everyone who joined.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
-fn marketplace_prompt_purchase(player_entity_id: i64, product_id: i64) -> bool {
-    info!("[Rune] MarketplaceService:PromptPurchase({}, {})", player_entity_id, product_id);
-    with_marketplace(false, |bridge| {
-        bridge.game_passes.contains_key(&product_id) || bridge.dev_products.contains_key(&product_id)
+fn players_get_players() -> Vec<PlayerRune> {
+    with_play_tree(Vec::new(), |g| {
+        let Some(players) = g.find_service("Players") else { return Vec::new() };
+        g.children(players).iter().filter_map(|p| player_rune(g, *p)).collect()
     })
 }
 
-/// MarketplaceService:GetProductInfo(productId)
-/// Returns product info or None if product doesn't exist.
-#[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn marketplace_get_product_info(product_id: i64) -> Option<ProductInfoRune> {
-    with_marketplace(None, |bridge| {
-        if let Some((name, desc, price, for_sale)) = bridge.game_passes.get(&product_id) {
-            Some(ProductInfoRune {
-                product_id,
-                name: name.clone(),
-                description: desc.clone(),
-                price_in_tickets: *price,
-                is_for_sale: *for_sale,
-                product_type: "GamePass".to_string(),
-            })
-        } else if let Some((name, desc, price, for_sale)) = bridge.dev_products.get(&product_id) {
-            Some(ProductInfoRune {
-                product_id,
-                name: name.clone(),
-                description: desc.clone(),
-                price_in_tickets: *price,
-                is_for_sale: *for_sale,
-                product_type: "DeveloperProduct".to_string(),
-            })
-        } else {
-            None
-        }
-    })
-}
-
-/// MarketplaceService:PlayerOwnsGamePass(player, passId)
-/// Returns true if the player owns the specified game pass.
-#[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn marketplace_player_owns_game_pass(player_entity_id: i64, pass_id: i64) -> bool {
-    with_marketplace(false, |bridge| {
-        bridge.player_passes
-            .get(&player_entity_id)
-            .map(|passes| passes.contains(&pass_id))
-            .unwrap_or(false)
-    })
-}
-
-/// MarketplaceService:GetTicketBalance(player)
-/// Returns the player's current Ticket balance.
-#[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn marketplace_get_ticket_balance(player_entity_id: i64) -> i64 {
-    with_marketplace(0, |bridge| {
-        *bridge.player_tickets.get(&player_entity_id).unwrap_or(&0)
-    })
-}
-
-/// Players:GetPlayerByUserId(userId)
-/// Returns player info or None.
+/// `Players:GetPlayerByUserId(user)`.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn players_get_player_by_user_id(user_id: i64) -> Option<PlayerRune> {
-    with_marketplace(None, |bridge| {
-        for (entity_id, (uid, name)) in &bridge.player_info {
-            if *uid == user_id {
-                let tickets = *bridge.player_tickets.get(entity_id).unwrap_or(&0);
-                return Some(PlayerRune {
-                    user_id: *uid,
-                    name: name.clone(),
-                    entity_id: *entity_id,
-                    ticket_balance: tickets,
-                });
-            }
-        }
-        None
+    with_play_tree(None, |g| {
+        let players = g.find_service("Players")?;
+        g.children(players)
+            .iter()
+            .filter_map(|p| player_rune(g, *p))
+            .find(|p| p.user_id == user_id)
     })
 }
 
-/// Players.LocalPlayer — get the local player
+/// `Players.LocalPlayer`: in Studio, the signed-in creator.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn players_get_local_player() -> Option<PlayerRune> {
-    with_marketplace(None, |bridge| {
-        bridge.player_info.iter().next().map(|(entity_id, (uid, name))| {
-            let tickets = *bridge.player_tickets.get(entity_id).unwrap_or(&0);
-            PlayerRune {
-                user_id: *uid,
-                name: name.clone(),
-                entity_id: *entity_id,
-                ticket_balance: tickets,
-            }
+    with_play_tree(None, |g| g.local_player.and_then(|p| player_rune(g, p)))
+}
+
+/// Hand the purchases waiting to be granted to the script that defines
+/// `pub fn process_receipt(receipt)` (the first one, when several do). It
+/// returns `true` to grant (Roblox's `PurchaseGranted`); anything else, or an
+/// error, leaves the purchase waiting, to be offered again. When a Luau script
+/// set `ProcessReceipt`, Luau answers instead: a simulation has one handler.
+///
+/// Called by the Play driver after `on_update`, with the bridges installed.
+/// The tree's lock is released before each call, so the script may use
+/// `eustress::dm` freely.
+#[cfg(feature = "realism-scripting")]
+pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::RuneRuntimeState) {
+    let Some(dm) = eustress_common::datamodel::active() else { return };
+    let mut handlers: Vec<(&u32, &eustress_common::soul::rune_runtime::CompiledScript)> = runtime
+        .compiled
+        .iter()
+        .filter(|(_, script)| {
+            rune::Vm::new(script.context.clone(), script.unit.clone())
+                .lookup_function(["process_receipt"])
+                .is_ok()
         })
-    })
+        .collect();
+    handlers.sort_by_key(|(index, _)| **index);
+    let Some((_, handler)) = handlers.first().copied() else { return };
+    let receipts: Vec<eustress_common::datamodel::Receipt> = {
+        let mut g = dm.lock();
+        if g.commerce.luau_process_receipt || g.commerce.receipts.is_empty() {
+            return;
+        }
+        g.commerce.receipts.drain(..).collect()
+    };
+    let mut decisions = Vec::with_capacity(receipts.len());
+    let mut errors = Vec::new();
+    for receipt in &receipts {
+        let mut vm = rune::Vm::new(handler.context.clone(), handler.unit.clone());
+        let granted = match vm.call(["process_receipt"], (ReceiptRune::from_receipt(receipt),)) {
+            Ok(answer) => rune::from_value::<bool>(answer).unwrap_or(false),
+            Err(e) => {
+                errors.push((handler.name.clone(), format!("process_receipt: {e}")));
+                false
+            }
+        };
+        decisions.push(eustress_common::datamodel::ReceiptDecision { purchase_id: receipt.purchase_id.clone(), granted });
+    }
+    dm.lock().commerce.decisions.extend(decisions);
+    runtime
+        .last_errors
+        .extend(errors.into_iter().map(eustress_common::soul::rune_runtime::ScriptError::from));
 }
 
 // ============================================================================
@@ -4225,7 +4361,8 @@ fn part_set_velocity(entity_name: &str, x: f64, y: f64, z: f64) {
 thread_local! {
     /// Gravity value — defaults to Earth gravity (9.80665 m/s²).
     /// Shared between Rune scripts and the Avian3d physics engine.
-    pub static WORKSPACE_GRAVITY: std::cell::RefCell<f64> = std::cell::RefCell::new(9.80665);
+    pub static WORKSPACE_GRAVITY: std::cell::RefCell<f64> =
+        std::cell::RefCell::new(eustress_common::units::STANDARD_GRAVITY);
 }
 
 /// Get the current workspace gravity in m/s².
@@ -4235,7 +4372,9 @@ fn workspace_get_gravity() -> f64 {
     WORKSPACE_GRAVITY.with(|g| *g.borrow())
 }
 
-/// Set the workspace gravity in m/s². Affects all physics simulation.
+/// Set the workspace gravity in m/s², straight down. Affects all physics
+/// simulation, the player character included, until Stop puts back the
+/// gravity Play started with.
 /// Earth = 9.80665, Moon = 1.625, Mars = 3.72076, zero-g = 0.0.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]

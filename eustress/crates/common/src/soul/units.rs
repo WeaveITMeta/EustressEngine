@@ -1,19 +1,21 @@
 //! # Soul Units System
 //!
 //! Universal unit conversion for Soul scripts.
-//! Write "jump 10 feet" or "move at 50 km/h" and Soul converts to engine units/meters.
+//! Write "jump 10 feet" or "move at 50 km/h" and Soul converts to engine
+//! units, which are meters: the engine is meter-native.
 //!
 //! ## Conversion Reference
 //!
-//! | Unit | To Units | To Meters |
-//! |------|----------|-----------|
-//! | 1 unit | 1.0 | 0.28 |
-//! | 1 meter | 3.571 | 1.0 |
-//! | 1 foot | 1.0886 | 0.3048 |
-//! | 1 yard | 3.266 | 0.9144 |
-//! | 1 inch | 0.0907 | 0.0254 |
-//! | 1 kilometer | 3571.43 | 1000.0 |
-//! | 1 mile | 5748.03 | 1609.34 |
+//! | Unit | To Meters |
+//! |------|-----------|
+//! | 1 unit | 1.0 |
+//! | 1 meter | 1.0 |
+//! | 1 stud | 0.28 (`crate::units::Unit::Stud`, Roblox's stud) |
+//! | 1 foot | 0.3048 |
+//! | 1 yard | 0.9144 |
+//! | 1 inch | 0.0254 |
+//! | 1 kilometer | 1000.0 |
+//! | 1 mile | 1609.34 |
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -21,15 +23,6 @@ use std::str::FromStr;
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// 1 unit = 0.28 meters (engine standard, formerly "stud")
-pub const UNIT_TO_METERS: f32 = 0.28;
-/// 1 meter = ~3.571 units
-pub const METERS_TO_UNITS: f32 = 1.0 / UNIT_TO_METERS;
-
-// Legacy aliases for compatibility
-pub const STUD_TO_METERS: f32 = UNIT_TO_METERS;
-pub const METERS_TO_STUDS: f32 = METERS_TO_UNITS;
 
 /// 1 foot = 0.3048 meters
 pub const FOOT_TO_METERS: f32 = 0.3048;
@@ -42,6 +35,9 @@ pub const MILE_TO_METERS: f32 = 1609.34;
 /// 1 kilometer = 1000 meters
 pub const KM_TO_METERS: f32 = 1000.0;
 
+/// Meters per stud: the engine's one stud, [`crate::units::Unit::Stud`].
+const METERS_PER_STUD: f32 = crate::units::Unit::Stud.to_meters() as f32;
+
 // ============================================================================
 // Unit Types
 // ============================================================================
@@ -49,8 +45,10 @@ pub const KM_TO_METERS: f32 = 1000.0;
 /// Distance unit
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DistanceUnit {
-    /// Engine units (1 unit = 0.28m)
+    /// Engine units: meters, since the engine is meter-native
     Units,
+    /// Studs, the engine's one stud ([`crate::units::Unit::Stud`])
+    Studs,
     Meters,
     Feet,
     Yards,
@@ -65,7 +63,8 @@ impl DistanceUnit {
     /// Convert to meters
     pub fn to_meters(&self, value: f32) -> f32 {
         match self {
-            DistanceUnit::Units => value * UNIT_TO_METERS,
+            DistanceUnit::Units => value,
+            DistanceUnit::Studs => value * METERS_PER_STUD,
             DistanceUnit::Meters => value,
             DistanceUnit::Feet => value * FOOT_TO_METERS,
             DistanceUnit::Yards => value * YARD_TO_METERS,
@@ -77,20 +76,16 @@ impl DistanceUnit {
         }
     }
     
-    /// Convert to units (engine default)
+    /// Convert to engine units (meters)
     pub fn to_units(&self, value: f32) -> f32 {
-        self.to_meters(value) * METERS_TO_UNITS
+        self.to_meters(value)
     }
-    
-    /// Legacy alias
-    pub fn to_studs(&self, value: f32) -> f32 {
-        self.to_units(value)
-    }
-    
+
     /// Convert from meters
     pub fn from_meters(&self, meters: f32) -> f32 {
         match self {
-            DistanceUnit::Units => meters * METERS_TO_UNITS,
+            DistanceUnit::Units => meters,
+            DistanceUnit::Studs => meters / METERS_PER_STUD,
             DistanceUnit::Meters => meters,
             DistanceUnit::Feet => meters / FOOT_TO_METERS,
             DistanceUnit::Yards => meters / YARD_TO_METERS,
@@ -108,7 +103,8 @@ impl FromStr for DistanceUnit {
     
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "unit" | "units" | "stud" | "studs" => Ok(DistanceUnit::Units),
+            "unit" | "units" => Ok(DistanceUnit::Units),
+            "stud" | "studs" => Ok(DistanceUnit::Studs),
             "m" | "meter" | "meters" | "metre" | "metres" => Ok(DistanceUnit::Meters),
             "ft" | "foot" | "feet" => Ok(DistanceUnit::Feet),
             "yd" | "yard" | "yards" => Ok(DistanceUnit::Yards),
@@ -125,8 +121,10 @@ impl FromStr for DistanceUnit {
 /// Speed unit
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpeedUnit {
-    /// Engine units per second
+    /// Engine units per second: meters per second
     UnitsPerSecond,
+    /// Studs per second ([`crate::units::Unit::Stud`])
+    StudsPerSecond,
     MetersPerSecond,
     FeetPerSecond,
     KilometersPerHour,
@@ -138,7 +136,8 @@ impl SpeedUnit {
     /// Convert to meters per second
     pub fn to_mps(&self, value: f32) -> f32 {
         match self {
-            SpeedUnit::UnitsPerSecond => value * UNIT_TO_METERS,
+            SpeedUnit::UnitsPerSecond => value,
+            SpeedUnit::StudsPerSecond => value * METERS_PER_STUD,
             SpeedUnit::MetersPerSecond => value,
             SpeedUnit::FeetPerSecond => value * FOOT_TO_METERS,
             SpeedUnit::KilometersPerHour => value / 3.6,
@@ -146,21 +145,17 @@ impl SpeedUnit {
             SpeedUnit::Knots => value * 0.51444,
         }
     }
-    
-    /// Convert to units per second (engine default)
+
+    /// Convert to engine units per second (meters per second)
     pub fn to_units_per_second(&self, value: f32) -> f32 {
-        self.to_mps(value) * METERS_TO_UNITS
+        self.to_mps(value)
     }
-    
-    /// Legacy alias
-    pub fn to_studs_per_second(&self, value: f32) -> f32 {
-        self.to_units_per_second(value)
-    }
-    
+
     /// Convert from meters per second
     pub fn from_mps(&self, mps: f32) -> f32 {
         match self {
-            SpeedUnit::UnitsPerSecond => mps * METERS_TO_UNITS,
+            SpeedUnit::UnitsPerSecond => mps,
+            SpeedUnit::StudsPerSecond => mps / METERS_PER_STUD,
             SpeedUnit::MetersPerSecond => mps,
             SpeedUnit::FeetPerSecond => mps / FOOT_TO_METERS,
             SpeedUnit::KilometersPerHour => mps * 3.6,
@@ -176,8 +171,8 @@ impl FromStr for SpeedUnit {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.to_lowercase().replace(" ", "").replace("/", "");
         match s.as_str() {
-            "unitss" | "unitsec" | "unitspersecond" | "units" |
-            "studss" | "studsec" | "studspersecond" | "studs" => Ok(SpeedUnit::UnitsPerSecond),
+            "unitss" | "unitsec" | "unitspersecond" | "units" => Ok(SpeedUnit::UnitsPerSecond),
+            "studss" | "studsec" | "studspersecond" | "studs" => Ok(SpeedUnit::StudsPerSecond),
             "ms" | "mps" | "metersec" | "meterspersecond" => Ok(SpeedUnit::MetersPerSecond),
             "fts" | "fps" | "feetpersecond" | "footpersecond" => Ok(SpeedUnit::FeetPerSecond),
             "kmh" | "kph" | "kilometersperhour" => Ok(SpeedUnit::KilometersPerHour),
@@ -342,34 +337,24 @@ impl UnitValue {
         }
     }
     
-    /// Try to convert to units (for distances)
+    /// Try to convert to engine units, meters (for distances)
     pub fn to_units(&self) -> Result<f32, String> {
         let unit: DistanceUnit = self.unit.parse()?;
         Ok(unit.to_units(self.value))
     }
-    
-    /// Legacy alias
-    pub fn to_studs(&self) -> Result<f32, String> {
-        self.to_units()
-    }
-    
+
     /// Try to convert to meters
     pub fn to_meters(&self) -> Result<f32, String> {
         let unit: DistanceUnit = self.unit.parse()?;
         Ok(unit.to_meters(self.value))
     }
     
-    /// Try to convert to units per second (for speeds)
+    /// Try to convert to engine units per second, meters per second (for speeds)
     pub fn to_units_per_second(&self) -> Result<f32, String> {
         let unit: SpeedUnit = self.unit.parse()?;
         Ok(unit.to_units_per_second(self.value))
     }
-    
-    /// Legacy alias
-    pub fn to_studs_per_second(&self) -> Result<f32, String> {
-        self.to_units_per_second()
-    }
-    
+
     /// Try to convert to radians (for angles)
     pub fn to_radians(&self) -> Result<f32, String> {
         let unit: AngleUnit = self.unit.parse()?;
@@ -414,8 +399,8 @@ pub fn parse_unit_value(text: &str) -> Option<UnitValue> {
     let value: f32 = value_str.parse().ok()?;
     
     if unit_str.is_empty() {
-        // Default to studs if no unit specified
-        Some(UnitValue::new(value, "studs"))
+        // A bare number is in engine units (meters)
+        Some(UnitValue::new(value, "units"))
     } else {
         Some(UnitValue::new(value, unit_str))
     }
@@ -431,30 +416,43 @@ mod tests {
     
     #[test]
     fn test_distance_conversion() {
-        let feet = DistanceUnit::Feet;
-        let studs = feet.to_studs(10.0);
-        assert!((studs - 10.886).abs() < 0.01);
-        
-        let meters = DistanceUnit::Meters;
-        let studs = meters.to_studs(1.0);
-        assert!((studs - 3.571).abs() < 0.01);
+        // Engine units are meters.
+        assert!((DistanceUnit::Feet.to_units(10.0) - 3.048).abs() < 1e-4);
+        assert_eq!(DistanceUnit::Meters.to_units(1.0), 1.0);
+        assert_eq!(DistanceUnit::Units.to_meters(2.5), 2.5);
     }
-    
+
+    /// Studs are the engine's one stud, Roblox's 0.28 m.
+    #[test]
+    fn test_studs_are_the_engine_stud() {
+        assert!((DistanceUnit::Studs.to_meters(10.0) - 2.8).abs() < 1e-5);
+        assert!((DistanceUnit::Studs.from_meters(2.8) - 10.0).abs() < 1e-4);
+        assert!((SpeedUnit::StudsPerSecond.to_mps(10.0) - 2.8).abs() < 1e-5);
+        assert_eq!("studs".parse::<DistanceUnit>(), Ok(DistanceUnit::Studs));
+        assert_eq!("units".parse::<DistanceUnit>(), Ok(DistanceUnit::Units));
+    }
+
     #[test]
     fn test_speed_conversion() {
         let kmh = SpeedUnit::KilometersPerHour;
-        let studs_s = kmh.to_studs_per_second(36.0); // 36 km/h = 10 m/s
-        assert!((studs_s - 35.71).abs() < 0.1);
+        let mps = kmh.to_units_per_second(36.0); // 36 km/h = 10 m/s
+        assert!((mps - 10.0).abs() < 1e-4);
     }
-    
+
     #[test]
     fn test_parse_unit_value() {
         let uv = parse_unit_value("10 feet").unwrap();
         assert_eq!(uv.value, 10.0);
         assert_eq!(uv.unit, "feet");
-        
+
         let uv = parse_unit_value("50 km/h").unwrap();
         assert_eq!(uv.value, 50.0);
         assert_eq!(uv.unit, "km/h");
+
+        // A bare number is in engine units, meters.
+        assert_eq!(parse_unit_value("3").unwrap().to_meters(), Ok(3.0));
+
+        let uv = parse_unit_value("10 studs").unwrap();
+        assert!((uv.to_meters().unwrap() - 2.8).abs() < 1e-5);
     }
 }

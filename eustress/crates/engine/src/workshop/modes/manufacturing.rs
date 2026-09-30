@@ -83,17 +83,112 @@ impl ToolHandler for QueryManufacturersTool {
         }
     }
 
-    fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-        // Returns structured query for the ManufacturingProgramRegistry to process.
-        // Actual registry lookup happens in the Workshop system that handles tool results.
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        // The same vendors the RFQ Builder offers: the Space's
+        // `DataService/Vendors` folders, read here because tools run off the
+        // main thread and cannot reach the ECS registry.
+        let registry = crate::manufacturing::ManufacturingProgramRegistry::load_space(&ctx.space_root);
+        let norm = |s: &str| s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        let strings = |key: &str| -> Vec<String> {
+            input
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).map(norm).collect())
+                .unwrap_or_default()
+        };
+        let process = input.get("process").and_then(|v| v.as_str()).map(norm).filter(|p| !p.is_empty());
+        let materials = strings("materials");
+        let certifications = strings("certifications");
+        let min_capacity = input.get("min_capacity").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        let has_certification = |m: &crate::manufacturing::Manufacturer, want: &str| {
+            let c = &m.certifications;
+            match want {
+                "iso_9001" => c.iso_9001,
+                "iso_14001" => c.iso_14001,
+                "iatf_16949" => c.iatf_16949,
+                "ul" => c.ul_certified,
+                "ul_battery" => c.ul_battery_certified,
+                "reach" => c.reach_compliant,
+                "rohs" => c.rohs_compliant,
+                other => c.additional.iter().any(|a| norm(a) == other),
+            }
+        };
+        let matches: Vec<&crate::manufacturing::Manufacturer> = registry
+            .manufacturers
+            .iter()
+            .filter(|m| {
+                process
+                    .as_ref()
+                    .map_or(true, |p| m.capabilities.processes.iter().any(|x| norm(x) == *p))
+            })
+            // "steel" finds "stainless_steel"; "aluminum" finds "aluminum_alloys".
+            .filter(|m| {
+                materials
+                    .iter()
+                    .all(|want| m.capabilities.materials.iter().any(|x| norm(x).contains(want.as_str())))
+            })
+            .filter(|m| certifications.iter().all(|want| has_certification(*m, want.as_str())))
+            .filter(|m| u64::from(m.capacity.monthly_units_available) >= min_capacity)
+            .collect();
+
+        let rows: Vec<serde_json::Value> = matches
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "name": m.name,
+                    "status": m.status,
+                    "country": m.country,
+                    "region": m.region,
+                    "lead_time_days": m.lead_time_days,
+                    "processes": m.capabilities.processes,
+                    "materials": m.capabilities.materials,
+                    "monthly_units_available": m.capacity.monthly_units_available,
+                    "min_order_quantity": m.capacity.min_order_quantity,
+                })
+            })
+            .collect();
+
+        let vendors_dir = ctx.space_root.join(crate::manufacturing::VENDORS_DIR);
+        let content = if registry.manufacturers.is_empty() {
+            format!(
+                "No vendors are registered in this Space ({}). Add them with the Procurement panel's vendor registry, then query again.",
+                vendors_dir.display()
+            )
+        } else if matches.is_empty() {
+            format!(
+                "None of the {} registered vendors match these filters.",
+                registry.manufacturers.len()
+            )
+        } else {
+            let lines: Vec<String> = matches
+                .iter()
+                .map(|m| {
+                    format!(
+                        "- {} ({}, {:?}): {} units/month, lead time {} days",
+                        m.name, m.country, m.status, m.capacity.monthly_units_available, m.lead_time_days
+                    )
+                })
+                .collect();
+            format!(
+                "{} of {} registered vendors match:\n{}",
+                matches.len(),
+                registry.manufacturers.len(),
+                lines.join("\n")
+            )
+        };
+
         ToolResult {
             tool_name: "query_manufacturers".to_string(),
             tool_use_id: String::new(),
             success: true,
-            content: "Querying manufacturing program registry...".to_string(),
+            content,
             structured_data: Some(serde_json::json!({
                 "action": "query_manufacturers",
                 "filters": input,
+                "registered": registry.manufacturers.len(),
+                "manufacturers": rows,
             })),
             stream_topic: Some("workshop.tool.query_manufacturers".to_string()),
         }

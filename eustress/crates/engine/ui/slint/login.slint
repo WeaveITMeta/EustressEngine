@@ -1,10 +1,12 @@
 // ============================================================================
 // Eustress Engine Studio - Login Dialog
-// SPI (Sign in with Private Identity) — identity.toml
+// SPI (Sign in with Private Identity): identity.toml
+// Law 1 chrome: DialogScrim > DialogCard > DialogFooter (dialog_kit.slint).
+// Enter signs in once a file is picked; Escape closes.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitNotice } from "dialog_kit.slint";
 
 export component LoginDialog inherits Rectangle {
     // Properties
@@ -18,192 +20,140 @@ export component LoginDialog inherits Rectangle {
     callback on-close();
     callback on-browse-identity();
 
+    property <bool> can-sign-in: root.identity-path != "" && !root.is-loading;
+
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => {
-            return accept;
-        }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 420px;
-        height: 380px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(420px, parent.width - 32px);
+            height: min(card.preferred-height, parent.height - 32px);
+            icon: @image-url("../../assets/icons/ui/key.svg");
+            title: "Sign in to Eustress";
+            subtitle: "Use your eustress-username.toml to authenticate";
+            close => { root.on-close(); }
 
-        TouchArea {
-            // Prevent click-through
-            scroll-event(event) => {
-                return accept;
-            }
-        }
-
-        VerticalBox {
-            padding: 24px;
-            spacing: 12px;
-            alignment: start;
-
-            // Title
-            Text {
-                text: "Sign in to Eustress";
-                color: Theme.text-primary;
-                font-size: 20px;
-                font-weight: 600;
-                horizontal-alignment: center;
-            }
-
-            Text {
-                text: "Use your eustress-username.toml to authenticate";
-                color: Theme.text-secondary;
-                font-size: 12px;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-
-            Rectangle { height: 8px; }
-
-            // Identity file section
-            Text {
-                text: "Identity File";
-                color: Theme.text-secondary;
-                font-size: 11px;
-                font-weight: 600;
-            }
-
-            // File picker — entire row is clickable
-            Rectangle {
-                height: 36px;
-                background: file-row-touch.has-hover ? Theme.button-hover : Theme.background-secondary;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: root.error-message != "" ? Theme.text-error : (file-row-touch.has-hover ? #4a4a5a : Theme.input-border);  // theme-exempt: #4a4a5a is the input-border hover-lighten state, no hover-border token
-
-                file-row-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    enabled: !root.is-loading;
-                    clicked => { root.on-browse-identity(); }
+            keys := FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        root.on-close();
+                        return accept;
+                    }
+                    if event.text == Key.Return && root.can-sign-in {
+                        root.on-login();
+                        return accept;
+                    }
+                    return reject;
                 }
 
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 8px;
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
 
-                    // Folder icon (centered vertically)
                     VerticalLayout {
-                        alignment: center;
-                        width: 14px;
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/import.svg");
-                            image-fit: contain;
-                            colorize: Theme.text-secondary;
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 14px;
+                        padding-bottom: 16px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        Text {
+                            text: "Identity file";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+
+                        // File picker: the entire row is clickable.
+                        Rectangle {
+                            height: 36px;
+                            border-radius: Theme.radius-sm;
+                            background: file-row-touch.has-hover && !root.is-loading ? Theme.button-hover : Theme.input-background;
+                            border-width: 1px;
+                            border-color: root.error-message != "" ? Theme.border-error
+                                : file-row-touch.has-hover && !root.is-loading ? Theme.accent-cyan
+                                : Theme.input-border;
+
+                            file-row-touch := TouchArea {
+                                mouse-cursor: root.is-loading ? default : pointer;
+                                enabled: !root.is-loading;
+                                clicked => { root.on-browse-identity(); }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 4px;
+                                spacing: 8px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Image {
+                                        width: 14px;
+                                        height: 14px;
+                                        source: @image-url("../../assets/icons/ui/folder-open.svg");
+                                        image-fit: contain;
+                                        colorize: root.identity-path != "" ? Theme.accent-cyan : Theme.text-secondary;
+                                    }
+                                }
+
+                                Text {
+                                    text: root.identity-path != "" ? root.identity-path : "Choose your eustress .toml file";
+                                    color: root.identity-path != "" ? Theme.text-primary : Theme.text-disabled;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    KitButton {
+                                        text: "Browse";
+                                        kind: "ghost";
+                                        enabled: !root.is-loading;
+                                        clicked => { root.on-browse-identity(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        KitNotice {
+                            kind: "info";
+                            text: "Your eustress-username.toml holds your Ed25519 keypair. Get one at eustress.dev/login. Never share your private key.";
+                        }
+
+                        if root.status-message != "": KitNotice {
+                            kind: "info";
+                            text: root.status-message;
+                        }
+
+                        if root.error-message != "": KitNotice {
+                            kind: "error";
+                            text: root.error-message;
                         }
                     }
 
-                    Text {
-                        text: root.identity-path != "" ? root.identity-path : "Click to select your eustress .toml file...";
-                        color: root.identity-path != "" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
+                    DialogFooter {
+                        KitButton {
+                            text: "Cancel";
+                            clicked => { root.on-close(); }
+                        }
+                        KitButton {
+                            text: root.is-loading ? "Signing in..." : "Sign in";
+                            kind: "primary";
+                            has-icon: true;
+                            icon: @image-url("../../assets/icons/ui/key.svg");
+                            enabled: root.can-sign-in;
+                            clicked => { root.on-login(); }
+                        }
                     }
-
-                    Text {
-                        text: "Browse";
-                        color: Theme.text-accent;
-                        font-size: 10px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Info box
-            Rectangle {
-                height: 56px;
-                background: Theme.selection-background;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: Theme.input-border;
-
-                HorizontalBox {
-                    padding: 10px;
-                    spacing: 8px;
-
-                    Text {
-                        text: "Your eustress-username.toml contains your Ed25519 keypair.\nGet one at eustress.dev/login if you don't have one.\nNever share your private key.";
-                        color: Theme.text-accent;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-
-            Rectangle { height: 4px; }
-
-            // Sign In button
-            Rectangle {
-                height: 40px;
-                background: root.identity-path != "" && !root.is-loading ? Theme.button-primary : #1a3a5a;  // theme-exempt: #1a3a5a is the disabled primary-CTA fill, no disabled-CTA token
-                border-radius: 4px;
-
-                login-touch := TouchArea {
-                    mouse-cursor: root.identity-path != "" && !root.is-loading ? pointer : default;
-                    enabled: root.identity-path != "" && !root.is-loading;
-                    clicked => { root.on-login(); }
-                }
-
-                Text {
-                    text: root.is-loading ? "Authenticating..." : "Sign In with Identity";
-                    color: root.identity-path != "" && !root.is-loading ? #ffffff : #ffffff80;  // theme-exempt: white / faded-white foreground on accent button, no inverse-text token
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            // Status/Error
-            if root.status-message != "": Text {
-                text: root.status-message;
-                color: Theme.text-secondary;
-                font-size: 11px;
-                horizontal-alignment: center;
-            }
-
-            if root.error-message != "": Text {
-                text: root.error-message;
-                color: Theme.text-error;
-                font-size: 11px;
-                horizontal-alignment: center;
-            }
-
-            Rectangle { vertical-stretch: 1; }
-
-            // Cancel link
-            TouchArea {
-                height: 20px;
-                clicked => { root.on-close(); }
-
-                Text {
-                    text: "Cancel";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    horizontal-alignment: center;
                 }
             }
         }

@@ -1,0 +1,2181 @@
+// ============================================================================
+// UI Builder: a whole game UI from one line
+// ============================================================================
+// A floating panel over the left of the viewport, on the shared chrome every
+// floating panel carries (glass surface, hairline, header, close button).
+//
+// - Create: describe the game, write the design brief, generate. Frames
+//   preview in the viewport; Variation, Regenerate and Undo; Recent.
+// - Design: style, HUD kit (restyles every HUD element at once), palette.
+// - Structure: every HUD element and screen, with its fields.
+// - Export: insert into the Space as ScreenGuis and scripts (one undo
+//   step), the checklist of what the game still wires, hook scripts, and
+//   the blueprints saved in this Space.
+//
+// All state lives in the `UiBuilderUi` global; Rust (`ui_builder/mod.rs`)
+// fills it when something changes and receives every click through
+// `action(id, arg)` and every field edit through `field-edited(key, value)`.
+
+import { Theme } from "theme.slint";
+import { ScrollView, LineEdit, TextEdit, ComboBox } from "std-widgets.slint";
+
+export struct UbChip {
+    id: string,
+    label: string,
+    icon: string,
+    selected: bool,
+}
+
+export struct UbExample {
+    id: string,
+    title: string,
+    detail: string,
+    icon: string,
+}
+
+export struct UbKV {
+    key: string,
+    value: string,
+}
+
+export struct UbSection {
+    index: int,
+    title: string,
+    body: string,
+    open: bool,
+}
+
+export struct UbRecent {
+    id: string,
+    title: string,
+    meta: string,
+    icon: string,
+    current: bool,
+}
+
+export struct UbKit {
+    id: string,
+    label: string,
+    selected: bool,
+    plate: color,
+    ink: color,
+    line: color,
+    line-width: float,
+    radius: float,
+    shadow: bool,
+}
+
+export struct UbPalette {
+    id: string,
+    label: string,
+    selected: bool,
+    c1: color,
+    c2: color,
+    c3: color,
+    c4: color,
+    c5: color,
+}
+
+export struct UbRow {
+    // "e:3" for HUD element 3, "s:1" for screen 1
+    id: string,
+    title: string,
+    detail: string,
+    icon: string,
+    visible: bool,
+    selected: bool,
+}
+
+export struct UbField {
+    key: string,
+    label: string,
+    value: string,
+    hint: string,
+    // Non-empty: a choice box instead of a text field.
+    options: [string],
+    // A text area, one entry per line.
+    multiline: bool,
+}
+
+export struct UbExportRow {
+    title: string,
+    path: string,
+    badge: string,
+}
+
+export struct UbCheck {
+    label: string,
+    count: int,
+    // error | warn | info
+    level: string,
+    detail: string,
+}
+
+export global UiBuilderUi {
+    in-out property <bool> open: false;
+    in-out property <string> tab: "create";
+    in-out property <string> prompt: "";
+    in property <bool> ai-mode: false;
+    in property <bool> has-key: false;
+    in property <string> status: "Offline";
+    in property <bool> busy: false;
+    in property <[UbExample]> examples;
+    in-out property <bool> examples-open: false;
+
+    // The design brief
+    in property <bool> has-brief: false;
+    in property <string> brief-meta: "";
+    in property <bool> brief-stale: false;
+    in property <[UbKV]> glance;
+    in property <[color]> glance-swatches;
+    in property <[UbSection]> brief;
+
+    // The result
+    in property <bool> has-result: false;
+    in property <string> result-title: "";
+    in property <string> result-meta: "";
+    in property <string> result-source: "Offline";
+    in property <[UbChip]> frames;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    in property <[UbRecent]> recent;
+
+    // Design
+    in property <[UbChip]> styles;
+    in property <string> style-about: "";
+    in property <[UbKit]> kits;
+    in property <string> kit-about: "";
+    in property <int> kit-overrides: 0;
+    in property <[UbPalette]> palettes;
+    in property <[color]> current-swatches;
+
+    // Structure
+    in property <[UbRow]> elements;
+    in property <[UbRow]> screens;
+    in property <string> selected-title: "";
+    in property <[UbField]> fields;
+    in property <[string]> add-kinds;
+    in-out property <string> filter: "";
+
+    // Export
+    in-out property <string> export-name: "";
+    in-out property <bool> server-script: false;
+    in property <[UbExportRow]> export-rows;
+    in property <string> insert-label: "Insert into game";
+    in property <bool> inserted: false;
+    in property <string> inserted-title: "";
+    in property <string> inserted-meta: "";
+    in property <[UbCheck]> checklist;
+    in property <int> todo-count: 0;
+    in property <int> note-count: 0;
+    in property <[UbExportRow]> script-rows;
+    in property <[UbRecent]> saved;
+    in property <string> saved-meta: "";
+    in property <string> usage: "";
+
+    // Preview
+    in-out property <bool> preview: false;
+    in property <[string]> preview-frames;
+    in-out property <int> preview-index: 0;
+
+    in property <string> toast: "";
+    // ok | warn | error
+    in property <string> toast-kind: "ok";
+
+    callback action(string, string);
+    callback field-edited(string, string);
+}
+
+// ── Icons ───────────────────────────────────────────────────────────────────
+
+export global UbIcons {
+    public pure function get(name: string) -> image {
+        if name == "sparkle" { return @image-url("../../assets/icons/ui/sparkle.svg"); }
+        if name == "palette" { return @image-url("../../assets/icons/ui/palette.svg"); }
+        if name == "tree" { return @image-url("../../assets/icons/ui/tree.svg"); }
+        if name == "export" { return @image-url("../../assets/icons/ui/export.svg"); }
+        if name == "undo" { return @image-url("../../assets/icons/ui/undo.svg"); }
+        if name == "redo" { return @image-url("../../assets/icons/ui/redo.svg"); }
+        if name == "close" { return @image-url("../../assets/icons/ui/close.svg"); }
+        if name == "check" { return @image-url("../../assets/icons/ui/check.svg"); }
+        if name == "plus" { return @image-url("../../assets/icons/ui/plus.svg"); }
+        if name == "eye" { return @image-url("../../assets/icons/ui/eye.svg"); }
+        if name == "search" { return @image-url("../../assets/icons/ui/search.svg"); }
+        if name == "refresh" { return @image-url("../../assets/icons/ui/refresh.svg"); }
+        if name == "settings" { return @image-url("../../assets/icons/ui/settings.svg"); }
+        if name == "history" { return @image-url("../../assets/icons/ui/history.svg"); }
+        if name == "play" { return @image-url("../../assets/icons/ui/play.svg"); }
+        if name == "screen" { return @image-url("../../assets/icons/ui/screen.svg"); }
+        if name == "layout-default" { return @image-url("../../assets/icons/ui/layout-default.svg"); }
+        if name == "coin" { return @image-url("../../assets/icons/ui/coin.svg"); }
+        if name == "sigma" { return @image-url("../../assets/icons/ui/sigma.svg"); }
+        if name == "flag" { return @image-url("../../assets/icons/ui/flag.svg"); }
+        if name == "gauge" { return @image-url("../../assets/icons/ui/gauge.svg"); }
+        if name == "clock" { return @image-url("../../assets/icons/ui/clock.svg"); }
+        if name == "array-linear" { return @image-url("../../assets/icons/ui/array-linear.svg"); }
+        if name == "array-grid" { return @image-url("../../assets/icons/ui/array-grid.svg"); }
+        if name == "trophy" { return @image-url("../../assets/icons/ui/trophy.svg"); }
+        if name == "map" { return @image-url("../../assets/icons/ui/map.svg"); }
+        if name == "button" { return @image-url("../../assets/icons/ui/button.svg"); }
+        if name == "list" { return @image-url("../../assets/icons/ui/list.svg"); }
+        if name == "checklist" { return @image-url("../../assets/icons/ui/checklist.svg"); }
+        if name == "keyboard" { return @image-url("../../assets/icons/ui/keyboard.svg"); }
+        if name == "megaphone" { return @image-url("../../assets/icons/ui/megaphone.svg"); }
+        if name == "certificate" { return @image-url("../../assets/icons/ui/certificate.svg"); }
+        if name == "chart-bar" { return @image-url("../../assets/icons/ui/chart-bar.svg"); }
+        if name == "book" { return @image-url("../../assets/icons/ui/book.svg"); }
+        if name == "key" { return @image-url("../../assets/icons/ui/key.svg"); }
+        if name == "factory" { return @image-url("../../assets/icons/ui/factory.svg"); }
+        if name == "vehicle" { return @image-url("../../assets/icons/ui/vehicle.svg"); }
+        if name == "shield" { return @image-url("../../assets/icons/ui/shield.svg"); }
+        if name == "crosshair" { return @image-url("../../assets/icons/ui/crosshair.svg"); }
+        if name == "flashlight" { return @image-url("../../assets/icons/ui/flashlight.svg"); }
+        if name == "users" { return @image-url("../../assets/icons/ui/users.svg"); }
+        if name == "fire" { return @image-url("../../assets/icons/ui/fire.svg"); }
+        if name == "chevron-down" { return @image-url("../../assets/icons/ui/chevron-down.svg"); }
+        if name == "chevron-right" { return @image-url("../../assets/icons/ui/chevron-right.svg"); }
+        if name == "chevron-up" { return @image-url("../../assets/icons/ui/chevron-up.svg"); }
+        if name == "delete" { return @image-url("../../assets/icons/ui/delete.svg"); }
+        if name == "image" { return @image-url("../../assets/icons/ui/image.svg"); }
+        if name == "warning" { return @image-url("../../assets/icons/ui/warning.svg"); }
+        if name == "info" { return @image-url("../../assets/icons/ui/info.svg"); }
+        if name == "error" { return @image-url("../../assets/icons/ui/error.svg"); }
+        if name == "save" { return @image-url("../../assets/icons/ui/save.svg"); }
+        if name == "pen" { return @image-url("../../assets/icons/ui/pen.svg"); }
+        if name == "lightning" { return @image-url("../../assets/icons/ui/lightning.svg"); }
+        if name == "brain" { return @image-url("../../assets/icons/ui/brain.svg"); }
+        if name == "terminal" { return @image-url("../../assets/icons/ui/terminal.svg"); }
+        if name == "document" { return @image-url("../../assets/icons/ui/document.svg"); }
+        if name == "folder-open" { return @image-url("../../assets/icons/ui/folder-open.svg"); }
+        if name == "import" { return @image-url("../../assets/icons/ui/import.svg"); }
+        if name == "cursor" { return @image-url("../../assets/icons/ui/cursor.svg"); }
+        if name == "lock" { return @image-url("../../assets/icons/ui/lock.svg"); }
+        if name == "heart-pulse" { return @image-url("../../assets/icons/ui/heart-pulse.svg"); }
+        return @image-url("../../assets/icons/ui/frame.svg");
+    }
+}
+
+// ── Small parts ─────────────────────────────────────────────────────────────
+
+component Glyph inherits Image {
+    in property <string> name;
+    in property <color> tint: Theme.text-secondary;
+    source: UbIcons.get(root.name);
+    colorize: root.tint;
+    image-fit: contain;
+    width: 14px;
+    height: 14px;
+}
+
+// A button with an optional icon. `primary` fills it with the gradient the
+// panel's main actions use; otherwise it is the plain button surface.
+component UbButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon: "";
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <length> font-size: 12px;
+    callback clicked();
+
+    height: 32px;
+    min-width: row.preferred-width;
+    border-radius: Theme.radius-md;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.primary
+        ? (touch.pressed ? Theme.accent-purple.darker(0.2) : @linear-gradient(90deg, Theme.accent-purple 0%, Theme.accent-blue 100%))
+        : (touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : Theme.button-background);
+    border-width: root.primary ? 0px : 1px;
+    border-color: Theme.border-color;
+
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: 7px;
+        padding-left: 10px;
+        padding-right: 10px;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Glyph {
+                name: root.icon;
+                tint: root.primary ? white : Theme.text-primary;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.primary ? white : Theme.text-primary;
+            font-size: root.font-size;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A small square icon button (undo, redo, close, row actions).
+component UbIconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <color> tint: Theme.text-secondary;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover && root.enabled ? Theme.button-hover : transparent;
+    opacity: root.enabled ? 1.0 : 0.35;
+
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: root.icon;
+        tint: root.tint;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A pill that can be picked: styles, frames, add-element kinds.
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <string> icon: "";
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 26px;
+    width: chip-row.preferred-width;
+    border-radius: 13px;
+    background: root.selected ? Theme.accent-cyan.with-alpha(0.22)
+        : touch.has-hover ? Theme.button-hover : Theme.button-background;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent-cyan.with-alpha(0.7) : Theme.border-color;
+
+    chip-row := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 11px;
+        spacing: 5px;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Glyph {
+                name: root.icon;
+                width: 12px;
+                height: 12px;
+                tint: root.selected ? Theme.text-primary : Theme.text-secondary;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Chips that wrap onto as many rows as they need.
+component ChipFlow inherits Rectangle {
+    in property <[UbChip]> chips;
+    in property <length> chip-width: 96px;
+    callback picked(string);
+
+    property <int> per-row: max(1, floor((root.width + 6px) / (root.chip-width + 6px)));
+    height: ceil(root.chips.length / root.per-row) * 32px;
+
+    for c[i] in root.chips: Chip {
+        x: mod(i, root.per-row) * (root.chip-width + 6px);
+        y: floor(i / root.per-row) * 32px;
+        width: root.chip-width;
+        text: c.label;
+        icon: c.icon;
+        selected: c.selected;
+        clicked => { root.picked(c.id); }
+    }
+}
+
+// A rounded card with an icon disc, a title and a subtitle.
+component Card inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> subtitle: "";
+
+    background: Theme.background-secondary.with-alpha(0.7);
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.accent-purple.with-alpha(0.2);
+                    Glyph {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        name: root.icon;
+                        tint: Theme.accent-purple.brighter(0.4);
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.title;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                if root.subtitle != "": Text {
+                    text: root.subtitle;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            @children
+        }
+    }
+}
+
+// Card body: the content under a Card's title row. A separate element so
+// cards keep their title row compact and their bodies full width.
+component SectionTitle inherits Text {
+    color: Theme.text-disabled;
+    font-size: Theme.font-xs;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+
+component StatusPill inherits Rectangle {
+    in property <string> text;
+    in property <color> tone: Theme.text-success;
+
+    height: 22px;
+    width: pill-row.preferred-width;
+    border-radius: 11px;
+    background: Theme.button-background;
+    border-width: 1px;
+    border-color: Theme.border-color;
+
+    pill-row := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 9px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.tone;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    width: 34px;
+    height: 18px;
+    border-radius: 9px;
+    background: root.checked ? Theme.accent-cyan : Theme.button-background;
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent-cyan : Theme.border-color;
+    animate background { duration: 120ms; }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: white;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// ── Create tab ──────────────────────────────────────────────────────────────
+
+component CreateTab inherits VerticalLayout {
+    alignment: start;
+    spacing: 12px;
+    padding: 12px;
+
+    // Describe your game
+    Card {
+        icon: "cursor";
+        title: "Describe your game";
+        subtitle: "One line is enough to start.";
+
+        VerticalLayout {
+            alignment: center;
+            UbButton {
+                text: "Examples";
+                icon: UiBuilderUi.examples-open ? "chevron-up" : "chevron-down";
+                height: 26px;
+                clicked => { UiBuilderUi.examples-open = !UiBuilderUi.examples-open; }
+            }
+        }
+    }
+
+    if UiBuilderUi.examples-open: Rectangle {
+        background: Theme.dialog-background;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: Theme.shadow-float;
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            HorizontalLayout {
+                padding-left: 8px;
+                height: 22px;
+                SectionTitle {
+                    text: "START FROM AN EXAMPLE";
+                    vertical-alignment: center;
+                }
+            }
+            for ex in UiBuilderUi.examples: Rectangle {
+                height: 40px;
+                border-radius: Theme.radius-sm;
+                background: ex-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Glyph {
+                            name: ex.icon;
+                            width: 16px;
+                            height: 16px;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: ex.title;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: ex.detail;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            overflow: elide;
+                        }
+                    }
+                }
+                ex-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        UiBuilderUi.examples-open = false;
+                        UiBuilderUi.action("example", ex.id);
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        height: 96px;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: prompt-edit.has-focus ? Theme.accent-cyan : Theme.border-color;
+        prompt-edit := TextEdit {
+            width: 100%;
+            height: 100%;
+            text <=> UiBuilderUi.prompt;
+            placeholder-text: "A cozy farming game with coins, a crop shop and daily quests";
+            wrap: word-wrap;
+            font-size: 13px;
+            edited(t) => { UiBuilderUi.action("prompt", t); }
+        }
+    }
+
+    // Mode: offline or Claude
+    VerticalLayout {
+        spacing: 6px;
+        SectionTitle { text: "MODE"; }
+        Rectangle {
+            height: 32px;
+            border-radius: Theme.radius-md;
+            background: Theme.button-background;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            HorizontalLayout {
+                padding: 3px;
+                spacing: 3px;
+                for m[i] in [{ id: "ai", label: "Claude AI", icon: "brain" }, { id: "offline", label: "Offline", icon: "lightning" }]: mode-item := Rectangle {
+                    property <bool> on: (m.id == "ai") == UiBuilderUi.ai-mode;
+                    border-radius: Theme.radius-sm;
+                    background: self.on ? Theme.background-tertiary : mode-touch.has-hover ? Theme.button-hover : transparent;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            Glyph {
+                                name: m.icon;
+                                width: 12px;
+                                height: 12px;
+                                tint: mode-item.on ? Theme.text-primary : Theme.text-disabled;
+                            }
+                        }
+                        Text {
+                            text: m.label;
+                            color: mode-item.on ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                    mode-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { UiBuilderUi.action("mode", m.id); }
+                    }
+                }
+            }
+        }
+        Text {
+            text: UiBuilderUi.ai-mode
+                ? (UiBuilderUi.has-key ? "Claude writes the brief and the UI. Takes about a minute." : "Claude mode needs an API key: add one in Settings > Soul. Until then the builder runs offline.")
+                : "Instant and free, no network. Switch to Claude AI for UIs that follow the prompt more closely.";
+            color: UiBuilderUi.ai-mode && !UiBuilderUi.has-key ? Theme.text-warning : Theme.text-disabled;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        UbButton {
+            text: UiBuilderUi.has-brief ? "Rewrite brief" : "Write brief";
+            icon: "document";
+            enabled: !UiBuilderUi.busy;
+            clicked => { UiBuilderUi.action("brief", ""); }
+        }
+        UbButton {
+            horizontal-stretch: 1;
+            primary: true;
+            icon: "play";
+            text: UiBuilderUi.busy ? "Working..." : "Generate UI";
+            enabled: !UiBuilderUi.busy;
+            clicked => { UiBuilderUi.action("generate", ""); }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        UbButton {
+            height: 24px;
+            text: "Improve prompt";
+            icon: "sparkle";
+            font-size: 11px;
+            enabled: !UiBuilderUi.busy && UiBuilderUi.prompt != "";
+            clicked => { UiBuilderUi.action("improve", ""); }
+        }
+    }
+
+    // The design brief
+    if UiBuilderUi.has-brief: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-md;
+                        background: Theme.accent-purple.with-alpha(0.2);
+                        Glyph {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            name: "pen";
+                            tint: Theme.accent-purple.brighter(0.4);
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Design brief";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: UiBuilderUi.brief-meta;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    UbIconButton {
+                        icon: "close";
+                        clicked => { UiBuilderUi.action("dismiss-brief", ""); }
+                    }
+                }
+            }
+
+            if UiBuilderUi.brief-stale: Rectangle {
+                height: 34px;
+                border-radius: Theme.radius-md;
+                background: Theme.text-warning.with-alpha(0.12);
+                border-width: 1px;
+                border-color: Theme.text-warning.with-alpha(0.4);
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 6px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        Glyph { name: "warning"; tint: Theme.text-warning; }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Your prompt changed since this brief was written.";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        UbButton {
+                            height: 24px;
+                            text: "Rewrite";
+                            font-size: 11px;
+                            clicked => { UiBuilderUi.action("brief", ""); }
+                        }
+                    }
+                }
+            }
+
+            SectionTitle { text: "AT A GLANCE"; }
+            for kv in UiBuilderUi.glance: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    width: 58px;
+                    text: kv.key;
+                    color: Theme.text-disabled;
+                    font-size: Theme.font-sm;
+                }
+                if kv.key == "Palette": HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+                    horizontal-stretch: 0;
+                    for c in UiBuilderUi.glance-swatches: Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: c;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: kv.value;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-sm;
+                    wrap: word-wrap;
+                }
+            }
+
+            for s in UiBuilderUi.brief: VerticalLayout {
+                spacing: 4px;
+                Rectangle {
+                    height: 26px;
+                    border-radius: Theme.radius-sm;
+                    background: sec-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        padding-left: 4px;
+                        VerticalLayout {
+                            alignment: center;
+                            Glyph {
+                                name: s.open ? "chevron-down" : "chevron-right";
+                                width: 10px;
+                                height: 10px;
+                            }
+                        }
+                        Text {
+                            width: 18px;
+                            text: s.index < 9 ? "0\{s.index + 1}" : "\{s.index + 1}";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: s.title;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            font-weight: 600;
+                            letter-spacing: 0.4px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    sec-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { UiBuilderUi.action("brief-section", "\{s.index}"); }
+                    }
+                }
+                if s.open: HorizontalLayout {
+                    padding-left: 40px;
+                    padding-right: 4px;
+                    Text {
+                        text: s.body;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            UbButton {
+                primary: true;
+                icon: "play";
+                text: "Generate UI from this brief";
+                enabled: !UiBuilderUi.busy;
+                clicked => { UiBuilderUi.action("generate-from-brief", ""); }
+            }
+        }
+    }
+
+    // The result
+    if UiBuilderUi.has-result: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-md;
+                        background: Theme.accent-purple.with-alpha(0.2);
+                        Glyph {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            name: "check";
+                            tint: Theme.accent-purple.brighter(0.4);
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: UiBuilderUi.result-title;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: UiBuilderUi.result-meta;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    StatusPill {
+                        text: UiBuilderUi.result-source;
+                        tone: UiBuilderUi.result-source == "Claude" ? Theme.accent-purple : Theme.text-success;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                SectionTitle { text: "FRAMES"; horizontal-stretch: 1; }
+                Text {
+                    text: "Click to preview";
+                    color: Theme.text-disabled;
+                    font-size: Theme.font-xs;
+                }
+            }
+            ChipFlow {
+                chips: UiBuilderUi.frames;
+                chip-width: 104px;
+                picked(id) => { UiBuilderUi.action("frame", id); }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                UbButton {
+                    horizontal-stretch: 1;
+                    text: "Variation";
+                    icon: "refresh";
+                    enabled: !UiBuilderUi.busy;
+                    clicked => { UiBuilderUi.action("variation", ""); }
+                }
+                UbButton {
+                    horizontal-stretch: 1;
+                    text: "Regenerate";
+                    icon: "sparkle";
+                    enabled: !UiBuilderUi.busy;
+                    clicked => { UiBuilderUi.action("regenerate", ""); }
+                }
+                UbButton {
+                    horizontal-stretch: 1;
+                    text: "Undo";
+                    icon: "undo";
+                    enabled: UiBuilderUi.can-undo;
+                    clicked => { UiBuilderUi.action("undo", ""); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                UbButton {
+                    horizontal-stretch: 1;
+                    text: "Customize";
+                    icon: "palette";
+                    clicked => { UiBuilderUi.tab = "design"; }
+                }
+                UbButton {
+                    horizontal-stretch: 1;
+                    text: "Insert";
+                    icon: "import";
+                    clicked => { UiBuilderUi.tab = "export"; }
+                }
+            }
+        }
+    }
+
+    // Recent
+    if UiBuilderUi.recent.length > 0: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Glyph { name: "history"; width: 16px; height: 16px; }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Recent";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Click one to restore it.";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    UbButton {
+                        height: 24px;
+                        text: "Clear";
+                        font-size: 11px;
+                        clicked => { UiBuilderUi.action("clear-recent", ""); }
+                    }
+                }
+            }
+            for r in UiBuilderUi.recent: Rectangle {
+                height: 40px;
+                border-radius: Theme.radius-md;
+                background: r.current ? Theme.accent-cyan.with-alpha(0.22) : rec-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Glyph { name: r.icon; width: 16px; height: 16px; tint: r.current ? Theme.text-primary : Theme.text-secondary; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: r.title;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: r.meta;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            overflow: elide;
+                        }
+                    }
+                    if r.current: VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "Current";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                        }
+                    }
+                }
+                rec-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { UiBuilderUi.action("restore", r.id); }
+                }
+            }
+        }
+    }
+}
+
+// ── Design tab ──────────────────────────────────────────────────────────────
+
+component KitTile inherits Rectangle {
+    in property <UbKit> kit;
+    callback clicked();
+
+    height: 70px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.kit.selected ? 2px : 0px;
+    border-color: Theme.accent-cyan;
+
+    VerticalLayout {
+        padding: 3px;
+        spacing: 3px;
+        // A little world: sky over grass, with the kit's "250" plate on it.
+        Rectangle {
+            height: 42px;
+            border-radius: Theme.radius-sm;
+            clip: true;
+            background: @linear-gradient(180deg, #7ec3ee 0%, #a9dbf5 58%, #6dbb52 58%, #4f9c3e 100%);
+            if root.kit.shadow: Rectangle {
+                x: (parent.width - 50px) / 2;
+                y: 11px + 3px;
+                width: 50px;
+                height: 22px;
+                border-radius: root.kit.radius * 1px;
+                background: #00000088;
+            }
+            Rectangle {
+                x: (parent.width - 50px) / 2;
+                y: 10px;
+                width: 50px;
+                height: 22px;
+                border-radius: root.kit.radius * 1px;
+                background: root.kit.plate;
+                border-width: root.kit.line-width * 1px;
+                border-color: root.kit.line;
+                Text {
+                    text: "250";
+                    color: root.kit.ink;
+                    font-size: 12px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Text {
+            text: root.kit.label;
+            color: root.kit.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-xs;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component DesignTab inherits VerticalLayout {
+    alignment: start;
+    spacing: 12px;
+    padding: 12px;
+
+    Card {
+        icon: "pen";
+        title: "Style";
+        subtitle: UiBuilderUi.style-about;
+    }
+    ChipFlow {
+        chips: UiBuilderUi.styles;
+        chip-width: 78px;
+        picked(id) => { UiBuilderUi.action("style", id); }
+    }
+
+    Card {
+        icon: "array-grid";
+        title: "HUD kit";
+        subtitle: "Restyles every HUD element at once, in your palette.";
+    }
+    kit-grid := Rectangle {
+        property <int> cols: 4;
+        property <length> cell: (self.width - 3 * 6px) / self.cols;
+        height: ceil(UiBuilderUi.kits.length / self.cols) * 76px;
+        for k[i] in UiBuilderUi.kits: KitTile {
+            x: mod(i, kit-grid.cols) * (kit-grid.cell + 6px);
+            y: floor(i / kit-grid.cols) * 76px;
+            width: kit-grid.cell;
+            kit: k;
+            clicked => { UiBuilderUi.action("kit", k.id); }
+        }
+    }
+    Text {
+        text: UiBuilderUi.kit-about;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    if UiBuilderUi.kit-overrides > 0: HorizontalLayout {
+        spacing: 8px;
+        Text {
+            horizontal-stretch: 1;
+            text: UiBuilderUi.kit-overrides == 1 ? "1 element keeps its own look (Structure > Look)." : "\{UiBuilderUi.kit-overrides} elements keep their own look (Structure > Look).";
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        UbButton {
+            height: 24px;
+            text: "Use the kit's";
+            icon: "refresh";
+            font-size: 11px;
+            clicked => { UiBuilderUi.action("kit-all", ""); }
+        }
+    }
+
+    Card {
+        icon: "palette";
+        title: "Palette";
+        subtitle: "Presets that fit the style.";
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: 3px;
+                for c in UiBuilderUi.current-swatches: Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: c;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+                }
+            }
+        }
+    }
+    palette-grid := Rectangle {
+        property <length> cell: (self.width - 6px) / 2;
+        height: ceil(UiBuilderUi.palettes.length / 2) * 38px;
+        for p[i] in UiBuilderUi.palettes: Rectangle {
+            x: mod(i, 2) * (palette-grid.cell + 6px);
+            y: floor(i / 2) * 38px;
+            width: palette-grid.cell;
+            height: 32px;
+            border-radius: 16px;
+            background: pal-touch.has-hover ? Theme.button-hover : Theme.button-background;
+            border-width: p.selected ? 2px : 1px;
+            border-color: p.selected ? Theme.accent-cyan : Theme.border-color;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 10px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: -5px;
+                    alignment: start;
+                    for c in [p.c1, p.c2, p.c3, p.c4, p.c5]: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 15px;
+                            height: 15px;
+                            border-radius: 7.5px;
+                            background: c;
+                            border-width: 1px;
+                            border-color: #00000055;
+                        }
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: p.label;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            pal-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { UiBuilderUi.action("palette", p.id); }
+            }
+        }
+    }
+}
+
+// ── Structure tab ───────────────────────────────────────────────────────────
+
+component StructureRow inherits Rectangle {
+    in property <UbRow> item;
+    in property <bool> movable: true;
+    callback act(string);
+
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    background: root.item.selected ? Theme.accent-cyan.with-alpha(0.22) : touch.has-hover ? Theme.explorer-item-hover : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.act("select"); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 4px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Glyph {
+                name: root.item.icon;
+                tint: root.item.visible ? Theme.text-primary : Theme.text-disabled;
+            }
+        }
+        Text {
+            text: root.item.title;
+            color: root.item.visible ? Theme.text-primary : Theme.text-disabled;
+            font-size: Theme.font-sm;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.item.detail;
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.movable && (touch.has-hover || root.item.selected): HorizontalLayout {
+            spacing: 0px;
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "eye";
+                    tint: root.item.visible ? Theme.text-secondary : Theme.text-disabled;
+                    clicked => { root.act("visible"); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "chevron-up";
+                    clicked => { root.act("up"); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "chevron-down";
+                    clicked => { root.act("down"); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "delete";
+                    clicked => { root.act("remove"); }
+                }
+            }
+        }
+    }
+}
+
+component StructureTab inherits VerticalLayout {
+    alignment: start;
+    spacing: 10px;
+    padding: 12px;
+
+    Rectangle {
+        height: 32px;
+        border-radius: Theme.radius-md;
+        background: Theme.input-background;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        HorizontalLayout {
+            padding-left: 10px;
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Glyph { name: "search"; }
+            }
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> UiBuilderUi.filter;
+                placeholder-text: "Filter elements and screens";
+                edited(t) => { UiBuilderUi.action("filter", t); }
+            }
+        }
+    }
+
+    if !UiBuilderUi.has-result: Text {
+        text: "Generate a UI on the Create tab first.";
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+    }
+
+    if UiBuilderUi.has-result: HorizontalLayout {
+        spacing: 6px;
+        SectionTitle {
+            text: "HUD  \{UiBuilderUi.elements.length}";
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        ComboBox {
+            width: 150px;
+            height: 26px;
+            model: UiBuilderUi.add-kinds;
+            current-value: "Add element";
+            selected(v) => {
+                UiBuilderUi.action("add", v);
+                self.current-value = "Add element";
+            }
+        }
+    }
+    for r in UiBuilderUi.elements: StructureRow {
+        item: r;
+        act(what) => { UiBuilderUi.action(what, r.id); }
+    }
+
+    if UiBuilderUi.has-result: SectionTitle { text: "SCREENS  \{UiBuilderUi.screens.length}"; }
+    for r in UiBuilderUi.screens: StructureRow {
+        item: r;
+        act(what) => { UiBuilderUi.action(what, r.id); }
+    }
+
+    // The selected element's or screen's fields. A separate card rather
+    // than rows inside the list, so rebuilding the list never takes the
+    // focus out of a field being typed in.
+    if UiBuilderUi.fields.length > 0: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            Text {
+                text: UiBuilderUi.selected-title;
+                color: Theme.text-primary;
+                font-size: Theme.font-md;
+                font-weight: 600;
+            }
+            for f in UiBuilderUi.fields: VerticalLayout {
+                spacing: 3px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        width: 64px;
+                        text: f.label;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    if f.options.length > 0: ComboBox {
+                        horizontal-stretch: 1;
+                        model: f.options;
+                        current-value: f.value;
+                        selected(v) => { UiBuilderUi.field-edited(f.key, v); }
+                    }
+                    if f.options.length == 0 && !f.multiline: LineEdit {
+                        horizontal-stretch: 1;
+                        text: f.value;
+                        edited(t) => { UiBuilderUi.field-edited(f.key, t); }
+                    }
+                    if f.options.length == 0 && f.multiline: TextEdit {
+                        horizontal-stretch: 1;
+                        height: 110px;
+                        text: f.value;
+                        font-size: 12px;
+                        edited(t) => { UiBuilderUi.field-edited(f.key, t); }
+                    }
+                }
+                if f.hint != "": HorizontalLayout {
+                    padding-left: 72px;
+                    Text {
+                        text: f.hint;
+                        color: Theme.text-disabled;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Export tab ──────────────────────────────────────────────────────────────
+
+component ExportRowView inherits Rectangle {
+    in property <UbExportRow> item;
+    height: 40px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Glyph { name: "document"; }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.item.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-sm;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.path;
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                font-family: "Consolas";
+                overflow: elide;
+            }
+        }
+        if root.item.badge != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 20px;
+                width: badge-text.preferred-width + 14px;
+                border-radius: 10px;
+                background: root.item.badge == "New" ? Theme.text-success.with-alpha(0.16) : Theme.button-background;
+                badge-text := Text {
+                    text: root.item.badge;
+                    color: root.item.badge == "New" ? Theme.text-success : Theme.text-secondary;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component ExportTab inherits VerticalLayout {
+    alignment: start;
+    spacing: 12px;
+    padding: 12px;
+
+    if !UiBuilderUi.has-result: Text {
+        text: "Generate a UI on the Create tab first.";
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+    }
+
+    if UiBuilderUi.has-result: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Glyph { name: "import"; width: 16px; height: 16px; tint: Theme.accent-purple.brighter(0.4); }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Insert into game";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "One click, one undo step (Ctrl+Z).";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                    }
+                }
+            }
+            SectionTitle { text: "NAME"; }
+            LineEdit {
+                text <=> UiBuilderUi.export-name;
+                placeholder-text: "Letters and digits";
+                edited(t) => { UiBuilderUi.action("export-name", t); }
+            }
+            Text {
+                text: "Letters and digits. Scripts find the UI by this name.";
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        checked <=> UiBuilderUi.server-script;
+                        toggled(on) => { UiBuilderUi.action("server-script", on ? "on" : "off"); }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Add server script";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                    }
+                    Text {
+                        text: "Currencies as player attributes and the requests the buttons send (ServerScriptService).";
+                        color: Theme.text-disabled;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            SectionTitle { text: "WHAT GETS INSERTED"; }
+            Rectangle {
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                VerticalLayout {
+                    padding: 2px;
+                    for r in UiBuilderUi.export-rows: ExportRowView { item: r; }
+                }
+            }
+            UbButton {
+                primary: true;
+                icon: "import";
+                text: UiBuilderUi.insert-label;
+                height: 36px;
+                font-size: 13px;
+                enabled: !UiBuilderUi.busy;
+                clicked => { UiBuilderUi.action("insert", ""); }
+            }
+            if UiBuilderUi.inserted: Rectangle {
+                border-radius: Theme.radius-md;
+                background: Theme.text-success.with-alpha(0.1);
+                border-width: 1px;
+                border-color: Theme.text-success.with-alpha(0.4);
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Glyph { name: "check"; tint: Theme.text-success; }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: UiBuilderUi.inserted-title;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+                    }
+                    Text {
+                        text: UiBuilderUi.inserted-meta;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    if UiBuilderUi.has-result: Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Glyph { name: "terminal"; width: 16px; height: 16px; tint: Theme.accent-purple.brighter(0.4); }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Export as code";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Hook scripts with a handler for everything this UI needs.";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                SectionTitle { text: "CHECKLIST"; horizontal-stretch: 1; vertical-alignment: center; }
+                if UiBuilderUi.todo-count > 0: Rectangle {
+                    height: 20px;
+                    width: todo-text.preferred-width + 14px;
+                    border-radius: 10px;
+                    background: Theme.text-warning.with-alpha(0.16);
+                    todo-text := Text {
+                        text: "\{UiBuilderUi.todo-count} to do";
+                        color: Theme.text-warning;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                if UiBuilderUi.note-count > 0: Rectangle {
+                    height: 20px;
+                    width: note-text.preferred-width + 14px;
+                    border-radius: 10px;
+                    background: Theme.button-background;
+                    note-text := Text {
+                        text: "\{UiBuilderUi.note-count} notes";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            for c in UiBuilderUi.checklist: check-item := Rectangle {
+                property <bool> expanded: false;
+                border-radius: Theme.radius-md;
+                background: check-touch.has-hover ? Theme.explorer-item-hover : Theme.button-background.with-alpha(0.4);
+                VerticalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 7px;
+                    padding-bottom: 7px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            Glyph {
+                                name: c.level == "error" ? "error" : c.level == "warn" ? "warning" : "info";
+                                tint: c.level == "error" ? Theme.text-error : c.level == "warn" ? Theme.text-warning : Theme.accent-blue;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: c.label;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "\{c.count}";
+                            color: c.level == "error" ? Theme.text-error : c.level == "warn" ? Theme.text-warning : Theme.accent-blue;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Glyph {
+                                name: check-item.expanded ? "chevron-down" : "chevron-right";
+                                width: 10px;
+                                height: 10px;
+                            }
+                        }
+                    }
+                    if check-item.expanded: Text {
+                        text: c.detail;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+                check-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { check-item.expanded = !check-item.expanded; }
+                }
+            }
+            SectionTitle { text: "SCRIPTS"; }
+            Rectangle {
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                VerticalLayout {
+                    padding: 2px;
+                    for r in UiBuilderUi.script-rows: ExportRowView { item: r; }
+                }
+            }
+            UbButton {
+                icon: "terminal";
+                text: "Insert scripts";
+                enabled: !UiBuilderUi.busy;
+                clicked => { UiBuilderUi.action("insert-scripts", ""); }
+            }
+            Text {
+                text: "Named after the UI, one undo step. The module and start script are rewritten on every insert; the hook scripts are written once and never touched again.";
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // Saved in this Space
+    Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Glyph { name: "folder-open"; width: 16px; height: 16px; tint: Theme.accent-purple.brighter(0.4); }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Saved in this Space";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: UiBuilderUi.saved-meta;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    UbIconButton {
+                        icon: "refresh";
+                        clicked => { UiBuilderUi.action("refresh-saved", ""); }
+                    }
+                }
+            }
+            for s in UiBuilderUi.saved: Rectangle {
+                height: 42px;
+                border-radius: Theme.radius-md;
+                background: s.current ? Theme.accent-cyan.with-alpha(0.18) : Theme.button-background.with-alpha(0.4);
+                border-width: s.current ? 1px : 0px;
+                border-color: Theme.accent-cyan.with-alpha(0.5);
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 6px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: s.title;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: s.meta;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            overflow: elide;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        UbButton {
+                            height: 26px;
+                            text: s.current ? "Editing" : "Load";
+                            icon: "pen";
+                            font-size: 11px;
+                            enabled: !s.current;
+                            clicked => { UiBuilderUi.action("load-saved", s.id); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        UbIconButton {
+                            icon: "delete";
+                            clicked => { UiBuilderUi.action("trash-saved", s.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if UiBuilderUi.usage != "": Rectangle {
+        background: Theme.background-secondary.with-alpha(0.7);
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            Text {
+                text: "Using it in your game";
+                color: Theme.text-primary;
+                font-size: Theme.font-md;
+                font-weight: 600;
+            }
+            Text {
+                text: "Press Play: the start script opens the loading screen and the menu, and wires every button.";
+                color: Theme.text-secondary;
+                font-size: Theme.font-xs;
+                wrap: word-wrap;
+            }
+            Rectangle {
+                background: Theme.background-primary;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                Text {
+                    x: 10px;
+                    y: 8px;
+                    width: parent.width - 20px;
+                    text: UiBuilderUi.usage;
+                    color: Theme.text-primary;
+                    font-family: "Consolas";
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                height: usage-measure.preferred-height + 16px;
+                usage-measure := Text {
+                    visible: false;
+                    width: parent.width - 20px;
+                    text: UiBuilderUi.usage;
+                    font-family: "Consolas";
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ── The panel ───────────────────────────────────────────────────────────────
+
+export component UiBuilderPanel inherits Rectangle {
+    // The panel shrinks to the viewport's height.
+    in property <length> height-limit: 800px;
+
+    width: 372px;
+    height: root.height-limit;
+    visible: UiBuilderUi.open;
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: Theme.shadow-float;
+    clip: true;
+
+    // Clicks on the panel stay on the panel.
+    TouchArea { }
+
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+
+        // Header
+        HorizontalLayout {
+            height: 52px;
+            padding-left: 12px;
+            padding-right: 8px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-md;
+                    background: @linear-gradient(135deg, Theme.accent-purple 0%, Theme.accent-blue 100%);
+                    Glyph {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        name: "cursor";
+                        tint: white;
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: "UI Builder";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Built-in plugin";
+                    color: Theme.text-disabled;
+                    font-size: Theme.font-xs;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "undo";
+                    enabled: UiBuilderUi.can-undo;
+                    clicked => { UiBuilderUi.action("undo", ""); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "redo";
+                    enabled: UiBuilderUi.can-redo;
+                    clicked => { UiBuilderUi.action("redo", ""); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                StatusPill {
+                    text: UiBuilderUi.status;
+                    tone: UiBuilderUi.busy ? Theme.text-warning : UiBuilderUi.ai-mode && UiBuilderUi.has-key ? Theme.accent-purple : Theme.text-success;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                UbIconButton {
+                    icon: "close";
+                    clicked => { UiBuilderUi.action("close", ""); }
+                }
+            }
+        }
+
+        // Tabs
+        HorizontalLayout {
+            height: 38px;
+            padding-left: 6px;
+            padding-right: 6px;
+            for t in [
+                { id: "create", label: "Create", icon: "cursor" },
+                { id: "design", label: "Design", icon: "pen" },
+                { id: "structure", label: "Structure", icon: "tree" },
+                { id: "export", label: "Export", icon: "export" },
+            ]: tab-item := Rectangle {
+                property <bool> on: UiBuilderUi.tab == t.id;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    VerticalLayout {
+                        alignment: center;
+                        Glyph {
+                            name: t.icon;
+                            width: 13px;
+                            height: 13px;
+                            tint: tab-item.on ? Theme.text-primary : Theme.text-disabled;
+                        }
+                    }
+                    Text {
+                        text: t.label;
+                        color: tab-item.on ? Theme.text-primary : tab-touch.has-hover ? Theme.text-secondary : Theme.text-disabled;
+                        font-size: Theme.font-sm;
+                        font-weight: tab-item.on ? 600 : 400;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    y: parent.height - 2px;
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: 2px;
+                    border-radius: 1px;
+                    background: tab-item.on ? Theme.accent-cyan : transparent;
+                }
+                tab-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { UiBuilderUi.tab = t.id; UiBuilderUi.action("tab", t.id); }
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        // Body
+        body-scroll := ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: always-off;
+            VerticalLayout {
+                width: body-scroll.visible-width;
+                if UiBuilderUi.tab == "create": CreateTab { }
+                if UiBuilderUi.tab == "design": DesignTab { }
+                if UiBuilderUi.tab == "structure": StructureTab { }
+                if UiBuilderUi.tab == "export": ExportTab { }
+            }
+        }
+
+        // Toast
+        if UiBuilderUi.toast != "": Rectangle {
+            height: 38px;
+            Rectangle {
+                x: 8px;
+                y: 2px;
+                width: parent.width - 16px;
+                height: 34px;
+                border-radius: Theme.radius-md;
+                background: Theme.dialog-background;
+                border-width: 1px;
+                border-color: UiBuilderUi.toast-kind == "error" ? Theme.text-error : UiBuilderUi.toast-kind == "warn" ? Theme.text-warning : Theme.text-success;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 4px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        Glyph {
+                            name: UiBuilderUi.toast-kind == "error" ? "error" : UiBuilderUi.toast-kind == "warn" ? "warning" : "check";
+                            tint: UiBuilderUi.toast-kind == "error" ? Theme.text-error : UiBuilderUi.toast-kind == "warn" ? Theme.text-warning : Theme.text-success;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: UiBuilderUi.toast;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        UbIconButton {
+                            icon: "close";
+                            clicked => { UiBuilderUi.action("dismiss-toast", ""); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Footer: preview
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+        HorizontalLayout {
+            height: 46px;
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                Toggle {
+                    checked <=> UiBuilderUi.preview;
+                    toggled(on) => { UiBuilderUi.action("preview", on ? "on" : "off"); }
+                }
+            }
+            Text {
+                text: "Preview";
+                color: Theme.text-primary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                ComboBox {
+                    height: 28px;
+                    enabled: UiBuilderUi.has-result;
+                    model: UiBuilderUi.preview-frames;
+                    current-index <=> UiBuilderUi.preview-index;
+                    selected(v) => { UiBuilderUi.action("preview-frame", v); }
+                }
+            }
+        }
+    }
+}

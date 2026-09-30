@@ -1,0 +1,1925 @@
+// ============================================================================
+// Terrain tool bar, cursor readout and material picker
+// ============================================================================
+//
+// Three surfaces from TERRAIN_TOOLS_UX.md:
+//
+//   TerrainToolBar        7.1  the glass bar at the top left of the viewport
+//                              while the current tool is Terrain
+//   TerrainCursorReadout  5.1  the pill that follows the cursor
+//   material picker       7.2  the thumbnail grid that opens under a swatch
+//
+//   Row 1  [disc] [1][2][3][4][5][6][7] | Grow | Erode |          [⋯] [×]
+//   Row 2  Size Strength Height Shape Pivot | Plane Snap Contours Mirror |
+//          Material Source Auto-material [actions]
+//   ⋯      Hardness  Stroke smoothing | Preset [v] Apply [name] Save Delete
+//
+// Row 2 is three groups: brush, aids, material. A group that would pass
+// `available-width` after the one before it starts a new line, so a narrow
+// viewport gets a taller bar instead of a clipped one. The advanced strip
+// wraps its two groups the same way.
+//
+// Nothing here owns brush state. Every control reports through a callback
+// and Rust pushes the new state back. Lengths arrive already in the display
+// unit; numbers leave as locale-independent text ("0.4", "16.5").
+//
+// Selection, the armed state and focus are `accent-cyan` throughout.
+
+import { Theme } from "theme.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { NumericField } from "numeric_field.slint";
+
+// One tool chip in row 1. `accent` is the tool family's hue (design 5).
+export struct TerrainToolChip {
+    id: string,
+    label: string,
+    icon: image,
+    key: string,
+    accent: color,
+}
+
+// One terrain material slot for the picker. The tile shows the swatch
+// colour until `has-thumbnail` says the albedo thumbnail has loaded.
+export struct TerrainMaterialTile {
+    slot-id: int,
+    name: string,
+    swatch: color,
+    thumbnail: image,
+    has-thumbnail: bool,
+    custom: bool,
+}
+
+// ── Small pieces ───────────────────────────────────────────────────────────
+
+// The 10 px caption in front of every setting.
+component Caption inherits Text {
+    color: Theme.text-secondary;
+    font-size: Theme.font-xs;
+    vertical-alignment: center;
+}
+
+// Body of a hover tooltip: the name, then an optional dim detail (a key).
+component TipBody inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+
+    background: Theme.dialog-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 6px;
+    drop-shadow-color: Theme.shadow-float;
+
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: 6px;
+
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+        }
+        if root.detail != "": Text {
+            text: root.detail;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+        }
+    }
+}
+
+// Caption plus controls, centred on the row.
+component Setting inherits HorizontalLayout {
+    in property <string> caption;
+
+    spacing: 6px;
+    cross-axis-alignment: center;
+
+    Caption { text: root.caption; }
+    @children
+}
+
+// On/off pill in the tool options bar style, cyan while on.
+component PillToggle inherits Rectangle {
+    in property <bool> on;
+    in property <string> name;
+    // Reports the NEW state.
+    callback toggled(bool);
+
+    width: 30px;
+    height: 16px;
+    border-radius: 8px;
+    background: root.on ? Theme.accent-cyan.with-alpha(0.8) : Theme.button-background;
+    border-width: 1px;
+    border-color: root.on ? Theme.accent-cyan
+        : touch.has-hover ? Theme.text-disabled : Theme.border-color;
+    animate background { duration: 120ms * Theme.motion-scale; easing: ease-out; }
+
+    accessible-role: switch;
+    accessible-label: root.name;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { root.toggled(!root.on); }
+
+    Rectangle {
+        x: root.on ? parent.width - self.width - 2px : 2px;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: root.on ? #ffffff : Theme.text-secondary;
+        animate x { duration: 120ms * Theme.motion-scale; easing: ease-out; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.on); }
+    }
+}
+
+// One segment of a segmented control, text or icon. The active segment is
+// filled cyan; `ghost` outlines the segment the Ctrl key would switch to.
+component Seg inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> active;
+    in property <bool> ghost;
+    // Accessible name, and the hover tip of an icon segment.
+    in property <string> name;
+    callback clicked();
+
+    min-width: root.has-icon ? 26px : 24px;
+    height: 20px;
+    border-radius: 3px;
+    background: root.active ? Theme.accent-cyan.with-alpha(0.22)
+        : root.ghost ? Theme.accent-cyan.with-alpha(0.06)
+        : touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.active || root.ghost ? 1px : 0px;
+    border-color: root.active ? Theme.accent-cyan.with-alpha(0.55) : Theme.accent-cyan.with-alpha(0.5);
+
+    accessible-role: button;
+    accessible-label: root.name != "" ? root.name : root.label;
+    accessible-checkable: true;
+    accessible-checked: root.active;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: root.has-icon ? 5px : 7px;
+        padding-right: root.has-icon ? 5px : 7px;
+        cross-axis-alignment: center;
+        alignment: center;
+
+        if root.has-icon: Image {
+            width: 16px;
+            height: 16px;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.active || root.ghost ? Theme.accent-cyan
+                : touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+        }
+        if !root.has-icon: Text {
+            text: root.label;
+            color: root.active ? Theme.text-primary
+                : root.ghost ? Theme.accent-cyan : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: root.active ? 700 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.has-icon && root.name != "": Tooltip {
+        TipBody { text: root.name; }
+    }
+}
+
+// The recessed track segments sit in (view_selector.slint's look).
+component SegTrack inherits Rectangle {
+    height: 24px;
+    border-radius: 4px;
+    background: Theme.background-primary;
+    border-width: 1px;
+    border-color: Theme.border-color;
+}
+
+// Thin slider under Size and Strength: a 3 px track, a cyan fill and a
+// thumb on hover. Press or drag anywhere on it; `changed-to` reports the
+// 0..1 fraction under the pointer while the button is held.
+component ThinSlider inherits Rectangle {
+    in property <float> fraction;
+    in property <string> name;
+    callback changed-to(float);
+
+    property <float> f: clamp(root.fraction, 0, 1);
+
+    height: 8px;
+
+    accessible-role: slider;
+    accessible-label: root.name;
+    accessible-value-minimum: 0;
+    accessible-value-maximum: 1;
+
+    // Explicit x: a sized child without one is centred in its parent.
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 100%;
+        height: 3px;
+        border-radius: 1.5px;
+        background: Theme.input-border;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: parent.width * root.f;
+        height: 3px;
+        border-radius: 1.5px;
+        background: touch.has-hover || touch.pressed ? Theme.accent-cyan : Theme.accent-cyan.with-alpha(0.55);
+    }
+    Rectangle {
+        x: parent.width * root.f - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: Theme.text-primary;
+        visible: touch.has-hover || touch.pressed;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                root.changed-to(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.changed-to(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+    }
+}
+
+// A 34 px tool chip: 22 px icon, the key in 9 px at the bottom right, and
+// a short bar in the tool family's hue at the bottom left.
+component ToolChip inherits Rectangle {
+    in property <TerrainToolChip> chip;
+    in property <bool> active;
+    callback clicked();
+
+    width: 34px;
+    height: 34px;
+    border-radius: Theme.radius-md;
+    background: root.active ? Theme.accent-cyan.with-alpha(0.10)
+        : touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent-cyan;
+
+    accessible-role: button;
+    accessible-label: root.chip.label + " (" + root.chip.key + ")";
+    accessible-checkable: true;
+    accessible-checked: root.active;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: 3px;
+        width: 22px;
+        height: 22px;
+        source: root.chip.icon;
+        image-fit: contain;
+        colorize: root.active ? Theme.accent-cyan
+            : touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+    }
+
+    Rectangle {
+        x: 4px;
+        y: parent.height - 5px;
+        width: 8px;
+        height: 2px;
+        border-radius: 1px;
+        background: root.chip.accent;
+        opacity: root.active || touch.has-hover ? 1.0 : 0.6;
+    }
+
+    Text {
+        x: parent.width - self.width - 3px;
+        y: parent.height - self.height;
+        text: root.chip.key;
+        font-size: 9px;
+        font-weight: 600;
+        color: root.active ? Theme.accent-cyan : Theme.text-disabled;
+    }
+
+    Tooltip {
+        TipBody {
+            text: root.chip.label;
+            detail: root.chip.key;
+        }
+    }
+}
+
+// Text button for tool actions and the preset row.
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 24px;
+    border-radius: Theme.radius-md;
+    background: !root.enabled ? Theme.button-background
+        : touch.pressed ? Theme.button-pressed
+        : touch.has-hover ? Theme.button-hover : Theme.button-background;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Compact single-line text field (the preset name), in NumericField's look.
+component NameField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    callback accepted(string);
+
+    width: 104px;
+    height: 22px;
+    background: Theme.input-background;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent-cyan : Theme.input-border;
+    animate border-color { duration: 80ms; easing: ease-out; }
+
+    input := TextInput {
+        x: 6px;
+        width: parent.width - 12px;
+        height: 100%;
+        text <=> root.text;
+        color: Theme.text-primary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        single-line: true;
+        accessible-label: root.placeholder;
+        accepted => { root.accepted(self.text); }
+    }
+
+    if root.text == "": Text {
+        x: 6px;
+        height: 100%;
+        text: root.placeholder;
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+}
+
+// Small dropdown: a field showing `current`, and a list of `options` in a
+// popup under it. Picking an entry reports it and closes the list.
+component MiniDropdown inherits Rectangle {
+    in property <[string]> options;
+    in property <string> current;
+    // Unit appended to the shown value and to every entry ("m").
+    in property <string> suffix;
+    in property <string> placeholder: "None";
+    in property <string> empty-text: "Nothing here yet";
+    in property <string> name;
+    callback picked(string);
+
+    height: 22px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.button-hover : Theme.input-background;
+    border-width: 1px;
+    border-color: list.is-open ? Theme.accent-cyan : Theme.input-border;
+
+    accessible-role: combobox;
+    accessible-label: root.name;
+    accessible-value: root.current;
+    accessible-expandable: true;
+    accessible-expanded: list.is-open;
+    accessible-action-default => { list.show(); }
+    accessible-action-expand => { list.show(); }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { list.show(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 5px;
+        spacing: 4px;
+        cross-axis-alignment: center;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.current == "" ? root.placeholder
+                : root.suffix == "" ? root.current : root.current + " " + root.suffix;
+            color: root.current == "" ? Theme.text-disabled : Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        // An icon, not the "▾" glyph: the default font draws it blank.
+        Image {
+            width: 10px;
+            height: 10px;
+            source: @image-url("../../assets/icons/ui/chevron-down.svg");
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+    }
+
+    list := PopupWindow {
+        x: 0;
+        y: root.height + 3px;
+        width: max(root.width, 96px);
+
+        Rectangle {
+            background: Theme.dialog-background;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: Theme.shadow-float;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+
+                if root.options.length == 0: Text {
+                    height: 22px;
+                    text: root.empty-text;
+                    color: Theme.text-disabled;
+                    font-size: Theme.font-sm;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                for option in root.options: Rectangle {
+                    height: 22px;
+                    border-radius: 3px;
+                    background: option == root.current ? Theme.accent-cyan.with-alpha(0.18)
+                        : row-touch.has-hover ? Theme.button-hover : transparent;
+
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.picked(option); }
+                    }
+
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: 100%;
+                        text: root.suffix == "" ? option : option + " " + root.suffix;
+                        color: option == root.current ? Theme.text-primary : Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One 56 px picker tile: the thumbnail (or the swatch colour until it has
+// loaded), a "custom" tag on Space slots, and the name under it.
+component MaterialTileView inherits Rectangle {
+    in property <TerrainMaterialTile> tile;
+    in property <bool> selected;
+    callback clicked();
+
+    width: 56px;
+    height: 72px;
+
+    accessible-role: list-item;
+    accessible-label: root.tile.custom ? root.tile.name + " (custom)" : root.tile.name;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    // Face and ring pin to the top; a sized child without x/y would be
+    // centred in the 72 px tile and run into the name.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 56px;
+        height: 56px;
+        border-radius: 6px;
+        clip: true;
+        background: root.tile.swatch;
+
+        if root.tile.has-thumbnail: Image {
+            width: 100%;
+            height: 100%;
+            source: root.tile.thumbnail;
+            image-fit: cover;
+        }
+
+        if root.tile.custom: Rectangle {
+            x: 3px;
+            y: 3px;
+            width: tag.preferred-width + 8px;
+            height: 12px;
+            border-radius: 3px;
+            background: #000000a8;
+
+            tag := Text {
+                x: 4px;
+                y: (parent.height - self.height) / 2;
+                text: "custom";
+                color: #ffffff;
+                font-size: 8px;
+            }
+        }
+    }
+
+    // Ring over the face: 2 px cyan when selected, 1 px otherwise.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 56px;
+        height: 56px;
+        border-radius: 6px;
+        border-width: root.selected ? 2px : 1px;
+        border-color: root.selected ? Theme.accent-cyan
+            : touch.has-hover ? Theme.text-secondary : Theme.border-color;
+    }
+
+    Text {
+        y: 58px;
+        width: 100%;
+        height: 14px;
+        text: root.tile.name;
+        color: root.selected ? Theme.text-primary : Theme.text-secondary;
+        font-size: Theme.font-xs;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Tooltip {
+        TipBody {
+            text: root.tile.name;
+            detail: root.tile.custom ? "Custom" : "";
+        }
+    }
+}
+
+// The swatch button (24 px swatch, the name elided at 90 px) and the
+// material picker it opens: a search field over a 6-column grid of 56 px
+// tiles, scrolling past five rows. Picking a tile reports
+// `picked(which, slot-id)` and closes the picker.
+component MaterialSwatchButton inherits Rectangle {
+    in property <string> which;
+    in property <string> name;
+    in property <color> swatch;
+    in property <image> thumbnail;
+    in property <bool> has-thumbnail;
+    in property <int> selected-slot;
+    in property <[TerrainMaterialTile]> materials;
+    in property <string> accessible-name;
+    callback picked(string, int);
+
+    property <length> tile-w: 56px;
+    property <length> tile-h: 72px;
+    property <length> gap: 6px;
+    property <int> columns: 6;
+    property <length> pitch-x: root.tile-w + root.gap;
+    property <length> pitch-y: root.tile-h + root.gap;
+    property <length> grid-w: root.columns * root.pitch-x - root.gap;
+    // The grid area keeps the height of the unfiltered list (one to five
+    // rows) so the picker does not jump while the user types.
+    property <int> all-rows: Math.ceil(root.materials.length / root.columns);
+    property <length> view-h: clamp(root.all-rows, 1, 5) * root.pitch-y - root.gap;
+
+    height: 28px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover || picker.is-open ? Theme.button-hover : Theme.button-background;
+    border-width: 1px;
+    border-color: picker.is-open ? Theme.accent-cyan : Theme.border-color;
+
+    accessible-role: combobox;
+    accessible-label: root.accessible-name;
+    accessible-value: root.name;
+    accessible-expandable: true;
+    accessible-expanded: picker.is-open;
+    accessible-action-default => { picker.show(); }
+    accessible-action-expand => { picker.show(); }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { picker.show(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 7px;
+        spacing: 6px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            clip: true;
+            background: root.swatch;
+
+            if root.has-thumbnail: Image {
+                width: 100%;
+                height: 100%;
+                source: root.thumbnail;
+                image-fit: cover;
+            }
+        }
+        Text {
+            max-width: 90px;
+            text: root.name;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        // An icon, not the "▾" glyph: the default font draws it blank.
+        Image {
+            width: 10px;
+            height: 10px;
+            source: @image-url("../../assets/icons/ui/chevron-down.svg");
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+    }
+
+    picker := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        // Grid, a lane for the scroll bar, and the padding either side.
+        width: root.grid-w + 12px + 20px;
+        // Typing in the search field and scrolling happen inside; only a
+        // click outside (or Esc) may close it.
+        close-policy: close-on-click-outside;
+
+        body := Rectangle {
+            property <string> query: search-box.text;
+            // The strip below lays one 1 px slot per matching tile, so its
+            // preferred width in px is the match count.
+            property <int> matches: Math.round(strip.preferred-width / 1px);
+
+            background: Theme.dialog-background;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: Theme.shadow-float;
+
+            init => { search-box.focus(); }
+
+            // Keep clicks on the padding from reaching anything below.
+            TouchArea { }
+
+            Rectangle {
+                x: Theme.radius-lg;
+                y: 0;
+                width: parent.width - 2 * Theme.radius-lg;
+                height: 1px;
+                background: Theme.border-highlight;
+            }
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                search-box := LineEdit {
+                    placeholder-text: "Search materials";
+                    font-size: Theme.font-sm;
+                    input-type: InputType.search;
+                }
+
+                Rectangle {
+                    height: root.view-h;
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: root.grid-w;
+                        viewport-height: max(root.tile-h, Math.ceil(body.matches / root.columns) * root.pitch-y - root.gap);
+                        horizontal-scrollbar-policy: always-off;
+
+                        // Compacting filter without a filtered model: every
+                        // material gets a slot in this zero-height row, 1 px
+                        // wide when it matches and 0 px when it does not.
+                        // The layout then places each matching slot at
+                        // x = (matches before it) px, which is the tile's
+                        // rank; the tile draws at that rank's grid cell,
+                        // offset back by the slot's own position.
+                        strip := HorizontalLayout {
+                            x: 0;
+                            y: 0;
+                            width: max(root.grid-w, root.materials.length * 1px);
+                            height: 0px;
+                            padding: 0px;
+                            spacing: 0px;
+                            alignment: start;
+
+                            for m in root.materials: slot := Rectangle {
+                                property <bool> hit: root.name-matches(m.name, body.query);
+                                property <int> rank: Math.round(self.x / 1px);
+
+                                width: self.hit ? 1px : 0px;
+
+                                if slot.hit: MaterialTileView {
+                                    x: Math.mod(slot.rank, root.columns) * root.pitch-x - slot.x;
+                                    y: Math.floor(slot.rank / root.columns) * root.pitch-y - slot.y;
+                                    tile: m;
+                                    selected: m.slot-id == root.selected-slot;
+                                    clicked => {
+                                        root.picked(root.which, m.slot-id);
+                                        picker.close();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if body.matches == 0: Text {
+                        width: 100%;
+                        height: root.tile-h;
+                        text: root.materials.length == 0 ? "No materials in this Space"
+                            : "No material name starts with \"" + body.query + "\"";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // Case-insensitive match of the search text against a material name.
+    // Slint 1.17 strings have no substring search (their members are
+    // is-empty, character-count, is-float, to-float, to-lowercase and
+    // to-uppercase), so this is a prefix match, done as a range test:
+    // `n` starts with `q` exactly when q <= n < q + U+10FFFF.
+    pure function name-matches(name: string, query: string) -> bool {
+        let n = name.to-lowercase();
+        let q = query.to-lowercase();
+        q.is-empty || (n >= q && n < q + "\u{10FFFF}")
+    }
+}
+
+// ── TerrainToolBar ─────────────────────────────────────────────────────────
+
+export component TerrainToolBar inherits Rectangle {
+    // Row 1
+    in property <[TerrainToolChip]> tools;
+    in property <string> active-tool;
+    in property <[string]> modes;
+    in property <int> active-mode;
+    in property <int> swapped-mode: -1;
+    in property <image> badge-icon;
+    // Row 2 (lengths already converted to the display unit by Rust)
+    in property <string> unit;
+    in property <float> size;
+    in property <float> size-min;
+    in property <float> size-max;
+    in property <bool> show-strength;
+    in property <float> strength;
+    in property <bool> show-height;
+    // Named `brush-height` because every Slint element already has a
+    // `height` (its own geometry); the setting key stays "height".
+    in property <float> brush-height;
+    in property <string> shape;
+    in property <image> shape-sphere-icon;
+    in property <image> shape-box-icon;
+    in property <image> shape-cylinder-icon;
+    in property <bool> show-pivot;
+    in property <string> pivot;
+    in property <image> pivot-bottom-icon;
+    in property <image> pivot-center-icon;
+    in property <image> pivot-top-icon;
+    in property <bool> show-plane;
+    in property <bool> plane-lock;
+    in property <float> plane-height;
+    in property <bool> snap;
+    in property <float> snap-step;
+    in property <[string]> snap-steps;
+    in property <bool> contours;
+    in property <string> mirror;
+    in property <bool> show-material;
+    in property <string> material-label: "Material";
+    in property <int> material;
+    in property <string> material-name;
+    in property <color> material-swatch;
+    in property <image> material-thumbnail;
+    in property <bool> material-has-thumbnail;
+    in property <bool> show-source;
+    in property <int> source-material;
+    in property <string> source-name;
+    in property <color> source-swatch;
+    in property <image> source-thumbnail;
+    in property <bool> source-has-thumbnail;
+    in property <bool> show-auto-material;
+    in property <bool> auto-material;
+    in property <bool> show-flatten-note;
+    in property <[TerrainMaterialTile]> materials;
+    in property <[string]> actions;
+    in property <bool> actions-enabled: true;
+    // Per action, in step with `actions`; an action past its end is enabled.
+    in property <[bool]> action-enabled;
+    // Size and Shape are the brushes'; Sea Level shows its water level
+    // instead, and has no mirror.
+    in property <bool> show-brush: true;
+    in property <bool> show-mirror: true;
+    in property <bool> show-level;
+    in property <float> level;
+    in property <bool> level-set;
+    // Region's Transform: its turn in degrees and its scale in percent.
+    // (Not `transform-*`: Slint gives every element its own transform-scale.)
+    in property <bool> show-region-transform;
+    in property <float> region-angle;
+    in property <float> region-scale: 100;
+    // A line of guidance in the settings row.
+    in property <string> hint;
+    // Advanced strip
+    in-out property <bool> advanced-open;
+    in property <bool> show-hardness;
+    in property <string> hardness;
+    in property <float> smoothing;
+    in property <[string]> presets;
+    in property <string> active-preset;
+    // Layout
+    in property <length> available-width: 900px;
+
+    callback tool-selected(string);
+    callback mode-selected(int);
+    callback setting-changed(string, string);
+    callback material-picked(string, int);
+    callback action(string);
+    callback preset(string, string);
+    callback close();
+
+    // ── Layout ──────────────────────────────────────────────────────────
+    property <length> pad: 10px;
+    property <length> row-h: 40px;
+    property <length> group-gap: 16px;
+    // 0 means no cap, as on the tool options bar.
+    property <length> cap: root.available-width > 0px ? root.available-width : 100000px;
+
+    // Row 2: brush (a), aids (b), material (c). Each group starts a new
+    // line when it would pass the cap after the group before it.
+    property <length> wa: group-a.preferred-width;
+    property <length> wb: group-b.preferred-width;
+    property <length> wc: group-c.preferred-width;
+    property <bool> c-empty: root.wc < 1px;
+    property <int> b-line: root.pad + root.wa + root.group-gap + root.wb + root.pad <= root.cap ? 0 : 1;
+    property <length> bx: root.b-line == 0 ? root.pad + root.wa + root.group-gap : root.pad;
+    property <bool> c-follows: root.c-empty || root.bx + root.wb + root.group-gap + root.wc + root.pad <= root.cap;
+    property <int> c-line: root.c-follows ? root.b-line : root.b-line + 1;
+    property <length> cx: root.c-follows ? root.bx + root.wb + root.group-gap : root.pad;
+    property <int> row2-lines: max(root.b-line, root.c-line) + 1;
+
+    // Advanced strip: feel (d) and presets (e), wrapped the same way.
+    property <length> wd: group-d.preferred-width;
+    property <length> we: group-e.preferred-width;
+    property <int> e-line: root.pad + root.wd + root.group-gap + root.we + root.pad <= root.cap ? 0 : 1;
+    property <length> ex: root.e-line == 0 ? root.pad + root.wd + root.group-gap : root.pad;
+    property <int> adv-lines: root.e-line + 1;
+    property <length> adv-y: root.row-h * (1 + root.row2-lines);
+
+    property <length> content-width: max(
+        row1.preferred-width,
+        root.pad + root.wa + root.pad,
+        root.bx + root.wb + root.pad,
+        root.c-empty ? 0px : root.cx + root.wc + root.pad,
+        root.advanced-open ? max(root.pad + root.wd + root.pad, root.ex + root.we + root.pad) : 0px);
+
+    // Size slider: logarithmic, so small brushes get as much travel as big.
+    property <float> size-lo: max(root.size-min, 0.01);
+    property <float> size-hi: max(root.size-max, root.size-lo * 1.01);
+    property <float> size-fraction: clamp(Math.ln(max(root.size, root.size-lo) / root.size-lo) / Math.ln(root.size-hi / root.size-lo), 0, 1);
+
+    width: min(root.content-width, root.cap);
+    height: root.row-h * (1 + root.row2-lines + (root.advanced-open ? root.adv-lines : 0));
+    animate height { duration: Theme.panel-anim-duration * Theme.motion-scale; easing: ease-in-out; }
+
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 20px;
+    drop-shadow-color: Theme.shadow-float;
+    clip: true;
+
+    // A click on the bar's empty glass stays on the bar; it never reaches
+    // the viewport below (where it would start a stroke).
+    TouchArea { }
+
+    // 1px top highlight, as on the tool options bar.
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    // ── Row 1: disc, tool chips, modes, ⋯ and × ────────────────────────
+    row1 := HorizontalLayout {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.row-h;
+        padding-left: root.pad;
+        padding-right: 6px;
+        spacing: 3px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: Theme.accent-cyan.with-alpha(0.18);
+            border-width: 1px;
+            border-color: Theme.accent-cyan.with-alpha(0.4);
+
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                source: root.badge-icon;
+                image-fit: contain;
+                colorize: Theme.accent-cyan;
+            }
+        }
+
+        Rectangle { width: 6px; }
+
+        for t in root.tools: ToolChip {
+            chip: t;
+            active: t.id == root.active-tool;
+            clicked => { root.tool-selected(t.id); }
+        }
+
+        if root.modes.length > 0: Rectangle { width: 8px; }
+        if root.modes.length > 0: Rectangle {
+            width: 1px;
+            height: 18px;
+            background: Theme.ribbon-separator;
+        }
+        if root.modes.length > 0: Rectangle { width: 8px; }
+        if root.modes.length > 0: SegTrack {
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+
+                for m[i] in root.modes: Seg {
+                    label: m;
+                    active: i == root.active-mode;
+                    ghost: i == root.swapped-mode && i != root.active-mode;
+                    clicked => { root.mode-selected(i); }
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 12px;
+        }
+
+        // ⋯ opens the advanced strip.
+        Rectangle {
+            width: 30px;
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: more-touch.has-hover || root.advanced-open ? Theme.button-hover : transparent;
+
+            accessible-role: button;
+            accessible-label: "More brush settings";
+            accessible-checkable: true;
+            accessible-checked: root.advanced-open;
+            accessible-action-default => { root.advanced-open = !root.advanced-open; }
+
+            // Three drawn dots, not the "⋯" glyph: the default font draws
+            // it blank.
+            for d in 3: Rectangle {
+                x: (parent.width - 15px) / 2 + d * 6px;
+                y: (parent.height - self.height) / 2;
+                width: 3px;
+                height: 3px;
+                border-radius: 1.5px;
+                background: root.advanced-open ? Theme.accent-cyan : Theme.text-secondary;
+            }
+
+            more-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.advanced-open = !root.advanced-open; }
+            }
+        }
+
+        // × leaves the terrain tools.
+        Rectangle {
+            width: 30px;
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: close-touch.has-hover ? Theme.accent-red.with-alpha(0.2) : transparent;
+
+            accessible-role: button;
+            accessible-label: "Leave terrain tools (Esc)";
+            accessible-action-default => { root.close(); }
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: close-touch.has-hover ? "Esc" : "×";
+                color: close-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
+                font-size: close-touch.has-hover ? 10px : 18px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.close(); }
+            }
+        }
+    }
+
+    // Divider between the tools and the settings.
+    Rectangle {
+        x: root.pad;
+        y: root.row-h;
+        width: root.width - 2 * root.pad;
+        height: 1px;
+        background: Theme.ribbon-separator;
+    }
+
+    // ── Row 2, group a: the brush ──────────────────────────────────────
+    Rectangle {
+        x: root.pad;
+        y: root.row-h;
+        width: group-a.preferred-width;
+        height: root.row-h;
+
+        group-a := HorizontalLayout {
+            spacing: 14px;
+            cross-axis-alignment: center;
+
+            if root.show-level: Setting {
+                caption: "Level";
+                NumericField {
+                    width: 84px;
+                    height: 22px;
+                    opacity: root.level-set ? 1.0 : 0.55;
+                    value: root.level;
+                    scrub-step: root.snap-step > 0 ? root.snap-step : 0.5;
+                    unit: root.unit;
+                    decimals: 2;
+                    value-changed(s) => { root.setting-changed("sea-level", root.clean-number(s)); }
+                }
+            }
+
+            if root.show-region-transform: Setting {
+                caption: "Angle";
+                NumericField {
+                    width: 72px;
+                    height: 22px;
+                    value: root.region-angle;
+                    scrub-step: 15;
+                    unit: "°";
+                    decimals: 1;
+                    value-changed(s) => { root.setting-changed("region-angle", root.clean-number(s)); }
+                }
+            }
+
+            if root.show-region-transform: Setting {
+                caption: "Scale";
+                NumericField {
+                    width: 72px;
+                    height: 22px;
+                    value: root.region-scale;
+                    min: 10;
+                    max: 1000;
+                    scrub-step: 5;
+                    unit: "%";
+                    decimals: 0;
+                    value-changed(s) => { root.setting-changed("region-scale", root.clean-number(s)); }
+                }
+            }
+
+            if root.show-brush: Setting {
+                caption: "Size";
+                VerticalLayout {
+                    spacing: 2px;
+                    NumericField {
+                        width: 80px;
+                        height: 22px;
+                        value: root.size;
+                        min: root.size-min;
+                        max: root.size-max;
+                        scrub-step: max(0.1, root.size * 0.025);
+                        unit: root.unit;
+                        decimals: 1;
+                        value-changed(s) => { root.setting-changed("size", root.clean-number(s)); }
+                    }
+                    ThinSlider {
+                        name: "Size";
+                        fraction: root.size-fraction;
+                        changed-to(f) => { root.setting-changed("size", root.size-at(f)); }
+                    }
+                }
+            }
+
+            if root.show-strength: Setting {
+                caption: "Strength";
+                VerticalLayout {
+                    spacing: 2px;
+                    NumericField {
+                        width: 64px;
+                        height: 22px;
+                        value: Math.round(root.strength * 100);
+                        min: 1;
+                        max: 100;
+                        scrub-step: 1;
+                        unit: "%";
+                        decimals: 0;
+                        value-changed(s) => { root.setting-changed("strength", root.num(s.to-float() / 100)); }
+                    }
+                    ThinSlider {
+                        name: "Strength";
+                        fraction: root.strength;
+                        changed-to(f) => { root.setting-changed("strength", root.num(Math.round(clamp(f, 0.01, 1) * 100) / 100)); }
+                    }
+                }
+            }
+
+            if root.show-height: Setting {
+                caption: "Height";
+                NumericField {
+                    width: 80px;
+                    height: 22px;
+                    value: root.brush-height;
+                    min: root.size-min;
+                    max: root.size-max;
+                    scrub-step: max(0.1, root.brush-height * 0.025);
+                    unit: root.unit;
+                    decimals: 1;
+                    value-changed(s) => { root.setting-changed("height", root.clean-number(s)); }
+                }
+            }
+
+            if root.show-brush: Setting {
+                caption: "Shape";
+                SegTrack {
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+                        Seg {
+                            has-icon: true;
+                            icon: root.shape-sphere-icon;
+                            name: "Sphere";
+                            active: root.shape == "sphere";
+                            clicked => { root.setting-changed("shape", "sphere"); }
+                        }
+                        Seg {
+                            has-icon: true;
+                            icon: root.shape-box-icon;
+                            name: "Box";
+                            active: root.shape == "box";
+                            clicked => { root.setting-changed("shape", "box"); }
+                        }
+                        Seg {
+                            has-icon: true;
+                            icon: root.shape-cylinder-icon;
+                            name: "Cylinder";
+                            active: root.shape == "cylinder";
+                            clicked => { root.setting-changed("shape", "cylinder"); }
+                        }
+                    }
+                }
+            }
+
+            if root.show-pivot: Setting {
+                caption: "Pivot";
+                SegTrack {
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+                        Seg {
+                            has-icon: true;
+                            icon: root.pivot-bottom-icon;
+                            name: "Bottom";
+                            active: root.pivot == "bottom";
+                            clicked => { root.setting-changed("pivot", "bottom"); }
+                        }
+                        Seg {
+                            has-icon: true;
+                            icon: root.pivot-center-icon;
+                            name: "Center";
+                            active: root.pivot == "center";
+                            clicked => { root.setting-changed("pivot", "center"); }
+                        }
+                        Seg {
+                            has-icon: true;
+                            icon: root.pivot-top-icon;
+                            name: "Top";
+                            active: root.pivot == "top";
+                            clicked => { root.setting-changed("pivot", "top"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Row 2, group b: plane, snap, contours, mirror ──────────────────
+    if root.b-line == 0: Rectangle {
+        x: root.bx - root.group-gap / 2;
+        y: root.row-h + (root.row-h - self.height) / 2;
+        width: 1px;
+        height: 16px;
+        background: Theme.ribbon-separator;
+    }
+
+    Rectangle {
+        x: root.bx;
+        y: root.row-h * (1 + root.b-line);
+        width: group-b.preferred-width;
+        height: root.row-h;
+
+        group-b := HorizontalLayout {
+            spacing: 14px;
+            cross-axis-alignment: center;
+
+            if root.show-plane: Setting {
+                caption: "Plane";
+                PillToggle {
+                    name: "Plane lock";
+                    on: root.plane-lock;
+                    toggled(v) => { root.setting-changed("plane-lock", v ? "true" : "false"); }
+                }
+                NumericField {
+                    width: 76px;
+                    height: 22px;
+                    opacity: root.plane-lock ? 1.0 : 0.55;
+                    value: root.plane-height;
+                    scrub-step: root.snap-step > 0 ? root.snap-step : 0.5;
+                    unit: root.unit;
+                    decimals: 1;
+                    value-changed(s) => { root.setting-changed("plane-height", root.clean-number(s)); }
+                }
+            }
+
+            Setting {
+                caption: "Snap";
+                PillToggle {
+                    name: "Snap to grid";
+                    on: root.snap;
+                    toggled(v) => { root.setting-changed("snap", v ? "true" : "false"); }
+                }
+                MiniDropdown {
+                    width: 80px;
+                    name: "Grid step";
+                    opacity: root.snap ? 1.0 : 0.55;
+                    options: root.snap-steps;
+                    current: root.num(root.snap-step);
+                    suffix: root.unit;
+                    picked(s) => { root.setting-changed("snap-step", s); }
+                }
+            }
+
+            Setting {
+                caption: "Contours";
+                PillToggle {
+                    name: "Contours";
+                    on: root.contours;
+                    toggled(v) => { root.setting-changed("contours", v ? "true" : "false"); }
+                }
+            }
+
+            if root.show-mirror: Setting {
+                caption: "Mirror";
+                SegTrack {
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+                        Seg {
+                            label: "Off";
+                            name: "Mirror off";
+                            active: root.mirror == "off" || root.mirror == "";
+                            clicked => { root.setting-changed("mirror", "off"); }
+                        }
+                        Seg {
+                            label: "X";
+                            name: "Mirror across X";
+                            active: root.mirror == "x";
+                            clicked => { root.setting-changed("mirror", "x"); }
+                        }
+                        Seg {
+                            label: "Z";
+                            name: "Mirror across Z";
+                            active: root.mirror == "z";
+                            clicked => { root.setting-changed("mirror", "z"); }
+                        }
+                        Seg {
+                            label: "XZ";
+                            name: "Mirror across X and Z";
+                            active: root.mirror == "xz";
+                            clicked => { root.setting-changed("mirror", "xz"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Row 2, group c: materials and tool actions ─────────────────────
+    if !root.c-empty && root.c-follows: Rectangle {
+        x: root.cx - root.group-gap / 2;
+        y: root.row-h * (1 + root.c-line) + (root.row-h - self.height) / 2;
+        width: 1px;
+        height: 16px;
+        background: Theme.ribbon-separator;
+    }
+
+    Rectangle {
+        x: root.cx;
+        y: root.row-h * (1 + root.c-line);
+        width: group-c.preferred-width;
+        height: root.row-h;
+
+        group-c := HorizontalLayout {
+            spacing: 14px;
+            cross-axis-alignment: center;
+
+            if root.show-material: Setting {
+                caption: root.material-label;
+                MaterialSwatchButton {
+                    which: "material";
+                    accessible-name: root.material-label;
+                    name: root.material-name;
+                    swatch: root.material-swatch;
+                    thumbnail: root.material-thumbnail;
+                    has-thumbnail: root.material-has-thumbnail;
+                    selected-slot: root.material;
+                    materials: root.materials;
+                    picked(which, slot) => { root.material-picked(which, slot); }
+                }
+            }
+
+            if root.show-source: Setting {
+                caption: "Source";
+                MaterialSwatchButton {
+                    which: "source";
+                    accessible-name: "Source";
+                    name: root.source-name;
+                    swatch: root.source-swatch;
+                    thumbnail: root.source-thumbnail;
+                    has-thumbnail: root.source-has-thumbnail;
+                    selected-slot: root.source-material;
+                    materials: root.materials;
+                    picked(which, slot) => { root.material-picked(which, slot); }
+                }
+            }
+
+            if root.show-auto-material: Setting {
+                caption: "Auto material";
+                PillToggle {
+                    name: "Auto material";
+                    on: root.auto-material;
+                    toggled(v) => { root.setting-changed("auto-material", v ? "true" : "false"); }
+                }
+            }
+
+            if root.hint != "": Text {
+                text: root.hint;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+
+            for a[i] in root.actions: ActionButton {
+                label: a;
+                enabled: root.actions-enabled && (i >= root.action-enabled.length || root.action-enabled[i]);
+                clicked => { root.action(a); }
+            }
+        }
+    }
+
+    // ── Advanced strip: hardness, stroke smoothing, presets ────────────
+    Rectangle {
+        y: root.adv-y;
+        width: root.width;
+        height: root.row-h * root.adv-lines;
+        visible: root.advanced-open;
+        background: Theme.background-tertiary.with-alpha(0.6);
+
+        Rectangle {
+            y: 0;
+            width: 100%;
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        Rectangle {
+            x: root.pad;
+            y: 0;
+            width: group-d.preferred-width;
+            height: root.row-h;
+
+            group-d := HorizontalLayout {
+                spacing: 14px;
+                cross-axis-alignment: center;
+
+                if root.show-hardness: Setting {
+                    caption: "Hardness";
+                    SegTrack {
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            Seg {
+                                label: "Soft";
+                                name: "Soft falloff";
+                                active: root.hardness == "soft";
+                                clicked => { root.setting-changed("hardness", "soft"); }
+                            }
+                            Seg {
+                                label: "Smooth";
+                                name: "Smooth falloff";
+                                active: root.hardness == "smooth";
+                                clicked => { root.setting-changed("hardness", "smooth"); }
+                            }
+                            Seg {
+                                label: "Hard";
+                                name: "Hard falloff";
+                                active: root.hardness == "hard";
+                                clicked => { root.setting-changed("hardness", "hard"); }
+                            }
+                        }
+                    }
+                }
+
+                Setting {
+                    caption: "Stroke smoothing";
+                    NumericField {
+                        width: 64px;
+                        height: 22px;
+                        value: Math.round(root.smoothing * 100);
+                        min: 0;
+                        max: 100;
+                        scrub-step: 1;
+                        unit: "%";
+                        decimals: 0;
+                        value-changed(s) => { root.setting-changed("smoothing", root.num(s.to-float() / 100)); }
+                    }
+                }
+            }
+        }
+
+        if root.e-line == 0: Rectangle {
+            x: root.ex - root.group-gap / 2;
+            y: (root.row-h - self.height) / 2;
+            width: 1px;
+            height: 16px;
+            background: Theme.ribbon-separator;
+        }
+
+        Rectangle {
+            x: root.ex;
+            y: root.row-h * root.e-line;
+            width: group-e.preferred-width;
+            height: root.row-h;
+
+            group-e := HorizontalLayout {
+                spacing: 6px;
+                cross-axis-alignment: center;
+
+                Setting {
+                    caption: "Preset";
+                    // Choosing a preset applies it, so the field always
+                    // shows the active one; Apply re-applies it after edits.
+                    MiniDropdown {
+                        width: 120px;
+                        name: "Preset";
+                        options: root.presets;
+                        current: root.active-preset;
+                        empty-text: "No presets saved";
+                        picked(p) => { root.preset("apply", p); }
+                    }
+                }
+                ActionButton {
+                    label: "Apply";
+                    enabled: root.active-preset != "";
+                    clicked => { root.preset("apply", root.active-preset); }
+                }
+                preset-name := NameField {
+                    placeholder: "New preset";
+                    accepted(t) => {
+                        if t != "" {
+                            root.preset("save", t);
+                            self.text = "";
+                        }
+                    }
+                }
+                ActionButton {
+                    label: "Save";
+                    enabled: preset-name.text != "";
+                    clicked => {
+                        root.preset("save", preset-name.text);
+                        preset-name.text = "";
+                    }
+                }
+                ActionButton {
+                    label: "Delete";
+                    enabled: root.active-preset != "";
+                    clicked => { root.preset("delete", root.active-preset); }
+                }
+            }
+        }
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────
+
+    // A float as locale-independent text: "0.4", never "0,4".
+    pure function num(v: float) -> string {
+        v.to-string-unlocalized()
+    }
+
+    // NumericField reports locale-formatted text; re-emit it unlocalized.
+    pure function clean-number(s: string) -> string {
+        s.to-float().to-string-unlocalized()
+    }
+
+    // The size at a slider fraction (log scale), to 0.1 of the unit.
+    pure function size-at(f: float) -> string {
+        root.num(Math.round(root.size-lo * Math.pow(root.size-hi / root.size-lo, f) * 10) / 10)
+    }
+}
+
+// ── TerrainCursorReadout ───────────────────────────────────────────────────
+
+// The glass pill 18 px right of and below the cursor, flipping to the other
+// side of the cursor near the viewport's right or bottom edge. It never takes
+// pointer input: there is no TouchArea, so clicks pass to the viewport.
+export component TerrainCursorReadout inherits Rectangle {
+    in property <string> text;
+    in property <color> accent;
+    in property <bool> plane;
+    in property <bool> snap;
+    in property <bool> contours;
+    in property <bool> mirror;
+    in property <image> plane-icon;
+    in property <image> snap-icon;
+    in property <image> contours-icon;
+    in property <image> mirror-icon;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    in property <length> bounds-width;
+    in property <length> bounds-height;
+
+    property <length> offset: 18px;
+    property <length> flip-gap: 12px;
+    property <bool> flip-x: root.bounds-width > 0px && root.anchor-x + root.offset + root.width > root.bounds-width;
+    property <bool> flip-y: root.bounds-height > 0px && root.anchor-y + root.offset + root.height > root.bounds-height;
+
+    x: root.flip-x ? max(0px, root.anchor-x - root.width - root.flip-gap) : root.anchor-x + root.offset;
+    y: root.flip-y ? max(0px, root.anchor-y - root.height - root.flip-gap) : root.anchor-y + root.offset;
+    width: content.preferred-width;
+    height: 24px;
+
+    background: Theme.panel-glass;
+    border-radius: min(Theme.radius-lg, self.height / 2);
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: Theme.shadow-float;
+
+    // Top hairline, inset past the rounded corners.
+    Rectangle {
+        x: parent.border-radius;
+        y: 0;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    content := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.accent;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        if root.plane: Image {
+            width: 12px;
+            height: 12px;
+            source: root.plane-icon;
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+        if root.snap: Image {
+            width: 12px;
+            height: 12px;
+            source: root.snap-icon;
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+        if root.contours: Image {
+            width: 12px;
+            height: 12px;
+            source: root.contours-icon;
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+        if root.mirror: Image {
+            width: 12px;
+            height: 12px;
+            source: root.mirror-icon;
+            image-fit: contain;
+            colorize: Theme.text-secondary;
+        }
+    }
+}
+
+// ── TerrainToolsUi ─────────────────────────────────────────────────────────
+
+// The terrain tools' state and callbacks, shared by the tool bar, the
+// readout and the ribbon's Terrain tab. Rust (`terrain_tools_ui.rs`) owns
+// every `in` property and answers every callback; the bar reports its own
+// rectangle back so a click on it never reaches the ground behind it.
+export global TerrainToolsUi {
+    // The terrain tools are the current tool (and the Space is not playing).
+    in property <bool> active;
+    // Keys of the seven tools, from the keybinding table, in tool order, and
+    // the key that enters or leaves the tools.
+    in property <[string]> tool-keys: ["1", "2", "3", "4", "5", "6", "7"];
+    in property <string> tools-key: "T";
+    in property <string> active-tool: "sculpt";
+    in property <[string]> modes;
+    in property <int> active-mode;
+    in property <int> swapped-mode: -1;
+    in property <string> unit: "m";
+    in property <float> size: 16;
+    in property <float> size-min: 0.5;
+    in property <float> size-max: 256;
+    in property <bool> show-strength: true;
+    in property <float> strength: 0.4;
+    in property <bool> show-height;
+    in property <float> brush-height: 8;
+    in property <string> shape: "sphere";
+    in property <bool> show-pivot;
+    in property <string> pivot: "center";
+    in property <bool> show-plane: true;
+    in property <bool> plane-lock;
+    in property <float> plane-height;
+    in property <bool> snap;
+    in property <float> snap-step: 1;
+    in property <[string]> snap-steps: ["0.25", "0.5", "1", "2", "4", "8"];
+    in property <bool> contours;
+    in property <string> mirror: "off";
+    in property <bool> show-material;
+    in property <string> material-label: "Material";
+    in property <int> material;
+    in property <string> material-name;
+    in property <color> material-swatch;
+    in property <image> material-thumbnail;
+    in property <bool> material-has-thumbnail;
+    in property <bool> show-source;
+    in property <int> source-material;
+    in property <string> source-name;
+    in property <color> source-swatch;
+    in property <image> source-thumbnail;
+    in property <bool> source-has-thumbnail;
+    in property <bool> show-auto-material;
+    in property <bool> auto-material;
+    in property <[TerrainMaterialTile]> materials;
+    in property <[string]> actions;
+    in property <bool> actions-enabled: true;
+    in property <[bool]> action-enabled;
+    in-out property <bool> advanced-open;
+    in property <bool> show-hardness: true;
+    in property <string> hardness: "smooth";
+    in property <float> smoothing;
+    in property <[string]> presets;
+    in property <string> active-preset;
+    // Size and Shape are the brushes'; Sea Level shows its water level
+    // (world height, in the unit) instead, and has no mirror.
+    in property <bool> show-brush: true;
+    in property <bool> show-mirror: true;
+    in property <bool> show-level;
+    in property <float> level;
+    in property <bool> level-set;
+    // Region's Transform: its turn in degrees and its scale in percent.
+    in property <bool> show-region-transform;
+    in property <float> region-angle;
+    in property <float> region-scale: 100;
+    // A line of guidance in the settings row ("Drag a rectangle ...").
+    in property <string> hint;
+
+    // The readout beside the cursor, in the viewport's logical pixels.
+    in property <bool> readout-visible;
+    in property <length> readout-x;
+    in property <length> readout-y;
+    in property <string> readout-text;
+    in property <color> readout-accent: #00bcd4;
+    in property <bool> readout-plane;
+    in property <bool> readout-snap;
+    in property <bool> readout-contours;
+    in property <bool> readout-mirror;
+
+    // The bar's rectangle in the viewport, written by the overlay.
+    in-out property <length> bar-x;
+    in-out property <length> bar-y;
+    in-out property <length> bar-width;
+    in-out property <length> bar-height;
+
+    callback tool-selected(string);
+    callback mode-selected(int);
+    callback setting-changed(string, string);
+    callback material-picked(string, int);
+    callback action(string);
+    callback preset(string, string);
+    callback close();
+}
+
+// ── TerrainToolsOverlay ────────────────────────────────────────────────────
+
+// Fills the viewport area. Draws the tool bar at the top left, where the
+// tool options bar sits (the two never show together), and the readout at
+// the cursor. The overlay itself takes no pointer input; only the bar's own
+// controls do.
+export component TerrainToolsOverlay inherits Rectangle {
+    // The tool chips: fixed, with the icons here and the keys from Rust.
+    property <[TerrainToolChip]> chips: [
+        { id: "draw", label: "Draw", icon: @image-url("../../assets/icons/terrain/tool-draw.svg"), key: TerrainToolsUi.tool-keys[0], accent: Theme.cat-structure },
+        { id: "sculpt", label: "Sculpt", icon: @image-url("../../assets/icons/terrain/tool-sculpt.svg"), key: TerrainToolsUi.tool-keys[1], accent: Theme.cat-structure },
+        { id: "smooth", label: "Smooth", icon: @image-url("../../assets/icons/terrain/tool-smooth.svg"), key: TerrainToolsUi.tool-keys[2], accent: Theme.accent-cyan },
+        { id: "flatten", label: "Flatten", icon: @image-url("../../assets/icons/terrain/tool-flatten.svg"), key: TerrainToolsUi.tool-keys[3], accent: Theme.accent-cyan },
+        { id: "paint", label: "Paint", icon: @image-url("../../assets/icons/terrain/tool-paint.svg"), key: TerrainToolsUi.tool-keys[4], accent: Theme.cat-modify },
+        { id: "sealevel", label: "Sea Level", icon: @image-url("../../assets/icons/terrain/tool-sealevel.svg"), key: TerrainToolsUi.tool-keys[5], accent: Theme.text-accent },
+        { id: "region", label: "Region", icon: @image-url("../../assets/icons/terrain/tool-region.svg"), key: TerrainToolsUi.tool-keys[6], accent: Theme.cat-parts },
+    ];
+
+    background: transparent;
+
+    bar := TerrainToolBar {
+        x: 8px;
+        y: 48px;
+        available-width: root.width - 16px;
+
+        tools: root.chips;
+        active-tool: TerrainToolsUi.active-tool;
+        modes: TerrainToolsUi.modes;
+        active-mode: TerrainToolsUi.active-mode;
+        swapped-mode: TerrainToolsUi.swapped-mode;
+        badge-icon: @image-url("../../assets/icons/terrain/terrain-tools.svg");
+        unit: TerrainToolsUi.unit;
+        size: TerrainToolsUi.size;
+        size-min: TerrainToolsUi.size-min;
+        size-max: TerrainToolsUi.size-max;
+        show-strength: TerrainToolsUi.show-strength;
+        strength: TerrainToolsUi.strength;
+        show-height: TerrainToolsUi.show-height;
+        brush-height: TerrainToolsUi.brush-height;
+        shape: TerrainToolsUi.shape;
+        shape-sphere-icon: @image-url("../../assets/icons/terrain/shape-sphere.svg");
+        shape-box-icon: @image-url("../../assets/icons/terrain/shape-box.svg");
+        shape-cylinder-icon: @image-url("../../assets/icons/terrain/shape-cylinder.svg");
+        show-pivot: TerrainToolsUi.show-pivot;
+        pivot: TerrainToolsUi.pivot;
+        pivot-bottom-icon: @image-url("../../assets/icons/terrain/pivot-bottom.svg");
+        pivot-center-icon: @image-url("../../assets/icons/terrain/pivot-center.svg");
+        pivot-top-icon: @image-url("../../assets/icons/terrain/pivot-top.svg");
+        show-plane: TerrainToolsUi.show-plane;
+        plane-lock: TerrainToolsUi.plane-lock;
+        plane-height: TerrainToolsUi.plane-height;
+        snap: TerrainToolsUi.snap;
+        snap-step: TerrainToolsUi.snap-step;
+        snap-steps: TerrainToolsUi.snap-steps;
+        contours: TerrainToolsUi.contours;
+        mirror: TerrainToolsUi.mirror;
+        show-material: TerrainToolsUi.show-material;
+        material-label: TerrainToolsUi.material-label;
+        material: TerrainToolsUi.material;
+        material-name: TerrainToolsUi.material-name;
+        material-swatch: TerrainToolsUi.material-swatch;
+        material-thumbnail: TerrainToolsUi.material-thumbnail;
+        material-has-thumbnail: TerrainToolsUi.material-has-thumbnail;
+        show-source: TerrainToolsUi.show-source;
+        source-material: TerrainToolsUi.source-material;
+        source-name: TerrainToolsUi.source-name;
+        source-swatch: TerrainToolsUi.source-swatch;
+        source-thumbnail: TerrainToolsUi.source-thumbnail;
+        source-has-thumbnail: TerrainToolsUi.source-has-thumbnail;
+        show-auto-material: TerrainToolsUi.show-auto-material;
+        auto-material: TerrainToolsUi.auto-material;
+        materials: TerrainToolsUi.materials;
+        actions: TerrainToolsUi.actions;
+        actions-enabled: TerrainToolsUi.actions-enabled;
+        action-enabled: TerrainToolsUi.action-enabled;
+        show-brush: TerrainToolsUi.show-brush;
+        show-mirror: TerrainToolsUi.show-mirror;
+        show-level: TerrainToolsUi.show-level;
+        level: TerrainToolsUi.level;
+        level-set: TerrainToolsUi.level-set;
+        show-region-transform: TerrainToolsUi.show-region-transform;
+        region-angle: TerrainToolsUi.region-angle;
+        region-scale: TerrainToolsUi.region-scale;
+        hint: TerrainToolsUi.hint;
+        advanced-open <=> TerrainToolsUi.advanced-open;
+        show-hardness: TerrainToolsUi.show-hardness;
+        hardness: TerrainToolsUi.hardness;
+        smoothing: TerrainToolsUi.smoothing;
+        presets: TerrainToolsUi.presets;
+        active-preset: TerrainToolsUi.active-preset;
+
+        tool-selected(id) => { TerrainToolsUi.tool-selected(id); }
+        mode-selected(index) => { TerrainToolsUi.mode-selected(index); }
+        setting-changed(key, value) => { TerrainToolsUi.setting-changed(key, value); }
+        material-picked(which, slot) => { TerrainToolsUi.material-picked(which, slot); }
+        action(name) => { TerrainToolsUi.action(name); }
+        preset(op, name) => { TerrainToolsUi.preset(op, name); }
+        close => { TerrainToolsUi.close(); }
+
+        init => {
+            TerrainToolsUi.bar-x = self.x;
+            TerrainToolsUi.bar-y = self.y;
+            TerrainToolsUi.bar-width = self.width;
+            TerrainToolsUi.bar-height = self.height;
+        }
+        changed width => { TerrainToolsUi.bar-width = self.width; }
+        changed height => { TerrainToolsUi.bar-height = self.height; }
+    }
+
+    if TerrainToolsUi.readout-visible: TerrainCursorReadout {
+        text: TerrainToolsUi.readout-text;
+        accent: TerrainToolsUi.readout-accent;
+        plane: TerrainToolsUi.readout-plane;
+        snap: TerrainToolsUi.readout-snap;
+        contours: TerrainToolsUi.readout-contours;
+        mirror: TerrainToolsUi.readout-mirror;
+        plane-icon: @image-url("../../assets/icons/terrain/plane-lock.svg");
+        snap-icon: @image-url("../../assets/icons/terrain/snap-grid.svg");
+        contours-icon: @image-url("../../assets/icons/terrain/contours.svg");
+        mirror-icon: @image-url("../../assets/icons/terrain/mirror.svg");
+        anchor-x: TerrainToolsUi.readout-x;
+        anchor-y: TerrainToolsUi.readout-y;
+        bounds-width: root.width;
+        bounds-height: root.height;
+    }
+}

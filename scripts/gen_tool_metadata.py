@@ -24,6 +24,14 @@ MODES_GLOB = "eustress/crates/engine/modes/*.toml"
 OUT = "eustress/crates/engine/src/tool_metadata.rs"
 
 # ── Wired ids: exact label/tooltip/icon matching the built-in ribbon ─────────
+# Premium tools charge Delta per use (see engine/src/delta.rs, owned by the
+# Tickets, Bliss & Delta session). EVERYTHING ELSE IS FREE: free is the default,
+# so a tool is premium only when its id is listed here. Prices are NOT set here;
+# they are served by the Worker at GET /api/delta/catalog and set by McKale.
+# Only a wired tool may be premium - a dream button does nothing, so charging
+# for it would bill a user for nothing. The generator refuses that case.
+PREMIUM = set()
+
 WIRED = {
     "data:chart": ("Chart", "Open a Chart tab", "viewport"),
     "data:import": ("Import", "Import CSV / JSON / Parquet", "import"),
@@ -549,6 +557,11 @@ def main():
     lines.append("    /// has no dispatch arm, so the UI must say so honestly and the")
     lines.append("    /// click is counted as demand (see `usage_telemetry.rs`).")
     lines.append("    pub wired: bool,")
+    lines.append("    /// True when using this tool charges Delta. Free is the default:")
+    lines.append("    /// only ids listed in `PREMIUM` in scripts/gen_tool_metadata.py")
+    lines.append("    /// are premium, and only wired tools may be listed. Prices live")
+    lines.append("    /// in the Worker catalog (GET /api/delta/catalog), not here.")
+    lines.append("    pub premium: bool,")
     lines.append("}")
     lines.append("")
     lines.append("/// Every icon id referenced by the table below or by a submode `icon`")
@@ -561,14 +574,26 @@ def main():
     lines.append(f"/// Metadata for all {len(rows)} tool ids across the mode manifests.")
     lines.append("pub fn tool_meta(id: &str) -> Option<ToolMeta> {")
     lines.append("    let (label, tooltip, icon, wired): (&'static str, &'static str, &'static str, bool) = match id {")
+    unknown = sorted(t for t in PREMIUM if t not in rows)
+    dream = sorted(t for t in PREMIUM if t in rows and t not in WIRED)
+    if unknown:
+        raise SystemExit(f"PREMIUM lists ids no manifest uses: {unknown}")
+    if dream:
+        raise SystemExit(f"PREMIUM lists unwired (dream) tools; charging for them bills for nothing: {dream}")
     for tid in sorted(rows):
         lb, tip, ic = rows[tid]
         w = "true" if tid in WIRED else "false"
         lines.append(f'        "{esc(tid)}" => ("{esc(lb)}", "{esc(tip)}", "{esc(ic)}", {w}),')
     lines.append("        _ => return None,")
     lines.append("    };")
-    lines.append("    Some(ToolMeta { label, tooltip, icon, wired })")
+    lines.append("    Some(ToolMeta { label, tooltip, icon, wired, premium: PREMIUM_TOOL_IDS.contains(&id) })")
     lines.append("}")
+    lines.append("")
+    lines.append("/// Tool ids that charge Delta per use. Everything else is free.")
+    lines.append("pub const PREMIUM_TOOL_IDS: &[&str] = &[")
+    for tid in sorted(PREMIUM):
+        lines.append(f'    "{esc(tid)}",')
+    lines.append("];")
     lines.append("")
 
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:

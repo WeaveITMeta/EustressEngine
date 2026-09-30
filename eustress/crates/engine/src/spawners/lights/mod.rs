@@ -8,29 +8,28 @@
 //! | `ClassName` | Spawner | Backing | Spec section |
 //! |---|---|---|---|
 //! | `PointLight`       | [`PointLightSpawner`]        | `bevy_pbr::PointLight`        | §4.2 |
-//! | `SpotLight`        | [`SpotLightSpawner`]         | `bevy_pbr::SpotLight`         | §4.3 |
-//! | `SurfaceLight`     | [`SurfaceLightSpawner`]      | emissive child quad + child `PointLight` (Option A) | §4.4 |
+//! | `SpotLight`        | [`SpotLightSpawner`]         | `bevy_pbr::SpotLight` on an emitter child | §4.3 |
+//! | `SurfaceLight`     | [`SurfaceLightSpawner`]      | `bevy_pbr::SpotLight` on an emitter child at the face | §4.4 |
 //! | `DirectionalLight` | [`DirectionalLightSpawner`]  | `bevy_pbr::DirectionalLight`  | §4.5 |
+//!
+//! Every spawner attaches only the Eustress authoring component; the
+//! rendered Bevy light is built and kept in step by
+//! `eustress_common::plugins::light_classes`, the one owner of that
+//! mapping for every spawn path.
 //!
 //! The celestial path (`Star`/`Sun`, `Moon`, `Sky`, `Atmosphere`) is
 //! deliberately NOT touched here — those classes already round-trip via
 //! `plugins::lighting_plugin::hydrate_lighting_entities` and are
 //! explicitly out of scope per `AGENT_DISPATCH.md` "Pre-existing Systems".
 //!
-//! ## Cargo-feature gating + registration
+//! ## Where these run
 //!
-//! Per spec §7.2 the `class-registry` cargo feature gates whether
-//! `file_loader::spawn_directory_entry` consults the registry before
-//! falling back to the legacy match arms. The registration call below
-//! ALSO sits behind that feature so a `--no-default-features` build does
-//! not pay the spawner-construction cost (small, but free is free).
-//!
-//! ## Mount point
-//!
-//! Wave 3.G (orchestrator-only) adds [`LightsSpawnerPlugin`] to
-//! `SlintUiPlugin::build` after every Wave-3 group lands. Until then
-//! this plugin is dead code and the legacy `spawn.rs` paths
-//! (`spawn_point_light` etc.) keep being the runtime path.
+//! [`LightsSpawnerPlugin`] is mounted by `SlintUiPlugin::build`, which
+//! registers the spawners with the `ClassRegistry`. The Space loaders do
+//! not spawn lights through the registry: `file_loader` and
+//! `instance_loader` build the authoring components directly with
+//! `light_classes::read_light_section`, so `spawn`, `apply_edit` and the
+//! import hooks here are exercised by their unit tests.
 //!
 //! ## LOOP 5 — drain resource discipline
 //!
@@ -57,14 +56,6 @@ pub use directional_light::DirectionalLightSpawner;
 pub use point_light::PointLightSpawner;
 pub use spot_light::SpotLightSpawner;
 pub use surface_light::SurfaceLightSpawner;
-
-/// Brightness multiplier applied when promoting a `SurfaceLight`'s
-/// authoring brightness to the child `PointLight`'s lumens. Surfaces in
-/// Roblox are area emitters; their brightness is a unitless scale, not a
-/// lumens reading. Matches the legacy `spawn_surface_light` magic number
-/// in `spawn.rs` so the new spawner ships at byte-equivalent visual
-/// behavior for existing SurfaceLight entities.
-pub(crate) const AREA_LIGHT_BRIGHTNESS_SCALE: f32 = 500.0;
 
 /// Bevy plugin that registers all four light spawners with the
 /// `ClassRegistry`.

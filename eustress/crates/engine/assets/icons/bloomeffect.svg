@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Bloom - a bright core glowing out into a soft halo -->
+  <circle cx="8" cy="8" r="7" fill="#FFE9A8" opacity="0.18"/>
+  <circle cx="8" cy="8" r="5.5" fill="#FFE9A8" opacity="0.3"/>
+  <circle cx="8" cy="8" r="4" fill="#FFF3C4" opacity="0.5"/>
+  <circle cx="8" cy="8" r="2.4" fill="#FFFFFF"/>
+</svg>

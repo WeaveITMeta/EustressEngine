@@ -37,7 +37,7 @@
 //!   watchpoint, deduped and stable-sorted. Both stores are exported
 //!   because subsystems use whichever suits them: scripts and
 //!   `set_sim_value` write `SimValuesResource`, while self-contained
-//!   simulations (e.g. the ARC-1 nuclear model) record straight into the
+//!   engine simulations record straight into the
 //!   watchpoint registry. `SimValuesResource` wins any key collision.
 //!   Used for hover-over-`get_sim_value("X")` to show the current value,
 //!   for `list_sim_values`, and for string-literal completion inside
@@ -248,7 +248,7 @@ mod engine_writer {
         play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
         sim_values: Option<Res<crate::simulation::plugin::SimValuesResource>>,
         // Watchpoints are a SECOND, independent store. Subsystems that own
-        // their own physics (the ARC-1 nuclear sim, for one) call
+        // their own physics call
         // `WatchPointRegistry::record` directly and never touch
         // `SimValuesResource`, so exporting only the latter left every such
         // value invisible to the MCP `get_sim_value` / `list_sim_values`

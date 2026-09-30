@@ -62,6 +62,7 @@
 
 #![warn(missing_docs)]
 
+pub mod animation;
 pub mod asset_resolver;
 pub mod class_map;
 pub mod color_manifest;
@@ -73,6 +74,10 @@ pub mod materializer;
 pub mod parser;
 pub mod property_map;
 pub mod roblox_mesh;
+pub mod texture_bake;
+pub mod service_props;
+pub mod carry_over;
+mod pose;
 pub mod service_router;
 pub mod sink;
 pub mod terrain;

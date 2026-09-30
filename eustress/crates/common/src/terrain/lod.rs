@@ -3,7 +3,9 @@
 //! LOD only changes a chunk's render mesh. Its collider is always built at
 //! LOD 0 (`collider.rs`) and is never rebuilt on a LOD change. A chunk
 //! holding volumetric edits switches between its marching-cubes mesh at
-//! LOD 0 and its heightfield mesh further out (see `marching`).
+//! LOD 0 and its heightfield mesh further out (see `marching`). Every LOD
+//! leaves out the quads over the holes of a sparse surface, judged at its own
+//! vertices (see `chunk_ground_quads`).
 
 use bevy::prelude::*;
 use super::{
@@ -173,7 +175,9 @@ pub fn update_lod_system(
             (new_lod != chunk.lod).then_some((entity, new_lod, distance))
         })
         .collect();
-    pending.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    // `total_cmp`, since a distance over a raster cell that is not a number
+    // is not a number either, and a sort whose order is not total may panic.
+    pending.sort_by(|a, b| b.2.total_cmp(&a.2));
     lod_state.pending_updates = pending.into_iter().map(|(entity, lod, _)| (entity, lod)).collect();
 }
 

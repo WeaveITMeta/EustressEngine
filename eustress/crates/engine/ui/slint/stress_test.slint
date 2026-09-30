@@ -1,387 +1,351 @@
 // ============================================================================
 // Eustress Engine - Stress Test Dialog
-// Network stress testing configuration
+// Synthetic players against the local server: they join the way the Player
+// does, move and interact through the real lanes, and the host reports what
+// it cost. The harness is the Multiplayer session's (network_benchmark.rs,
+// docs/networking/STRESS_TEST.md); this file is only the dialog.
+//
+// Chrome: DialogScrim > DialogCard > DialogFooter (DRAFTING_UX.md Law 1).
+// Escape, the close button and an outside click all close it.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, Slider, CheckBox, ScrollView } from "std-widgets.slint";
+import { Slider, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitSwitch, SettingsGroup, SettingRow, KitSectionLabel } from "dialog_kit.slint";
 
-component StressSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
+// A slider and its current value, for a SettingRow.
+component SliderControl inherits HorizontalLayout {
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <int> value;
+    in property <string> unit: "";
+    callback changed(int);
 
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
+    spacing: 10px;
+    Slider {
+        width: 170px;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        changed(v) => { root.changed(round(v)); }
     }
-
     Text {
-        x: 10px;
-        text: root.title;
+        width: 44px;
+        text: root.unit == "" ? root.value : root.value + " " + root.unit;
         color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: right;
         vertical-alignment: center;
+    }
+}
+
+// One result figure: the number and what it counts.
+component StatTile inherits Rectangle {
+    in property <string> value;
+    in property <string> label;
+    in property <bool> alert: false;
+
+    // Equal columns: every tile asks for the same width, whatever its text.
+    horizontal-stretch: 1;
+    preferred-width: 100px;
+    min-width: 60px;
+    background: Theme.background-secondary.with-alpha(0.6);
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: root.alert ? Theme.text-error.with-alpha(0.35) : Theme.border-color;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 2px;
+        Text {
+            text: root.value;
+            color: root.alert ? Theme.text-error : Theme.text-primary;
+            font-size: Theme.font-lg;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-xs;
+            overflow: elide;
+        }
+    }
+}
+
+// A labelled row of result tiles.
+component ResultRow inherits VerticalLayout {
+    in property <string> title;
+    spacing: 6px;
+    KitSectionLabel { text: root.title; }
+    HorizontalLayout {
+        spacing: 8px;
+        @children
     }
 }
 
 export component StressTestDialog inherits Rectangle {
     in-out property <int> client-count: 1;
-    in-out property <int> message-rate: 10;
+    // Avatar updates each bot sends per second; 20 is the Player's rate.
+    in-out property <int> message-rate: 20;
     in-out property <int> duration-seconds: 60;
     in-out property <bool> simulate-movement: true;
     in-out property <bool> simulate-interactions: false;
+    // Bots download the Space before playing, as real players do.
+    in-out property <bool> download-world: true;
+    // The most bots this machine can drive (MachineCapabilities).
+    in property <int> max-clients: 50;
     in property <bool> running: false;
     in property <float> progress: 0;
     in property <string> status: "";
+    // Relay frames received, relay latency (ms), and all failures.
     in property <int> total-messages: 0;
     in property <float> avg-latency: 0;
     in property <int> errors: 0;
+
+    // Join
+    in property <int> joined: 0;
+    in property <int> join-failures: 0;
+    in property <int> disconnects: 0;
+    in property <float> join-p95-ms: 0;
+    // Relay: one bot's movement reaching the others through the host.
+    in property <float> relay-p50-ms: 0;
+    in property <float> relay-p95-ms: 0;
+    in property <float> relay-loss: 0; // 0..1
+    // Round trips
+    in property <float> invoke-p95-ms: 0; // RemoteFunction
+    in property <float> rtt-ms: 0; // QUIC
+    // Host
+    in property <float> host-frame-p95-ms: 0;
+    in property <float> host-net-ms: 0; // network work per frame
+    in property <float> host-budget: 0; // 0..1 of the 16.7 ms frame
+    // Traffic per bot
+    in property <float> down-kbps: 0;
+    in property <float> up-kbps: 0;
+    // CPU the bots themselves kept busy, in cores (they run inside Studio).
+    in property <float> bot-cores: 0;
+    // The end-of-run summary, selectable so it can be copied.
+    in property <string> report: "";
 
     callback on-start();
     callback on-stop();
     callback on-close();
 
-    width: 100%;
-    height: 100%;
-    background: Theme.modal-backdrop;
-
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => {
-            return accept;
-        }
+    // One decimal place.
+    pure function d1(v: float) -> string {
+        return round(v * 10) / 10;
     }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 480px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+    property <bool> has-results: root.total-messages > 0 || root.joined > 0 || root.join-failures > 0 || root.report != "";
 
-        TouchArea {
-            scroll-event(event) => {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+
+    // Escape closes. Other keys pass through as before.
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.on-close();
                 return accept;
             }
+            return reject;
         }
 
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
+        DialogScrim {
+            dismiss => { root.on-close(); }
 
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
+            DialogCard {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(600px, parent.width - 40px);
+                height: min(body.preferred-height + footer.preferred-height + 45px, parent.height - 40px);
+                icon: @image-url("../../assets/icons/ui/stress.svg");
+                title: "Stress test";
+                subtitle: "Synthetic players join the local server the way the Player does";
+                close => { root.on-close(); }
 
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Stress Test";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                body-scroll := ScrollView {
+                    vertical-stretch: 1;
+
+                    body := VerticalLayout {
+                        width: body-scroll.visible-width;
+                        padding: 16px;
+                        spacing: 14px;
+                        alignment: start;
+
+                        SettingsGroup {
+                            title: "LOAD";
+                            note: "Start hosts the local server first when Studio is not already hosting.";
+
+                            SettingRow {
+                                label: "Players";
+                                description: "Synthetic players that join. This machine can drive \{root.max-clients}.";
+                                divider: false;
+                                SliderControl {
+                                    minimum: 1;
+                                    maximum: max(root.max-clients, 1);
+                                    value: root.client-count;
+                                    changed(v) => { root.client-count = v; }
+                                }
+                            }
+
+                            SettingRow {
+                                label: "Avatar updates per second";
+                                description: "Sent by each player. The Player sends 20.";
+                                SliderControl {
+                                    minimum: 1;
+                                    maximum: 60;
+                                    value: root.message-rate;
+                                    changed(v) => { root.message-rate = v; }
+                                }
+                            }
+
+                            SettingRow {
+                                label: "Duration";
+                                description: "How long the test runs";
+                                SliderControl {
+                                    minimum: 10;
+                                    maximum: 300;
+                                    value: root.duration-seconds;
+                                    unit: "s";
+                                    changed(v) => { root.duration-seconds = v; }
+                                }
+                            }
+                        }
+
+                        SettingsGroup {
+                            title: "BEHAVIOUR";
+
+                            SettingRow {
+                                label: "Move";
+                                description: "Players walk, so their movement relays to the others.";
+                                divider: false;
+                                KitSwitch { checked <=> root.simulate-movement; }
+                            }
+
+                            SettingRow {
+                                label: "Interact";
+                                description: "Players chat, jump, fire remotes and call RemoteFunctions.";
+                                KitSwitch { checked <=> root.simulate-interactions; }
+                            }
+
+                            SettingRow {
+                                label: "Download the world";
+                                description: "Players download the Space before playing, as real players do. Off measures steady play alone.";
+                                KitSwitch { checked <=> root.download-world; }
+                            }
+                        }
+
+                        // Progress (while running)
+                        if root.running: VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.status;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                overflow: elide;
+                            }
+                            Rectangle {
+                                height: 6px;
+                                background: Theme.background-tertiary;
+                                border-radius: 3px;
+                                clip: true;
+
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * clamp(root.progress, 0, 1);
+                                    height: 100%;
+                                    background: Theme.accent-cyan;
+                                    border-radius: 3px;
+                                }
+                            }
+                        }
+
+                        // Results
+                        if root.has-results: VerticalLayout {
+                            spacing: 12px;
+
+                            ResultRow {
+                                title: "JOIN";
+                                StatTile { value: root.joined; label: "Joined"; }
+                                StatTile { value: root.join-failures; label: "Failed to join"; alert: root.join-failures > 0; }
+                                StatTile { value: root.disconnects; label: "Disconnects"; alert: root.disconnects > 0; }
+                                StatTile { value: d1(root.join-p95-ms) + " ms"; label: "Join time p95"; }
+                            }
+
+                            ResultRow {
+                                title: "RELAY";
+                                StatTile { value: root.total-messages; label: "Frames received"; }
+                                StatTile { value: d1(root.relay-p50-ms) + " ms"; label: "Latency p50"; }
+                                StatTile { value: d1(root.relay-p95-ms) + " ms"; label: "Latency p95"; }
+                                StatTile { value: d1(root.relay-loss * 100) + "%"; label: "Loss"; alert: root.relay-loss > 0.01; }
+                            }
+
+                            ResultRow {
+                                title: "ROUND TRIPS AND FAILURES";
+                                StatTile { value: d1(root.avg-latency) + " ms"; label: "Relay latency, mean"; }
+                                StatTile { value: d1(root.invoke-p95-ms) + " ms"; label: "RemoteFunction p95"; }
+                                StatTile { value: d1(root.rtt-ms) + " ms"; label: "Network round trip"; }
+                                StatTile { value: root.errors; label: "Errors"; alert: root.errors > 0; }
+                            }
+
+                            ResultRow {
+                                title: "HOST";
+                                StatTile { value: d1(root.host-frame-p95-ms) + " ms"; label: "Host frame p95"; alert: root.host-frame-p95-ms > 16.7; }
+                                StatTile { value: round(root.host-budget * 100) + "%"; label: "Of the frame budget"; alert: root.host-budget > 0.8; }
+                                StatTile { value: d1(root.host-net-ms) + " ms"; label: "Network work per frame"; }
+                                // The bots run inside Studio, on threads of their own.
+                                StatTile { value: d1(root.bot-cores) + " cores"; label: "The bots' own CPU"; }
+                            }
+
+                            ResultRow {
+                                title: "TRAFFIC PER PLAYER";
+                                StatTile { value: d1(root.down-kbps) + " kbps"; label: "Down"; }
+                                StatTile { value: d1(root.up-kbps) + " kbps"; label: "Up"; }
+                            }
+
+                            if root.report != "": VerticalLayout {
+                                spacing: 6px;
+                                KitSectionLabel { text: "REPORT"; }
+                                TextEdit {
+                                    height: 120px;
+                                    read-only: true;
+                                    text: root.report;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "Select the report and press Ctrl+C to copy it.";
+                                    color: Theme.text-disabled;
+                                    font-size: Theme.font-xs;
+                                }
+                            }
+                        }
+                    }
                 }
 
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: destructive close-button hover tint, no token
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
+                // ── Footer ──
+                footer := DialogFooter {
+                    KitButton {
+                        text: "Close";
                         clicked => { root.on-close(); }
                     }
 
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content ──
-            VerticalLayout {
-                vertical-stretch: 1;
-                padding: 20px;
-                spacing: 4px;
-                alignment: start;
-
-                StressSection { title: "CONFIGURATION"; }
-
-                // Clients slider
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            width: 110px;
-                            text: "Clients";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 1;
-                            maximum: 200;
-                            value: root.client-count;
-                        }
-                        Text {
-                            width: 36px;
-                            text: root.client-count;
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Messages/sec slider
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            width: 110px;
-                            text: "Messages/sec";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 1;
-                            maximum: 100;
-                            value: root.message-rate;
-                        }
-                        Text {
-                            width: 36px;
-                            text: root.message-rate;
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Duration slider
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            width: 110px;
-                            text: "Duration (sec)";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 10;
-                            maximum: 300;
-                            value: root.duration-seconds;
-                        }
-                        Text {
-                            width: 36px;
-                            text: root.duration-seconds;
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle { height: 8px; }
-                StressSection { title: "OPTIONS"; }
-
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        CheckBox { text: "Simulate movement"; checked <=> root.simulate-movement; }
-                    }
-                }
-
-                Rectangle {
-                    height: 28px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        CheckBox { text: "Simulate interactions"; checked <=> root.simulate-interactions; }
-                    }
-                }
-
-                // Progress bar (when running)
-                if root.running: Rectangle {
-                    height: 40px;
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: root.status;
-                            color: Theme.text-secondary;
-                            font-size: 10px;
-                        }
-                        Rectangle {
-                            height: 6px;
-                            background: Theme.background-tertiary;
-                            border-radius: 3px;
-
-                            Rectangle {
-                                width: parent.width * root.progress;
-                                height: 100%;
-                                background: Theme.accent-blue;
-                                border-radius: 3px;
+                    // Start test, or Stop while a test runs.
+                    KitButton {
+                        text: root.running ? "Stop" : "Start test";
+                        kind: root.running ? "danger" : "primary";
+                        clicked => {
+                            if (root.running) {
+                                root.on-stop();
+                            } else {
+                                root.on-start();
                             }
-                        }
-                    }
-                }
-
-                // Results (after test)
-                if root.total-messages > 0: Rectangle {
-                    height: 60px;
-                    background: Theme.dialog-titlebar-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.border-color;
-
-                    HorizontalLayout {
-                        padding: 12px;
-                        spacing: 16px;
-
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            Text {
-                                text: root.total-messages;
-                                color: Theme.accent-blue;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-                            Text { text: "Messages"; color: Theme.text-secondary; font-size: 9px; }
-                        }
-
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            Text {
-                                text: round(root.avg-latency) + "ms";
-                                color: Theme.accent-green;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-                            Text { text: "Avg Latency"; color: Theme.text-secondary; font-size: 9px; }
-                        }
-
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            Text {
-                                text: root.errors;
-                                color: root.errors > 0 ? Theme.text-error : Theme.accent-green;
-                                font-size: 16px;
-                                font-weight: 600;
-                            }
-                            Text { text: "Errors"; color: Theme.text-secondary; font-size: 9px; }
-                        }
-                    }
-                }
-            }
-
-            // ── Footer ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    spacing: 10px;
-                    alignment: center;
-
-                    // Close
-                    Rectangle {
-                        width: 80px; height: 32px;
-                        border-radius: 5px;
-                        background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-
-                        close-btn := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-
-                        Text {
-                            text: "Close";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Start Test / Stop (green / red)
-                    Rectangle {
-                        width: 100px; height: 32px;
-                        border-radius: 5px;
-                        background: root.running ?
-                            (stop-ta.has-hover ? #4a1515 : #2a1515) :  // theme-exempt: dark danger-button fill tints, no token
-                            (start-ta.has-hover ? #1a4a2a : #152a1e);  // theme-exempt: dark success-button fill tints, no token
-                        border-width: 1px;
-                        border-color: root.running ?
-                            (stop-ta.has-hover ? Theme.border-error : #5a2020) :  // theme-exempt: #5a2020 dark danger-button idle border tint
-                            (start-ta.has-hover ? Theme.accent-green : #2a5a32);  // theme-exempt: #2a5a32 dark success-button idle border tint
-
-                        start-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            visible: !root.running;
-                            clicked => { root.on-start(); }
-                        }
-
-                        stop-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            visible: root.running;
-                            clicked => { root.on-stop(); }
-                        }
-
-                        Text {
-                            text: root.running ? "Stop" : "Start Test";
-                            color: root.running ?
-                                (stop-ta.has-hover ? Theme.text-error : #e57373) :  // theme-exempt: #e57373 muted danger-button idle text
-                                (start-ta.has-hover ? #a5d6a7 : Theme.accent-green);  // theme-exempt: #a5d6a7 light success-button hover text
-                            font-size: 12px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
                         }
                     }
                 }

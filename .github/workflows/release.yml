@@ -211,6 +211,18 @@ jobs:
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
           cp eustress/target/aarch64-apple-darwin/release/eustress-engine "$APP/Contents/MacOS/"
           cp -r eustress/crates/engine/assets "$APP/Contents/Resources/assets"
+          # Common's shipped assets (materials, characters, class schemas, and
+          # the primitive part meshes), where the app looks inside a bundle,
+          # and the constitution Help > Constitution opens.
+          git ls-files eustress/crates/common/assets \
+            | grep -Eiv '(^|/)scripts/|\.(fbx|py|pyc|blend[0-9]*)$' \
+            | while IFS= read -r f; do
+                dest="$APP/Contents/Resources/common/assets/${f#eustress/crates/common/assets/}"
+                mkdir -p "$(dirname "$dest")"
+                cp "$f" "$dest"
+              done
+          mkdir -p "$APP/Contents/Resources/docs"
+          cp docs/documents/eustress_constitution.pdf "$APP/Contents/Resources/docs/"
           cp eustress/crates/engine/assets/icon.png "$APP/Contents/Resources/AppIcon.png"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
@@ -310,6 +322,15 @@ jobs:
           mkdir -p stage/icons dist
           cp eustress/target/release/eustress-engine stage/
           cp -r eustress/crates/engine/assets stage/assets
+          git ls-files eustress/crates/common/assets \
+            | grep -Eiv '(^|/)scripts/|\.(fbx|py|pyc|blend[0-9]*)$' \
+            | while IFS= read -r f; do
+                dest="stage/common/assets/${f#eustress/crates/common/assets/}"
+                mkdir -p "$(dirname "$dest")"
+                cp "$f" "$dest"
+              done
+          mkdir -p stage/docs
+          cp docs/documents/eustress_constitution.pdf stage/docs/
           cp eustress/crates/engine/assets/linux/eustress-engine.desktop stage/
           cp eustress/crates/engine/assets/linux/install.sh stage/
           cp eustress/crates/engine/assets/linux/icons/*.png stage/icons/

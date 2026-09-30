@@ -20,7 +20,7 @@ pub mod constants {
     /// Speed of light (m/s)
     pub const C: f64 = 299792458.0;
     /// Standard gravity (m/s²)
-    pub const G_EARTH: f64 = 9.81;
+    pub const G_EARTH: f64 = crate::units::STANDARD_GRAVITY;
     /// Standard atmospheric pressure (Pa)
     pub const ATM: f64 = 101325.0;
     /// Water density at 4°C (kg/m³)

@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Result as LuaResult, Value};
 
-use crate::datamodel::{DmValue, EnumItem};
+use crate::datamodel::{DmValue, EnumItem, RemoteValue};
 use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim, LuauUDim2, LuauVector3, UserDataPeek};
 use crate::scripting::{UDim, UDim2};
 
@@ -105,5 +105,81 @@ pub fn enum_name_arg(value: &Value) -> Option<String> {
             .ok()
             .map(|s| s.trim_start_matches("Enum.").rsplit('.').next().unwrap_or("").to_string()),
         _ => None,
+    }
+}
+
+/// A remote argument as a Luau value.
+pub fn remote_to_lua(lua: &Lua, value: &RemoteValue) -> LuaResult<Value> {
+    Ok(match value {
+        RemoteValue::Value(v) => to_lua(lua, v)?,
+        RemoteValue::Array(items) => {
+            let t = lua.create_table()?;
+            for (i, item) in items.iter().enumerate() {
+                t.raw_set(i as i64 + 1, remote_to_lua(lua, item)?)?;
+            }
+            Value::Table(t)
+        }
+        RemoteValue::Map(entries) => {
+            let t = lua.create_table()?;
+            for (k, v) in entries {
+                t.raw_set(k.as_str(), remote_to_lua(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
+/// A Luau value as a remote argument.
+///
+/// Scalars go through [`from_lua`]. A table becomes an array when its keys
+/// run `1..n` and a map when they are all strings; a table mixing the two is
+/// an error, as in Roblox. Functions and threads pass as nil rather than
+/// failing the whole call, which is also what Roblox does.
+pub fn remote_from_lua(value: &Value) -> LuaResult<RemoteValue> {
+    match value {
+        Value::Function(_) | Value::Thread(_) => Ok(RemoteValue::NIL),
+        Value::Table(t) => table_to_remote(t),
+        other => Ok(RemoteValue::Value(from_lua(other)?)),
+    }
+}
+
+/// Split a table into the array part or the string-keyed part, refusing one
+/// that holds both. Map keys come out sorted, so the same table always
+/// encodes the same way and the determinism check stays honest.
+fn table_to_remote(t: &mlua::Table) -> LuaResult<RemoteValue> {
+    let len = t.raw_len();
+    let mut array = Vec::with_capacity(len);
+    for i in 1..=len {
+        let v: Value = t.raw_get(i as i64)?;
+        array.push(remote_from_lua(&v)?);
+    }
+
+    let mut map: Vec<(String, RemoteValue)> = Vec::new();
+    for pair in t.clone().pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        match key {
+            // Already taken by the array walk above.
+            Value::Integer(i) if i >= 1 && (i as usize) <= len => {}
+            Value::Number(n) if n.fract() == 0.0 && n >= 1.0 && (n as usize) <= len => {}
+            Value::String(s) => map.push((s.to_str()?.to_string(), remote_from_lua(&value)?)),
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "a remote argument table cannot have a {} key",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if !array.is_empty() && !map.is_empty() {
+        return Err(mlua::Error::RuntimeError(
+            "a remote argument table cannot mix array and string keys".into(),
+        ));
+    }
+    if map.is_empty() {
+        Ok(RemoteValue::Array(array))
+    } else {
+        map.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(RemoteValue::Map(map))
     }
 }

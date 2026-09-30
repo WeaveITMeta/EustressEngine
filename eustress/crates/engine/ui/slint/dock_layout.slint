@@ -4,8 +4,8 @@
 //           Theme/Accessibility, Performance Feedback
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, Button, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { KitDivider, KitButton, KitSwitch, DialogFooter, SettingsGroup, SettingRow } from "dialog_kit.slint";
 
 // ============================================================================
 // Layout Preset Definition
@@ -132,8 +132,25 @@ export component LayoutPresetSelector inherits Rectangle {
 
     width: 160px;
     height: 28px;
-    background: root.dropdown-open ? Theme.explorer-item-hover : Theme.overlay-background;
-    border-radius: 4px;
+    // The popup surface in small: glass, `radius-md`, one border, the top
+    // hairline. Open (the dropdown is showing) is the armed state, ringed in
+    // the selection cyan.
+    background: root.dropdown-open || btn-touch.has-hover ? Theme.explorer-item-hover : Theme.panel-glass;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: root.dropdown-open ? Theme.accent-cyan.with-alpha(0.6) : Theme.border-color;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow-float;
+    animate background { duration: 100ms; }
+
+    Rectangle {
+        x: Theme.radius-md;
+        y: 0;
+        width: parent.width - 2 * Theme.radius-md;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
 
     // Current preset button
     btn-touch := TouchArea {
@@ -151,40 +168,94 @@ export component LayoutPresetSelector inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 7px;
 
-        Rectangle {
-            width: 16px;
+        VerticalLayout {
+            alignment: center;
             Image {
-                width: 16px;
-                height: 16px;
+                width: 14px;
+                height: 14px;
                 source: root.presets[root.current-preset-index].icon;
                 image-fit: contain;
-                vertical-alignment: center;
+                colorize: root.dropdown-open ? Theme.accent-cyan : Theme.text-secondary;
             }
         }
         Text {
             text: root.presets[root.current-preset-index].name;
             color: Theme.text-primary;
             font-size: 12px;
+            font-weight: 500;
             vertical-alignment: center;
             horizontal-stretch: 1;
+            overflow: elide;
         }
         VerticalLayout {
-            width: 12px;
             alignment: center;
-
             Image {
-                width: 12px;
-                height: 12px;
+                width: 10px;
+                height: 10px;
                 source: root.dropdown-open ? @image-url("../../assets/icons/ui/chevron-up.svg") :
                         @image-url("../../assets/icons/ui/chevron-down.svg");
                 image-fit: contain;
-                colorize: Theme.text-secondary;
+                colorize: root.dropdown-open ? Theme.accent-cyan : Theme.text-secondary;
             }
         }
+    }
+}
+
+// ── Menu parts (private) ────────────────────────────────────────────────────
+
+/// A menu separator: a KitDivider inset from the menu's edges.
+component DockMenuSeparator inherits Rectangle {
+    height: 9px;
+    KitDivider {
+        x: 6px;
+        y: 4px;
+        width: parent.width - 12px;
+    }
+}
+
+/// A 28px menu action row: icon and label. `danger` paints it in the red
+/// accent for a destructive action.
+component DockMenuAction inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> danger: false;
+    callback clicked();
+
+    height: 28px;
+    border-radius: Theme.radius-sm;
+    background: touch.pressed ? Theme.button-pressed
+        : touch.has-hover ? Theme.explorer-item-hover : transparent;
+    animate background { duration: 80ms; easing: ease-out; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    Image {
+        x: 11px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.danger ? Theme.accent-red
+            : touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+    }
+
+    Text {
+        x: 34px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 44px;
+        text: root.text;
+        color: root.danger ? Theme.accent-red : Theme.text-primary;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -245,27 +316,40 @@ export component LayoutDropdownMenu inherits Rectangle {
     callback close();
 
     width: 220px;
-    height: (root.presets.length * 44px) + 72px;
-    background: Theme.panel-background;
-    border-radius: 6px;
+    // Hug the content. The old fixed `presets * 44px + 72px` was 31px short
+    // of the rows it holds, so "Reset to default" hung below the card.
+    height: body.min-height;
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: Theme.border-color;
-    drop-shadow-blur: 12px;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 4px;
     drop-shadow-color: Theme.shadow-float;
 
     // Absorb clicks on menu body
     TouchArea {}
 
-    VerticalLayout {
-        padding: 4px;
+    Rectangle {
+        x: Theme.radius-md;
+        y: 0;
+        width: parent.width - 2 * Theme.radius-md;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    body := VerticalLayout {
+        padding: 5px;
         spacing: 1px;
 
-        // Preset list
+        // Preset list. The current preset is marked with the cyan check
+        // and a cyan icon.
         for preset[index] in root.presets: Rectangle {
-            height: 42px;
-            background: item-touch.has-hover ? Theme.explorer-item-hover :
-                        index == root.current-preset-index ? Theme.explorer-item-selected : transparent;
-            border-radius: 4px;
+            height: 38px;
+            border-radius: Theme.radius-sm;
+            background: item-touch.pressed ? Theme.button-pressed
+                : item-touch.has-hover ? Theme.explorer-item-hover : transparent;
+            animate background { duration: 80ms; easing: ease-out; }
 
             item-touch := TouchArea {
                 mouse-cursor: pointer;
@@ -279,129 +363,87 @@ export component LayoutDropdownMenu inherits Rectangle {
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                spacing: 8px;
+                spacing: 10px;
 
-                // Icon
-                Rectangle {
-                    width: 20px;
-                        Image {
-                            x: 2px;
-                            y: 13px;
-                            width: 16px;
-                            height: 16px;
-                            source: preset.icon;
-                            image-fit: contain;
-                        }
-                    }
-                    
-                    // Name + description
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        alignment: center;
-                        spacing: 1px;
-                        
-                        Text {
-                            text: preset.name;
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            font-weight: 600;
-                        }
-                        Text {
-                            text: preset.description;
-                            color: Theme.text-secondary;
-                            font-size: 10px;
-                        }
-                    }
-                }
-            }
-            
-            // Separator
-            Rectangle {
-                height: 1px;
-                background: Theme.border-color;
-            }
-            
-            // Save Layout
-            Rectangle {
-                height: 32px;
-                background: save-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                border-radius: 4px;
-
-                save-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.save-layout-to-file();
-                        root.close();
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: preset.icon;
+                        image-fit: contain;
+                        colorize: index == root.current-preset-index ? Theme.accent-cyan
+                            : item-touch.has-hover ? Theme.text-primary : Theme.text-secondary;
                     }
                 }
 
-                HorizontalLayout {
-                    padding-left: 10px;
-                    spacing: 8px;
+                // Name + description
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 1px;
 
-                    Rectangle {
-                        width: 20px;
-                        Image { x: 2px; y: 8px; width: 16px; height: 16px; source: @image-url("../../assets/icons/ui/save.svg"); image-fit: contain; }
+                    Text {
+                        text: preset.name;
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        font-weight: index == root.current-preset-index ? 600 : 500;
+                        overflow: elide;
                     }
-                    Text { text: "Save Layout..."; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                    Text {
+                        text: preset.description;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
                 }
-            }
 
-            // Import Layout
-            Rectangle {
-                height: 32px;
-                background: import-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                border-radius: 4px;
-                
-                import-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.load-layout-from-file();
-                        root.close();
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        width: 12px;
+                        height: 12px;
+                        source: @image-url("../../assets/icons/ui/check.svg");
+                        image-fit: contain;
+                        colorize: Theme.accent-cyan;
+                        opacity: index == root.current-preset-index ? 1.0 : 0.0;
                     }
-                }
-                
-                HorizontalLayout {
-                    padding-left: 10px;
-                    spacing: 8px;
-                    
-                    Rectangle {
-                        width: 20px;
-                        Image { x: 2px; y: 8px; width: 16px; height: 16px; source: @image-url("../../assets/icons/ui/import.svg"); image-fit: contain; }
-                    }
-                    Text { text: "Import Layout..."; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
-                }
-            }
-            
-            // Reset to Default
-            Rectangle {
-                height: 32px;
-                background: reset-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                border-radius: 4px;
-                
-                // Reset applies the Default preset in full: panels, widths
-                // and tabs, exactly as picking it from the list does.
-                reset-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.preset-selected(0, root.presets[0]);
-                        root.close();
-                    }
-                }
-                
-                HorizontalLayout {
-                    padding-left: 10px;
-                    spacing: 8px;
-                    
-                    Rectangle {
-                        width: 20px;
-                        Image { x: 2px; y: 8px; width: 16px; height: 16px; source: @image-url("../../assets/icons/ui/reset.svg"); image-fit: contain; }
-                    }
-                    Text { text: "Reset to Default"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                 }
             }
         }
+
+        DockMenuSeparator { }
+
+        DockMenuAction {
+            icon: @image-url("../../assets/icons/ui/save.svg");
+            text: "Save layout...";
+            clicked => {
+                root.save-layout-to-file();
+                root.close();
+            }
+        }
+
+        DockMenuAction {
+            icon: @image-url("../../assets/icons/ui/import.svg");
+            text: "Import layout...";
+            clicked => {
+                root.load-layout-from-file();
+                root.close();
+            }
+        }
+
+        // Reset applies the Default preset in full: panels, widths and
+        // tabs, exactly as picking it from the list does.
+        DockMenuAction {
+            icon: @image-url("../../assets/icons/ui/reset.svg");
+            text: "Reset to default";
+            clicked => {
+                root.preset-selected(0, root.presets[0]);
+                root.close();
+            }
+        }
     }
+}
 
 // ============================================================================
 // Performance Overlay (FPS, Memory, Auto-hide inactive)
@@ -412,61 +454,117 @@ export component PerformanceOverlay inherits Rectangle {
     in-out property <float> frame-time-ms: 16.67;
     in-out property <int> entity-count: 0;
     in-out property <bool> show-detailed: false;
-    
+
+    // Green at 55 and up, amber from 30, red below.
+    property <color> tone: root.fps >= 55 ? Theme.text-success : root.fps >= 30 ? Theme.text-warning : Theme.text-error;
+
     width: root.show-detailed ? 200px : 80px;
     height: root.show-detailed ? 112px : 28px;
-    background: Theme.overlay-background;
-    border-radius: 4px;
+    background: touch.has-hover ? Theme.explorer-item-hover : Theme.panel-glass;
+    border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: Theme.border-color;
-    
-    TouchArea {
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow-float;
+    animate background { duration: 100ms; }
+
+    Rectangle {
+        x: Theme.radius-md;
+        y: 0;
+        width: parent.width - 2 * Theme.radius-md;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.show-detailed = !root.show-detailed; }
     }
-    
+
     if !root.show-detailed: HorizontalLayout {
-        padding: 6px;
-        spacing: 4px;
-        
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.tone;
+            }
+        }
         Text {
             text: Math.round(root.fps) + " FPS";
-            color: root.fps >= 55 ? Theme.text-success : root.fps >= 30 ? Theme.text-warning : Theme.text-error;
+            color: root.tone;
+            font-size: 11px;
             font-weight: 600;
             vertical-alignment: center;
         }
     }
-    
+
     if root.show-detailed: VerticalLayout {
-        padding: 12px;
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
         spacing: 8px;
-        
+        alignment: start;
+
         HorizontalLayout {
-            Text { text: "FPS:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
-            Text { 
-                text: Math.round(root.fps * 10) / 10; 
-                color: root.fps >= 55 ? Theme.text-success : root.fps >= 30 ? Theme.text-warning : Theme.text-error;
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: root.tone;
+                }
+            }
+            Text {
+                text: "PERFORMANCE";
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+
+        KitDivider { }
+
+        HorizontalLayout {
+            Text { text: "Frame rate"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 12px; vertical-alignment: center; }
+            Text {
+                text: Math.round(root.fps * 10) / 10 + " FPS";
+                color: root.tone;
                 font-weight: 600;
-                font-size: 13px;
+                font-size: 12px;
                 vertical-alignment: center;
             }
         }
-        
+
         HorizontalLayout {
-            Text { text: "Frame:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
-            Text { 
-                text: Math.round(root.frame-time-ms * 100) / 100 + "ms"; 
+            Text { text: "Frame time"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 12px; vertical-alignment: center; }
+            Text {
+                text: Math.round(root.frame-time-ms * 100) / 100 + " ms";
                 color: Theme.text-primary;
-                font-size: 13px;
+                font-size: 12px;
                 vertical-alignment: center;
             }
         }
-        
+
         HorizontalLayout {
-            Text { text: "Entities:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
-            Text { 
-                text: root.entity-count; 
+            Text { text: "Entities"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 12px; vertical-alignment: center; }
+            Text {
+                text: root.entity-count;
                 color: Theme.text-primary;
-                font-size: 13px;
+                font-size: 12px;
                 vertical-alignment: center;
             }
         }
@@ -477,109 +575,147 @@ export component PerformanceOverlay inherits Rectangle {
 // Theme Editor Panel
 // ============================================================================
 
+/// One UI-scale choice: a segment in the KitSegmented style, selected in
+/// the selection cyan. Private, so it reads the scale straight from the
+/// editor instead of holding an index that a click would unbind.
+component ScaleChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 24px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-sm - 1px;
+    background: root.selected ? Theme.accent-cyan.with-alpha(0.2)
+        : chip-touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.accent-cyan.with-alpha(0.6);
+
+    Text {
+        text: root.text;
+        color: root.selected ? Theme.text-primary : Theme.text-secondary;
+        font-size: 11px;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    chip-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The body of the floating Theme settings panel. The panel's title bar and
+// drag handle belong to its host in main.slint, so this draws the settings
+// and the footer only.
 export component ThemeEditor inherits Rectangle {
     in-out property <bool> dark-mode: true;
     in-out property <bool> high-contrast: false;
     in-out property <float> ui-scale: 1.0;
     in-out property <color> accent-color: Theme.accent-blue;
-    
+
     callback theme-changed();
     callback apply-theme();
-    
-    background: Theme.panel-background;
-    border-radius: 4px;
-    
-    VerticalBox {
-        padding: 12px;
-        spacing: 12px;
-        
-        Text {
-            text: "Theme Settings";
-            color: Theme.text-primary;
-            font-size: 14px;
-            font-weight: 600;
-        }
-        
-        // Dark/Light mode toggle
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "Dark Mode"; color: Theme.text-primary; horizontal-stretch: 1; }
-            Rectangle {
-                width: 48px;
-                height: 24px;
-                background: root.dark-mode ? Theme.accent-blue : Theme.button-background;
-                border-radius: 12px;
-                
-                TouchArea {
-                    clicked => {
-                        root.dark-mode = !root.dark-mode;
-                        root.theme-changed();
+
+    background: transparent;
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 10px;
+            alignment: start;
+            vertical-stretch: 1;
+
+            SettingsGroup {
+                title: "APPEARANCE";
+
+                SettingRow {
+                    label: "Dark mode";
+                    divider: false;
+                    KitSwitch {
+                        checked <=> root.dark-mode;
+                        toggled(v) => { root.theme-changed(); }
                     }
                 }
-                
-                Rectangle {
-                    x: root.dark-mode ? parent.width - self.width - 2px : 2px;
-                    y: 2px;
-                    width: 20px;
-                    height: 20px;
-                    background: white;
-                    border-radius: 10px;
-                    
-                    animate x { duration: 150ms; }
+
+                SettingRow {
+                    label: "High contrast";
+                    KitSwitch {
+                        checked <=> root.high-contrast;
+                        toggled(v) => { root.theme-changed(); }
+                    }
+                }
+
+                KitDivider { }
+
+                VerticalLayout {
+                    padding-top: 9px;
+                    padding-bottom: 10px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        Text {
+                            text: "UI scale";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            font-weight: 500;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: Math.round(root.ui-scale * 100) + "%";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.input-background;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            ScaleChip {
+                                text: "90%";
+                                selected: root.ui-scale < 0.95;
+                                clicked => { root.ui-scale = 0.9; root.theme-changed(); }
+                            }
+                            ScaleChip {
+                                text: "100%";
+                                selected: root.ui-scale >= 0.95 && root.ui-scale < 1.05;
+                                clicked => { root.ui-scale = 1.0; root.theme-changed(); }
+                            }
+                            ScaleChip {
+                                text: "110%";
+                                selected: root.ui-scale >= 1.05 && root.ui-scale < 1.175;
+                                clicked => { root.ui-scale = 1.1; root.theme-changed(); }
+                            }
+                            ScaleChip {
+                                text: "125%";
+                                selected: root.ui-scale >= 1.175;
+                                clicked => { root.ui-scale = 1.25; root.theme-changed(); }
+                            }
+                        }
+                    }
                 }
             }
         }
-        
-        // High contrast toggle
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "High Contrast"; color: Theme.text-primary; horizontal-stretch: 1; }
-            Rectangle {
-                width: 48px;
-                height: 24px;
-                background: root.high-contrast ? Theme.accent-blue : Theme.button-background;
-                border-radius: 12px;
-                
-                TouchArea {
-                    clicked => {
-                        root.high-contrast = !root.high-contrast;
-                        root.theme-changed();
-                    }
-                }
-                
-                Rectangle {
-                    x: root.high-contrast ? parent.width - self.width - 2px : 2px;
-                    y: 2px;
-                    width: 20px;
-                    height: 20px;
-                    background: white;
-                    border-radius: 10px;
-                    
-                    animate x { duration: 150ms; }
-                }
+
+        DialogFooter {
+            KitButton {
+                text: "Apply theme";
+                kind: "primary";
+                clicked => { root.apply-theme(); }
             }
-        }
-        
-        // UI Scale
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "UI Scale"; color: Theme.text-primary; }
-            Text { text: Math.round(root.ui-scale * 100) + "%"; color: Theme.text-secondary; horizontal-stretch: 1; }
-        }
-        
-        HorizontalBox {
-            spacing: 4px;
-            Button { text: "90%"; clicked => { root.ui-scale = 0.9; root.theme-changed(); } }
-            Button { text: "100%"; clicked => { root.ui-scale = 1.0; root.theme-changed(); } }
-            Button { text: "110%"; clicked => { root.ui-scale = 1.1; root.theme-changed(); } }
-            Button { text: "125%"; clicked => { root.ui-scale = 1.25; root.theme-changed(); } }
-        }
-        
-        Rectangle { height: 1px; background: Theme.border-color; }
-        
-        Button {
-            text: "Apply Theme";
-            clicked => { root.apply-theme(); }
         }
     }
 }

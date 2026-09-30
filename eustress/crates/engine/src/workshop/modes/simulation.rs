@@ -17,55 +17,61 @@ impl ToolHandler for ControlSimulationTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "control_simulation",
-            description: "Control the simulation playback state. Actions: play (start/resume simulation), pause (freeze at current tick), stop (reset to initial state), step (advance one tick while paused). Also supports set_time_scale to speed up or slow down simulation time.",
-            input_schema: serde_json::json!({
+            description: "Control the simulation playback state. Actions: play (start a run, or resume a paused one), pause (freeze at the current tick), stop (end the run and reset to the initial state), set_time_scale (speed up or slow down a run). Each action is the same command as run_simulation, pause_simulation or stop_simulation. To advance a paused simulation by exact ticks, use sim_step. With several engines on one Universe, pass `pid` to control a specific one.",
+            input_schema: eustress_tools::sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "description": "Control action: play, pause, stop, step, set_time_scale" },
-                    "time_scale": { "type": "number", "description": "Time compression factor (1.0 = realtime, 10.0 = 10x speed, 0.1 = slow motion). Only used with set_time_scale action." }
+                    "action": { "type": "string", "description": "Control action: play, pause, stop, set_time_scale" },
+                    "time_scale": { "type": "number", "description": "Time compression factor (1.0 = realtime, 10.0 = 10x speed, 0.1 = slow motion). Required for set_time_scale; optional for play." }
                 },
                 "required": ["action"]
-            }),
+            })),
             modes: &[WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &["workshop.simulation.control"],
         }
     }
 
-    fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        use crate::workshop::tools::simulation_tools::{
+            PauseSimulationTool, RunSimulationTool, StopSimulationTool,
+        };
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let time_scale = input.get("time_scale").and_then(|v| v.as_f64());
-
-        let valid = matches!(action, "play" | "pause" | "stop" | "step" | "set_time_scale");
-        if !valid {
-            return ToolResult {
-                tool_name: "control_simulation".to_string(),
-                tool_use_id: String::new(),
-                success: false,
-                content: format!("Unknown action '{}'. Use: play, pause, stop, step, set_time_scale", action),
-                structured_data: None,
-                stream_topic: None,
-            };
-        }
-
-        ToolResult {
+        let refuse = |content: String| ToolResult {
             tool_name: "control_simulation".to_string(),
             tool_use_id: String::new(),
-            success: true,
-            content: match action {
-                "play" => "Simulation playing".to_string(),
-                "pause" => "Simulation paused".to_string(),
-                "stop" => "Simulation stopped and reset".to_string(),
-                "step" => "Advanced one simulation tick".to_string(),
-                "set_time_scale" => format!("Time scale set to {:.1}x", time_scale.unwrap_or(1.0)),
-                _ => unreachable!(),
-            },
-            structured_data: Some(serde_json::json!({
-                "action": format!("simulation_{}", action),
-                "time_scale": time_scale,
-            })),
-            stream_topic: Some("workshop.simulation.control".to_string()),
-        }
+            success: false,
+            content,
+            structured_data: None,
+            stream_topic: None,
+        };
+
+        // Each action is queued as the real simulation command, the same one
+        // the matching tool sends, so the result reports what the engine was
+        // actually asked to do. The input passes through whole, so `pid` and
+        // the other routing fields reach the command.
+        let mut result = match action {
+            "play" => RunSimulationTool.execute(input, ctx),
+            // `run` on a running or paused run retunes its time scale.
+            "set_time_scale" => {
+                if input.get("time_scale").and_then(|v| v.as_f64()).is_none() {
+                    return refuse("set_time_scale needs a numeric `time_scale`.".to_string());
+                }
+                RunSimulationTool.execute(input, ctx)
+            }
+            "pause" => PauseSimulationTool.execute(input, ctx),
+            "stop" => StopSimulationTool.execute(input, ctx),
+            "step" => {
+                return refuse(
+                    "control_simulation has no step: use sim_step, which advances a paused simulation by exact ticks.".to_string(),
+                )
+            }
+            other => {
+                return refuse(format!("Unknown action '{other}'. Use: play, pause, stop, set_time_scale"));
+            }
+        };
+        result.tool_name = "control_simulation".to_string();
+        result
     }
 }
 

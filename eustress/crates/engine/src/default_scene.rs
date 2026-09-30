@@ -189,7 +189,7 @@ pub fn setup_default_scene(
 /// `distance` and re-derives this Transform every frame, so writing a pose here
 /// does not aim the camera. To aim it, seed the controller instead — see
 /// `EUSTRESS_CAMERA_ORBIT` on [`crate::camera_controller::EustressCamera`].
-fn editor_camera_start() -> Transform {
+pub(crate) fn editor_camera_start() -> Transform {
     Transform::from_xyz(10.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y)
 }
 

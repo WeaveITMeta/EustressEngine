@@ -98,7 +98,7 @@ const VBK_HEADER_LEN: usize = 12;
 pub(crate) const VBK_PAYLOAD_LEN: usize = BRICK_CELLS * 3;
 /// Largest lattice region one CSG edit visits (256^3 points). A shape bigger
 /// than this is refused rather than stalling the frame for seconds.
-const MAX_EDIT_LATTICE_POINTS: i64 = 256 * 256 * 256;
+pub const MAX_EDIT_LATTICE_POINTS: i64 = 256 * 256 * 256;
 /// Smoothing copies its region before blurring it, so it gets a smaller cap.
 const MAX_SMOOTH_LATTICE_POINTS: i64 = 128 * 128 * 128;
 /// Lattice coordinates are clamped to +/- 2^28 before integer conversion so
@@ -212,7 +212,9 @@ fn lattice_range(lo: Vec3, hi: Vec3, cell: f32, max_points: i64) -> Option<(IVec
     let n0 = (lo.min(hi) / cell).floor().clamp(-limit, limit).as_ivec3();
     let n1 = (lo.max(hi) / cell).ceil().clamp(-limit, limit).as_ivec3();
     let extent = n1 - n0 + IVec3::ONE;
-    let points = extent.x as i64 * extent.y as i64 * extent.z as i64;
+    // Saturating: a box reaching the clamp on every axis holds more points
+    // than an i64 counts.
+    let points = (extent.x as i64).saturating_mul(extent.y as i64).saturating_mul(extent.z as i64);
     if points > max_points {
         tracing::warn!(
             points,
@@ -761,13 +763,10 @@ pub fn lattice_surface_height(config: &TerrainConfig, data: &TerrainData, nx: i3
     let r = resolution as i32;
     let (chunk_x, i) = (nx.div_euclid(r), nx.rem_euclid(r));
     let (chunk_z, k) = (nz.div_euclid(r), nz.rem_euclid(r));
-    let total_x = (config.chunks_x * 2 + 1) as f32;
-    let total_z = (config.chunks_z * 2 + 1) as f32;
     let u = i as f32 / resolution as f32;
     let v = k as f32 / resolution as f32;
-    let world_u = ((chunk_x as f32 + u + config.chunks_x as f32) / total_x).clamp(0.0, 1.0);
-    let world_v = ((chunk_z as f32 + v + config.chunks_z as f32) / total_z).clamp(0.0, 1.0);
-    config.world_height(data.sample_height(world_u, world_v))
+    let uv = config.chunk_point_uv(IVec2::new(chunk_x, chunk_z), u, v);
+    config.world_height(data.sample_height(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0)))
 }
 
 /// The field at global lattice point `n`, reading the stored cell directly
@@ -855,10 +854,54 @@ pub enum CsgShape {
     /// Upright cylinder around the vertical line through `center`, reaching
     /// `half_height` above and below it.
     Cylinder { center: Vec3, radius: f32, half_height: f32 },
+    /// Box of `half_extents` along its own axes, turned by `rotation` (a unit
+    /// quaternion) about `center`. The identity rotation is exactly
+    /// [`Self::AxisBox`].
+    OrientedBox { center: Vec3, half_extents: Vec3, rotation: Quat },
+    /// Cylinder around its own Y axis through `center`, reaching
+    /// `half_height` along that axis either way, turned by `rotation` (a unit
+    /// quaternion). The identity rotation is exactly [`Self::Cylinder`].
+    OrientedCylinder { center: Vec3, radius: f32, half_height: f32, rotation: Quat },
+}
+
+/// World offset `offset` in the frame of a shape turned by `rotation`. The
+/// identity passes it through untouched, so an unturned oriented shape
+/// measures bit for bit like its axis-aligned counterpart.
+#[inline]
+pub(crate) fn shape_local(rotation: Quat, offset: Vec3) -> Vec3 {
+    if rotation == Quat::IDENTITY {
+        offset
+    } else {
+        rotation.inverse() * offset
+    }
+}
+
+/// Half extents on the world axes of a box of `half_extents` turned by
+/// `rotation`: each world axis takes the box's three axes projected onto it.
+fn turned_box_reach(rotation: Quat, half_extents: Vec3) -> Vec3 {
+    if rotation == Quat::IDENTITY {
+        return half_extents;
+    }
+    let axes = Mat3::from_quat(rotation).abs();
+    axes.x_axis * half_extents.x + axes.y_axis * half_extents.y + axes.z_axis * half_extents.z
+}
+
+/// Half extents on the world axes of a cylinder of `radius` and
+/// `half_height` whose axis is `rotation` applied to Y: along world axis `i`
+/// the axis reaches `|a_i| * half_height` and the end discs `radius *
+/// sqrt(1 - a_i^2)` past it.
+fn turned_cylinder_reach(rotation: Quat, radius: f32, half_height: f32) -> Vec3 {
+    if rotation == Quat::IDENTITY {
+        return Vec3::new(radius, half_height, radius);
+    }
+    let axis = rotation * Vec3::Y;
+    let disc = (Vec3::ONE - axis * axis).max(Vec3::ZERO);
+    axis.abs() * half_height + Vec3::new(disc.x.sqrt(), disc.y.sqrt(), disc.z.sqrt()) * radius
 }
 
 impl CsgShape {
     /// Exact signed distance from `p` to the shape's surface, negative inside.
+    /// A turned shape measures in its own frame.
     pub fn distance(&self, p: Vec3) -> f32 {
         match *self {
             Self::Sphere { center, radius } => (p - center).length() - radius,
@@ -872,16 +915,35 @@ impl CsgShape {
                 let vertical = d.y.abs() - half_height;
                 Vec2::new(radial.max(0.0), vertical.max(0.0)).length() + radial.max(vertical).min(0.0)
             }
+            Self::OrientedBox { center, half_extents, rotation } => {
+                let q = shape_local(rotation, p - center).abs() - half_extents;
+                q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+            Self::OrientedCylinder { center, radius, half_height, rotation } => {
+                let d = shape_local(rotation, p - center);
+                let radial = Vec2::new(d.x, d.z).length() - radius;
+                let vertical = d.y.abs() - half_height;
+                Vec2::new(radial.max(0.0), vertical.max(0.0)).length() + radial.max(vertical).min(0.0)
+            }
         }
     }
 
-    /// World AABB of the shape itself.
+    /// World AABB of the shape itself (of the turned shape, for the oriented
+    /// ones).
     pub fn bounds(&self) -> (Vec3, Vec3) {
         match *self {
             Self::Sphere { center, radius } => (center - Vec3::splat(radius), center + Vec3::splat(radius)),
             Self::AxisBox { center, half_extents } => (center - half_extents, center + half_extents),
             Self::Cylinder { center, radius, half_height } => {
                 let reach = Vec3::new(radius, half_height, radius);
+                (center - reach, center + reach)
+            }
+            Self::OrientedBox { center, half_extents, rotation } => {
+                let reach = turned_box_reach(rotation, half_extents);
+                (center - reach, center + reach)
+            }
+            Self::OrientedCylinder { center, radius, half_height, rotation } => {
+                let reach = turned_cylinder_reach(rotation, radius, half_height);
                 (center - reach, center + reach)
             }
         }
@@ -895,7 +957,8 @@ impl CsgShape {
         (lo - band, hi + band)
     }
 
-    /// Finite position and strictly positive size.
+    /// Finite position, strictly positive size and, for the oriented shapes,
+    /// a unit rotation.
     fn is_valid(&self) -> bool {
         match *self {
             Self::Sphere { center, radius } => center.is_finite() && radius.is_finite() && radius > 0.0,
@@ -904,6 +967,22 @@ impl CsgShape {
             }
             Self::Cylinder { center, radius, half_height } => {
                 center.is_finite() && radius.is_finite() && half_height.is_finite() && radius > 0.0 && half_height > 0.0
+            }
+            Self::OrientedBox { center, half_extents, rotation } => {
+                center.is_finite()
+                    && half_extents.is_finite()
+                    && half_extents.cmpgt(Vec3::ZERO).all()
+                    && rotation.is_finite()
+                    && rotation.is_normalized()
+            }
+            Self::OrientedCylinder { center, radius, half_height, rotation } => {
+                center.is_finite()
+                    && radius.is_finite()
+                    && half_height.is_finite()
+                    && radius > 0.0
+                    && half_height > 0.0
+                    && rotation.is_finite()
+                    && rotation.is_normalized()
             }
         }
     }
@@ -983,6 +1062,40 @@ impl EditTracker {
     }
 }
 
+/// A horizontal plane that cuts a CSG edit: the edit keeps only the part of
+/// its shape on one side (a Draw dab on the terrain tools' locked plane).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipPlane {
+    /// World height of the plane.
+    pub y: f32,
+    /// Keep the part at or below the plane (else at or above it).
+    pub keep_below: bool,
+}
+
+impl ClipPlane {
+    /// Signed distance from `p` to the kept half-space, negative inside it.
+    #[inline]
+    fn distance(&self, p: Vec3) -> f32 {
+        if self.keep_below {
+            p.y - self.y
+        } else {
+            self.y - p.y
+        }
+    }
+
+    /// The edit box `(lo, hi)` cut to the kept side, keeping `band` past the
+    /// cut face, where distances still quantize below [`Q_NONE`]. `None`
+    /// when nothing of the box is kept.
+    fn cut(&self, lo: Vec3, hi: Vec3, band: f32) -> Option<(Vec3, Vec3)> {
+        let (lo, hi) = if self.keep_below {
+            (lo, Vec3::new(hi.x, hi.y.min(self.y + band), hi.z))
+        } else {
+            (Vec3::new(lo.x, lo.y.max(self.y - band), lo.z), hi)
+        };
+        (lo.y <= hi.y).then_some((lo, hi))
+    }
+}
+
 /// Apply `shape` with `op`. Add writes `material` on the points where it
 /// becomes the nearest surface; carve writes it on the walls it exposes.
 /// Either paints inside its shape, and up to one cell outside it where the
@@ -994,15 +1107,41 @@ pub fn apply_shape(
     op: CsgOp,
     material: Option<TerrainMaterial>,
 ) -> VolumeEdit {
-    if !shape.is_valid() {
+    apply_shape_clipped(config, volume, shape, op, material.unwrap_or(TerrainMaterial::Rock).to_u8(), None)
+}
+
+/// [`apply_shape`] with material slot `material` (a built-in material or a
+/// Space's custom slot), cut by `clip` when set: the edit applies the
+/// intersection of `shape` and the clip's kept half-space, whose distance is
+/// the larger of the two distances, so the cut face is as crisp as the
+/// shape's own surface.
+pub fn apply_shape_clipped(
+    config: &TerrainConfig,
+    volume: &mut TerrainVolume,
+    shape: CsgShape,
+    op: CsgOp,
+    material: u8,
+    clip: Option<ClipPlane>,
+) -> VolumeEdit {
+    if !shape.is_valid() || clip.is_some_and(|clip| !clip.y.is_finite()) {
         return VolumeEdit::default();
     }
     let cell = lattice_cell_size(config);
     let (lo, hi) = shape.edit_bounds(config);
+    let (lo, hi) = match clip {
+        Some(clip) => match clip.cut(lo, hi, EDIT_BAND_CELLS * cell) {
+            Some(cut) => cut,
+            None => return VolumeEdit::default(),
+        },
+        None => (lo, hi),
+    };
     let Some((n0, n1)) = lattice_range(lo, hi, cell, MAX_EDIT_LATTICE_POINTS) else {
         return VolumeEdit::default();
     };
-    let material = material.unwrap_or(TerrainMaterial::Rock).to_u8();
+    let distance = |p: Vec3| {
+        let d = shape.distance(p);
+        clip.map_or(d, |clip| d.max(clip.distance(p)))
+    };
     let b0 = lattice_to_brick(n0).0;
     let b1 = lattice_to_brick(n1).0;
     let mut tracker = EditTracker::new();
@@ -1027,7 +1166,7 @@ pub fn apply_shape(
                     for j in local_lo.y..=local_hi.y {
                         for i in local_lo.x..=local_hi.x {
                             let n = origin + IVec3::new(i, j, k);
-                            let q = quantize_distance(shape.distance(lattice_point_world(n, cell)), cell);
+                            let q = quantize_distance(distance(lattice_point_world(n, cell)), cell);
                             // Saturated: the shape is too far away to lower
                             // A or C, or to matter to a carve it would lift.
                             if q == Q_NONE {
@@ -1417,6 +1556,50 @@ pub fn save_volume_bricks(
     Ok(report)
 }
 
+/// [`save_volume_bricks`] for the bricks `coords` alone: each one the volume
+/// holds is written (beside its file, then renamed over it), and the file of
+/// each one it no longer holds is deleted, unless it is a file the load could
+/// not use ([`TerrainVolume::keeps_unloaded_file`]). Nothing else in the
+/// folder is touched. Save calls this with the bricks changed since its last
+/// save, so an unchanged volume costs nothing.
+pub fn save_volume_bricks_at(
+    terrain_dir: &Path,
+    config: &TerrainConfig,
+    volume: &TerrainVolume,
+    coords: &[IVec3],
+) -> Result<VolumeSaveReport, String> {
+    let dir = volume_dir(terrain_dir);
+    let cell = lattice_cell_size(config);
+    let mut report = VolumeSaveReport::default();
+    if coords.iter().any(|coord| volume.brick(*coord).is_some()) {
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("Failed to create terrain volume directory {:?}: {}", dir, error))?;
+    }
+    for coord in coords {
+        let name = brick_file_name(*coord);
+        let path = dir.join(&name);
+        match volume.brick(*coord) {
+            Some(brick) => {
+                let staging = dir.join(format!("{name}.tmp"));
+                std::fs::write(&staging, encode_brick(brick, cell))
+                    .map_err(|error| format!("Failed to write terrain brick {:?}: {}", staging, error))?;
+                if let Err(error) = std::fs::rename(&staging, &path) {
+                    let _ = std::fs::remove_file(&staging);
+                    return Err(format!("Failed to move terrain brick into place at {:?}: {}", path, error));
+                }
+                report.written += 1;
+            }
+            None if volume.keeps_unloaded_file(*coord) => {}
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => report.removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Failed to delete stale terrain brick {:?}: {}", path, error)),
+            },
+        }
+    }
+    Ok(report)
+}
+
 /// Read every `b{x}_{y}_{z}.vbk` under `terrain_dir/volume` into a volume.
 ///
 /// A Space without the folder has an empty volume. A file that cannot be
@@ -1488,6 +1671,7 @@ mod tests {
             chunk_resolution: 16,
             chunks_x: 2,
             chunks_z: 2,
+            center_chunk: IVec2::ZERO,
             lod_levels: 1,
             lod_distances: vec![64.0],
             view_distance: 512.0,
@@ -1986,6 +2170,39 @@ mod tests {
         assert_eq!(report, VolumeSaveReport { written: 0, removed: volume.brick_count() });
         assert!(load_volume_bricks(&dir, &config).is_empty());
         assert!(load_volume_bricks(&temp_terrain_dir("missing"), &config).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_subset_save_writes_and_deletes_only_the_bricks_it_names() {
+        let config = test_config();
+        let dir = temp_terrain_dir("subset");
+        let mut volume = TerrainVolume::new();
+        apply_sphere(&config, &mut volume, Vec3::new(3.0, -4.0, 5.0), 6.0, CsgOp::Carve, None);
+        apply_box(&config, &mut volume, Vec3::new(-20.0, 15.0, 8.0), Vec3::new(4.0, 2.0, 3.0), CsgOp::Add, Some(TerrainMaterial::Basalt));
+        save_volume_bricks(&dir, &config, &volume).expect("the full save");
+        let coords: Vec<IVec3> = volume.bricks().map(|(coord, _)| coord).collect();
+        assert!(coords.len() > 1);
+
+        // One brick changes, one goes, the rest are untouched.
+        let (changed, gone) = (coords[0], coords[1]);
+        let folder = volume_dir(&dir);
+        let untouched = folder.join(brick_file_name(coords[coords.len() - 1]));
+        let untouched_before = std::fs::metadata(&untouched).unwrap().modified().unwrap();
+        let mut edited = volume.clone();
+        let mut brick = edited.brick(changed).unwrap().clone();
+        brick.material[0] = TerrainMaterial::Sand.to_u8();
+        edited.set_brick(changed, Some(brick));
+        edited.set_brick(gone, None);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let report = save_volume_bricks_at(&dir, &config, &edited, &[changed, gone, IVec3::new(99, 99, 99)]).expect("the subset save");
+        assert_eq!(report, VolumeSaveReport { written: 1, removed: 1 });
+        assert!(!folder.join(brick_file_name(gone)).exists(), "the removed brick's file is gone");
+        assert_eq!(std::fs::metadata(&untouched).unwrap().modified().unwrap(), untouched_before, "an unnamed brick is not rewritten");
+        let loaded = load_volume_bricks(&dir, &config);
+        assert_eq!(loaded.brick_count(), edited.brick_count());
+        assert!(loaded.brick(changed) == edited.brick(changed), "the changed brick reads back changed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

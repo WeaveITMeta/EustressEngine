@@ -137,6 +137,10 @@ impl Plugin for StudioPluginSystem {
             .register_type::<SimMode>()
             .add_message::<PluginMenuActionEvent>()
             .add_message::<PluginActionEvent>()
+            // The UI Builder's panel and systems. Added here, with the other
+            // built-in Studio plugins, so every app that has the plugin system
+            // has it too; `setup_builtin_plugins` adds its Plugins-tab button.
+            .add_plugins(crate::ui_builder::UiBuilderPlugin)
             .add_systems(Startup, setup_builtin_plugins)
             .add_systems(Update, (
                 advance_sim_clock,
@@ -232,6 +236,13 @@ fn setup_builtin_plugins(
     registry.register(crate::script_plugin_host::PluginHostControlsPlugin::default());
     if let Err(e) = manager.enable_plugin(&mut registry, "plugin-host-controls") {
         warn!("🔌 Failed to enable plugin-host-controls plugin: {}", e);
+    }
+
+    // UI Builder: a whole game UI from one line (`ui_builder/`). The button
+    // fires the same `uibuilder:toggle` action as the UI ribbon tab's.
+    registry.register(crate::ui_builder::UiBuilderStudioPlugin::default());
+    if let Err(e) = manager.enable_plugin(&mut registry, "ui-builder") {
+        warn!("🔌 Failed to enable ui-builder plugin: {}", e);
     }
 
     info!("🔌 Plugin system ready. {} plugins loaded, {} custom tabs.",

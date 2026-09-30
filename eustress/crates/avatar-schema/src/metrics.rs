@@ -22,8 +22,12 @@ use bevy::reflect::Reflect;
 /// Website Height slider endpoints.
 pub const MIN_HEIGHT_M: f32 = 1.45;
 pub const MAX_HEIGHT_M: f32 = 2.05;
-/// Matches `client/src/main.rs:68` — the Client already used real gravity;
-/// this makes it the shared constant rather than a coincidence.
+/// Standard gravity, m/s²: the value of `eustress_common::units::STANDARD_GRAVITY`,
+/// which this crate sits below and cannot name. A test in `common` pins the two.
+///
+/// [`ResolvedMotion::jump_velocity`] is a jump's take-off at this gravity; the
+/// controller uses the Space's live gravity instead
+/// ([`ResolvedMotion::jump_velocity_under`]).
 pub const GRAVITY_MPS2: f32 = 9.80665;
 /// Leg length of the reference body the shipped Mixamo clips were authored
 /// against. `stride_scale` is measured relative to this.
@@ -31,6 +35,10 @@ pub const REFERENCE_LEG_LENGTH_M: f32 = 0.93;
 /// Nominal used before the rig has been measured. Replaced by the real
 /// measurement as soon as `AvatarRig` binds.
 pub const NOMINAL_BIND_HEIGHT_M: f32 = 1.83;
+/// The fastest a person has run, m/s: Usain Bolt's top speed in the 2009
+/// Berlin 100 m final. Running and sprinting add speed up to here and no
+/// further ([`ResolvedMotion::capped_speeds`]). Walking is never capped.
+pub const HUMAN_SPRINT_CAP_MPS: f32 = 12.42;
 
 /// Derived, never authored. Every field has exactly one producer.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,18 +160,75 @@ impl BodyMorphs {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "bevy", derive(Reflect))]
 pub struct ResolvedMotion {
+    /// Walking pace, m/s. Never capped: a script or Space may set any
+    /// WalkSpeed, as in Roblox, where speed boosts rely on it.
     pub walk_speed: f32,
+    /// Running pace as authored or derived, m/s. A body runs at the capped
+    /// pace ([`Self::capped_run_and_sprint`]).
     pub run_speed: f32,
+    /// Sprint speed over the running pace. A body sprints at the capped
+    /// speed ([`Self::capped_run_and_sprint`]).
     pub sprint_multiplier: f32,
-    /// Metres above the take-off point. Converted to an impulse via
-    /// `v = sqrt(2·g·apex)` so "jump 0.95 m" is a descriptor number rather
-    /// than the magic 50.0 (`Humanoid` schema) or 5.5 that shipped before.
+    /// Metres above the take-off point that a jump peaks at, under whatever
+    /// gravity the Space has: Roblox's JumpHeight rule, so an imported game
+    /// jumps as it was tuned. Converted to an impulse via `v = sqrt(2·g·apex)`
+    /// ([`Self::jump_velocity_under`]) so "jump 0.95 m" is a descriptor
+    /// number rather than the magic 50.0 (`Humanoid` schema) or 5.5 that
+    /// shipped before. Unused while [`Self::jump_speed_mps`] is set.
     pub jump_apex_m: f32,
+    /// Take-off speed of a jump, m/s, when the jump is authored as a launch
+    /// speed: Roblox's JumpPower under UseJumpPower. The jump then peaks
+    /// wherever the Space's gravity takes that speed. `None` jumps by
+    /// [`Self::jump_apex_m`].
+    pub jump_speed_mps: Option<f32>,
 }
 
 impl ResolvedMotion {
+    /// Take-off speed of a jump, m/s, under a downward gravity of `gravity`
+    /// m/s²: `launch_speed` when one is set (Roblox's JumpPower under
+    /// UseJumpPower), otherwise the speed that peaks `apex_m` metres up
+    /// (Roblox's JumpHeight). The player and every NPC jump by this one rule.
+    ///
+    /// Weightless, a height needs no speed, so only a launch speed leaves the
+    /// ground. A negative or non-finite input counts as zero: `math.huge`
+    /// would otherwise launch the body at infinite speed.
+    pub fn take_off_speed(launch_speed: Option<f32>, apex_m: f32, gravity: f32) -> f32 {
+        let usable = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        match launch_speed {
+            Some(speed) => usable(speed),
+            None => (2.0 * usable(gravity) * usable(apex_m)).sqrt(),
+        }
+    }
+
+    /// This body's take-off speed, m/s, under a downward gravity of `gravity`
+    /// m/s² ([`Self::take_off_speed`]).
+    pub fn jump_velocity_under(&self, gravity: f32) -> f32 {
+        Self::take_off_speed(self.jump_speed_mps, self.jump_apex_m, gravity)
+    }
+
+    /// This body's take-off speed, m/s, under standard gravity
+    /// ([`GRAVITY_MPS2`]).
     pub fn jump_velocity(&self) -> f32 {
-        (2.0 * GRAVITY_MPS2 * self.jump_apex_m.max(0.0)).sqrt()
+        self.jump_velocity_under(GRAVITY_MPS2)
+    }
+
+    /// Running and sprinting speeds, m/s, for a walking pace, a running pace
+    /// and a sprint multiplier: `run = max(walk, min(run, cap))` and
+    /// `sprint = max(walk, min(run * multiplier, cap))`, where the cap is
+    /// [`HUMAN_SPRINT_CAP_MPS`]. Running and sprinting never add speed past a
+    /// person's top speed, and never slow a body below its walk, which is
+    /// uncapped. Everything that moves a body at a run or a sprint reads its
+    /// speed here, so a Space's paces and a script's are capped alike. A
+    /// NaN pace or multiplier moves at the walk.
+    pub fn capped_speeds(walk: f32, run: f32, sprint_multiplier: f32) -> (f32, f32) {
+        let cap = |v: f32| if v.is_nan() { walk } else { v.min(HUMAN_SPRINT_CAP_MPS).max(walk) };
+        (cap(run), cap(run * sprint_multiplier))
+    }
+
+    /// This body's running and sprinting speeds, m/s
+    /// ([`Self::capped_speeds`]).
+    pub fn capped_run_and_sprint(&self) -> (f32, f32) {
+        Self::capped_speeds(self.walk_speed, self.run_speed, self.sprint_multiplier)
     }
 }
 
@@ -187,6 +252,9 @@ pub fn resolve_motion(desc: &AvatarDescriptor, m: &BodyMetrics) -> ResolvedMotio
             .jump_apex_m
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(0.55 + 0.35 * m.stride_scale),
+        // Zero is a real launch speed: Roblox's JumpPower 0 keeps a
+        // character on the ground.
+        jump_speed_mps: desc.motion.jump_speed_mps.filter(|v| v.is_finite() && *v >= 0.0),
     }
 }
 
@@ -289,6 +357,100 @@ mod tests {
         assert!((apex - 0.95).abs() < 1e-4, "apex {apex}");
     }
 
+    /// Under any gravity the jump peaks at its authored height; weightless,
+    /// it cannot take off.
+    #[test]
+    fn a_jump_peaks_at_its_apex_under_any_gravity() {
+        let mut d = AvatarDescriptor::default();
+        d.motion.jump_apex_m = Some(0.95);
+        let motion = resolve_motion(&d, &morphs(0.5, 0.5).metrics(NOMINAL_BIND_HEIGHT_M));
+        for g in [1.62_f32, GRAVITY_MPS2, 54.936] {
+            let v = motion.jump_velocity_under(g);
+            assert!((v * v / (2.0 * g) - 0.95).abs() < 1e-4, "gravity {g}");
+        }
+        assert_eq!(motion.jump_velocity_under(0.0), 0.0);
+        assert_eq!(motion.jump_velocity_under(-9.8), 0.0);
+        assert_eq!(motion.jump_velocity(), motion.jump_velocity_under(GRAVITY_MPS2));
+    }
+
+    /// A launch speed (Roblox's JumpPower under UseJumpPower) takes off at
+    /// exactly that speed under any gravity, weightless included, and the
+    /// height is then unused.
+    #[test]
+    fn a_launch_speed_takes_off_at_that_speed_under_any_gravity() {
+        let mut d = AvatarDescriptor::default();
+        d.motion.jump_apex_m = Some(0.95);
+        d.motion.jump_speed_mps = Some(12.5);
+        let motion = resolve_motion(&d, &morphs(0.5, 0.5).metrics(NOMINAL_BIND_HEIGHT_M));
+        assert_eq!(motion.jump_speed_mps, Some(12.5));
+        for g in [0.0_f32, 1.62, GRAVITY_MPS2, 54.936] {
+            assert_eq!(motion.jump_velocity_under(g), 12.5, "gravity {g}");
+        }
+
+        d.motion.jump_speed_mps = Some(0.0);
+        let grounded = resolve_motion(&d, &morphs(0.5, 0.5).metrics(NOMINAL_BIND_HEIGHT_M));
+        assert_eq!(grounded.jump_velocity(), 0.0, "JumpPower 0 does not jump");
+
+        for bad in [f32::NAN, f32::INFINITY, -4.0] {
+            d.motion.jump_speed_mps = Some(bad);
+            let m = resolve_motion(&d, &morphs(0.5, 0.5).metrics(NOMINAL_BIND_HEIGHT_M));
+            assert_eq!(m.jump_speed_mps, None, "{bad} falls back to the height");
+        }
+    }
+
+    /// Written straight onto a body (a script's JumpPower or JumpHeight), a
+    /// bad number still does not launch it.
+    #[test]
+    fn a_bad_jump_number_does_not_launch_the_body() {
+        for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -3.0] {
+            assert_eq!(ResolvedMotion::take_off_speed(Some(bad), 1.0, GRAVITY_MPS2), 0.0, "speed {bad}");
+            assert_eq!(ResolvedMotion::take_off_speed(None, bad, GRAVITY_MPS2), 0.0, "height {bad}");
+            assert_eq!(ResolvedMotion::take_off_speed(None, 1.0, bad), 0.0, "gravity {bad}");
+        }
+    }
+
+    /// Box Head walks at 8 m/s with a run at the gait ratio (21.5) and a 1.45
+    /// sprint (31.2): both stop at a person's top speed.
+    #[test]
+    fn a_fast_walk_runs_and_sprints_at_human_top_speed() {
+        let (run, sprint) = ResolvedMotion::capped_speeds(8.0, 8.0 * 3.9 / 1.45, 1.45);
+        assert_eq!(run, HUMAN_SPRINT_CAP_MPS);
+        assert_eq!(sprint, HUMAN_SPRINT_CAP_MPS);
+    }
+
+    /// A walk above the cap is never slowed: a speed boost to 20 m/s moves at
+    /// 20 in every gait.
+    #[test]
+    fn a_walk_above_the_cap_moves_at_its_walk_in_every_gait() {
+        assert_eq!(ResolvedMotion::capped_speeds(20.0, 20.0 * 3.9 / 1.45, 1.45), (20.0, 20.0));
+        // A run authored below the walk still never slows the body under it.
+        assert_eq!(ResolvedMotion::capped_speeds(6.0, 3.0, 1.2), (6.0, 6.0));
+    }
+
+    /// Body-derived paces sit far below the cap, so every body's own run and
+    /// sprint are exactly as resolved, the tallest included.
+    #[test]
+    fn body_paces_are_under_the_cap() {
+        for (h, leg) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] {
+            let mut d = AvatarDescriptor::default();
+            d.morphs.height = Norm01::new(h);
+            d.morphs.leg_ratio = Norm01::new(leg);
+            let m = d.morphs.metrics(NOMINAL_BIND_HEIGHT_M);
+            let motion = resolve_motion(&d, &m);
+            let (run, sprint) = motion.capped_run_and_sprint();
+            assert_eq!(run, motion.run_speed, "height {h}, leg {leg}");
+            assert_eq!(sprint, motion.run_speed * motion.sprint_multiplier, "height {h}, leg {leg}");
+            assert!(sprint < HUMAN_SPRINT_CAP_MPS);
+        }
+    }
+
+    /// A NaN pace moves at the walk rather than at the cap.
+    #[test]
+    fn a_nan_pace_moves_at_the_walk() {
+        assert_eq!(ResolvedMotion::capped_speeds(2.0, f32::NAN, 1.45), (2.0, 2.0));
+        assert_eq!(ResolvedMotion::capped_speeds(2.0, 4.0, f32::NAN), (4.0, 2.0));
+    }
+
     #[test]
     fn descriptor_round_trips_through_json_and_toml() {
         let mut d = AvatarDescriptor::default();
@@ -302,6 +464,43 @@ mod tests {
         assert_eq!(j, d);
         let t: AvatarDescriptor = toml::from_str(&toml::to_string(&d).unwrap()).unwrap();
         assert_eq!(t, d);
+    }
+
+    /// Unset, a launch speed leaves the JSON (the avatar API rejects motion
+    /// keys it does not know); set, it round-trips and moves the hash.
+    #[test]
+    fn a_launch_speed_is_written_and_hashed_only_when_set() {
+        let mut d = AvatarDescriptor::default();
+        let unset = d.content_hash();
+        assert!(!serde_json::to_string(&d).unwrap().contains("jump_speed_mps"));
+
+        d.motion.jump_speed_mps = Some(15.0);
+        assert!(serde_json::to_string(&d).unwrap().contains("jump_speed_mps"));
+        assert_ne!(d.content_hash(), unset, "a launch speed did not move the hash");
+        let j: AvatarDescriptor = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(j, d);
+        let t: AvatarDescriptor = toml::from_str(&toml::to_string(&d).unwrap()).unwrap();
+        assert_eq!(t, d);
+    }
+
+    /// The avatar API accepts only these motion keys (the Worker's allowlist
+    /// in `infrastructure/cloudflare/api/src/avatar.mjs`). A launch speed is
+    /// Space policy, never part of a saved avatar, so a descriptor the website
+    /// saves writes no other motion key.
+    #[test]
+    fn a_saved_avatar_writes_only_the_motion_keys_the_api_accepts() {
+        const API_MOTION_KEYS: [&str; 4] = ["walk_speed_mps", "run_speed_mps", "sprint_multiplier", "jump_apex_m"];
+        let mut d = AvatarDescriptor::default();
+        d.motion.walk_speed_mps = Some(2.0);
+        d.motion.run_speed_mps = Some(4.0);
+        d.motion.sprint_multiplier = Some(1.5);
+        d.motion.jump_apex_m = Some(0.9);
+        let json = serde_json::to_value(&d).unwrap();
+        let motion = json["motion"].as_object().expect("motion is an object");
+        assert_eq!(motion.len(), API_MOTION_KEYS.len());
+        for key in motion.keys() {
+            assert!(API_MOTION_KEYS.contains(&key.as_str()), "the avatar API rejects the motion key {key}");
+        }
     }
 
     #[test]

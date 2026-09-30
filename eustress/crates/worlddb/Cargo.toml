@@ -49,6 +49,9 @@ toml = "0.8"
 # Deterministic per-chunk content hashing for `.echk` bake → R2 delta
 # uploads (Phase 5). Same major the engine already uses.
 blake3 = "1"
+# Checkpoints of the whole database for snapshot and revert (`checkpoint`).
+# The same zstd the engine and eustress-common already build.
+zstd = "0.13"
 
 [dev-dependencies]
 # JSON round-trip for the WorldState projection DTO tests (projection.rs).

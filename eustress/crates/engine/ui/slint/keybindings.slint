@@ -3,15 +3,18 @@
 //
 // The row list is data-driven from Rust (`slint_ui::sync_keybindings_to_slint`
 // builds it straight off the live `KeyBindings` resource), so what the dialog
-// shows is what the engine will actually do — a hand-written row list drifts
+// shows is what the engine will actually do; a hand-written row list drifts
 // from the real bindings the moment anything is remapped.
 //
-// Clicking a row's key cell arms capture; the next chord replaces the binding.
-// Esc backs out of capture without changing anything.
+// Clicking a row arms capture; the next chord replaces the binding. Esc backs
+// out of capture without changing anything, and closes the dialog when
+// nothing is being captured. Built on the shared dialog chrome
+// (dialog_kit.slint): a capture in progress is the selection cyan.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitSegmented, KeyCap, KitNotice, KitSectionLabel, KitDivider } from "dialog_kit.slint";
 
 /// One row of the dialog. Section headers and action rows share the model so
 /// Rust owns the ordering and the Slint side is a straight `for`.
@@ -30,19 +33,15 @@ export struct ShortcutEntry {
 component ShortcutRow inherits Rectangle {
     in property <string> action: "";
     in property <string> shortcut: "";
-    /// This row is waiting for a chord — the key cell shows a prompt and an
-    /// accent border instead of the current binding.
+    /// This row is waiting for a chord: its keycap shows a prompt, outlined
+    /// in the selection cyan, instead of the current binding.
     in property <bool> capturing: false;
-
     callback rebind-requested();
 
-    height: 26px;
-    background: row-touch.has-hover ? Theme.button-hover : transparent;
-    border-radius: 3px;
-
-    // ONE source for the badge height. The row padding below centres the badge
-    // by subtracting this from the row height, so the two cannot drift apart.
-    property <length> badge-height: 20px;
+    height: 32px;
+    border-radius: Theme.radius-sm;
+    background: root.capturing ? Theme.accent-cyan.with-alpha(0.08)
+        : row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
     row-touch := TouchArea {
         mouse-cursor: pointer;
@@ -50,70 +49,37 @@ component ShortcutRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        // Centre the badge in the row.
-        //
-        // A layout child does NOT get Slint's automatic centring: the compiler's
-        // `maybe_center_in_parent` is skipped for `child_of_layout`, so a child
-        // with a fixed cross-axis size sits flush against the top of the row —
-        // here 0px above the badge and 6px below it. Padding the content band
-        // down to the badge's own height centres it, and the label (which has no
-        // fixed height, so it stretches to the band) stays centred with it.
-        padding-top: (root.height - root.badge-height) / 2;
-        padding-bottom: (root.height - root.badge-height) / 2;
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 12px;
 
         Text {
             horizontal-stretch: 1;
             text: root.action;
             color: Theme.text-primary;
-            font-size: 11px;
+            font-size: 12px;
             vertical-alignment: center;
+            overflow: elide;
         }
-
-        Rectangle {
-            width: 140px;
-            height: root.badge-height;
-            background: root.capturing ? Theme.button-hover : Theme.background-tertiary;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: root.capturing ? Theme.accent-blue : Theme.input-border;
-
-            Text {
-                text: root.capturing
-                    ? "Press a key…"
-                    : (root.shortcut == "" ? "Not bound" : root.shortcut);
-                color: root.capturing ? Theme.accent-blue
-                     : (root.shortcut == "" ? Theme.text-disabled : Theme.text-secondary);
-                font-size: 10px;
-                font-weight: 500;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+        if root.capturing: VerticalLayout {
+            alignment: center;
+            KeyCap {
+                chord: "Press keys...";
+                live: true;
             }
         }
-    }
-}
-
-component ShortcutSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
-
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-    }
-
-    Text {
-        x: 10px;
-        text: root.title;
-        color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
+        if !root.capturing && root.shortcut != "": VerticalLayout {
+            alignment: center;
+            KeyCap {
+                chord: root.shortcut;
+            }
+        }
+        if !root.capturing && root.shortcut == "": Text {
+            text: "Not set";
+            color: Theme.text-disabled;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -171,264 +137,173 @@ export component KeybindingsDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 480px;
-        height: min(parent.height - 80px, 560px);
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        DialogCard {
+            width: min(parent.width - 48px, 600px);
+            height: min(parent.height - 64px, 640px);
+            icon: @image-url("../../assets/icons/ui/keyboard.svg");
+            title: "Keyboard shortcuts";
+            subtitle: "Click a shortcut, then press the new keys";
+            close => { root.on-close(); }
 
-        TouchArea {
-            scroll-event(event) => { return accept; }
-        }
-
-        // One FocusScope wraps the whole body: whichever row armed capture,
-        // the chord is caught here, so there is no per-row focus juggling and
-        // no way for a keystroke to land on a row that is no longer armed.
-        //
-        // Explicit 100% sizing: the parent is a Rectangle, not a layout, so a
-        // bare FocusScope would collapse to its content's preferred size and
-        // the dialog would render at the width of its longest row.
-        capture := FocusScope {
-            width: 100%;
-            height: 100%;
-
-            key-pressed(event) => {
-                if (root.capturing-action == "") {
-                    return reject;
-                }
-                // A bare modifier is the first half of a chord — keep waiting
-                // for the key it modifies rather than binding "Ctrl" alone.
-                //
-                // The RIGHT-hand variants and the lock keys matter as much as
-                // the left ones: Slint reports every one of them as a C0
-                // control character (ShiftR = 0x15, ControlR = 0x16,
-                // MetaR = 0x18, AltGr = 0x13, CapsLock = 0x14), and the Rust
-                // chord parser folds 0x01..0x1A back to A..Z on the assumption
-                // that a control character means Ctrl+letter. Letting them
-                // through would silently rebind the row to "Ctrl+U" / "Ctrl+V"
-                // / "Ctrl+T" the moment the user brushed right-Shift.
-                if (event.text == Key.Control || event.text == Key.Alt
-                    || event.text == Key.Shift || event.text == Key.Meta
-                    || event.text == Key.ControlR || event.text == Key.ShiftR
-                    || event.text == Key.MetaR || event.text == Key.AltGr
-                    || event.text == Key.CapsLock) {
+            // One FocusScope wraps the whole body: whichever row armed
+            // capture, the chord is caught here, so there is no per-row focus
+            // juggling and no way for a keystroke to land on a row that is no
+            // longer armed.
+            capture := FocusScope {
+                vertical-stretch: 1;
+                key-pressed(event) => {
+                    if (root.capturing-action == "") {
+                        // Nothing armed: Esc closes, as in every dialog.
+                        if (event.text == Key.Escape) {
+                            root.on-close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    // A bare modifier is the first half of a chord — keep
+                    // waiting for the key it modifies rather than binding
+                    // "Ctrl" alone.
+                    //
+                    // The RIGHT-hand variants and the lock keys matter as much
+                    // as the left ones: Slint reports every one of them as a
+                    // C0 control character (ShiftR = 0x15, ControlR = 0x16,
+                    // MetaR = 0x18, AltGr = 0x13, CapsLock = 0x14), and the Rust
+                    // chord parser folds 0x01..0x1A back to A..Z on the
+                    // assumption that a control character means Ctrl+letter.
+                    // Letting them through would silently rebind the row to
+                    // "Ctrl+U" / "Ctrl+V" / "Ctrl+T" the moment the user
+                    // brushed right-Shift.
+                    if (event.text == Key.Control || event.text == Key.Alt
+                        || event.text == Key.Shift || event.text == Key.Meta
+                        || event.text == Key.ControlR || event.text == Key.ShiftR
+                        || event.text == Key.MetaR || event.text == Key.AltGr
+                        || event.text == Key.CapsLock) {
+                        return accept;
+                    }
+                    if (event.text == Key.Escape) {
+                        root.capturing-action = "";
+                        return accept;
+                    }
+                    root.on-rebind(root.capturing-action,
+                        (event.modifiers.control ? "Ctrl+" : "")
+                        + (event.modifiers.alt ? "Alt+" : "")
+                        + (event.modifiers.shift ? "Shift+" : "")
+                        + root.key-token(event.text));
                     return accept;
                 }
-                if (event.text == Key.Escape) {
-                    root.capturing-action = "";
-                    return accept;
-                }
-                root.on-rebind(root.capturing-action,
-                    (event.modifiers.control ? "Ctrl+" : "")
-                    + (event.modifiers.alt ? "Alt+" : "")
-                    + (event.modifiers.shift ? "Shift+" : "")
-                    + root.key-token(event.text));
-                return accept;
-            }
 
-            VerticalLayout {
-                padding: 0px;
-                spacing: 0px;
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
 
-                // ── Title bar ──
-                Rectangle {
-                    height: 46px;
-                    background: Theme.dialog-titlebar-background;
-                    border-radius: 8px;
-
-                    Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "Keyboard Shortcuts";
-                        color: Theme.text-primary;
-                        font-size: 13px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        x: parent.width - 36px;
-                        y: (parent.height - self.height) / 2;
-                        width: 28px; height: 28px;
-                        border-radius: 5px;
-                        background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no matching surface token
-
-                        close-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-
-                        Text {
-                            text: "×";
-                            color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                            font-size: 17px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Rectangle {
-                        y: parent.height - 1px;
-                        width: 100%; height: 1px;
-                        background: Theme.border-color;
-                    }
-                }
-
-                // ── Preset row: one click swaps the whole map ──
-                Rectangle {
-                    height: 34px;
-                    background: Theme.background-secondary;
+                    // ── Preset: one click swaps the whole map ──
                     HorizontalLayout {
                         padding-left: 16px;
                         padding-right: 16px;
-                        spacing: 8px;
-                        alignment: start;
-                        Text {
-                            text: "Preset";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        for preset in [
-                            { id: "eustress", label: "Eustress" },
-                            { id: "roblox", label: "Mainstream" },
-                        ]: Rectangle {
-                            width: 110px;
-                            height: 24px;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: root.active-preset == preset.id ? Theme.accent-blue : Theme.border-color;
-                            background: root.active-preset == preset.id ? Theme.explorer-item-selected
-                                      : preset-touch.has-hover ? Theme.button-hover : transparent;
-                            preset-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.on-apply-preset(preset.id); }
+                        padding-top: 12px;
+                        padding-bottom: 10px;
+                        spacing: 10px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            KitSectionLabel {
+                                text: "PRESET";
                             }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            KitSegmented {
+                                options: ["Eustress", "Mainstream"];
+                                // Rust reports the preset back, "custom" included.
+                                managed: true;
+                                current-index: root.active-preset == "eustress" ? 0
+                                    : root.active-preset == "roblox" ? 1 : -1;
+                                selected(i) => {
+                                    root.on-apply-preset(i == 0 ? "eustress" : "roblox");
+                                }
+                            }
+                        }
+                        if root.active-preset == "custom": VerticalLayout {
+                            alignment: center;
                             Text {
-                                width: parent.width;
-                                height: parent.height;
-                                text: preset.label;
-                                color: Theme.text-primary;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                                text: "Custom: edited by hand";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
                             }
                         }
-                        if root.active-preset == "custom": Text {
-                            text: "custom (edited by hand)";
-                            color: Theme.text-secondary;
-                            font-size: 10px;
-                            vertical-alignment: center;
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+
+                    // ── Conflict: a rejected rebind names the action that
+                    //    already owns the chord, right where the user looks ──
+                    if root.conflict-message != "": HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-bottom: 10px;
+                        KitNotice {
+                            kind: "error";
+                            text: root.conflict-message;
                         }
                     }
-                    Rectangle {
-                        y: parent.height - 1px;
-                        width: 100%; height: 1px;
-                        background: Theme.border-color;
-                    }
-                }
 
-                // ── Hint / conflict strip ──
-                //
-                // Doubles as the error surface: a rejected rebind names the
-                // action that already owns the chord, in place, right where
-                // the user is looking.
-                Rectangle {
-                    height: 26px;
-                    background: root.conflict-message == ""
-                        ? Theme.background-secondary
-                        : Theme.background-tertiary;
+                    KitDivider { }
 
-                    Text {
-                        x: 16px;
-                        width: parent.width - 32px;
-                        height: parent.height;
-                        text: root.conflict-message == ""
-                            ? "Click a shortcut to rebind it. Esc cancels."
-                            : root.conflict-message;
-                        color: root.conflict-message == ""
-                            ? Theme.text-secondary
-                            : Theme.text-error;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
+                    // ── The bindings ──
+                    list := ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            width: list.visible-width;
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 12px;
+                            spacing: 1px;
+                            alignment: start;
 
-                // ── Content ──
-                ScrollView {
-                    vertical-stretch: 1;
-
-                    VerticalLayout {
-                        padding: 16px;
-                        padding-top: 8px;
-                        spacing: 2px;
-                        alignment: start;
-
-                        for entry in root.entries: VerticalLayout {
-                            spacing: 0px;
-
-                            if entry.is-section: ShortcutSection {
-                                title: entry.label;
-                            }
-                            if !entry.is-section: ShortcutRow {
-                                action: entry.label;
-                                shortcut: entry.chord;
-                                capturing: root.capturing-action == entry.action-id;
-                                rebind-requested => {
-                                    root.capturing-action = entry.action-id;
-                                    capture.focus();
+                            for entry in root.entries: VerticalLayout {
+                                spacing: 0;
+                                if entry.is-section: HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-top: 14px;
+                                    padding-bottom: 6px;
+                                    KitSectionLabel {
+                                        text: entry.label;
+                                    }
+                                }
+                                if !entry.is-section: ShortcutRow {
+                                    action: entry.label;
+                                    shortcut: entry.chord;
+                                    capturing: root.capturing-action == entry.action-id;
+                                    rebind-requested => {
+                                        root.capturing-action = entry.action-id;
+                                        capture.focus();
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // ── Footer ──
-                Rectangle {
-                    height: 1px; background: Theme.border-color;
-                }
-                Rectangle {
-                    height: 52px;
-                    background: Theme.dialog-titlebar-background;
-                    border-radius: 8px;
-
-                    HorizontalLayout {
-                        alignment: center;
-
-                        Rectangle {
-                            width: 80px; height: 32px;
-                            border-radius: 5px;
-                            background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
-                            border-width: 1px;
-                            border-color: Theme.border-color;
-
-                            close-btn := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.on-close(); }
-                            }
-
+                    DialogFooter {
+                        pack-end: false;
+                        VerticalLayout {
+                            alignment: center;
                             Text {
-                                text: "Close";
-                                color: Theme.text-primary;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                                text: root.capturing-action == ""
+                                    ? "Changes save as you make them."
+                                    : "Press the new keys, or Esc to keep the old ones.";
+                                color: root.capturing-action == "" ? Theme.text-disabled : Theme.accent-cyan;
+                                font-size: Theme.font-sm;
                             }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        KitButton {
+                            text: "Done";
+                            kind: "primary";
+                            clicked => { root.on-close(); }
                         }
                     }
                 }

@@ -1,39 +1,71 @@
 // ============================================================================
-// About Eustress Engine — simple identity card. Version + build info + links.
-// Opened from Help menu via help:about action.
+// About Eustress Engine: a simple identity card. Version, build info, links.
+// Opened from the Help menu via the help:about action.
+// Law 1 chrome: DialogScrim > DialogCard > DialogFooter (dialog_kit.slint).
+// Escape or Enter closes.
 // ============================================================================
 
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitDivider, KitSectionLabel } from "dialog_kit.slint";
 
+// One outbound link: icon, name, the address, and an arrow. The whole row
+// is the hit target; hover marks it in the selection cyan.
 component LinkRow inherits Rectangle {
+    in property <image> icon;
     in property <string> label: "";
     in property <string> url: "";
     callback open-url(string);
 
-    height: 24px;
+    height: 34px;
+    border-radius: Theme.radius-sm;
     background: ta.has-hover ? Theme.button-hover : transparent;
-    border-radius: 4px;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: ta.has-hover ? Theme.accent-cyan : Theme.text-secondary;
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.url;
+            color: ta.has-hover ? Theme.accent-cyan : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/arrow-right.svg");
+                image-fit: contain;
+                colorize: ta.has-hover ? Theme.accent-cyan : Theme.text-disabled;
+            }
+        }
+    }
 
     ta := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.open-url(root.url); }
-    }
-
-    HorizontalLayout {
-        padding-left: 10px; padding-right: 10px; spacing: 8px;
-        Text {
-            text: root.label;
-            color: Theme.text-primary;
-            font-size: 11px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-        Text {
-            text: root.url;
-            color: Theme.accent-blue;
-            font-size: 10px;
-            vertical-alignment: center;
-        }
     }
 }
 
@@ -46,142 +78,132 @@ export component AboutDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    // Backdrop click closes
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 440px;
-        height: 360px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(440px, parent.width - 32px);
+            height: min(card.preferred-height, parent.height - 32px);
+            icon: @image-url("../../assets/icons/ui/sparkle.svg");
+            title: "About Eustress Engine";
+            subtitle: root.version != "" ? "Version " + root.version : "";
+            close => { root.on-close(); }
 
-        // Absorb clicks inside the card so backdrop doesn't close it
-        TouchArea {
-            scroll-event(event) => { return accept; }
-        }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "About Eustress Engine";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            keys := FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.Escape || event.text == Key.Return {
+                        root.on-close();
+                        return accept;
+                    }
+                    return reject;
                 }
 
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: destructive close-button hover tint, no danger-hover surface token
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
 
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 20px;
+                        padding-bottom: 16px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        Text {
+                            text: "Eustress Engine";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-xxl;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Version " + root.version;
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+
+                        if root.commit != "": Text {
+                            text: "Build " + root.commit + (root.build-date != "" ? " • " + root.build-date : "");
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            font-family: "Consolas";
+                            horizontal-alignment: center;
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "The AI-native orchestrator: Soul Scripts, Workshop AI and live world modeling on a Rust core.";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle { height: 10px; }
+
+                        HorizontalLayout {
+                            padding-left: 2px;
+                            KitSectionLabel { text: "LINKS"; }
+                        }
+
+                        Rectangle {
+                            background: Theme.background-secondary.with-alpha(0.6);
+                            border-radius: Theme.radius-md;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 0;
+
+                                LinkRow {
+                                    icon: @image-url("../../assets/icons/ui/web.svg");
+                                    label: "Website";
+                                    url: "https://eustress.dev";
+                                    open-url(u) => { root.open-url(u); }
+                                }
+                                KitDivider { }
+                                LinkRow {
+                                    icon: @image-url("../../assets/icons/ui/link.svg");
+                                    label: "GitHub";
+                                    url: "https://github.com/eustressengine/eustress";
+                                    open-url(u) => { root.open-url(u); }
+                                }
+                                KitDivider { }
+                                LinkRow {
+                                    icon: @image-url("../../assets/icons/ui/users.svg");
+                                    label: "Discord";
+                                    url: "https://discord.gg/DGP9my8DYN";
+                                    open-url(u) => { root.open-url(u); }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "© Anthropic-assisted. Built by humans who care.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            horizontal-alignment: center;
+                        }
                     }
 
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    DialogFooter {
+                        KitButton {
+                            text: "Close";
+                            kind: "primary";
+                            clicked => { root.on-close(); }
+                        }
                     }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Body ──
-            VerticalLayout {
-                padding: 20px;
-                spacing: 10px;
-
-                Text {
-                    text: "Eustress Engine";
-                    color: Theme.text-primary;
-                    font-size: 20px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                }
-
-                Text {
-                    text: "Version " + root.version;
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    horizontal-alignment: center;
-                }
-
-                if root.commit != "": Text {
-                    text: "Build " + root.commit + (root.build-date != "" ? " • " + root.build-date : "");
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    horizontal-alignment: center;
-                }
-
-                Rectangle { height: 8px; }
-
-                Text {
-                    text: "The AI-native orchestrator: Soul Scripts, Workshop AI and live world modeling on a Rust core.";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    horizontal-alignment: center;
-                    wrap: word-wrap;
-                }
-
-                Rectangle { height: 8px; }
-
-                LinkRow {
-                    label: "Website";
-                    url: "https://eustress.dev";
-                    open-url(u) => { root.open-url(u); }
-                }
-                LinkRow {
-                    label: "GitHub";
-                    url: "https://github.com/eustressengine/eustress";
-                    open-url(u) => { root.open-url(u); }
-                }
-                LinkRow {
-                    label: "Discord";
-                    url: "https://discord.gg/DGP9my8DYN";
-                    open-url(u) => { root.open-url(u); }
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                Text {
-                    text: "© Anthropic-assisted. Built by humans who care.";
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    horizontal-alignment: center;
                 }
             }
         }

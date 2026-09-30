@@ -65,6 +65,24 @@ fn registry() -> &'static ToolRegistry {
         // PhysicsService: which physics domains step, gravity, clock speed.
         r.register(crate::bridge_tools::GetPhysicsSettingsTool);
         r.register(crate::bridge_tools::SetPhysicsSettingsTool);
+        // Terrain: the reads (stats, surface samples, terrain-only raycasts,
+        // voxels), then the edits, each through the engine's own terrain
+        // command path as one undo step. Generate and flat only queue work
+        // that finishes on later frames; carve and clear remove ground and
+        // are Destructive.
+        r.register(crate::bridge_tools::TerrainStatsTool);
+        r.register(crate::bridge_tools::TerrainQueryTool);
+        r.register(crate::bridge_tools::TerrainRaycastTool);
+        r.register(crate::bridge_tools::TerrainReadVoxelsTool);
+        r.register(crate::bridge_tools::TerrainGenerateTool);
+        r.register(crate::bridge_tools::TerrainFlatTool);
+        r.register(crate::bridge_tools::TerrainSculptTool);
+        r.register(crate::bridge_tools::TerrainPaintTool);
+        r.register(crate::bridge_tools::TerrainFillTool);
+        r.register(crate::bridge_tools::TerrainCarveTool);
+        r.register(crate::bridge_tools::TerrainReplaceMaterialTool);
+        r.register(crate::bridge_tools::TerrainLayerCreateTool);
+        r.register(crate::bridge_tools::TerrainClearTool);
         // Binary-ECS entity CRUD: OVERRIDE the disk entity tools by name so
         // they operate on binary cores via the bridge when the engine is
         // live, and fall back to the disk tool (FileSystem rep) when it's
@@ -107,6 +125,14 @@ fn registry() -> &'static ToolRegistry {
         // can establish every precondition and still leave the decision open.
         r.register(crate::bridge_tools::PublishStatusTool);
         r.register(crate::bridge_tools::PublishSpaceTool);
+        // Restore points: save one before a risky change, see what changed
+        // since one, and go back to one. A revert first saves a safety
+        // snapshot, so the revert itself can be undone.
+        r.register(crate::bridge_tools::SaveSnapshotTool);
+        r.register(crate::bridge_tools::ListSnapshotsTool);
+        r.register(crate::bridge_tools::DiffSnapshotTool);
+        r.register(crate::bridge_tools::RevertToSnapshotTool);
+        r.register(crate::bridge_tools::CancelPendingRevertTool);
         // Disk world-container tools — create Universes / Spaces (no engine).
         r.register(crate::bridge_tools::NewUniverseTool);
         r.register(crate::bridge_tools::NewSpaceTool);
@@ -145,6 +171,20 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "get_physics_settings",
     "set_physics_settings",
     "export_instances_toml",
+    // Every terrain read and edit reaches the RUNNING engine's terrain.
+    "terrain_stats",
+    "terrain_query",
+    "terrain_raycast",
+    "terrain_read_voxels",
+    "terrain_generate",
+    "terrain_flat",
+    "terrain_sculpt",
+    "terrain_paint",
+    "terrain_fill",
+    "terrain_carve",
+    "terrain_replace_material",
+    "terrain_layer_create",
+    "terrain_clear",
     // The UI surface and publishing all reach the RUNNING engine.
     "list_modes",
     "list_mode_tools",
@@ -154,6 +194,12 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "ui_sequence",
     "publish_status",
     "publish_space",
+    // Restore points of the RUNNING engine's open Space.
+    "save_snapshot",
+    "list_snapshots",
+    "diff_snapshot",
+    "revert_to_snapshot",
+    "cancel_pending_revert",
     // Bridge-only too: both fail outright without a live engine, so pointing
     // them at the server's nominal default Universe rather than the running
     // one just produces "engine is not running" against a Universe that was
@@ -557,6 +603,40 @@ mod tests {
         // Every bridge tool must resolve against the LIVE engine's Universe.
         for name in ["export_instances_toml", "promote_entity", "demote_entity"] {
             assert!(is_bridge_tool(name), "{name} should be a bridge tool");
+        }
+    }
+
+    #[test]
+    fn terrain_tools_are_registered_classified_and_live() {
+        use eustress_tools::capability::{capability_of, Capability};
+
+        let tools = list_shared_tools();
+        let expected = [
+            ("terrain_stats", Capability::Read),
+            ("terrain_query", Capability::Read),
+            ("terrain_raycast", Capability::Read),
+            ("terrain_read_voxels", Capability::Read),
+            ("terrain_generate", Capability::Write),
+            ("terrain_flat", Capability::Write),
+            ("terrain_sculpt", Capability::Write),
+            ("terrain_paint", Capability::Write),
+            ("terrain_fill", Capability::Write),
+            ("terrain_replace_material", Capability::Write),
+            ("terrain_layer_create", Capability::Write),
+            ("terrain_carve", Capability::Destructive),
+            ("terrain_clear", Capability::Destructive),
+        ];
+        for (name, class) in expected {
+            assert!(tools.iter().any(|t| t["name"] == name), "{name} is registered");
+            assert_eq!(capability_of(name), Some(class), "{name} capability");
+            // Every terrain tool must resolve against the LIVE engine's Universe.
+            assert!(is_bridge_tool(name), "{name} should be a bridge tool");
+            // Only the reads advertise themselves as safe to auto-approve.
+            assert_eq!(annotation(&tools, name, "readOnlyHint"), class == Capability::Read, "{name} readOnlyHint");
+        }
+        // Removing ground, or replacing a whole terrain, always asks first.
+        for name in ["terrain_carve", "terrain_clear", "terrain_generate", "terrain_flat"] {
+            assert_eq!(annotation(&tools, name, "destructiveHint"), true, "{name} destructiveHint");
         }
     }
 

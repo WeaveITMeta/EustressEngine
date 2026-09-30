@@ -30,62 +30,7 @@ use eustress_common::{Attributes, Tags};
 // File-System-First Mesh Source
 // ============================================================================
 
-/// Tracks the source .glb file for a part's mesh (file-system-first architecture).
-/// When present, the mesh was loaded from this path rather than generated inline.
-/// The Scale Tool uses Transform.scale instead of regenerating the mesh.
-#[derive(Component, Debug, Clone, Reflect)]
-#[reflect(Component)]
-pub struct MeshSource {
-    /// Relative path to the .glb file (from engine assets root)
-    pub path: String,
-}
-
-impl MeshSource {
-    pub fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
-/// Map PartType to the corresponding .glb file path in assets/parts/
-pub fn part_type_to_glb_path(part_type: &PartType) -> &'static str {
-    match part_type {
-        PartType::Block => "parts/block.glb",
-        PartType::Ball => "parts/ball.glb",
-        PartType::Cylinder => "parts/cylinder.glb",
-        PartType::Wedge => "parts/wedge.glb",
-        PartType::CornerWedge => "parts/corner_wedge.glb",
-        PartType::Cone => "parts/cone.glb",
-    }
-}
-
-/// Local-space collider half-extents that, after Avian re-applies the
-/// entity's (global) Transform scale to the collider, yield a *world*
-/// collider matching the part's visible `size`.
-///
-/// ## Why (verified 2026-05-25 against live scene + Avian 0.6 source)
-///
-/// Parts render a UNIT GLB mesh scaled by `Transform.scale`, and Avian
-/// scales the collider by the SAME accumulated scale
-/// (`propagate_collider_transforms` assigns `ColliderTransform.scale` =
-/// global scale; `update_collider_scale`'s child-collider path applies it
-/// ungated). Building at `size/2` therefore double-counts the scale: a part
-/// of size `s` (whose local `Transform.scale == s`, parent Model at scale 1)
-/// got a world collider of `(s/2)·s = s²/2` half-extent — verified by the
-/// non-linear signature the user saw (size 3 → 9 wide, size 5.2 → 27 wide,
-/// size 0.9 → 0.81). Dividing the local half-extents by the local Transform
-/// scale cancels Avian's multiply so the world collider resolves to `size/2`
-/// (a UNIT collider when `scale == size`). The cancellation is robust to
-/// ancestor (folder/Model) scale: Avian applies `A·S`, and
-/// `(size/2 / S)·(A·S) = size/2 · A`, which equals the visible extent for
-/// both the unit-mesh convention (`S=size`) and the baked-mesh one (`S=1`).
-pub fn collider_local_half(size: Vec3, transform_scale: Vec3) -> Vec3 {
-    let inv = |s: f32| if s.is_finite() && s.abs() > 1e-4 { 1.0 / s.abs() } else { 1.0 };
-    Vec3::new(
-        size.x * 0.5 * inv(transform_scale.x),
-        size.y * 0.5 * inv(transform_scale.y),
-        size.z * 0.5 * inv(transform_scale.z),
-    )
-}
+pub use eustress_common::part_draw::{collider_local_half, part_type_to_glb_path, MeshSource};
 
 // ============================================================================
 // Part Spawning (file-system-first: .glb via AssetServer)
@@ -395,19 +340,16 @@ pub fn spawn_camera(
 // Light Spawning
 // ============================================================================
 //
-// Light Textures (Bevy 0.17+):
-// - PointLightTexture: Cubemap texture for omnidirectional light cookies
-// - SpotLightTexture: 2D texture projected onto illuminated surfaces
-// - DirectionalLightTexture: 2D texture for sun/directional light patterns
+// These spawn the AUTHORING component only. The Bevy light behind it (its
+// lumens or lux, cone, face-aimed emitter and sun-disc opt-out) is built on the
+// next Update by `eustress_common::plugins::light_classes`, the one owner of
+// that mapping, and followed live from then on. Writing a Bevy light here too
+// gave every spawn path its own brightness factor.
 //
-// To add a light texture, use the `texture` field on the Eustress light component
-// and load the asset via AssetServer. The spawn functions below will need to be
-// extended to accept AssetServer and load textures when the field is Some.
+// Light textures (cookies) need Bevy's `pbr_light_textures` feature, which the
+// engine does not enable; the `texture` field round-trips but is not drawn.
 
-/// Spawn a PointLight entity
-/// 
-/// If `light.texture` is Some, a PointLightTexture component should be added
-/// with a cubemap texture loaded from the asset path.
+/// Spawn a PointLight entity.
 pub fn spawn_point_light(
     commands: &mut Commands,
     instance: Instance,
@@ -415,28 +357,17 @@ pub fn spawn_point_light(
     transform: Transform,
 ) -> Entity {
     let name = instance.name.clone();
-    // TODO: If light.texture is Some, load cubemap and add PointLightTexture component
     commands.spawn((
-        PointLight {
-            color: light.color,
-            // Lumens — physically based; a disabled light emits nothing.
-            intensity: if light.enabled { light.brightness } else { 0.0 },
-            range: light.range,
-            radius: light.radius, // Spherical area light radius
-            shadow_maps_enabled: light.shadows && light.enabled,
-            ..default()
-        },
         transform,
+        Visibility::default(),
         instance,
         light,
         Name::new(name),
     )).id()
 }
 
-/// Spawn a SpotLight entity
-/// 
-/// If `light.texture` is Some, a SpotLightTexture component should be added
-/// with a 2D texture loaded from the asset path.
+/// Spawn a SpotLight entity. Its cone comes out of `light.face` (Front, the
+/// light's -Z, by default).
 pub fn spawn_spot_light(
     commands: &mut Commands,
     instance: Instance,
@@ -444,26 +375,17 @@ pub fn spawn_spot_light(
     transform: Transform,
 ) -> Entity {
     let name = instance.name.clone();
-    // TODO: If light.texture is Some, load texture and add SpotLightTexture component
     commands.spawn((
-        SpotLight {
-            color: light.color,
-            // Lumens — physically based; a disabled light emits nothing.
-            intensity: if light.enabled { light.brightness } else { 0.0 },
-            range: light.range,
-            inner_angle: (light.angle * 0.85).to_radians(),
-            outer_angle: light.angle.to_radians(),
-            shadow_maps_enabled: light.shadows && light.enabled,
-            ..default()
-        },
         transform,
+        Visibility::default(),
         instance,
         light,
         Name::new(name),
     )).id()
 }
 
-/// Spawn a SurfaceLight entity
+/// Spawn a SurfaceLight entity. It carries its AUTHORED transform (it once
+/// sat at the origin); the emitter sits on its parent part's `face`.
 pub fn spawn_surface_light(
     commands: &mut Commands,
     instance: Instance,
@@ -471,29 +393,17 @@ pub fn spawn_surface_light(
     transform: Transform,
 ) -> Entity {
     let name = instance.name.clone();
-    // `light_sync::sync_surface_lights` rescales this PointLight's intensity from
-    // `brightness` and keeps it live; the important thing here is that the entity
-    // carries its AUTHORED transform, not the origin (the old bug), so the
-    // surface lights the scene from where it was placed.
     commands.spawn((
-        PointLight {
-            color: light.color,
-            intensity: if light.enabled { light.brightness * 500.0 } else { 0.0 },
-            range: light.range,
-            shadow_maps_enabled: light.shadows && light.enabled,
-            ..default()
-        },
         transform,
+        Visibility::default(),
         instance,
         light,
         Name::new(name),
     )).id()
 }
 
-/// Spawn a DirectionalLight entity (sun/global light)
-/// 
-/// If `light.texture` is Some, a DirectionalLightTexture component should be added
-/// with a 2D texture loaded from the asset path (e.g., cloud shadows).
+/// Spawn a DirectionalLight entity. It shines along the transform's -Z and
+/// is not the sun (no sun disc is drawn for it).
 pub fn spawn_directional_light(
     commands: &mut Commands,
     instance: Instance,
@@ -501,17 +411,9 @@ pub fn spawn_directional_light(
     transform: Transform,
 ) -> Entity {
     let name = instance.name.clone();
-    // TODO: If light.texture is Some, load texture and add DirectionalLightTexture component
     commands.spawn((
-        bevy::prelude::DirectionalLight {
-            color: light.color,
-            illuminance: light.brightness * 10000.0,
-            shadow_maps_enabled: light.shadows,
-            shadow_depth_bias: light.shadow_depth_bias,
-            shadow_normal_bias: light.shadow_normal_bias,
-            ..default()
-        },
         transform,
+        Visibility::default(),
         instance,
         light,
         Name::new(name),

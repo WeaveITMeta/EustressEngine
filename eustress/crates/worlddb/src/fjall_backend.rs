@@ -433,6 +433,30 @@ impl FjallWorldDb {
         self.meta.insert(Self::META_TX_COUNTER, &val.to_le_bytes())?;
         Ok(())
     }
+
+    /// The keyspace every partition lives in. A checkpoint reads it whole and
+    /// a restore writes it whole ([`crate::checkpoint`]).
+    pub(crate) fn keyspace(&self) -> &fjall::Keyspace {
+        &self.keyspace
+    }
+
+    /// Read the counters this handle keeps in memory from `meta` again, after
+    /// a restore replaced its contents underneath the handle. The drop writes
+    /// the tx counter back, so a stale one would overwrite the restored value.
+    pub(crate) fn reload_counters(&self) -> Result<()> {
+        let read = |key: &[u8]| -> Result<Option<u64>> {
+            Ok(self.meta.get(key)?.filter(|b| b.len() == 8).map(|b| {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&b);
+                u64::from_le_bytes(arr)
+            }))
+        };
+        let tx = read(Self::META_TX_COUNTER)?.unwrap_or(TxId::GENESIS.0);
+        let seq = read(Self::META_MUTATION_SEQ)?.unwrap_or(0);
+        self.tx_counter.store(tx, Ordering::Release);
+        self.mutation_seq.store(seq, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl WorldDb for FjallWorldDb {
@@ -643,6 +667,29 @@ impl WorldDb for FjallWorldDb {
             }
         }
         Ok(out)
+    }
+
+    fn instance_core_ids(&self) -> Result<std::collections::HashSet<EntityId>> {
+        let morton = crate::keys::MortonKeyEncoder::default();
+        let prefix = morton.component_prefix(ComponentTypeId::INSTANCE_CORE);
+        let mut out = std::collections::HashSet::new();
+        for res in self.entities.prefix(prefix) {
+            let (key, _value) = res?;
+            if let Ok((entity, component)) = morton.decode_component(&key) {
+                if component == ComponentTypeId::INSTANCE_CORE {
+                    out.insert(entity);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn checkpoint_to(
+        &self,
+        out: &Path,
+        elide: &dyn Fn(&str, &[u8]) -> bool,
+    ) -> Result<crate::checkpoint::CheckpointInfo> {
+        self.write_checkpoint(out, elide)
     }
 
     fn rekey_instance_cores(

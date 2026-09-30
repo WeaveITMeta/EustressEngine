@@ -61,9 +61,11 @@
 //! Beside the material map, a root can carry a [`TerrainHeightTexture`]: its
 //! SURFACE heights (the bake when there is one) as world metres, one R32Float
 //! texel per raster cell with the material map's raster mapping. The water
-//! material reads it to measure how deep the water is over each pixel. It
-//! exists while [`TerrainHeightTextureRequest::wanted`] says some water
-//! surface is drawn, whether or not the ground is textured, and is uploaded
+//! material reads it to measure how deep the water is over each pixel, and
+//! a streaming root's far field lifts its levels onto it (see `far_field`).
+//! It exists while [`TerrainHeightTextureRequest::wants`] the root (some
+//! water surface is drawn, or the root's far field needs it), whether or not
+//! the ground is textured, and is uploaded
 //! again (whole, at most every [`HEIGHT_UPLOAD_INTERVAL_SECS`]) after the
 //! height stamps (`TerrainDirtyChunks::height_seq`) move, the raster is
 //! replaced or the config changes. Like the material map, a new texture is only bindable
@@ -80,6 +82,7 @@ use bevy::shader::ShaderRef;
 // feature (see `avatar::boot`).
 use tracing::{debug, warn};
 
+use super::far_field::TerrainFarFieldPlugin;
 use super::material::MATERIAL_SLOT_COUNT;
 use super::material_slots::{TerrainMaterialSlots, TerrainMaterialSlotsPlugin};
 use super::texture_arrays::{
@@ -445,18 +448,46 @@ impl TerrainSurface {
     pub fn is_drawable(&self) -> bool {
         self.textured && self.age_frames >= SURFACE_SETTLE_FRAMES
     }
+
+    /// The material map image, [`Self::map_size`] texels, for the far field,
+    /// which shades with the same cells.
+    pub(crate) fn material_map(&self) -> &Handle<Image> {
+        &self.material_map
+    }
+
+    /// Texels per axis of the material map: the raster's.
+    pub(crate) fn map_size(&self) -> UVec2 {
+        self.map_size
+    }
+
+    /// The material map is old enough to be on the GPU, whether or not the
+    /// arrays are bound.
+    pub(crate) fn is_map_ready(&self) -> bool {
+        self.age_frames >= SURFACE_SETTLE_FRAMES
+    }
 }
 
-/// Whether anything draws with a terrain height texture: set by the water
-/// systems while a water surface exists, so a Space without water pays
-/// neither the texture's memory nor its uploads.
+/// Which terrain roots draw with a height texture, so a Space that draws
+/// with none pays neither the texture's memory nor its uploads.
 #[derive(Resource, Debug, Default)]
 pub struct TerrainHeightTextureRequest {
+    /// Some water surface is drawn, so every root keeps its texture: set by
+    /// the water systems.
     pub wanted: bool,
+    /// Roots whose far field draws from their texture: set by
+    /// `far_field::sync_terrain_far_fields`.
+    pub far_field_roots: Vec<Entity>,
+}
+
+impl TerrainHeightTextureRequest {
+    /// Whether `root` keeps a height texture.
+    pub fn wants(&self, root: Entity) -> bool {
+        self.wanted || self.far_field_roots.contains(&root)
+    }
 }
 
 /// A terrain root's surface heights as a texture (see the module docs).
-/// Present while [`TerrainHeightTextureRequest::wanted`] and the root has a
+/// Present while [`TerrainHeightTextureRequest::wants`] the root and it has a
 /// height raster no wider than [`MAX_MATERIAL_MAP_SIDE`].
 #[derive(Component, Debug)]
 pub struct TerrainHeightTexture {
@@ -717,11 +748,11 @@ pub fn swap_terrain_chunk_materials(
     }
 }
 
-/// Give every terrain root a [`TerrainHeightTexture`] while one is wanted and
-/// keep it current (see the module docs); remove it when it is not wanted or
-/// the root has no raster to draw it from. Runs after
-/// `apply_terrain_dirty_chunks`, so the height stamps of this frame's edits
-/// and bakes are already there.
+/// Give every terrain root a [`TerrainHeightTexture`] while
+/// [`TerrainHeightTextureRequest::wants`] it and keep it current (see the
+/// module docs); remove it when it is not wanted or the root has no raster
+/// to draw it from. Runs after `apply_terrain_dirty_chunks`, so the height
+/// stamps of this frame's edits and bakes are already there.
 pub fn sync_terrain_height_textures(
     mut commands: Commands,
     time: Option<Res<Time<Real>>>,
@@ -733,13 +764,14 @@ pub fn sync_terrain_height_textures(
         With<TerrainRoot>,
     >,
 ) {
-    let wanted = request.is_some_and(|request| request.wanted);
+    let request = request.as_deref();
     let now = time.map(|time| time.elapsed_secs_f64());
     // Heights only: paint and volume marks leave this, and a texture of
     // heights has nothing to re-upload for them.
     let seq = dirty.as_ref().map_or(0, |dirty| dirty.height_seq());
     for (entity, config, base, baked, texture) in &mut roots {
         let data = surface_data(base, baked);
+        let wanted = request.is_some_and(|request| request.wants(entity));
         let Some(size) = height_texture_size(data).filter(|_| wanted) else {
             if texture.is_some() {
                 commands.entity(entity).try_remove::<TerrainHeightTexture>();
@@ -787,9 +819,11 @@ pub fn sync_terrain_height_textures(
     }
 }
 
-/// The textured terrain material: its shader, its `MaterialPlugin` and the
-/// systems above. Added by the shared `TerrainPlugin` (Client) and by the
-/// engine's `EngineTerrainPlugin`, each guarding against adding it twice.
+/// The textured terrain material: its shader, its `MaterialPlugin`, the
+/// systems above, and the far field that draws the rest of a streaming
+/// terrain from the same bindings (`far_field::TerrainFarFieldPlugin`).
+/// Added by the shared `TerrainPlugin` (Client) and by the engine's
+/// `EngineTerrainPlugin`, each guarding against adding it twice.
 pub struct TerrainSurfacePlugin;
 
 impl Plugin for TerrainSurfacePlugin {
@@ -825,6 +859,11 @@ impl Plugin for TerrainSurfacePlugin {
                     .after(super::chunk_spawn_system)
                     .after(super::apply_terrain_dirty_chunks),
             );
+        // The far field's material shares this one's map, slot records and
+        // arrays; it never adds this plugin back, so the guard is enough.
+        if !app.is_plugin_added::<TerrainFarFieldPlugin>() {
+            app.add_plugins(TerrainFarFieldPlugin);
+        }
     }
 }
 

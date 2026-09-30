@@ -76,7 +76,13 @@ const MARKER: &str = "cores_baked";
 ///   ([`legacy_stored_id_from_uuid`]), so create, import, promote, the bridge
 ///   and Delete could never address a baked core by its uuid. Upgrading
 ///   re-keys those cores in place.
-const BAKE_VERSION: u32 = 3;
+/// * v4 — eligibility is an allowlist: a childless, mesh-free `Part` under the
+///   Workspace (`representation::streams_from_db`). v1 to v3 baked nearly
+///   every childless instance of any class from every service, Textures,
+///   Decals, Welds, scripts and storage templates included, and spawned them
+///   flat under Workspace. Upgrading from v2 or v3 removes those cores and
+///   leaves the rest alone.
+const BAKE_VERSION: u32 = 4;
 
 /// What one bake run did. Logged at INFO so a slow first open is explicable.
 #[derive(Debug, Default, Clone)]
@@ -190,12 +196,61 @@ pub(crate) fn synthetic_rel(class_name: &str, stored_id: u64) -> String {
     format!("Workspace/__bin_{class_name}_{stored_id:016x}/_instance.toml")
 }
 
+/// What pass 3 of [`bake_tree_to_cores`] may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BakeMode {
+    /// Write a core for every eligible entity and remove the core of every
+    /// ineligible one: the first bake, or an upgrade that widens eligibility.
+    Full,
+    /// Only remove the cores of entities that are no longer eligible. For an
+    /// upgrade that narrows eligibility, where re-writing eligible cores from
+    /// the tree would overwrite the edits a streaming Space made to them and
+    /// re-create the cores of parts deleted since.
+    RemoveOnly,
+}
+
+/// Remove the core a previous bake wrote for `uuid`, if one exists (`existing`
+/// holds every stored id). It is keyed by id and cell: tried under the
+/// canonical and the legacy id, at the world position the bake computes and
+/// where the uuid-primary copy says it is, which differ once a streaming Space
+/// moved it. Also drops its synthetic `path_to_uuid` entry. `true` when a core
+/// was present.
+fn remove_core_for(
+    db: &dyn WorldDb,
+    uuid: &[u8; 16],
+    class_name: &str,
+    world: Option<&Transform>,
+    existing: &std::collections::HashSet<u64>,
+) -> bool {
+    let ids: Vec<u64> = [stored_id_from_uuid(uuid), legacy_stored_id_from_uuid(uuid)]
+        .into_iter()
+        .filter(|id| existing.contains(id))
+        .collect();
+    if ids.is_empty() {
+        return false;
+    }
+    let copy_at = db
+        .get_entity_core_by_uuid(uuid)
+        .ok()
+        .flatten()
+        .and_then(|b| decode_instance_core(&b).ok())
+        .map(|c| c.t);
+    let world_at = world.map(|t| t.translation.to_array());
+    for id in &ids {
+        for pos in [world_at, copy_at].into_iter().flatten() {
+            let _ = db.delete_instance_core(EntityId(*id), (pos[0], pos[1], pos[2]));
+        }
+        let _ = db.delete_path_to_uuid(&synthetic_rel(class_name, *id));
+    }
+    true
+}
+
 /// Bake eligible `tree` entities into Morton-keyed `entities` cores.
 ///
 /// Idempotent by marker file. Additive: it never deletes a tree row, so a
 /// Space that fails midway is still fully loadable through the existing path
 /// and simply re-bakes on the next open.
-pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb) -> BakeSummary {
+pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb, mode: BakeMode) -> BakeSummary {
     let mut sum = BakeSummary::default();
 
     // ── Pass 1: read every entity row and record parent links ────────────
@@ -292,6 +347,13 @@ pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb) -> BakeSummary {
     }
 
     // ── Pass 3: write cores for eligible leaves ──────────────────────────
+    // Which cores exist now, so the reconcile below deletes only real ones
+    // (and counts them honestly) instead of writing a tombstone for every
+    // ineligible entity in the Space.
+    let existing: std::collections::HashSet<u64> = db
+        .instance_core_ids()
+        .map(|ids| ids.into_iter().map(|e| e.0).collect())
+        .unwrap_or_default();
     for key in &keys {
         let Some(node) = nodes.get(key) else { continue };
         // ONE predicate, shared with `file_loader`'s streaming-primary skip.
@@ -302,6 +364,7 @@ pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb) -> BakeSummary {
             &node.def.metadata.class_name,
             node.has_children,
             node.has_custom_mesh,
+            key,
         );
         if !eligible {
             // RECONCILE, do not merely skip. A previous bake version may have
@@ -309,26 +372,22 @@ pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb) -> BakeSummary {
             // it would mean the loader spawns it AND residency streams it.
             // Removing here is what makes a predicate change self-correcting
             // rather than something that needs a manual purge.
-            if let (Some(t), Ok(Some(uuid))) =
-                (world.get(key), db.path_to_uuid(key))
-            {
-                let id = EntityId(stored_id_from_uuid(&uuid));
-                if db
-                    .delete_instance_core(id, (t.translation.x, t.translation.y, t.translation.z))
-                    .is_ok()
-                {
+            if let Ok(Some(uuid)) = db.path_to_uuid(key) {
+                if remove_core_for(db, &uuid, &node.def.metadata.class_name, world.get(key), &existing) {
                     sum.removed += 1;
                 }
-                let _ = db.delete_path_to_uuid(&synthetic_rel(
-                    &node.def.metadata.class_name,
-                    id.0,
-                ));
             }
             if node.has_children {
                 sum.skipped_parent += 1;
             } else {
                 sum.skipped_filesystem += 1;
             }
+            continue;
+        }
+        if mode == BakeMode::RemoveOnly {
+            // Eligibility only narrows in this upgrade: an eligible entity
+            // keeps the core it has, and one without a core was deleted since
+            // the last bake and must stay deleted.
             continue;
         }
         let Some(t) = world.get(key) else { continue };
@@ -477,23 +536,24 @@ pub fn bake_once(space_root: &Path, db: &dyn WorldDb) {
         );
         return;
     }
-    if prior == Some(2) {
-        // v2 to v3 changes ids, not eligibility. Re-baking from the tree here
-        // would overwrite the edits a streaming Space made to its cores and
-        // re-create the cores of parts deleted since, so the re-key is the
-        // whole upgrade.
-        stamp(space_root);
-        return;
-    }
+    // v2 and v3 baked a superset of what v4 allows, so upgrading them only
+    // removes. Re-baking from the tree would overwrite the edits a streaming
+    // Space made to its cores and re-create the cores of parts deleted since.
+    // v1's predicate differed in both directions, and a Space with no marker
+    // has never been baked: both get the full pass.
+    let mode = match prior {
+        Some(2) | Some(3) => BakeMode::RemoveOnly,
+        _ => BakeMode::Full,
+    };
     if let Some(v) = prior {
         info!(
             target: "eustress_engine::bake_cores",
-            from = v, to = BAKE_VERSION,
-            "bake version changed: re-deriving eligibility and removing cores the previous version wrote for entities that should stay in the tree"
+            from = v, to = BAKE_VERSION, ?mode,
+            "bake version changed: removing cores the previous version wrote for entities that should stay in the tree"
         );
     }
     let t0 = std::time::Instant::now();
-    let sum = bake_tree_to_cores(space_root, db);
+    let sum = bake_tree_to_cores(space_root, db, mode);
     info!(
         target: "eustress_engine::bake_cores",
         examined = sum.examined,
@@ -653,24 +713,106 @@ mod db_tests {
         eustress_worlddb::backend::open(&space.join("world.fjalldb")).unwrap()
     }
 
-    /// A bare Part at `pos`, with the identity rows `migrate_identity` would
-    /// have written, optionally also as a folder on disk. No "mesh" anywhere in
-    /// the text, or the shared predicate keeps it in the tree.
+    /// A bare Part under Workspace at `pos`, with the identity rows
+    /// `migrate_identity` would have written, optionally also as a folder on
+    /// disk. No "mesh" anywhere in the text, or the shared predicate keeps it
+    /// in the tree.
     fn seed(db: &dyn WorldDb, space: &Path, name: &str, hex: &str, pos: [f32; 3], on_disk: bool) -> String {
-        let rel = format!("Workspace/{name}/_instance.toml");
+        seed_in(db, space, "Workspace", "Part", name, hex, pos, on_disk)
+    }
+
+    fn seed_in(
+        db: &dyn WorldDb,
+        space: &Path,
+        service: &str,
+        class: &str,
+        name: &str,
+        hex: &str,
+        pos: [f32; 3],
+        on_disk: bool,
+    ) -> String {
+        let rel = format!("{service}/{name}/_instance.toml");
         let text = format!(
-            "[metadata]\nclass_name = \"Part\"\nname = \"{name}\"\nuuid = \"{hex}\"\n\n[transform]\nposition = [{}, {}, {}]\n",
+            "[metadata]\nclass_name = \"{class}\"\nname = \"{name}\"\nuuid = \"{hex}\"\n\n[transform]\nposition = [{}, {}, {}]\n",
             pos[0], pos[1], pos[2]
         );
         db.put_file(&rel, text.as_bytes()).unwrap();
         db.put_path_to_uuid(&rel, &uuid(hex)).unwrap();
         db.put_uuid_to_path(&uuid(hex), &rel).unwrap();
         if on_disk {
-            let folder = space.join("Workspace").join(name);
+            let folder = space.join(service).join(name);
             std::fs::create_dir_all(&folder).unwrap();
             std::fs::write(folder.join("_instance.toml"), text).unwrap();
         }
         rel
+    }
+
+    /// The core a v3 bake would have written for a tree row: canonical id,
+    /// world position, uuid copy and synthetic path.
+    fn write_v3_core(db: &dyn WorldDb, rel: &str, hex: &str, pos: [f32; 3]) -> u64 {
+        let text = String::from_utf8(db.get_file(rel).unwrap().unwrap()).unwrap();
+        let mut core = super::instance_to_arch(&toml::from_str::<InstanceDefinition>(&text).unwrap());
+        core.t = pos;
+        let bytes = encode_instance_core(&core).unwrap();
+        let id = stored_id_from_uuid(&uuid(hex));
+        db.put_instance_core(EntityId(id), (pos[0], pos[1], pos[2]), &bytes).unwrap();
+        db.put_entity_core_by_uuid(&uuid(hex), &bytes).unwrap();
+        db.put_path_to_uuid(&synthetic_rel(&core.class_name, id), &uuid(hex)).unwrap();
+        id
+    }
+
+    /// Only a Part under the Workspace becomes a core: not a Texture beside
+    /// it, not a Part template in ServerStorage.
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored --test-threads=1"]
+    fn fresh_bake_converts_only_workspace_parts() {
+        let space = temp_space("allow");
+        let db = open(&space);
+        seed(db.as_ref(), &space, "Brick", UUID_A, [10.0, 2.0, 5.0], false);
+        seed_in(db.as_ref(), &space, "Workspace", "Texture", "Skin", UUID_B, [0.0, 0.0, 0.0], false);
+        seed_in(db.as_ref(), &space, "ServerStorage", "Part", "Template", UUID_C, [0.0, 0.0, 0.0], false);
+
+        bake_once(&space, db.as_ref());
+
+        assert_eq!(core_ids(db.as_ref()), vec![stored_id_from_uuid(&uuid(UUID_A))]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// A v3 Space holds cores for a Texture and a storage template. The v4
+    /// upgrade removes exactly those, with their synthetic paths, and keeps
+    /// the Workspace Part's core, bytes and all.
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored --test-threads=1"]
+    fn v3_upgrade_removes_only_the_cores_that_are_no_longer_eligible() {
+        let space = temp_space("v3");
+        let db = open(&space);
+        let part = seed(db.as_ref(), &space, "Brick", UUID_A, [10.0, 2.0, 5.0], false);
+        let tex = seed_in(db.as_ref(), &space, "Workspace", "Texture", "Skin", UUID_B, [4.0, 0.0, 4.0], false);
+        let tpl = seed_in(db.as_ref(), &space, "ServerStorage", "Part", "Template", UUID_C, [300.0, 0.0, 0.0], false);
+        let keep = write_v3_core(db.as_ref(), &part, UUID_A, [10.0, 2.0, 5.0]);
+        let tex_id = write_v3_core(db.as_ref(), &tex, UUID_B, [4.0, 0.0, 4.0]);
+        let tpl_id = write_v3_core(db.as_ref(), &tpl, UUID_C, [300.0, 0.0, 0.0]);
+        let kept_bytes = db.get_entity_core_by_uuid(&uuid(UUID_A)).unwrap().unwrap();
+        std::fs::create_dir_all(space.join(".eustress")).unwrap();
+        std::fs::write(space.join(".eustress").join(MARKER), "3").unwrap();
+
+        bake_once(&space, db.as_ref());
+
+        let after: Vec<(u64, Vec<u8>)> = db
+            .iter_instance_cores()
+            .unwrap()
+            .into_iter()
+            .map(|(id, b)| (id.0, b))
+            .collect();
+        assert_eq!(after, vec![(keep, kept_bytes)], "only the Workspace Part's core remains, unchanged");
+        assert!(db.path_to_uuid(&synthetic_rel("Texture", tex_id)).unwrap().is_none());
+        assert!(db.path_to_uuid(&synthetic_rel("Part", tpl_id)).unwrap().is_none());
+        assert_eq!(db.path_to_uuid(&synthetic_rel("Part", keep)).unwrap(), Some(uuid(UUID_A)));
+        assert!(db.get_file(&tex).unwrap().is_some(), "the tree rows stay: the tree owns them now");
+        assert_eq!(marker(&space), BAKE_VERSION.to_string());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
     }
 
     fn core_ids(db: &dyn WorldDb) -> Vec<u64> {

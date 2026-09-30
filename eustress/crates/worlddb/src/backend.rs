@@ -367,6 +367,14 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// The entity id of every stored `ArchInstanceCore`. For callers that need
+    /// to know WHICH cores exist without their bytes, e.g. a loader deciding
+    /// whether residency holds an entity. The default reads the cores;
+    /// backends that can walk keys alone override it.
+    fn instance_core_ids(&self) -> Result<std::collections::HashSet<EntityId>> {
+        Ok(self.iter_instance_cores()?.into_iter().map(|(id, _)| id).collect())
+    }
+
     /// Rename Morton-keyed instance cores from one entity id to another, in
     /// place: same cell, same bytes, only the id at the end of the key
     /// changes. Old ids with no core are ignored.
@@ -414,6 +422,20 @@ pub trait WorldDb: Send + Sync + 'static {
             report.present.insert(new);
         }
         Ok(report)
+    }
+
+    /// Write a checkpoint of the whole database to `out`: every partition at
+    /// one sequence number, safe while other threads commit
+    /// ([`crate::checkpoint`]). `elide(partition, key)` names the records whose
+    /// value the caller supplies again at restore. A backend that cannot take
+    /// one refuses.
+    fn checkpoint_to(
+        &self,
+        out: &Path,
+        elide: &dyn Fn(&str, &[u8]) -> bool,
+    ) -> Result<crate::checkpoint::CheckpointInfo> {
+        let _ = (out, elide);
+        Err(crate::error::Error::Other("this database backend takes no checkpoints".to_string()))
     }
 
     /// Collect every `INSTANCE_CORE` whose Morton cell lies in the

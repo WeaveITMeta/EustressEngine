@@ -528,12 +528,14 @@ pub struct CodeGenContext {
 
 impl Default for CodeGenContext {
     fn default() -> Self {
+        // Factors into studs, the engine's one stud (`crate::units::Unit::Stud`).
+        let studs_per_meter = (1.0 / crate::units::Unit::Stud.to_meters()) as f32;
         let mut unit_conversions = std::collections::HashMap::new();
-        unit_conversions.insert("foot_to_studs".to_string(), 1.0886);
-        unit_conversions.insert("meter_to_studs".to_string(), 3.571);
-        unit_conversions.insert("yard_to_studs".to_string(), 3.266);
-        unit_conversions.insert("km_to_studs".to_string(), 3571.43);
-        unit_conversions.insert("mile_to_studs".to_string(), 5748.03);
+        unit_conversions.insert("foot_to_studs".to_string(), 0.3048 * studs_per_meter);
+        unit_conversions.insert("meter_to_studs".to_string(), studs_per_meter);
+        unit_conversions.insert("yard_to_studs".to_string(), 0.9144 * studs_per_meter);
+        unit_conversions.insert("km_to_studs".to_string(), 1000.0 * studs_per_meter);
+        unit_conversions.insert("mile_to_studs".to_string(), 1609.344 * studs_per_meter);
         
         Self {
             scene: String::new(),

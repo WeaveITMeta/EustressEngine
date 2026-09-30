@@ -21,21 +21,34 @@
 //! The shipped clip library is eight Mixamo files — idle, walk, run, jump, per
 //! sex. There is no hang, no shimmy, no mantle, no roll. A traversal system
 //! built on clips we do not have would be a stub; one built on transform
-//! motion plus two-bone IK is a real, playable mechanic that looks plain until
-//! clips exist. Every phase carries a [`ClimbPhase::clip_hint`] naming the clip
-//! that should displace its procedural pose.
+//! motion plus two-bone IK is a real, playable mechanic. Every phase carries
+//! a [`ClimbPhase::clip_hint`] naming the clip that should displace its
+//! procedural pose.
 //!
-//! **Honest limitation:** because the motion graph has no climb node and
-//! `locomotion` reports `grounded = false` while climbing, the animation
-//! blend currently drives the *jump* clip through every phase here. The pose
-//! you see is the IK, fighting a clip that thinks it is falling. Fixing that
-//! is a motion-graph change, not a change to this module.
+//! While climbing, the motion graph holds its idle branch as a base pose, and
+//! the authored climb pose and the limb IK in [`super::ik`] lay over it.
+//!
+//! ## What can be climbed
+//!
+//! Every probe here goes through the surface rules in [`super::climbable`]:
+//! the world is climbable, and characters, NPCs, moving parts and invisible
+//! walls are not, unless a `Climbable` attribute says otherwise.
+//!
+//! ## The body hangs like a body
+//!
+//! A hang is braced when there is wall under the feet and free when there is
+//! not, and the legs, the stand-off from the wall and the swing all follow
+//! from which. Catching a ledge gives a little at the arms and pulls back. A
+//! free-hanging body carried into the catch swings under the hands and
+//! settles. The pull-up is root motion keyed at the three moments a real one
+//! passes through: the top of the pull, the knee on the lip, the stand.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use super::climbable::{ClimbSurfaces, SurfaceRule};
 use super::grip::{self, Grip, ProbeConfig};
-use super::locomotion::{capsule_fits, unwedge};
+use super::locomotion::{capsule_fits_where, unwedge_where};
 use super::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
 
@@ -79,11 +92,37 @@ const WALL_PROBE_REACH: f32 = 2.2;
 /// Seconds a deliberate drop suppresses re-grabbing for. Long enough to clear
 /// the ledge under gravity, short enough not to feel like a lockout.
 const REGRAB_LOCKOUT: f32 = 0.45;
-/// Seconds the pull-up takes.
+/// Seconds a pull-up takes before its distance is counted.
+const MANTLE_BASE_SECONDS: f32 = 0.45;
+/// Seconds per metre the body travels through a pull-up.
 ///
-/// 0.65 s to clear a ~2 m ledge is roughly 3 m/s of vertical body movement —
-/// faster than a person can pull their own mass, so it read as a teleport.
-const MANTLE_DURATION: f32 = 1.05;
+/// Together about 1.15 s to haul out of a full hang and about 1 s to climb
+/// onto a chest-high wall from the ground. One fixed time made the short
+/// climb laboured and the long one rushed, and 0.65 s to clear a ~2 m ledge,
+/// roughly 3 m/s of vertical travel, read as a teleport.
+const MANTLE_SECONDS_PER_M: f32 = 0.28;
+/// Top of the pull: the shoulders this far above the lip, as a fraction of
+/// body height, elbows bent, hands still on the edge.
+const PULL_SHOULDERS_ABOVE_LIP_FRAC: f32 = 0.06;
+/// The knee-up: the body centre this far below the lip, as a fraction of body
+/// height. The pelvis is level with the edge, the chest over it, and one knee
+/// comes onto the top.
+const KNEEL_CENTRE_BELOW_LIP_FRAC: f32 = 0.01;
+/// ... and this far in front of the face, as a multiple of capsule radius.
+const KNEEL_STANDOFF: f32 = 0.75;
+/// Where the climb ends: this far in from the edge, as a multiple of capsule
+/// radius, feet on the top rather than on the lip. Where there is no room that
+/// far in, it ends on the probe's own top point.
+const STAND_IN: f32 = 1.4;
+/// Each stretch of the pull-up gets at least this much of the timeline, in
+/// metres of equivalent travel. A stretch with nothing to do (the pull, when
+/// the climb starts standing on the ground) is still a beat, not a skip.
+const MANTLE_KEY_FLOOR: f32 = 0.15;
+/// Time per metre in each stretch of a pull-up, relative to the others. The
+/// pull is the hard part and is slowest; standing up off a knee is quick.
+const MANTLE_EFFORT: [f32; 3] = [1.6, 1.0, 0.7];
+/// How far in from the edge the palms press once they turn over onto the top.
+const PRESS_IN: f32 = 0.14;
 /// Lateral hand-over-hand speed, m/s.
 const SHIMMY_SPEED: f32 = 1.15;
 /// How far the extent scan looks along a lip, and its step.
@@ -246,6 +285,23 @@ pub struct AvatarClimb {
     pub transfer_cooldown: f32,
     /// Position the current timed phase started from.
     start: Vec3,
+    /// How much wall is under the feet, 0 hanging free to 1 braced, smoothed
+    /// so the legs swing onto and off a wall instead of snapping.
+    pub brace: f32,
+    /// How far the arms have given under the catch, metres.
+    pub sag: f32,
+    sag_vel: f32,
+    /// Swing of the body under its hands, radians, positive carrying the feet
+    /// toward the wall.
+    pub swing: f32,
+    swing_vel: f32,
+    /// The pull-up in progress.
+    pub mantle: MantlePath,
+    /// True while a blocked pull-up lowers back the way it came.
+    pub mantle_back: bool,
+    /// How far the palms have turned over from the lip onto the top during a
+    /// pull-up, 0..1.
+    pub press: f32,
 }
 
 impl AvatarClimb {
@@ -307,27 +363,9 @@ impl AvatarClimb {
                     g.tangent.lerp(to.tangent, lead).normalize_or(g.tangent),
                 ))
             }
-            // Mantling: the palms press on the TOP surface, not the lip edge.
-            //
-            // During a pull-up the hands are flat on the ledge pushing down.
-            // Targeting the edge left the arms hanging off the front while the
-            // body rose past them, so the legs appeared to do all the work and
-            // the arms did nothing — which is exactly what a vault should not
-            // look like.
-            (ClimbPhase::Mantling, _) => {
-                // The palms hold the LIP through the pull, then move onto the
-                // top once the body has risen to meet it.
-                //
-                // Targeting the top from t=0 asks for a point still out of
-                // range and the chain locks straight; migrating too early
-                // leaves the hands behind the rising torso. Holding until the
-                // body is at lip height and transitioning over the back half
-                // is the order a real pull-up happens in.
-                let k = self.t.clamp(0.0, 1.0);
-                let onto_top = ((k - 0.5) / 0.3).clamp(0.0, 1.0);
-                let p = g.point.lerp(g.top - g.normal * 0.12, onto_top);
-                Some((p, g.normal, g.tangent))
-            }
+            // Mantling moves the holds themselves, from the lip onto the top
+            // (see `drive_climb`); the frame stays on the face, which is where
+            // a trailing foot pushes.
             _ => Some((g.point, g.normal, g.tangent)),
         }
     }
@@ -360,6 +398,49 @@ pub(crate) const fn hang_standoff() -> f32 {
     HANG_STANDOFF
 }
 
+/// Stand-off for a FREE hang, as a multiple of capsule radius.
+///
+/// With nothing under the feet the body hangs under its hands, not a body
+/// width out from a face that is not there. [`HANG_STANDOFF`] keeps the
+/// capsule off a wall; with no wall below, the arms decide.
+const FREE_HANG_STANDOFF: f32 = 0.45;
+
+/// Stand-off for a given brace, as a multiple of capsule radius.
+pub(crate) fn hang_standoff_for(brace: f32) -> f32 {
+    FREE_HANG_STANDOFF + (HANG_STANDOFF - FREE_HANG_STANDOFF) * brace.clamp(0.0, 1.0)
+}
+
+/// How far behind the lip's face the wall below may sit and still take the
+/// feet, in metres. Recessed further than a shin can reach, it is no wall to
+/// the feet and the body hangs free.
+const BRACE_REACH: f32 = 0.30;
+/// How fast the legs find or leave the wall, per second.
+const BRACE_RATE: f32 = 7.0;
+
+/// The give in the arms when a ledge is caught: a spring on the body's
+/// height under the hands. Stiff and a little under-damped, so the body dips,
+/// comes back past rest by a hair and settles.
+const SAG_OMEGA: f32 = 9.0;
+const SAG_DAMPING: f32 = 0.55;
+/// Share of the fall speed at the catch that the arms take, m/s per m/s.
+const SAG_FROM_FALL: f32 = 0.18;
+/// Every catch gives a little, even a hand put on a lip from standing, m/s.
+const SAG_BASE: f32 = 0.25;
+/// Most the arms give, in metres. They are near full reach already.
+const MAX_SAG: f32 = 0.09;
+
+/// A free-hanging body swings under its hands as a pendulum, damped by the
+/// climber holding still.
+const SWING_DAMPING: f32 = 0.22;
+/// Feet on a wall hold the body still: at full brace the swing is pulled to
+/// rest by a spring this much stiffer, rad/s, critically damped, so it stops
+/// in a tenth of a second instead of creeping back.
+const BRACED_SWING_STIFFNESS: f32 = 10.0;
+/// Share of the speed carried into the catch that becomes swing.
+const SWING_FROM_SPEED: f32 = 0.35;
+/// Largest swing, radians.
+const MAX_SWING: f32 = 0.45;
+
 /// Where the body centre sits for a given grip.
 fn hang_pose(grip: &Grip, body: &AvatarBody) -> Vec3 {
     grip.point + grip.normal * (body.metrics.capsule_radius * HANG_STANDOFF)
@@ -376,24 +457,27 @@ fn hang_pose(grip: &Grip, body: &AvatarBody) -> Vec3 {
 /// because nothing appears to be carrying the load.
 const ROOT_WEIGHT_SHIFT: f32 = 0.34;
 
-/// Where the body hangs, given the two hands' actual holds.
+/// Where the body hangs, given the two hands' actual holds and how much wall
+/// is under the feet.
 ///
 /// This is the ROOT half of a full-body solve. [`hang_pose`] positions the body
 /// from the grip — one point shared by both hands — which cannot express a
 /// reach at all: the hands can move anywhere and the body never responds.
 /// Hanging from the hold midpoint, biased toward whichever hand bears weight,
-/// is what makes a reach look like it costs something.
-pub(crate) fn hang_pose_from_holds(
+/// is what makes a reach look like it costs something. A braced body stands
+/// off the wall by its own width; a free one hangs under its hands.
+pub(crate) fn hang_root(
     holds: &[Vec3; 2],
     anchored: usize,
     normal: Vec3,
     body: &AvatarBody,
+    brace: f32,
 ) -> Vec3 {
     let centre = (holds[0] + holds[1]) * 0.5;
     let toward_anchor = (holds[anchored.min(1)] - centre) * ROOT_WEIGHT_SHIFT;
     centre
         + toward_anchor
-        + normal * (body.metrics.capsule_radius * HANG_STANDOFF)
+        + normal * (body.metrics.capsule_radius * hang_standoff_for(brace))
         - Vec3::Y * hang_drop(body)
 }
 
@@ -446,6 +530,276 @@ fn face_wall(grip: &Grip) -> Quat {
     Quat::from_rotation_y((-into.x).atan2(-into.z))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The pull-up as root motion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Where the body centre goes through a pull-up, keyed at the moments a real
+/// one passes through.
+///
+/// 1. The pull: hands on the lip, elbows driving down, until the shoulders are
+///    just over the edge.
+/// 2. The knee-up: the palms turn over onto the top and press, the chest goes
+///    over the lip, and one knee comes up onto it with the pelvis level with
+///    the edge.
+/// 3. The stand: up off the knee onto the top, the trailing leg coming through.
+///
+/// Height and distance from the face are each interpolated through the keys
+/// with a monotone cubic, so the body never dips below a key or backs away
+/// from the wall between two, and its speed runs on through each key instead
+/// of stopping at it. Each stretch gets time in proportion to how far it
+/// travels, which is what makes a deep haul slow in the pull and a climb from
+/// the ground quick through it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MantlePath {
+    /// Horizontal point on the face line under the start, and under the stand.
+    face_from: Vec3,
+    face_to: Vec3,
+    /// Outward face normal, horizontal.
+    normal: Vec3,
+    /// Height of the body centre at each key: start, top of the pull, knee,
+    /// stand.
+    y: [f32; 4],
+    /// Distance of the body centre IN FRONT of the face at each key; negative
+    /// is over the top.
+    d: [f32; 4],
+    /// Progress, 0..1, at which each key is reached.
+    pub k: [f32; 4],
+    /// Seconds the whole pull-up takes.
+    pub duration: f32,
+    /// Where it ends, standing.
+    pub stand: Vec3,
+    /// Height of the top surface, which the leading knee lands on.
+    pub top_y: f32,
+    /// Whether it began from a hang, which is where a blocked one returns to.
+    pub from_hang: bool,
+}
+
+impl MantlePath {
+    fn new(start: Vec3, g: &Grip, stand: Vec3, body: &AvatarBody, from_hang: bool) -> Self {
+        let m = &body.metrics;
+        let h = m.height_m;
+        let lip = g.point;
+        let normal = g.normal.with_y(0.0).normalize_or(Vec3::Z);
+        let off = |p: Vec3| (p - lip).dot(normal);
+
+        let (y0, d0) = (start.y, off(start));
+        let y1 = (lip.y + h * (PULL_SHOULDERS_ABOVE_LIP_FRAC - SHOULDER_ABOVE_CENTRE_FRAC)).max(y0);
+        let d1 = d0.min(m.capsule_radius * HANG_STANDOFF);
+        let y2 = (lip.y - h * KNEEL_CENTRE_BELOW_LIP_FRAC).max(y1);
+        let d2 = d1.min(m.capsule_radius * KNEEL_STANDOFF);
+        let y3 = stand.y.max(y2);
+        let d3 = off(stand).min(d2);
+        let y = [y0, y1, y2, y3];
+        let d = [d0, d1, d2, d3];
+
+        let stretch = |i: usize| ((y[i + 1] - y[i]) + (d[i] - d[i + 1]) + MANTLE_KEY_FLOOR) * MANTLE_EFFORT[i];
+        let total = stretch(0) + stretch(1) + stretch(2);
+        let k1 = stretch(0) / total;
+        let k2 = (stretch(0) + stretch(1)) / total;
+        let travel = (y3 - y0) + (d0 - d3);
+
+        Self {
+            face_from: (start - normal * d0).with_y(0.0),
+            face_to: (stand - normal * off(stand)).with_y(0.0),
+            normal,
+            y,
+            d,
+            k: [0.0, k1, k2, 1.0],
+            duration: MANTLE_BASE_SECONDS + travel.max(0.0) * MANTLE_SECONDS_PER_M,
+            stand,
+            top_y: g.top.y,
+            from_hang,
+        }
+    }
+
+    /// The body centre at progress `k`.
+    pub fn at(&self, k: f32) -> Vec3 {
+        let k = k.clamp(0.0, 1.0);
+        let y = monotone_cubic(&self.k, &self.y, k);
+        let d = monotone_cubic(&self.k, &self.d, k);
+        let along = self.face_from.lerp(self.face_to, ease_in_out(k));
+        let p = along + self.normal * d;
+        Vec3::new(p.x, y, p.z)
+    }
+
+    /// How far the palms have turned over onto the top at `k`, 0..1: through
+    /// the pull they hold the lip, and they go over it as the chest reaches it.
+    pub fn press(&self, k: f32) -> f32 {
+        let from = self.k[1] - 0.08;
+        smooth_step(((k - from) / 0.22).clamp(0.0, 1.0))
+    }
+}
+
+/// Monotone cubic interpolation through four keys (Fritsch and Butland).
+///
+/// Monotone data stays monotone between the keys, with no overshoot past a
+/// key, and the slope is zero at both ends so the move eases in and out.
+pub(crate) fn monotone_cubic(xs: &[f32; 4], ys: &[f32; 4], x: f32) -> f32 {
+    let mut secant = [0.0_f32; 3];
+    for i in 0..3 {
+        let h = xs[i + 1] - xs[i];
+        secant[i] = if h > 1e-6 { (ys[i + 1] - ys[i]) / h } else { 0.0 };
+    }
+    let mut slope = [0.0_f32; 4];
+    for i in 1..3 {
+        let (a, b) = (secant[i - 1], secant[i]);
+        if a * b > 0.0 {
+            let (h0, h1) = (xs[i] - xs[i - 1], xs[i + 1] - xs[i]);
+            let (w1, w2) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+            slope[i] = (w1 + w2) / (w1 / a + w2 / b);
+        }
+    }
+    let x = x.clamp(xs[0], xs[3]);
+    let i = if x < xs[1] {
+        0
+    } else if x < xs[2] {
+        1
+    } else {
+        2
+    };
+    let h = xs[i + 1] - xs[i];
+    if h <= 1e-6 {
+        return ys[i + 1];
+    }
+    let t = (x - xs[i]) / h;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * ys[i]
+        + (t3 - 2.0 * t2 + t) * h * slope[i]
+        + (-2.0 * t3 + 3.0 * t2) * ys[i + 1]
+        + (t3 - t2) * h * slope[i + 1]
+}
+
+/// Where a pull-up ends: standing on the top a step in from the edge when
+/// there is room, else on the probe's own top point.
+fn stand_point(
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
+    g: &Grip,
+    body: &AvatarBody,
+    rot: Quat,
+) -> Vec3 {
+    let lift = Vec3::Y * (body.metrics.capsule_half_extent() + 0.02);
+    let solid = |e: Entity| rule.surface(e).blocks();
+    let deep = Vec3::new(g.point.x, g.top.y, g.point.z) - g.normal * (body.metrics.capsule_radius * STAND_IN);
+    let probe = deep + Vec3::Y * 0.3;
+    if let Some(hit) = spatial.cast_ray_predicate(probe, Dir3::NEG_Y, 0.6, true, filter, &solid) {
+        let ground = probe - Vec3::Y * hit.distance;
+        // The same top carrying on that far in: not a step down, not a wall.
+        if (ground.y - g.top.y).abs() < 0.12 && Vec3::from(hit.normal).y > 0.7 {
+            let stand = ground + lift;
+            if capsule_fits_where(spatial, &clearance_shape(body), stand, rot, filter, &solid) {
+                return stand;
+            }
+        }
+    }
+    g.top + lift
+}
+
+/// The clearance shape once the legs come over the lip: the chest and head.
+///
+/// From the knee-up on, one knee is on the top and the other leg hangs down
+/// the face, so the whole capsule would report the ledge itself as in the
+/// way. What a ceiling or an overhang would stop is the chest and head, and
+/// that is what is tested: from mid-chest up, slimmer than the body, so the
+/// lip it is passing over never counts.
+pub(crate) fn upper_body_clearance(body: &AvatarBody) -> Collider {
+    let m = &body.metrics;
+    let half = m.capsule_half_extent();
+    let r = m.capsule_radius * 0.6;
+    let (bottom, top) = (half * 0.5, half * 0.92);
+    Collider::capsule_endpoints(r, Vec3::Y * (bottom + r), Vec3::Y * (top - r).max(bottom + r))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hanging: brace, catch and swing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Is there wall below this grip for the feet to push on?
+///
+/// Cast at the heights a braced sole takes, from behind the body toward the
+/// wall. A face within [`BRACE_REACH`] of the lip's own face plane takes the
+/// feet; a bar, an overhang or a lip over open air does not.
+fn wall_for_feet(
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
+    g: &Grip,
+    body: &AvatarBody,
+) -> bool {
+    let Ok(into) = Dir3::new(-g.normal.with_y(0.0)) else {
+        return false;
+    };
+    let half = body.metrics.capsule_half_extent();
+    let centre_y = g.point.y - hang_drop(body);
+    let out = body.metrics.capsule_radius * HANG_STANDOFF + 0.05;
+    let solid = |e: Entity| rule.surface(e).blocks();
+    [0.52_f32, 0.85].into_iter().any(|below| {
+        let origin = Vec3::new(g.point.x, centre_y - half * below, g.point.z) + g.normal * out;
+        origin.is_finite()
+            && spatial
+                .cast_ray_predicate(origin, into, out + BRACE_REACH, true, filter, &solid)
+                .is_some_and(|hit| rule.surface(hit.entity).holds() && Vec3::from(hit.normal).y.abs() < 0.7)
+    })
+}
+
+/// Ease the brace toward whether there is wall under the feet now.
+fn update_brace(
+    climb: &mut AvatarClimb,
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
+    g: &Grip,
+    body: &AvatarBody,
+    dt: f32,
+) {
+    let want = if wall_for_feet(spatial, filter, rule, g, body) { 1.0 } else { 0.0 };
+    climb.brace += (want - climb.brace) * (1.0 - (-BRACE_RATE * dt).exp());
+}
+
+/// Natural frequency of the hanging body as a pendulum from its hands, rad/s.
+///
+/// Never below 1.5, so a weightless hang still settles instead of drifting.
+fn swing_omega(body: &AvatarBody, gravity: f32) -> f32 {
+    let length = hang_drop(body) + body.metrics.capsule_half_extent() * 0.3;
+    (gravity.max(0.0) / length.max(0.3)).sqrt().max(1.5)
+}
+
+/// Advance the catch and the swing by `dt`.
+fn step_hang_springs(climb: &mut AvatarClimb, body: &AvatarBody, gravity: f32, dt: f32) {
+    let accel = -SAG_OMEGA * SAG_OMEGA * climb.sag - 2.0 * SAG_DAMPING * SAG_OMEGA * climb.sag_vel;
+    climb.sag_vel += accel * dt;
+    climb.sag += climb.sag_vel * dt;
+    if climb.sag > MAX_SAG {
+        climb.sag = MAX_SAG;
+        climb.sag_vel = climb.sag_vel.min(0.0);
+    }
+    climb.sag = climb.sag.max(-0.02);
+
+    let brace = climb.brace.clamp(0.0, 1.0);
+    let omega = swing_omega(body, gravity) + BRACED_SWING_STIFFNESS * brace;
+    let damping = SWING_DAMPING + (1.0 - SWING_DAMPING) * brace;
+    let accel = -omega * omega * climb.swing - 2.0 * damping * omega * climb.swing_vel;
+    climb.swing_vel += accel * dt;
+    climb.swing += climb.swing_vel * dt;
+    if climb.swing.abs() > MAX_SWING {
+        climb.swing = climb.swing.clamp(-MAX_SWING, MAX_SWING);
+        climb.swing_vel = 0.0;
+    }
+}
+
+/// Where the body hangs this frame: under the holds at the stand-off the
+/// brace calls for, lowered by the catch, and swung under the hands.
+fn hang_body_position(climb: &AvatarClimb, anchored: usize, normal: Vec3, body: &AvatarBody) -> Vec3 {
+    let rest = hang_root(&climb.holds, anchored, normal, body, climb.brace) - Vec3::Y * climb.sag;
+    let pivot = climb.hold_centre();
+    // About the lip line, signed so a positive swing carries the feet toward
+    // the wall.
+    let axis = Vec3::Y.cross(normal).normalize_or(Vec3::X);
+    pivot + Quat::from_axis_angle(axis, climb.swing) * (rest - pivot)
+}
+
 pub(crate) fn probe_config_for(body: &AvatarBody, feet_y: f32) -> ProbeConfig {
     probe_config(body, feet_y)
 }
@@ -467,7 +821,12 @@ pub(crate) struct AvatarClimbPlugin;
 
 impl Plugin for AvatarClimbPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, attach_climb_state.in_set(AvatarSystems::Lifecycle))
+        app.register_type::<super::climbable::Climbable>()
+            .add_systems(
+                Update,
+                (attach_climb_state, super::climbable::mark_character_models)
+                    .in_set(AvatarSystems::Lifecycle),
+            )
             // Before locomotion: while attached, the controller must not also
             // be driving the body, or the two fight over position.
             .add_systems(
@@ -503,6 +862,7 @@ const GRAB_FAN: f32 = 0.38;
 /// reads as the mechanic randomly failing.
 pub fn detect_ledge(
     spatial: &SpatialQuery,
+    rule: &dyn SurfaceRule,
     origin: Vec3,
     forward: Vec3,
     body: &AvatarBody,
@@ -519,7 +879,7 @@ pub fn detect_ledge(
     let mut best: Option<Grip> = None;
     for angle in [0.0, -GRAB_FAN, GRAB_FAN] {
         let d = Quat::from_rotation_y(angle) * fwd;
-        if let Some(g) = grip::probe(spatial, &filter, origin, d, &cfg) {
+        if let Some(g) = grip::probe(spatial, &filter, rule, origin, d, &cfg) {
             // Prefer the lip most square to the direction being held, so a
             // wall you are facing wins over one you are merely beside.
             let score = (-g.normal).dot(fwd);
@@ -612,7 +972,9 @@ pub(crate) fn hang_action(intent: &AvatarIntent, grip: &Grip, extent: (f32, f32)
 #[allow(clippy::too_many_arguments)]
 fn drive_climb(
     time: Res<Time>,
+    gravity: Option<Res<Gravity>>,
     spatial: SpatialQuery,
+    surfaces: ClimbSurfaces,
     mut q: Query<
         (
             Entity,
@@ -624,20 +986,26 @@ fn drive_climb(
             &AvatarBody,
             Option<&super::abilities::AvatarAbilities>,
         ),
-        With<SpawnedByAvatarRuntime>,
+        // A seated avatar rides its seat; nothing here may grab for it.
+        (With<SpawnedByAvatarRuntime>, Without<super::seat::AvatarSeated>),
     >,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    let g_down = super::locomotion::downward_gravity(gravity.as_deref());
 
     for (entity, mut tf, mut vel, mut climb, intent, loco, body, abilities) in q.iter_mut() {
         // Each verb is checked where it begins, so switching one off never
         // drops a character out of a move already under way.
         let abilities = abilities.copied().unwrap_or_default();
         let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+        // What this climber may take hold of. Its own body is not there.
+        let climber = surfaces.for_climber(entity);
+        let rule: &dyn SurfaceRule = &climber;
         let half = body.metrics.capsule_half_extent();
+        let radius = body.metrics.capsule_radius;
         // Slightly under body size. A hang deliberately parks the capsule close
         // to the wall it is holding, so a full-width probe would report contact
         // every frame and refuse to move at all; this clears grazing contact
@@ -662,6 +1030,7 @@ fn drive_climb(
                     if let Some(g) = probe_ledge_below(
                         &spatial,
                         &filter,
+                        rule,
                         tf.translation - Vec3::Y * half,
                         intent.direction.normalize_or_zero(),
                         body,
@@ -687,7 +1056,7 @@ fn drive_climb(
                     continue;
                 }
                 let forward = intent.direction.normalize_or_zero();
-                let Some(g) = detect_ledge(&spatial, tf.translation, forward, body, entity) else {
+                let Some(g) = detect_ledge(&spatial, rule, tf.translation, forward, body, entity) else {
                     continue;
                 };
                 // Never take a hold the body could not physically reach.
@@ -701,7 +1070,7 @@ fn drive_climb(
                 let feet = tf.translation.y - half;
                 if abilities.vault
                     && g.height_above(feet) <= body.metrics.height_m * VAULT_MAX_FRAC
-                    && can_mantle(&spatial, &filter, &g, body, face_wall(&g))
+                    && can_mantle(&spatial, &filter, rule, &g, body, face_wall(&g))
                 {
                     climb.grip = Some(g);
                     climb.seat_hands(&g, body.metrics.shoulder_half_width.max(0.10));
@@ -726,20 +1095,21 @@ fn drive_climb(
 
                 // No room to hang: vault it if we can, otherwise refuse. A
                 // grab that buries the character is worse than no grab.
-                if !has_hang_clearance(&spatial, &filter, &g, body) {
+                if !has_hang_clearance(&spatial, &filter, rule, &g, body) {
                     // Low enough to stride over, or high enough that it has
                     // to be pulled? Same decision as above, and it has to be
                     // made here too — this branch is reached by anything with
                     // no room to hang, at any height.
                     let low = g.height_above(tf.translation.y - half) <= body.metrics.height_m * VAULT_MAX_FRAC;
                     let allowed = if low { abilities.vault } else { abilities.climb };
-                    if allowed && can_mantle(&spatial, &filter, &g, body, face_wall(&g)) {
+                    if allowed && can_mantle(&spatial, &filter, rule, &g, body, face_wall(&g)) {
                         climb.grip = Some(g);
                         tf.rotation = face_wall(&g);
                         if low {
                             begin_vault(&mut climb, &tf);
                         } else {
-                            begin_mantle(&mut climb, &tf);
+                            climb.seat_hands(&g, body.metrics.shoulder_half_width.max(0.10));
+                            begin_mantle(&mut climb, &tf, &g, &spatial, &filter, rule, body, false);
                             vel.0 = Vec3::ZERO;
                         }
                     }
@@ -749,8 +1119,8 @@ fn drive_climb(
                 if !abilities.climb {
                     continue;
                 }
-                begin_hang(&mut climb, &spatial, &filter, &mut vel, g, body);
-                info!("🧗 grip at {:?} (standable: {})", g.point, g.standable);
+                begin_hang(&mut climb, &spatial, &filter, rule, &mut vel, g, body);
+                info!("🧗 grip at {:?} (standable: {}, braced: {})", g.point, g.standable, climb.brace > 0.5);
             }
 
             ClimbPhase::Hanging => {
@@ -761,17 +1131,20 @@ fn drive_climb(
                 vel.0 = Vec3::ZERO;
                 // Relax out of the sideways lean rather than snapping upright.
                 climb.travel *= 1.0 - (6.0 * dt).min(1.0);
+                update_brace(&mut climb, &spatial, &filter, rule, &g, body, dt);
+                step_hang_springs(&mut climb, body, g_down, dt);
                 let anchored = 1 - climb.reaching;
-                let want = hang_pose_from_holds(&climb.holds, anchored, g.normal, body);
+                let want = hang_body_position(&climb, anchored, g.normal, body);
                 settle_to(
                     &mut tf,
                     want,
                     climb_body_rotation_with(climb.facing_normal(), g.tangent, &climb.holds),
                     dt,
                     &spatial,
+                    rule,
                     &clear,
                     &filter,
-                    body.metrics.capsule_radius,
+                    radius,
                 );
                 climb.t += dt;
 
@@ -819,7 +1192,7 @@ fn drive_climb(
                         // Catch the next hold down if there is one. Releasing
                         // is the fallback, not the default: a ledge above
                         // another ledge should be climbed down, not fallen off.
-                        if let Some(below) = probe_below(&spatial, &filter, &g, body) {
+                        if let Some(below) = probe_below(&spatial, &filter, rule, &g, body) {
                             info!("🧗 lowering onto {:?}", below.point);
                             begin_lower(&mut climb, &mut tf, &mut vel, below);
                         } else {
@@ -832,10 +1205,10 @@ fn drive_climb(
                     // Mantle if there is somewhere to stand, otherwise reach
                     // for a higher grip. This is the cliff-ascent verb.
                     HangAction::Up => {
-                        if can_mantle(&spatial, &filter, &g, body, tf.rotation) {
-                            begin_mantle(&mut climb, &tf);
+                        if can_mantle(&spatial, &filter, rule, &g, body, tf.rotation) {
+                            begin_mantle(&mut climb, &tf, &g, &spatial, &filter, rule, body, true);
                         } else if let Some(up) =
-                            probe_next_grip(&spatial, &filter, &g, body, Vec3::Y)
+                            probe_next_grip(&spatial, &filter, rule, &g, body, Vec3::Y)
                         {
                             begin_transfer(&mut climb, &tf, up);
                         } else if g.standable || !abilities.wall_jump {
@@ -865,7 +1238,7 @@ fn drive_climb(
                             let launch = wall_jump_velocity(
                                 g.normal,
                                 intent.direction,
-                                body.motion.jump_velocity(),
+                                body.motion.jump_velocity_under(g_down),
                             );
                             climb.phase = ClimbPhase::None;
                             climb.grip = None;
@@ -882,7 +1255,7 @@ fn drive_climb(
                     HangAction::WallJump => {
                         // Switched off, the same input lets go instead.
                         let launch = if abilities.wall_jump {
-                            wall_jump_velocity(g.normal, intent.direction, body.motion.jump_velocity())
+                            wall_jump_velocity(g.normal, intent.direction, body.motion.jump_velocity_under(g_down))
                         } else {
                             Vec3::ZERO
                         };
@@ -908,14 +1281,17 @@ fn drive_climb(
                         // back to the general lateral probe for a wall that
                         // simply continues past a gap.
                         let side = g.tangent * sign;
-                        let next = probe_corner(&spatial, &filter, &g, body, sign)
-                            .or_else(|| probe_next_grip(&spatial, &filter, &g, body, side))
+                        let next = probe_corner(&spatial, &filter, rule, &g, body, sign)
+                            .or_else(|| probe_next_grip(&spatial, &filter, rule, &g, body, side))
                             // Last: LEAP the gap. Reaching around a corner and
                             // reaching along a continuing wall are both static
                             // moves; when neither finds anything the lip has
                             // genuinely ended, and jumping is the verb.
                             .or_else(|| {
-                                abilities.ledge_leap.then(|| probe_leap(&spatial, &filter, &g, body, side)).flatten()
+                                abilities
+                                    .ledge_leap
+                                    .then(|| probe_leap(&spatial, &filter, rule, &g, body, side))
+                                    .flatten()
                             });
                         if let Some(next) = next {
                             begin_transfer(&mut climb, &tf, next);
@@ -950,8 +1326,8 @@ fn drive_climb(
                 // straight line — walls are not required to be flat.
                 let moved = g.point + g.tangent * (dir * step);
                 let cfg = probe_config(body, moved.y - hang_drop(body) - half);
-                let stand_off = moved + g.normal * (body.metrics.capsule_radius * 1.5);
-                if let Some(re) = grip::probe(&spatial, &filter, stand_off, -g.normal, &cfg) {
+                let stand_off = moved + g.normal * (radius * 1.5);
+                if let Some(re) = grip::probe(&spatial, &filter, rule, stand_off, -g.normal, &cfg) {
                     g = re;
                 } else {
                     g.point = moved;
@@ -981,20 +1357,23 @@ fn drive_climb(
                 climb.reaching = lead;
 
                 climb.extent = grip::edge_extent(
-                    &spatial, &filter, &g, &probe_config(body, g.point.y - hang_drop(body) - half),
+                    &spatial, &filter, rule, &g, &probe_config(body, g.point.y - hang_drop(body) - half),
                     EXTENT_SCAN, EXTENT_STEP,
                 );
+                update_brace(&mut climb, &spatial, &filter, rule, &g, body, dt);
+                step_hang_springs(&mut climb, body, g_down, dt);
                 let anchored = 1 - climb.reaching;
-                let want = hang_pose_from_holds(&climb.holds, anchored, g.normal, body);
+                let want = hang_body_position(&climb, anchored, g.normal, body);
                 if !settle_to(
                     &mut tf,
                     want,
                     climb_body_rotation_with(climb.facing_normal(), g.tangent, &climb.holds),
                     dt,
                     &spatial,
+                    rule,
                     &clear,
                     &filter,
-                    body.metrics.capsule_radius,
+                    radius,
                 ) {
                     // Shimmied into something. Stop at the obstruction and hang
                     // there instead of grinding the body along it.
@@ -1011,6 +1390,8 @@ fn drive_climb(
                 let span = hang_pose(&from, body).distance(hang_pose(&to, body));
                 climb.t += dt / (TRANSFER_DURATION + span * TRANSFER_SECONDS_PER_M);
                 let k = climb.t.clamp(0.0, 1.0);
+                // The legs look ahead to the hold they are going to.
+                update_brace(&mut climb, &spatial, &filter, rule, &to, body, dt);
 
                 // Arc through the midpoint lifted by a fraction of the rise, so
                 // the body swings to the new hold instead of sliding along the
@@ -1038,13 +1419,13 @@ fn drive_climb(
                 let disagree = (1.0 - from.normal.dot(to.normal)).clamp(0.0, 1.0);
                 let mid = (a + b) * 0.5
                     + Vec3::Y * lift
-                    + out * (body.metrics.capsule_radius * 2.6 * disagree);
+                    + out * (radius * 2.6 * disagree);
 
                 let arc = quadratic(a, mid, b, ease_in_out(k));
                 // A blocked frame is NOT a failed transfer. `place_body` stops
                 // the body against whatever it met and the swing keeps running;
                 // only arriving nowhere counts as failure, checked at the end.
-                let _ = place_body(&mut tf, arc, &spatial, &clear, &filter, body.metrics.capsule_radius);
+                let _ = place_body(&mut tf, arc, &spatial, rule, &clear, &filter, radius);
                 tf.rotation = tf.rotation.slerp(face_wall(&to), (12.0 * dt).min(1.0));
 
                 // Move only the REACHING hand toward the new hold. The other
@@ -1063,7 +1444,7 @@ fn drive_climb(
                     // it up the whole way, the hold in hand is still the old
                     // one, and pretending otherwise strands the character on a
                     // grip its hands are nowhere near.
-                    if tf.translation.distance(b) > body.metrics.capsule_radius * 2.0 {
+                    if tf.translation.distance(b) > radius * 2.0 {
                         debug!("🧗 transfer blocked the whole way, staying put");
                         climb.target = None;
                         climb.phase = ClimbPhase::Hanging;
@@ -1081,10 +1462,12 @@ fn drive_climb(
                     climb.holds[other] = to.point + to.tangent * (os * hw);
                     climb.reaching = other;
                     climb.extent = grip::edge_extent(
-                        &spatial, &filter, &to,
+                        &spatial, &filter, rule, &to,
                         &probe_config(body, to.point.y - hang_drop(body) - half),
                         EXTENT_SCAN, EXTENT_STEP,
                     );
+                    // Caught: the further the crossing, the more the arms give.
+                    climb.sag_vel = SAG_BASE + span * 0.25;
                     climb.phase = ClimbPhase::Hanging;
                     climb.t = 0.0;
                 }
@@ -1098,8 +1481,9 @@ fn drive_climb(
                 vel.0 = Vec3::ZERO;
                 climb.t += dt / LOWER_DURATION;
                 let k = climb.t.clamp(0.0, 1.0);
+                update_brace(&mut climb, &spatial, &filter, rule, &g, body, dt);
                 let down = climb.start.lerp(hang_pose(&g, body), ease_in_out(k));
-                if !place_body(&mut tf, down, &spatial, &clear, &filter, body.metrics.capsule_radius) {
+                if !place_body(&mut tf, down, &spatial, rule, &clear, &filter, radius) {
                     // The hang position is occupied — most often the ledge is
                     // low enough that the drop would end inside the floor.
                     debug!("🧗 lower blocked, releasing");
@@ -1143,38 +1527,37 @@ fn drive_climb(
                 let top = g.top + Vec3::Y * (half + 0.02);
                 // A HOP, not a lift.
                 //
-                // The mantle raises the body vertically and only then moves it
-                // forward, which is right for hauling yourself out of a hang
-                // and completely wrong here — it is what reads as floating up
-                // the face of a knee-high block. A stride goes up and forward
-                // together and arcs slightly OVER the landing, so the foot
-                // comes down onto the top rather than rising to meet it.
+                // A pull-up raises the body before it moves it forward, which
+                // is right for hauling yourself out of a hang and completely
+                // wrong here — it is what reads as floating up the face of a
+                // knee-high block. A stride goes up and forward together and
+                // arcs slightly OVER the landing, so the foot comes down onto
+                // the top rather than rising to meet it.
                 let along = climb.start.lerp(top, ease_in_out(k));
                 // Parabola peaking mid-stride and exactly zero at both ends, so
                 // the landing is on the surface and not above it.
                 let arc = VAULT_HOP_RISE * 4.0 * k * (1.0 - k);
                 let hop = Vec3::new(along.x, along.y + arc, along.z);
-                let _ = place_body(
-                    &mut tf, hop, &spatial, &clear, &filter, body.metrics.capsule_radius,
-                );
+                let _ = place_body(&mut tf, hop, &spatial, rule, &clear, &filter, radius);
 
                 // Keep the body moving through the vault instead of parking it.
                 // Velocity is what the locomotion controller reads the instant
                 // this phase ends, and a zero there is a dead stop on the lip.
                 let forward = -g.normal;
-                vel.0 = forward * (body.motion.run_speed * VAULT_EXIT_SPEED_FRAC);
+                // The run the body can actually reach (a human sprint cap),
+                // never a faster stored one.
+                let exit_speed = body.motion.capped_run_and_sprint().0 * VAULT_EXIT_SPEED_FRAC;
+                vel.0 = forward * exit_speed;
 
                 if k >= 1.0 {
-                    let _ = place_body(
-                        &mut tf, top, &spatial, &clear, &filter, body.metrics.capsule_radius,
-                    );
+                    let _ = place_body(&mut tf, top, &spatial, rule, &clear, &filter, radius);
                     climb.phase = ClimbPhase::None;
                     climb.grip = None;
                     climb.t = 0.0;
                     // Hand back to locomotion still walking. Without this the
                     // character lands and stands there until the player lets go
                     // of the key and presses it again.
-                    vel.0 = forward * (body.motion.run_speed * VAULT_EXIT_SPEED_FRAC);
+                    vel.0 = forward * exit_speed;
                 }
             }
 
@@ -1184,51 +1567,69 @@ fn drive_climb(
                     climb.phase = ClimbPhase::None;
                     continue;
                 };
-                // Hold the wall facing for the whole pull-up. Only `Hanging`
-                // maintained it, so a mantle could drift off-axis part-way
-                // through and take the authored arm directions with it.
+                // Hold the wall facing for the whole pull-up, so the authored
+                // arm directions stay pointed at the ledge.
                 tf.rotation = tf.rotation.slerp(face_wall(&g), (10.0 * dt).min(1.0));
-                climb.t += dt / MANTLE_DURATION;
-
-                // Up first, then forward. A straight lerp to the top clips the
-                // character through the ledge corner; going vertical before
-                // horizontal traces the shape of the obstacle.
+                let path = climb.mantle;
+                let step = dt / path.duration.max(0.2);
+                climb.t += if climb.mantle_back { -step } else { step };
                 let k = climb.t.clamp(0.0, 1.0);
-                let up_phase = (k / 0.6).clamp(0.0, 1.0);
-                let fwd_phase = ((k - 0.4) / 0.6).clamp(0.0, 1.0);
 
-                let top = g.top + Vec3::Y * (half + 0.02);
-                // `ease_in_out`, not `ease_out`.
-                //
-                // `ease_out` is heavily front-loaded: 30% through the move the
-                // body was already 75% of the way up, while the hands were
-                // still holding the lip below it. The arms stretched down to a
-                // ledge the torso had already passed, which reads as a dive
-                // rather than a pull-up. A symmetric curve keeps the body and
-                // the hands in the same part of the motion.
-                let lifted = Vec3::new(
-                    climb.start.x,
-                    climb.start.y + (top.y - climb.start.y) * ease_in_out(up_phase),
-                    climb.start.z,
-                );
-                let up = lifted.lerp(
-                    Vec3::new(top.x, lifted.y.max(top.y), top.z),
-                    ease_in_out(fwd_phase),
-                );
-                if !place_body(&mut tf, up, &spatial, &clear, &filter, body.metrics.capsule_radius) {
-                    // A ceiling or an overhang above the lip. Give the ledge
-                    // back rather than pulling the body up through it.
-                    debug!("🧗 mantle blocked, back to hang");
-                    climb.phase = ClimbPhase::Hanging;
-                    climb.t = 0.0;
+                // The palms hold the lip through the pull, then turn over onto
+                // the top as the chest reaches it and press the body up. That
+                // is the order a real pull-up happens in; targeting the top
+                // from the start asks for a point out of reach and locks the
+                // arms straight.
+                climb.press = path.press(k);
+                let hw = body.metrics.shoulder_half_width.max(0.10);
+                for (hand, side) in [(0usize, -1.0_f32), (1, 1.0)] {
+                    let on_lip = g.point + g.tangent * (side * hw);
+                    let on_top = Vec3::new(on_lip.x, g.top.y, on_lip.z)
+                        + g.tangent * (side * hw * 0.15)
+                        - g.normal * PRESS_IN;
+                    let want = on_lip.lerp(on_top, climb.press);
+                    climb.holds[hand] = climb.holds[hand].lerp(want, (14.0 * dt).min(1.0));
+                    climb.hold_normals[hand] = g.normal;
+                }
+
+                // From the knee-up on, the legs are coming over the lip, and
+                // only the chest and head can be in the way.
+                let upper = upper_body_clearance(body);
+                let shape = if k < path.k[1] { &clear } else { &upper };
+                let moved = place_body(&mut tf, path.at(k), &spatial, rule, shape, &filter, radius);
+
+                if climb.mantle_back {
+                    // Back down the way it came, which was clear a moment ago.
+                    if climb.t <= 0.0 {
+                        climb.mantle_back = false;
+                        climb.t = 0.0;
+                        climb.press = 0.0;
+                        if path.from_hang {
+                            climb.seat_hands(&g, hw);
+                            climb.phase = ClimbPhase::Hanging;
+                        } else {
+                            climb.phase = ClimbPhase::None;
+                            climb.grip = None;
+                            climb.regrab_lockout = REGRAB_LOCKOUT;
+                        }
+                    }
+                    continue;
+                }
+                if !moved {
+                    // A ceiling or an overhang above the lip. Lower back into
+                    // the hang along the same path rather than dropping out of
+                    // a pose that is half over the edge.
+                    debug!("🧗 mantle blocked at {k:.2}, lowering back");
+                    climb.mantle_back = true;
                     continue;
                 }
 
                 if k >= 1.0 {
-                    let _ = place_body(&mut tf, top, &spatial, &clear, &filter, body.metrics.capsule_radius);
+                    let _ = place_body(&mut tf, path.stand, &spatial, rule, &clear, &filter, radius);
                     climb.phase = ClimbPhase::None;
                     climb.grip = None;
                     climb.t = 0.0;
+                    climb.press = 0.0;
                 }
             }
         }
@@ -1243,6 +1644,7 @@ fn begin_hang(
     climb: &mut AvatarClimb,
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     vel: &mut LinearVelocity,
     g: Grip,
     body: &AvatarBody,
@@ -1255,11 +1657,24 @@ fn begin_hang(
     climb.extent = grip::edge_extent(
         spatial,
         filter,
+        rule,
         &g,
         &probe_config(body, g.point.y - hang_drop(body) - half),
         EXTENT_SCAN,
         EXTENT_STEP,
     );
+
+    // THE CATCH. The legs arrive the way they will hang, onto the wall or
+    // free; the arms give under whatever speed the body brought; and a free
+    // body carried into the hold swings on under it.
+    climb.brace = if wall_for_feet(spatial, filter, rule, &g, body) { 1.0 } else { 0.0 };
+    let incoming = vel.0;
+    climb.sag = 0.0;
+    climb.sag_vel = SAG_BASE + (-incoming.y).max(0.0) * SAG_FROM_FALL;
+    climb.swing = 0.0;
+    let length = hang_drop(body) + half * 0.3;
+    let into_wall = incoming.with_y(0.0).dot(-g.normal);
+    climb.swing_vel = (into_wall * SWING_FROM_SPEED / length).clamp(-2.0, 2.0) * (1.0 - climb.brace);
     vel.0 = Vec3::ZERO;
 }
 
@@ -1269,10 +1684,24 @@ fn begin_vault(climb: &mut AvatarClimb, tf: &Transform) {
     climb.start = tf.translation;
 }
 
-fn begin_mantle(climb: &mut AvatarClimb, tf: &Transform) {
+#[allow(clippy::too_many_arguments)]
+fn begin_mantle(
+    climb: &mut AvatarClimb,
+    tf: &Transform,
+    g: &Grip,
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
+    body: &AvatarBody,
+    from_hang: bool,
+) {
     climb.phase = ClimbPhase::Mantling;
     climb.t = 0.0;
     climb.start = tf.translation;
+    climb.mantle_back = false;
+    climb.press = 0.0;
+    let stand = stand_point(spatial, filter, rule, g, body, face_wall(g));
+    climb.mantle = MantlePath::new(tf.translation, g, stand, body, from_hang);
 }
 
 fn begin_transfer(climb: &mut AvatarClimb, tf: &Transform, to: Grip) {
@@ -1305,6 +1734,7 @@ fn begin_lower(climb: &mut AvatarClimb, tf: &mut Transform, vel: &mut LinearVelo
 fn has_hang_clearance(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     g: &Grip,
     body: &AvatarBody,
 ) -> bool {
@@ -1324,14 +1754,16 @@ fn has_hang_clearance(
     //
     // A shape test at the destination cannot be fooled that way: it asks
     // whether the body fits where it is going, which is the actual question.
+    let solid = |e: Entity| rule.surface(e).blocks();
     let blocked = spatial
-        .cast_shape(
+        .cast_shape_predicate(
             &clearance_shape(body),
             pose,
             Quat::IDENTITY,
             Dir3::Y,
             &ShapeCastConfig::from_max_distance(0.01),
             filter,
+            &solid,
         )
         .is_some();
     if blocked {
@@ -1344,7 +1776,7 @@ fn has_hang_clearance(
     let under = g.point - Vec3::Y * 0.02 - g.normal * (m.capsule_radius * 0.3);
     under.is_finite()
         && spatial
-            .cast_ray(under, Dir3::NEG_Y, hang_drop(body) * 0.5, true, filter)
+            .cast_ray_predicate(under, Dir3::NEG_Y, hang_drop(body) * 0.5, true, filter, &solid)
             .is_some()
 }
 
@@ -1355,6 +1787,7 @@ fn has_hang_clearance(
 fn probe_next_grip(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     from: &Grip,
     body: &AvatarBody,
     dir: Vec3,
@@ -1380,7 +1813,7 @@ fn probe_next_grip(
     // turns toward you), which is why A/D at a corner did nothing before.
     for sweep in [0.0_f32, -0.78, 0.78, -1.57, 1.57] {
         let cast = Quat::from_rotation_y(sweep) * -from.normal;
-        let Some(found) = grip::probe(spatial, filter, origin, cast, &cfg) else {
+        let Some(found) = grip::probe(spatial, filter, rule, origin, cast, &cfg) else {
             continue;
         };
         // Reject a "new" grip that is really the one already held, or one so
@@ -1409,6 +1842,7 @@ fn probe_next_grip(
 fn probe_corner(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     from: &Grip,
     body: &AvatarBody,
     sign: f32,
@@ -1418,7 +1852,7 @@ fn probe_corner(
     let origin = from.point + t * (m.capsule_radius * 2.2) - from.normal * (m.capsule_radius * 3.0);
     let feet = origin.y - hang_drop(body) - m.capsule_half_extent();
     let cfg = probe_config(body, feet);
-    let found = grip::probe(spatial, filter, origin, -t, &cfg)?;
+    let found = grip::probe(spatial, filter, rule, origin, -t, &cfg)?;
     let moved_on = found.point.distance(from.point);
     // Far enough to be a different hold, near enough to be a reach.
     (moved_on > m.capsule_radius && moved_on <= body.metrics.height_m * MAX_GRAB_DISTANCE_FRAC)
@@ -1433,6 +1867,7 @@ fn probe_corner(
 fn probe_ledge_below(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     feet: Vec3,
     dir: Vec3,
     body: &AvatarBody,
@@ -1444,12 +1879,13 @@ fn probe_ledge_below(
     }
 
     // Is there actually a drop? If the floor continues, this is not an edge.
-    let floor = spatial.cast_ray(
+    let floor = spatial.cast_ray_predicate(
         ahead + Vec3::Y * 0.1,
         Dir3::NEG_Y,
         MIN_LEDGE_HEIGHT + 0.2,
         true,
         filter,
+        &|e| rule.surface(e).blocks(),
     );
     if floor.is_some() {
         return None;
@@ -1458,12 +1894,12 @@ fn probe_ledge_below(
     // Probe back toward the edge from below and beyond it.
     let origin = feet + dir * (m.capsule_radius * 2.6);
     let cfg = probe_config(body, feet.y - hang_drop(body));
-    let g = grip::probe(spatial, filter, origin, -dir, &cfg)?;
+    let g = grip::probe(spatial, filter, rule, origin, -dir, &cfg)?;
 
     // Stepping off is only a lower if there is somewhere to hang. Off a
     // knee-high block there is not, and the old code lowered the body a metre
     // anyway — straight through the floor it had been standing on.
-    has_hang_clearance(spatial, filter, &g, body).then_some(g)
+    has_hang_clearance(spatial, filter, rule, &g, body).then_some(g)
 }
 
 /// How far one hand travels per step of the shimmy, in metres.
@@ -1534,6 +1970,7 @@ const LEAP_STEP: f32 = 0.22;
 pub(crate) fn probe_leap(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     from: &Grip,
     body: &AvatarBody,
     dir: Vec3,
@@ -1559,7 +1996,7 @@ pub(crate) fn probe_leap(
             let cfg = probe_config(body, feet);
             for sweep in [0.0_f32, -0.78, 0.78] {
                 let cast = Quat::from_rotation_y(sweep) * -from.normal;
-                let Some(found) = grip::probe(spatial, filter, origin, cast, &cfg) else {
+                let Some(found) = grip::probe(spatial, filter, rule, origin, cast, &cfg) else {
                     continue;
                 };
                 let gap = found.point.distance(from.point);
@@ -1582,6 +2019,7 @@ pub(crate) fn probe_leap(
 pub(crate) fn probe_below(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     from: &Grip,
     body: &AvatarBody,
 ) -> Option<Grip> {
@@ -1601,12 +2039,12 @@ pub(crate) fn probe_below(
             let origin = at + from.normal * (m.capsule_radius * 1.5);
             let feet = origin.y - hang_drop(body) - m.capsule_half_extent();
             let cfg = probe_config(body, feet);
-            let Some(found) = grip::probe(spatial, filter, origin, -from.normal, &cfg) else {
+            let Some(found) = grip::probe(spatial, filter, rule, origin, -from.normal, &cfg) else {
                 continue;
             };
             // Strictly lower, or this is the hold already in hand.
             if found.point.y < from.point.y - m.capsule_radius
-                && has_hang_clearance(spatial, filter, &found, body)
+                && has_hang_clearance(spatial, filter, rule, &found, body)
             {
                 return Some(found);
             }
@@ -1630,6 +2068,7 @@ pub(crate) fn probe_below(
 fn can_mantle(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    rule: &dyn SurfaceRule,
     g: &Grip,
     body: &AvatarBody,
     rot: Quat,
@@ -1638,7 +2077,7 @@ fn can_mantle(
         return false;
     }
     let stand = g.top + Vec3::Y * (body.metrics.capsule_half_extent() + 0.02);
-    capsule_fits(spatial, &clearance_shape(body), stand, rot, filter)
+    capsule_fits_where(spatial, &clearance_shape(body), stand, rot, filter, &|e| rule.surface(e).blocks())
 }
 
 /// The capsule used for every climb clearance test.
@@ -1664,12 +2103,16 @@ pub(crate) fn place_body(
     tf: &mut Transform,
     target: Vec3,
     spatial: &SpatialQuery,
+    rule: &dyn SurfaceRule,
     collider: &Collider,
     filter: &SpatialQueryFilter,
     radius: f32,
 ) -> bool {
     let rot = tf.rotation;
-    if capsule_fits(spatial, collider, target, rot, filter) {
+    // A trigger volume the body is inside of is not geometry it is inside of.
+    let solid = |e: Entity| rule.surface(e).blocks();
+    let fits = |p: Vec3| capsule_fits_where(spatial, collider, p, rot, filter, &solid);
+    if fits(target) {
         tf.translation = target;
         return true;
     }
@@ -1685,9 +2128,9 @@ pub(crate) fn place_body(
     //
     // Being invalid already means moving cannot make it worse, so take the
     // requested move and then try to climb back out into free space.
-    if !capsule_fits(spatial, collider, from, rot, filter) {
+    if !fits(from) {
         tf.translation = target;
-        if let Some(free) = unwedge(spatial, collider, target, rot, filter, radius) {
+        if let Some(free) = unwedge_where(spatial, collider, target, rot, filter, radius, &solid) {
             tf.translation = free;
         }
         return false;
@@ -1699,7 +2142,7 @@ pub(crate) fn place_body(
     let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
     for _ in 0..6 {
         let mid = 0.5 * (lo + hi);
-        if capsule_fits(spatial, collider, from.lerp(target, mid), rot, filter) {
+        if fits(from.lerp(target, mid)) {
             lo = mid;
         } else {
             hi = mid;
@@ -1711,12 +2154,14 @@ pub(crate) fn place_body(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settle_to(
     tf: &mut Transform,
     pos: Vec3,
     rot: Quat,
     dt: f32,
     spatial: &SpatialQuery,
+    rule: &dyn SurfaceRule,
     collider: &Collider,
     filter: &SpatialQueryFilter,
     radius: f32,
@@ -1725,6 +2170,7 @@ fn settle_to(
         tf,
         tf.translation.lerp(pos, (14.0 * dt).min(1.0)),
         spatial,
+        rule,
         collider,
         filter,
         radius,
@@ -1785,19 +2231,6 @@ mod tests {
         assert!((ease_out(1.0) - 1.0).abs() < 1e-6);
         assert!((ease_in_out(1.0) - 1.0).abs() < 1e-6);
         assert!(ease_in_out(0.0).abs() < 1e-6);
-    }
-
-    /// The vertical move must lead the horizontal one, or the character cuts
-    /// the corner and clips through the ledge.
-    #[test]
-    fn mantle_goes_up_before_it_goes_forward() {
-        let mut k = 0.0_f32;
-        while k <= 1.0 {
-            let up = ease_out((k / 0.6).clamp(0.0, 1.0));
-            let fwd = ease_in_out(((k - 0.4) / 0.6).clamp(0.0, 1.0));
-            assert!(up >= fwd - 1e-6, "at k={k} forward ({fwd}) outran up ({up})");
-            k += 0.02;
-        }
     }
 
     #[test]
@@ -2220,8 +2653,8 @@ mod root_weight_tests {
         let b = body();
         let holds = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(0.2, 2.0, 0.0)];
         // Anchor either hand: symmetric holds give the same answer.
-        let l = hang_pose_from_holds(&holds, 0, Vec3::Z, &b);
-        let r = hang_pose_from_holds(&holds, 1, Vec3::Z, &b);
+        let l = hang_root(&holds, 0, Vec3::Z, &b, 1.0);
+        let r = hang_root(&holds, 1, Vec3::Z, &b, 1.0);
         assert!((l.x + r.x).abs() < 1e-4, "not symmetric: {} vs {}", l.x, r.x);
     }
 
@@ -2233,7 +2666,7 @@ mod root_weight_tests {
         // Right hand has reached far out; left is anchored.
         let holds = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(1.4, 2.4, 0.0)];
         let centre = (holds[0] + holds[1]) * 0.5;
-        let pose = hang_pose_from_holds(&holds, 0, Vec3::Z, &b);
+        let pose = hang_root(&holds, 0, Vec3::Z, &b, 1.0);
         assert!(
             pose.x < centre.x - 0.05,
             "body at x={:.2} did not shift toward the anchored left hand \
@@ -2242,7 +2675,7 @@ mod root_weight_tests {
             centre.x
         );
         // And anchoring the other hand leans the other way.
-        let other = hang_pose_from_holds(&holds, 1, Vec3::Z, &b);
+        let other = hang_root(&holds, 1, Vec3::Z, &b, 1.0);
         assert!(other.x > pose.x, "anchor side does not change the lean");
     }
 
@@ -2258,7 +2691,7 @@ mod root_weight_tests {
         for spread in [0.0_f32, 0.5, 1.5] {
             let holds = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(spread, 2.0 + spread, 0.0)];
             for anchor in 0..2 {
-                let p = hang_pose_from_holds(&holds, anchor, Vec3::Z, &b);
+                let p = hang_root(&holds, anchor, Vec3::Z, &b, 1.0);
                 assert!(
                     p.y < holds[anchor].y,
                     "spread {spread}, anchor {anchor}: body y={:.2} is not below its                      anchor at y={:.2}",
@@ -2276,8 +2709,8 @@ mod root_weight_tests {
         let b = body();
         let seated = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(0.2, 2.0, 0.0)];
         let reached = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(1.6, 2.0, 0.0)];
-        let a = hang_pose_from_holds(&seated, 0, Vec3::Z, &b);
-        let c = hang_pose_from_holds(&reached, 0, Vec3::Z, &b);
+        let a = hang_root(&seated, 0, Vec3::Z, &b, 1.0);
+        let c = hang_root(&reached, 0, Vec3::Z, &b, 1.0);
         let body_moved = (c - a).length();
         let hand_moved = (reached[1] - seated[1]).length();
         assert!(
@@ -2403,5 +2836,282 @@ mod corner_facing_tests {
         c.seat_hands(&g, 0.2);
         assert_eq!(c.hold_normals, [Vec3::X, Vec3::X]);
         assert!((c.facing_normal() - Vec3::X).length() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod mantle_path_tests {
+    use super::*;
+    use crate::avatar::grip::GripKind;
+    use eustress_avatar_schema::{resolve, AvatarDescriptor, NOMINAL_BIND_HEIGHT_M};
+
+    fn body() -> AvatarBody {
+        let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
+        AvatarBody {
+            metrics,
+            motion,
+            control: crate::avatar::AvatarControl::LocalPlayer,
+            metrics_finalised: false,
+        }
+    }
+
+    /// A wall whose face is at z = -1 and whose top is 2 m up.
+    fn lip() -> Grip {
+        Grip {
+            point: Vec3::new(0.0, 2.0, -1.0),
+            normal: Vec3::Z,
+            tangent: Vec3::X,
+            top: Vec3::new(0.0, 2.0, -1.16),
+            standable: true,
+            kind: GripKind::Ledge,
+        }
+    }
+
+    fn stand(b: &AvatarBody, g: &Grip) -> Vec3 {
+        Vec3::new(g.point.x, g.top.y, g.point.z) - g.normal * (b.metrics.capsule_radius * STAND_IN)
+            + Vec3::Y * (b.metrics.capsule_half_extent() + 0.02)
+    }
+
+    fn from_hang(b: &AvatarBody, g: &Grip) -> (Vec3, MantlePath) {
+        let start = hang_pose(g, b);
+        (start, MantlePath::new(start, g, stand(b, g), b, true))
+    }
+
+    fn from_ground(b: &AvatarBody, lip_height: f32) -> (Grip, Vec3, MantlePath) {
+        let g = Grip {
+            point: Vec3::new(0.0, lip_height, -1.0),
+            top: Vec3::new(0.0, lip_height, -1.16),
+            ..lip()
+        };
+        let start = Vec3::new(0.0, b.metrics.capsule_half_extent(), -0.55);
+        (g, start, MantlePath::new(start, &g, stand(b, &g), b, false))
+    }
+
+    #[test]
+    fn a_pull_up_starts_where_the_body_is_and_ends_standing() {
+        let (b, g) = (body(), lip());
+        let (start, path) = from_hang(&b, &g);
+        assert!(path.at(0.0).distance(start) < 1e-4, "jumped at the start: {:?} vs {start:?}", path.at(0.0));
+        assert!(
+            path.at(1.0).distance(stand(&b, &g)) < 1e-4,
+            "ended at {:?}, not standing on the top",
+            path.at(1.0)
+        );
+    }
+
+    /// Up and in, never down and out: a body that dips between two keys, or
+    /// backs off the wall, reads as the pull-up failing and being retried.
+    #[test]
+    fn the_body_only_rises_and_never_backs_off_the_wall() {
+        let (b, g) = (body(), lip());
+        let (_, path) = from_hang(&b, &g);
+        let mut prev = path.at(0.0);
+        for i in 1..=200 {
+            let p = path.at(i as f32 / 200.0);
+            assert!(p.y >= prev.y - 1e-4, "dipped at k={}: {} -> {}", i as f32 / 200.0, prev.y, p.y);
+            let (was, now) = ((prev - g.point).dot(g.normal), (p - g.point).dot(g.normal));
+            assert!(now <= was + 1e-4, "backed off the wall at k={}: {was} -> {now}", i as f32 / 200.0);
+            prev = p;
+        }
+    }
+
+    /// The body goes over the edge only once it is above it. Crossing the face
+    /// any lower would put the pelvis through the corner of the ledge.
+    #[test]
+    fn the_body_is_above_the_lip_before_it_crosses_the_edge() {
+        let b = body();
+        let half = b.metrics.capsule_half_extent();
+        let (g, _, ground) = from_ground(&b, 1.3);
+        for (grip, path) in [(lip(), from_hang(&b, &lip()).1), (g, ground)] {
+            for i in 0..=200 {
+                let k = i as f32 / 200.0;
+                let p = path.at(k);
+                if (p - grip.point).dot(grip.normal) < 0.0 {
+                    assert!(
+                        p.y - grip.point.y > half * 0.3,
+                        "over the edge at k={k} only {:.2} m above the lip",
+                        p.y - grip.point.y
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pull is the hard part and takes the most time; the knee comes
+    /// after it and the stand after that.
+    #[test]
+    fn the_keys_come_in_order_and_the_pull_takes_real_time() {
+        let (b, g) = (body(), lip());
+        let (_, path) = from_hang(&b, &g);
+        let k = path.k;
+        assert!(k[0] == 0.0 && k[3] == 1.0);
+        assert!(k[0] < k[1] && k[1] < k[2] && k[2] < k[3], "keys out of order: {k:?}");
+        assert!(k[1] > 0.25, "the pull is over in {:.0}% of the move", k[1] * 100.0);
+        assert!(
+            (0.9..1.4).contains(&path.duration),
+            "a full haul takes {:.2} s; below about 1 s it reads as a teleport, above 1.4 s as a struggle",
+            path.duration
+        );
+    }
+
+    /// From standing, there is little or nothing to pull: the move gets on
+    /// with it instead of holding still for a third of its time.
+    #[test]
+    fn a_climb_from_the_ground_does_not_wait_on_an_empty_pull() {
+        let b = body();
+        let (_, start, path) = from_ground(&b, 1.3);
+        assert!(path.at(0.0).distance(start) < 1e-4);
+        assert!(path.k[1] < 0.3, "an empty pull holds {:.0}% of the move", path.k[1] * 100.0);
+        assert!(path.duration < 1.2, "a chest-high climb takes {:.2} s", path.duration);
+    }
+
+    /// From the knee-up on, the clearance test uses the chest and head only.
+    /// Along the whole path that shape must stay clear of the very ledge being
+    /// climbed, or every pull-up would report itself blocked and back off.
+    #[test]
+    fn the_upper_body_never_meets_the_ledge_it_climbs() {
+        let b = body();
+        let half = b.metrics.capsule_half_extent();
+        let r = b.metrics.capsule_radius * 0.6;
+        let bottom_centre = half * 0.5 + r;
+        let (g, _, ground) = from_ground(&b, 2.1);
+        let free = {
+            let start = hang_pose(&lip(), &b) - lip().normal * (b.metrics.capsule_radius * 0.63);
+            MantlePath::new(start, &lip(), stand(&b, &lip()), &b, true)
+        };
+        for (grip, path) in [(lip(), from_hang(&b, &lip()).1), (g, ground), (lip(), free)] {
+            for i in 0..=200 {
+                let k = i as f32 / 200.0;
+                if k < path.k[1] {
+                    continue;
+                }
+                let c = path.at(k) + Vec3::Y * bottom_centre;
+                let ahead = (c - grip.point).dot(grip.normal);
+                let above = c.y - grip.point.y;
+                // Distance from the shape's lowest sphere to the ledge block
+                // (everything behind the face and below the top).
+                let gap = match (ahead > 0.0, above > 0.0) {
+                    (true, true) => (ahead * ahead + above * above).sqrt(),
+                    (true, false) => ahead,
+                    (false, true) => above,
+                    (false, false) => 0.0,
+                };
+                assert!(gap > r, "the chest meets the ledge at k={k:.2}: gap {gap:.3} m");
+            }
+        }
+    }
+
+    #[test]
+    fn the_palms_hold_the_lip_through_the_pull_then_press_on_the_top() {
+        let (b, g) = (body(), lip());
+        let (_, path) = from_hang(&b, &g);
+        assert_eq!(path.press(0.0), 0.0);
+        assert_eq!(path.press(path.k[1] - 0.1), 0.0, "let go of the lip before the chest reached it");
+        assert!((path.press(path.k[2]) - 1.0).abs() < 1e-4, "not pressing on the top at the knee-up");
+    }
+
+    #[test]
+    fn monotone_cubic_hits_its_keys_and_never_overshoots() {
+        let xs = [0.0, 0.3, 0.6, 1.0];
+        let ys = [0.0, 0.8, 0.85, 2.0];
+        for (x, y) in xs.iter().zip(ys) {
+            assert!((monotone_cubic(&xs, &ys, *x) - y).abs() < 1e-5);
+        }
+        let mut prev = -1.0;
+        for i in 0..=1000 {
+            let v = monotone_cubic(&xs, &ys, i as f32 / 1000.0);
+            assert!(v >= prev - 1e-6, "not monotone at {}", i as f32 / 1000.0);
+            assert!((0.0..=2.0).contains(&v), "overshot to {v}");
+            prev = v;
+        }
+        // Flat data stays flat, with no ringing either side of a step.
+        let flat = [1.0, 1.0, 1.0, 1.0];
+        assert!((monotone_cubic(&xs, &flat, 0.45) - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod catch_tests {
+    use super::*;
+    use eustress_avatar_schema::{resolve, AvatarDescriptor, NOMINAL_BIND_HEIGHT_M};
+
+    fn body() -> AvatarBody {
+        let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
+        AvatarBody {
+            metrics,
+            motion,
+            control: crate::avatar::AvatarControl::LocalPlayer,
+            metrics_finalised: false,
+        }
+    }
+
+    const G: f32 = 9.81;
+    const DT: f32 = 1.0 / 60.0;
+
+    /// The arms give under a catch and pull the body back up.
+    #[test]
+    fn a_catch_gives_and_comes_back() {
+        let b = body();
+        let mut c = AvatarClimb { brace: 1.0, ..default() };
+        c.sag_vel = SAG_BASE + 5.0 * SAG_FROM_FALL;
+        let mut deepest: f32 = 0.0;
+        for _ in 0..90 {
+            step_hang_springs(&mut c, &b, G, DT);
+            deepest = deepest.max(c.sag);
+        }
+        assert!(deepest > 0.02, "a 5 m/s catch gave only {deepest:.3} m");
+        assert!(deepest <= MAX_SAG + 1e-6, "the arms gave {deepest:.3} m, past their reach");
+        assert!(c.sag.abs() < 0.005, "still sagging {:.3} m after 1.5 s", c.sag);
+    }
+
+    /// Hanging free, the body swings on under its hands for a while and
+    /// settles. With its feet on a wall it stops almost at once.
+    #[test]
+    fn a_free_swing_settles_and_a_braced_one_stops_at_once() {
+        let b = body();
+        let mut free = AvatarClimb { brace: 0.0, ..default() };
+        free.swing_vel = 1.0;
+        let mut braced = AvatarClimb { brace: 1.0, ..default() };
+        braced.swing_vel = 1.0;
+        for _ in 0..36 {
+            step_hang_springs(&mut free, &b, G, DT);
+            step_hang_springs(&mut braced, &b, G, DT);
+        }
+        assert!(braced.swing.abs() < 0.03 && braced.swing_vel.abs() < 0.1, "a braced body is still swinging");
+        let moving = free.swing.abs() > 0.02 || free.swing_vel.abs() > 0.05;
+        assert!(moving, "a free body stopped swinging as fast as a braced one");
+        for _ in 0..600 {
+            step_hang_springs(&mut free, &b, G, DT);
+        }
+        assert!(free.swing.abs() < 0.02, "still swinging {:.3} rad after 10 s", free.swing);
+    }
+
+    /// Positive swing carries the feet, and the body, toward the wall.
+    #[test]
+    fn a_positive_swing_carries_the_body_toward_the_wall() {
+        let b = body();
+        let mut c = AvatarClimb { brace: 0.0, ..default() };
+        c.holds = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(0.2, 2.0, 0.0)];
+        let rest = hang_body_position(&c, 0, Vec3::Z, &b);
+        c.swing = 0.3;
+        let swung = hang_body_position(&c, 0, Vec3::Z, &b);
+        assert!(swung.z < rest.z - 0.1, "swing moved the body from {rest:?} to {swung:?}");
+        assert!(swung.y > rest.y, "a pendulum rises as it swings");
+    }
+
+    /// With wall under the feet the body stands off it by its own width; with
+    /// none, it hangs under its hands.
+    #[test]
+    fn a_free_hang_hangs_closer_under_the_hands() {
+        let b = body();
+        let holds = [Vec3::new(-0.2, 2.0, 0.0), Vec3::new(0.2, 2.0, 0.0)];
+        let braced = hang_root(&holds, 0, Vec3::Z, &b, 1.0);
+        let free = hang_root(&holds, 0, Vec3::Z, &b, 0.0);
+        assert!(free.z < braced.z - 0.1, "free {free:?} vs braced {braced:?}");
+        assert!(free.z > 0.0, "a free hang still hangs in front of the hands, not inside the lip");
+        assert!(
+            braced.z >= b.metrics.capsule_radius * HANG_STANDOFF - 1e-4,
+            "a braced body must clear the wall by its radius"
+        );
     }
 }

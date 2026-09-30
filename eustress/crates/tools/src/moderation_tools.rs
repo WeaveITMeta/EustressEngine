@@ -20,14 +20,10 @@ use crate::modes::WorkshopMode;
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use serde_json::{json, Value};
 
-const DEFAULT_API: &str = "https://api.eustress.dev";
-
+/// The API in use: `EUSTRESS_API_URL` when it is an accepted base, else
+/// production (`eustress_common::api_base`).
 fn api_base() -> String {
-    std::env::var("EUSTRESS_API_URL")
-        .ok()
-        .map(|s| s.trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_API.to_string())
+    eustress_common::api_base::api_base().to_string()
 }
 
 fn token() -> Result<String, String> {

@@ -1,6 +1,6 @@
 //! Electric propulsion — ion and Hall thrusters.
 
-const G0: f32 = 9.80665;
+const G0: f32 = crate::units::STANDARD_GRAVITY_F32;
 // Used by the unit tests below; kept as a named physical constant per the
 // propulsion spec even though no public function consumes it directly.
 #[allow(dead_code)]

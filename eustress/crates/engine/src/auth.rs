@@ -8,9 +8,9 @@
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
 
-/// Backend API URL (placeholder - backend not yet deployed)
-/// In development, use offline mode or mock authentication
-const API_URL: &str = "https://api.eustress.dev";
+// The API logins go to: production, or `EUSTRESS_API_URL` when it names an
+// accepted test API (`eustress_common::api_base`).
+use eustress_common::api_base::api_base;
 
 /// Development mode flag - when true, allows mock login
 const DEV_MODE: bool = true;
@@ -330,7 +330,7 @@ fn try_real_login(email: &str, password: &str, remember: bool) -> AuthResult {
         "password": password,
     });
     
-    let response = client.post(&format!("{}/api/auth/login", API_URL))
+    let response = client.post(&format!("{}/api/auth/login", api_base()))
         .set("Content-Type", "application/json")
         .send_json(&body);
     
@@ -465,7 +465,7 @@ fn do_steam_login() -> AuthResult {
     };
     
     // Open browser to Steam login
-    let login_url = format!("{}/api/auth/steam?studio_port={}", API_URL, port);
+    let login_url = format!("{}/api/auth/steam?studio_port={}", api_base(), port);
     if let Err(e) = open::that(&login_url) {
         return AuthResult::Error(format!("Failed to open browser: {}", e));
     }
@@ -540,7 +540,7 @@ fn validate_and_fetch_user(token: &str) -> AuthResult {
         .timeout(std::time::Duration::from_secs(10))
         .build();
     
-    let response = client.get(&format!("{}/api/auth/me", API_URL))
+    let response = client.get(&format!("{}/api/auth/me", api_base()))
         .set("Authorization", &format!("Bearer {}", token))
         .call();
     
@@ -583,9 +583,15 @@ fn validate_and_fetch_user(token: &str) -> AuthResult {
     }
 }
 
-/// Get path to saved token file
+/// Where the saved login lives: one file per API, so a login is only ever
+/// sent back to the API that issued it. A Studio pointed at a test API
+/// (`EUSTRESS_API_URL`) never loads production's saved login.
 fn get_token_path() -> Option<std::path::PathBuf> {
-    dirs::data_local_dir().map(|p| p.join("EustressEngine").join("auth_token"))
+    let dir = dirs::data_local_dir()?.join("EustressEngine");
+    Some(match eustress_common::api_base::credential_scope() {
+        None => dir.join("auth_token"),
+        Some(scope) => dir.join(format!("auth_token.{scope}")),
+    })
 }
 
 /// Save token to disk
@@ -725,7 +731,7 @@ fn start_bliss_node(mut handle: ResMut<BlissNodeHandle>, bliss_state: Res<BlissN
     let port = 7777u16;
 
     println!("🟣 Starting Bliss {} on port {}...", mode, port);
-    println!("🟣 Registration: https://api.eustress.dev (Cloudflare)");
+    println!("🟣 Registration: {} (Cloudflare)", api_base());
     println!("🟣 This node: co-signing + identity verification");
 
     // Spawn the async node startup on a background thread

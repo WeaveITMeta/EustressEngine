@@ -1,0 +1,232 @@
+// ============================================================================
+// Eustress Studio: Listing status
+//
+// Where a published Universe stands in the gallery's review, from
+// <universe>/.eustress/review.toml, a file of its own because publishing
+// rewrites publish.toml (moderation_dossier.rs fetches and stores it, and sets
+// main.slint's `listing-*` properties). Every string arrives author-safe and
+// is shown verbatim.
+//
+// ListingStatusRow is used twice: in full in the Publish dialog, and compact
+// at the top of History's Restore points view (the chip and the headline;
+// a click opens the review on eustress.dev).
+// ============================================================================
+
+import { TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { KitButton, KitNotice } from "dialog_kit.slint";
+
+// One reason a Universe is not listed, or what to change.
+export struct ListingReason {
+    category: string,
+    title: string,
+    why: string,
+    what-to-change: string,
+}
+
+// The status as a chip. Listed is green; not listed and changes requested
+// are amber (red is for errors and deleting); the rest are neutral.
+component ListingChip inherits Rectangle {
+    in property <string> status;
+    in property <string> rating;
+
+    property <color> tone: root.status == "listed" ? Theme.text-success
+        : root.status == "not_listed" || root.status == "changes_requested" ? Theme.text-warning
+        : Theme.text-secondary;
+
+    width: chip-row.preferred-width;
+    height: 20px;
+    border-radius: 10px;
+    background: root.tone.with-alpha(0.14);
+    border-width: 1px;
+    border-color: root.tone.with-alpha(0.35);
+
+    chip-row := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 6px;
+        Text {
+            text: root.status == "in_review" ? "In review"
+                : root.status == "listed" ? "Listed"
+                : root.status == "approved_private" ? "Approved, private"
+                : root.status == "not_listed" ? "Not listed"
+                : root.status == "changes_requested" ? "Changes requested"
+                : root.status == "appeal_in_review" ? "Appeal in review"
+                : "Not published yet";
+            color: root.tone;
+            font-size: 10px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        if root.rating != "": Text {
+            text: "·  " + root.rating;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ListingStatusRow inherits VerticalLayout {
+    in property <string> status;
+    in property <string> headline;
+    in property <string> rating;
+    in property <string> updated;
+    in property <[ListingReason]> reasons;
+    in property <string> suggested-edit;
+    in property <bool> can-appeal;
+    in property <bool> appeal-busy;
+    in property <string> appeal-error;
+    // Compact: the chip and the headline only (History).
+    in property <bool> compact: false;
+
+    // 10 to 2000 characters; the Rust side POSTs it.
+    callback appeal(string);
+    callback open-review();
+
+    property <bool> appealing: false;
+    property <string> appeal-text: "";
+    property <int> appeal-length: root.appeal-text.character-count;
+    property <bool> appeal-ok: root.appeal-length >= 10 && root.appeal-length <= 2000;
+    property <bool> show-reasons: !root.compact
+        && (root.status == "not_listed" || root.status == "changes_requested");
+
+    // A successful appeal changes the status; the box closes with it.
+    changed status => {
+        if root.status == "appeal_in_review" {
+            root.appealing = false;
+            root.appeal-text = "";
+        }
+    }
+
+    spacing: 8px;
+
+    // Chip, headline, when.
+    HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            ListingChip { status: root.status; rating: root.rating; }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.headline != "" ? root.headline
+                : root.status == "" ? "Publish this Universe to send it for review." : "";
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.updated != "" && !root.compact: Text {
+            text: root.updated;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+        // Compact: the whole review is one click away.
+        if root.compact && root.status != "": KitButton {
+            height: 20px;
+            text: "Open";
+            kind: "ghost";
+            clicked => { root.open-review(); }
+        }
+    }
+
+    // Why, and what to change.
+    if root.show-reasons: VerticalLayout {
+        spacing: 8px;
+        for reason in root.reasons: Rectangle {
+            border-radius: Theme.radius-sm;
+            background: Theme.background-tertiary.with-alpha(0.5);
+            border-width: 1px;
+            border-color: Theme.border-color;
+            height: reason-layout.preferred-height;
+            reason-layout := VerticalLayout {
+                padding: 8px;
+                spacing: 3px;
+                Text {
+                    text: reason.title;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                if reason.why != "": Text {
+                    text: reason.why;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                if reason.what-to-change != "": Text {
+                    text: "What to change: " + reason.what-to-change;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        if root.suggested-edit != "": KitNotice {
+            kind: "info";
+            text: "Suggested edit: " + root.suggested-edit;
+        }
+    }
+
+    // Appeal, and the full review.
+    if !root.compact && root.status != "": HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        if root.can-appeal && !root.appealing: KitButton {
+            height: 24px;
+            text: "Appeal";
+            clicked => { root.appealing = true; }
+        }
+        KitButton {
+            height: 24px;
+            text: "Open on eustress.dev";
+            kind: "ghost";
+            has-icon: true;
+            icon: @image-url("../../assets/icons/ui/globe.svg");
+            clicked => { root.open-review(); }
+        }
+    }
+
+    if !root.compact && root.appealing && root.can-appeal: VerticalLayout {
+        spacing: 6px;
+        TextEdit {
+            text <=> root.appeal-text;
+            height: 72px;
+            font-size: 11px;
+            wrap: word-wrap;
+            placeholder-text: "Tell the reviewers why this should be listed (10 to 2000 characters)";
+            enabled: !root.appeal-busy;
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.appeal-length + " / 2000";
+                color: root.appeal-length > 2000 ? Theme.text-error : Theme.text-disabled;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+            KitButton {
+                height: 24px;
+                text: "Cancel";
+                kind: "ghost";
+                enabled: !root.appeal-busy;
+                clicked => { root.appealing = false; }
+            }
+            KitButton {
+                height: 24px;
+                text: root.appeal-busy ? "Sending..." : "Send appeal";
+                kind: "primary";
+                enabled: root.appeal-ok && !root.appeal-busy;
+                clicked => { root.appeal(root.appeal-text); }
+            }
+        }
+        if root.appeal-error != "": KitNotice {
+            kind: "error";
+            text: root.appeal-error;
+        }
+    }
+}

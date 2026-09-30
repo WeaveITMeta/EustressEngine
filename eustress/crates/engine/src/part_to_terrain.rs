@@ -202,6 +202,7 @@ fn handle_part_to_terrain(
                     root: root.to_bits(),
                     tiles: edit.tiles,
                     bricks: edit.bricks,
+                    water: edit.water,
                 },
             );
         }

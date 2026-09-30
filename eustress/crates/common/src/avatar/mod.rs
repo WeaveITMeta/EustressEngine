@@ -47,7 +47,8 @@ pub mod abilities;
 /// A Space's own player characters, per body option.
 pub mod space_character;
 
-/// The motion graph — retargeted clips blended by real locomotion.
+/// The motion graph: retargeted clips blended by real locomotion, for every
+/// avatar no Animator binds.
 #[cfg(all(feature = "physics", feature = "model-import"))]
 pub mod anim;
 #[cfg(feature = "physics")]
@@ -55,6 +56,13 @@ pub mod control;
 /// Ledge detection and mantling.
 #[cfg(feature = "physics")]
 pub mod climb;
+/// Riding a seat: the body follows its seat while `AvatarSeated` is on it.
+#[cfg(feature = "physics")]
+pub mod seat;
+/// What a climber may take hold of: the world, never another character or
+/// anything that moves, unless a `Climbable` attribute says otherwise.
+#[cfg(feature = "physics")]
+pub mod climbable;
 /// Grip detection — the "what can I grab in direction d" primitive the whole
 /// traversal set is built on. Avian-dependent, so gated with its siblings.
 #[cfg(feature = "physics")]
@@ -266,6 +274,9 @@ pub enum AvatarSystems {
     Animation,
     /// Procedural bone writes. Strictly after Bevy's animation sampling.
     PostAnim,
+    /// A seated avatar onto its seat, in `PostUpdate`: after every mover of
+    /// the seat, before animation, the camera follow and propagation.
+    Ride,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -331,10 +342,15 @@ impl Plugin for AvatarRuntimePlugin {
         // animation sampling and transform propagation.
         // `AnimationSystems` is re-exported from `bevy_app`, not
         // `bevy_animation` (bevy_animation itself imports it from there).
+        // Inside the Animator's window too: after its root-motion pin, which
+        // the life layer's hips writes build on, and before scripts' joint
+        // overrides and the Motor6D pass.
         app.configure_sets(
             PostUpdate,
             AvatarSystems::PostAnim
                 .after(bevy::app::AnimationSystems)
+                .after(crate::animation::AnimatorSet::RootMotion)
+                .before(crate::animation::AnimatorSet::Overrides)
                 .before(TransformSystems::Propagate),
         );
 
@@ -368,6 +384,7 @@ impl Plugin for AvatarRuntimePlugin {
             app.add_plugins((
                 procedural::AvatarLifePlugin,
                 climb::AvatarClimbPlugin,
+                seat::AvatarSeatPlugin,
                 landing::AvatarLandingPlugin,
                 ik::AvatarIkPlugin,
             ));

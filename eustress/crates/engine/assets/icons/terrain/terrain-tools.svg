@@ -1,0 +1,10 @@
+<!-- Terrain tools badge: a mountain range outline with a small brush.
+     Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Mountain range -->
+  <path d="M2 20L7.5 9.5L11 14.5L13.5 12L21 20Z"/>
+  <!-- Brush handle -->
+  <path d="M21 3L18.5 5.5"/>
+  <!-- Brush head -->
+  <path d="M17.5 4.4L19.6 6.5C19 8 16.8 8.8 14.6 9.4C15.2 7.2 16 5 17.5 4.4Z"/>
+</svg>

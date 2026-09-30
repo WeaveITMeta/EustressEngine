@@ -70,7 +70,7 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul and Rune scripts (.soul, .rune files)" },
     ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio - Sound effects and music" },
-    ServiceFolder { name: "PhysicsService",          class: "PhysicsService",         icon: "physicsservice",     description: "Gravity, solver settings, and which physics domains step" },
+    ServiceFolder { name: "PhysicsService",          class: "PhysicsService",         icon: "physicsservice",     description: "Solver settings and which physics domains step" },
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
     ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform - datasets, series, columns, and runs" },
     ServiceFolder { name: "Website",                 class: "Website",                 icon: "website",            description: "Values a website reads - References baked into a published manifest" },
@@ -251,7 +251,10 @@ pub fn scaffold_new_space(
         .join("assets")
         .join("lighting_templates");
 
-    let lighting_children = ["Atmosphere", "Moon", "Sky", "Sun"];
+    // Clouds is a visible, editable fair-weather layer: with no Clouds object
+    // a Space has no clouds (Roblox's rule), so a new Space gets one. The
+    // repair below leaves it out, so a deleted Clouds stays deleted.
+    let lighting_children = ["Atmosphere", "Clouds", "Moon", "Sky", "Sun"];
     for child_name in &lighting_children {
         let template_path = lighting_template_dir.join(format!("{}.instance.toml", child_name));
         let target_path = space_root.join("Lighting").join(format!("{}.instance.toml", child_name));
@@ -281,9 +284,8 @@ pub fn scaffold_new_space(
 /// Copy engine default part GLBs (block, ball, wedge, etc.) into a target directory.
 /// Skips files that already exist so user modifications are preserved.
 pub fn copy_engine_default_parts(target_parts_dir: &Path) {
-    let engine_parts_dir = crate::resource_root()
-        .join("assets")
-        .join("parts");
+    // The primitive part meshes ship in common's assets, which both apps ship.
+    let engine_parts_dir = eustress_common::assets_dir().join("parts");
 
     if !engine_parts_dir.exists() {
         warn!("Engine parts directory not found at {:?}", engine_parts_dir);
@@ -352,12 +354,12 @@ pub fn pick_new_space_root(initial_dir: &Path) -> Option<PathBuf> {
 /// that has an `InstanceFile` component back to its `.part.toml` on disk.
 /// Entities without `InstanceFile` (runtime-spawned, default scene) are written
 /// to `Workspace/<name>.part.toml` as new files.
-pub fn save_space(world: &mut World) {
+pub fn save_space(world: &mut World) -> SaveReport {
     let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
         Some(sr) => sr.0.clone(),
         None => {
-            warn!("Cannot save — no SpaceRoot resource set");
-            return;
+            warn!("Cannot save: no SpaceRoot resource set");
+            return SaveReport::default();
         }
     };
 
@@ -366,252 +368,52 @@ pub fn save_space(world: &mut World) {
     let workspace_dir = space_root.join("Workspace");
     let _ = std::fs::create_dir_all(&workspace_dir);
 
-    let mut saved = 0usize;
-    let mut errors = 0usize;
-    let mut to_save: Vec<(String, PathBuf, InstanceDefinition)> = Vec::new();
+    // Every part and tag edit not yet on disk: the edit writer's queue, in
+    // order, then whatever is still marked changed (`persist_pending_edits`).
+    let pending = persist_pending_edits(world);
+    let mut saved = pending.written;
+    let unchanged = pending.unchanged;
+    let mut errors = pending.errors;
+    let mut paths = pending.paths;
 
-    {
-        // Use the LOCAL Transform, not GlobalTransform.
-        //
-        // Every `_instance.toml` stores `[transform] position/rotation/scale`
-        // as values LOCAL to the entity's parent. The loader applies
-        // these as the entity's local Transform and lets Bevy compose
-        // them with the parent's GlobalTransform. Writing the *global*
-        // transform during save made every nested save → reload drift
-        // the part by the parent's transform (or compose the parent's
-        // rotation a second time) — which is why the user's "neat
-        // door" scene came back as a mess after a session close/open.
-        // For top-level parts with identity-parent Workspace this was
-        // a no-op; any grouped/folder-nested or duplicated-while-
-        // parented part accumulated the drift.
-        let mut query = world.query::<(
-            Entity,
-            &eustress_common::classes::Instance,
-            &eustress_common::classes::BasePart,
-            &Transform,
-            Option<&crate::space::instance_loader::InstanceFile>,
-            Option<&eustress_common::classes::Part>,
-        )>();
-
-        let now = Utc::now().to_rfc3339();
-
-        for (_entity, instance, base_part, local_tf, instance_file, part) in query.iter(world) {
-            use eustress_common::classes::ClassName;
-            match instance.class_name {
-                ClassName::Sky | ClassName::Atmosphere | ClassName::Camera
-                | ClassName::Star | ClassName::Moon | ClassName::Clouds => continue,
-                _ => {}
-            }
-
-            let toml_path = if let Some(inst_file) = instance_file {
-                inst_file.toml_path.clone()
-            } else {
-                // New entity without InstanceFile — create folder structure
-                let safe_name = sanitize_filename(&instance.name);
-                let part_dir = workspace_dir.join(&safe_name);
-                let _ = std::fs::create_dir_all(&part_dir);
-                part_dir.join("_instance.toml")
-            };
-
-            let t = *local_tf;
-            let authoritative_size = base_part.size;
-
-            // Preserve the display-name override when the folder name
-            // and instance name don't match — e.g. a second sibling
-            // "Block" lives in `Block-a3f2/` with `name = "Block"` in
-            // the TOML so the Explorer still renders it as "Block".
-            let folder_stem = toml_path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string());
-            let name_override = match &folder_stem {
-                Some(stem) if *stem != instance.name => Some(instance.name.clone()),
-                _ => None,
-            };
-
-            // Component-authoritative fields (the only ones the ECS owns).
-            // TOML scale = BasePart.size (correct in both scale-tool
-            // branches; Transform.scale alone pinned legacy parts at 1×1×1).
-            let live_transform = TransformData {
-                position: [t.translation.x, t.translation.y, t.translation.z],
-                rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
-                scale: [authoritative_size.x, authoritative_size.y, authoritative_size.z],
-            };
-            let live_color = {
-                let c = base_part.color.to_srgba();
-                [c.red, c.green, c.blue, c.alpha]
-            };
-            // Prefer the live material NAME (preserves custom MaterialService
-            // names + Material-Flip edits); fall back to the enum.
-            let live_material = if base_part.material_name.is_empty() {
-                format!("{:?}", base_part.material)
-            } else {
-                base_part.material_name.clone()
-            };
-
-            // ── LOAD-MERGE (2026-05-22) ─────────────────────────────────
-            // Start from the EXISTING on-disk definition and overwrite only
-            // the component-authoritative fields. Rebuilding the whole
-            // `InstanceDefinition` from components alone (what this path did
-            // before) silently dropped every field the ECS does not carry:
-            //   * the custom `asset.mesh` — it was re-derived from the
-            //     primitive `Part.shape`, so a custom-mesh part (V-Cell)
-            //     came back as `parts/block.glb` and rendered as a block;
-            //   * the realism `[material]` / `[thermodynamic]` /
-            //     `[electrochemical]` sections (V-Cell's Titanium material);
-            //   * the metadata audit chain, `attributes`, `tags`, `ui`,
-            //     `[extra]`.
-            // That was the V-Cell "renders as blocks, lost its material"
-            // data loss. Read DISK directly (`load_instance_definition_with_extras`,
-            // NOT the active_db funnel) so the merge base is the on-disk
-            // TOML, never a stale binary `#bin` cache; the write below then
-            // refreshes that cache from the corrected merge.
-            let existing = if instance_file.is_some() {
-                crate::space::instance_loader::load_instance_definition_with_extras(&toml_path)
-                    .map(|(d, _)| d)
-                    .ok()
-            } else {
-                None
-            };
-
-            let def = if let Some(mut d) = existing {
-                // SCALE GUARD (2026-05-24): for a CUSTOM-mesh part (mesh not
-                // under "parts/", e.g. "../meshes/Foo.glb") the TOML `scale`
-                // is the user's MULTIPLIER, while `BasePart.size` is the
-                // mesh-AABB-derived world size. Writing size→scale here
-                // double-applies it on reload and stretches the mesh (the
-                // V-Supreme "Save broke the suit" bug). So for custom meshes
-                // keep the on-disk scale and only refresh position+rotation;
-                // primitives (block.glb etc., size == scale) take the full
-                // live_transform. Mirrors the guard in
-                // `write_instance_changes_system` (instance_loader.rs).
-                let is_custom_mesh = d.asset.as_ref()
-                    .map(|a| crate::space::representation::mesh_requires_filesystem(&a.mesh))
-                    .unwrap_or(false);
-                if is_custom_mesh {
-                    d.transform.position = live_transform.position;
-                    d.transform.rotation = live_transform.rotation;
-                    // d.transform.scale preserved from disk (user multiplier)
-                } else {
-                    d.transform = live_transform;
-                }
-                d.properties.color = live_color;
-                d.properties.transparency = base_part.transparency;
-                d.properties.anchored = base_part.anchored;
-                d.properties.can_collide = base_part.can_collide;
-                d.properties.cast_shadow = base_part.cast_shadow;
-                d.properties.reflectance = base_part.reflectance;
-                d.properties.locked = base_part.locked;
-                d.properties.material = live_material;
-                d.metadata.name = name_override;
-                d.metadata.last_modified = now.clone();
-                d
-            } else {
-                // New entity (no on-disk TOML) or unreadable file — build
-                // from components. New parts spawned here are primitives, so
-                // deriving the mesh from `Part.shape` is correct for them.
-                let mesh = part
-                    .map(|p| match p.shape {
-                        eustress_common::classes::PartType::Block => "parts/block.glb",
-                        eustress_common::classes::PartType::Ball => "parts/ball.glb",
-                        eustress_common::classes::PartType::Cylinder => "parts/cylinder.glb",
-                        eustress_common::classes::PartType::Wedge => "parts/wedge.glb",
-                        eustress_common::classes::PartType::CornerWedge => "parts/corner_wedge.glb",
-                        eustress_common::classes::PartType::Cone => "parts/cone.glb",
-                    })
-                    .unwrap_or("parts/block.glb")
-                    .to_string();
-                let class_name = format!("{:?}", instance.class_name)
-                    .trim_start_matches("ClassName::")
-                    .to_string();
-                InstanceDefinition {
-                    nuclear: None,
-                    plasma: None,
-                    asset: Some(AssetReference {
-                        mesh,
-                        scene: "Scene0".to_string(),
-                    }),
-                    transform: live_transform,
-                    properties: InstanceProperties {
-                        color: live_color,
-                        material: live_material,
-                        transparency: base_part.transparency,
-                        anchored: base_part.anchored,
-                        can_collide: base_part.can_collide,
-                        cast_shadow: base_part.cast_shadow,
-                        reflectance: base_part.reflectance,
-                        locked: base_part.locked,
-                        physics: None,
-                        respect_gltf_materials: false,
-                        // Persist the destructible opt-in so a part authored as
-                        // destructible stays destructible across a save/load.
-                        destructible: base_part.destructible,
-                    },
-                    metadata: InstanceMetadata {
-                        class_name,
-                        archivable: instance.archivable,
-                        name: name_override,
-                        created: String::new(),
-                        last_modified: now.clone(),
-                        ..Default::default()
-                    },
-                    material: None,
-                    thermodynamic: None,
-                    electrochemical: None,
-                    ui: None,
-                    attributes: None,
-                    tags: None,
-                    parameters: None,
-                    extra: std::collections::HashMap::new(),
-                }
-            };
-
-            to_save.push((instance.name.clone(), toml_path, def));
-        }
-    }
-
-    // Stamp every save with the current user's identity when logged in. The
-    // stamp is cheap (~100 bytes) and kept forever — the full chain feeds
-    // Bliss attribution and AI "who is capable of what" training data.
+    // Services changed since the last save. Without the tracker every one.
+    let dirty_services: Option<std::collections::HashSet<Entity>> = world
+        .get_resource_mut::<SaveDirty>()
+        .map(|mut d| std::mem::take(&mut d.services));
     let stamp = world.get_resource::<crate::auth::AuthState>()
         .and_then(crate::space::instance_loader::current_stamp);
 
-    for (name, path, def) in to_save.iter_mut() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match crate::space::instance_loader::write_instance_definition_signed(
-            path, def, stamp.as_ref(),
-        ) {
-            Ok(()) => {
-                saved += 1;
-                debug!("💾 Saved '{}' → {:?}", name, path);
-            }
-            Err(e) => {
-                errors += 1;
-                error!("❌ Failed to save '{}': {}", name, e);
-            }
-        }
-    }
-
     {
-        let mut svc_query = world.query::<&ServiceComponent>();
-        let services: Vec<ServiceComponent> = svc_query.iter(world).cloned().collect();
-        for svc in &services {
+        // Services too: only those changed since the last save.
+        let mut svc_query = world.query::<(Entity, &ServiceComponent)>();
+        let services: Vec<(Entity, ServiceComponent)> = svc_query
+            .iter(world)
+            .filter(|(e, _)| dirty_services.as_ref().is_none_or(|d| d.contains(e)))
+            .map(|(e, svc)| (e, svc.clone()))
+            .collect();
+        let mut retry_services: Vec<Entity> = Vec::new();
+        for (entity, svc) in &services {
             if svc.toml_path != PathBuf::new() {
                 if let Err(e) = crate::space::service_loader::save_service_to_file_signed(svc, stamp.as_ref()) {
                     error!("❌ Failed to save service {}: {}", svc.class_name, e);
                     errors += 1;
+                    retry_services.push(*entity);
                 } else {
                     saved += 1;
+                    paths.push(svc.toml_path.clone());
                 }
+            }
+        }
+        if !retry_services.is_empty() {
+            if let Some(mut d) = world.get_resource_mut::<SaveDirty>() {
+                d.services.extend(retry_services);
             }
         }
     }
 
     if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
         if errors == 0 {
-            notifs.success(format!("Space saved — {} files written", saved));
+            notifs.success(format!("Space saved: {} files written", saved));
         } else {
             notifs.warning(format!(
                 "Space saved with {} errors ({} files written)",
@@ -620,7 +422,925 @@ pub fn save_space(world: &mut World) {
         }
     }
 
-    info!("💾 Space save complete: {} saved, {} errors", saved, errors);
+    info!(
+        "💾 Space save complete: {} written, {} already up to date, {} errors",
+        saved, unchanged, errors
+    );
+    SaveReport { written: saved, unchanged, errors, paths }
+}
+
+/// What a `save_space` did: files written (parts, tags and attributes, and
+/// services), parts whose file already matched, failures (left due for the
+/// next save), and the paths written. A database checkpoint pushes those
+/// paths into its tree before dumping, ahead of the watcher.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SaveReport {
+    pub written: usize,
+    pub unchanged: usize,
+    pub errors: usize,
+    pub paths: Vec<PathBuf>,
+}
+
+/// Parts changed since the last save: the ones `save_space` reads and
+/// writes. Filled every frame by `track_save_dirty`, emptied by each save.
+/// A part edited in the same frame as a save joins the set after it, so it
+/// goes out with the next save.
+#[derive(Resource, Default)]
+pub struct SaveDirty {
+    entities: std::collections::HashSet<Entity>,
+    services: std::collections::HashSet<Entity>,
+    /// File-backed entities whose tags or attributes changed.
+    attrs: std::collections::HashSet<Entity>,
+    /// `PartSave::fingerprint` of what was last handed to the writer, per
+    /// part: a part marked changed with the same values is not written again.
+    fingerprints: std::collections::HashMap<Entity, u64>,
+}
+
+/// Record every part whose pose, part properties or instance changed, and
+/// every service whose properties changed; `save_part` then writes only the
+/// parts that differ from their files.
+///
+/// A Space opening is not an edit. Every part and service it spawns matches
+/// its file, and the class-default backfill after the spawn marks them all
+/// again, so both are left out: counting them made the first save after an
+/// open read every part's file and rewrite every `_service.toml`, and with
+/// autosave calling `save_space` that cost landed on a timer. A part spawned
+/// with no file is always kept, since only a save writes it.
+pub fn track_save_dirty(
+    mut dirty: ResMut<SaveDirty>,
+    load_in_progress: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    changed_services: Query<(Entity, Ref<ServiceComponent>), Changed<ServiceComponent>>,
+    changed_attrs: Query<
+        (
+            Entity,
+            Option<Ref<eustress_common::attributes::Tags>>,
+            Option<Ref<eustress_common::attributes::Attributes>>,
+        ),
+        (
+            With<crate::space::instance_loader::InstanceFile>,
+            Or<(
+                Changed<eustress_common::attributes::Tags>,
+                Changed<eustress_common::attributes::Attributes>,
+            )>,
+        ),
+    >,
+    changed: Query<
+        (
+            Entity,
+            Ref<Transform>,
+            bevy::ecs::query::Has<crate::space::instance_loader::InstanceFile>,
+        ),
+        (
+            With<eustress_common::classes::BasePart>,
+            // Parts streamed from the binary cores persist through the binary
+            // mirror, and residency spawns and despawns them all the time. A
+            // selected one loses the marker; `save_space` skips it by path.
+            Without<eustress_common::classes::ColdStreamed>,
+            Or<(
+                Changed<Transform>,
+                Changed<eustress_common::classes::BasePart>,
+                Changed<eustress_common::classes::Instance>,
+            )>,
+        ),
+    >,
+) {
+    let loading = load_in_progress.is_some_and(|l| l.active);
+    dirty.entities.extend(
+        changed
+            .iter()
+            .filter(|(_, transform, has_file)| !*has_file || !(loading || transform.is_added()))
+            .map(|(entity, ..)| entity),
+    );
+    dirty.services.extend(
+        changed_services
+            .iter()
+            .filter(|(_, service)| !(loading || service.is_added()))
+            .map(|(entity, _)| entity),
+    );
+    // Tags and attributes arrive with the spawn too; only later edits count.
+    dirty.attrs.extend(
+        changed_attrs
+            .iter()
+            .filter(|(_, tags, attrs)| {
+                !(loading
+                    || tags.as_ref().is_some_and(|t| t.is_added())
+                    || attrs.as_ref().is_some_and(|a| a.is_added()))
+            })
+            .map(|(entity, ..)| entity),
+    );
+}
+
+/// A part's live values, gathered on the main thread for `save_part`.
+struct PartSave {
+    entity: Entity,
+    name: String,
+    toml_path: PathBuf,
+    has_file: bool,
+    translation: Vec3,
+    rotation: Quat,
+    size: Vec3,
+    color: [f32; 4],
+    material: String,
+    transparency: f32,
+    anchored: bool,
+    can_collide: bool,
+    cast_shadow: bool,
+    reflectance: f32,
+    locked: bool,
+    destructible: bool,
+    archivable: bool,
+    class_name: String,
+    mesh: &'static str,
+    name_override: Option<String>,
+    /// The name the loader gives the file when it names none
+    /// (`loader_fallback_name`).
+    stem: Option<String>,
+}
+
+/// Whether two definitions agree on every field `save_space` writes: the
+/// test for "this part has not changed since its file was written".
+fn saved_fields_match(a: &InstanceDefinition, b: &InstanceDefinition) -> bool {
+    fn close(x: &[f32], y: &[f32], tolerance: f32) -> bool {
+        x.len() == y.len()
+            && x.iter().zip(y).all(|(p, q)| (p - q).abs() <= tolerance * p.abs().max(q.abs()).max(1.0))
+    }
+    // Colours are stored as 0 to 255 integers: equal within half a step.
+    let colour_step = 0.5 / 255.0;
+    close(&a.transform.position, &b.transform.position, 1e-5)
+        && same_rotation(a.transform.rotation, b.transform.rotation)
+        && close(&a.transform.scale, &b.transform.scale, 1e-5)
+        && close(&a.properties.color, &b.properties.color, colour_step)
+        && close(
+            &[a.properties.transparency, a.properties.reflectance],
+            &[b.properties.transparency, b.properties.reflectance],
+            1e-5,
+        )
+        && a.properties.anchored == b.properties.anchored
+        && a.properties.can_collide == b.properties.can_collide
+        && a.properties.cast_shadow == b.properties.cast_shadow
+        && a.properties.locked == b.properties.locked
+        && a.properties.material == b.properties.material
+        && a.metadata.name == b.metadata.name
+}
+
+/// Largest turn, in radians, that still counts as the same rotation: about
+/// 0.06 degrees. Well above what a file's short quaternion loses (four
+/// digits: about 1e-4 rad) and well below any turn a person makes.
+const SAME_ROTATION_RADIANS: f64 = 1e-3;
+
+/// Whether two stored rotations turn a part the same way. They are compared
+/// as rotations, not number by number: the loader normalises every rotation
+/// it reads (`sanitize_rot`), and a file written with a short quaternion
+/// (`[0.0, -0.1693, 0.0, 0.9856]`) is not unit length, so the live rotation
+/// never equals the file's numbers even when nothing moved. Comparing the
+/// numbers made every rotated part look edited once anything touched it
+/// after a load, and the edit writer rewrote and re-stamped them all. `q`
+/// and `-q` are the same rotation. A zero or non-finite quaternion matches
+/// only itself.
+fn same_rotation(a: [f32; 4], b: [f32; 4]) -> bool {
+    fn unit(q: [f32; 4]) -> Option<[f64; 4]> {
+        let v = q.map(f64::from);
+        let length = v.iter().map(|c| c * c).sum::<f64>().sqrt();
+        (length.is_finite() && length > 1e-9).then(|| v.map(|c| c / length))
+    }
+    match (unit(a), unit(b)) {
+        (Some(x), Some(y)) => {
+            let dot = x.iter().zip(y.iter()).map(|(p, q)| p * q).sum::<f64>().abs().min(1.0);
+            // The angle between the two rotations is 2 * acos(|dot|).
+            2.0 * dot.acos() <= SAME_ROTATION_RADIANS
+        }
+        _ => a == b,
+    }
+}
+
+/// A part's live values, ready for `save_part`, or `None` for a part the
+/// save leaves alone (a baked part, a sky or light singleton).
+fn part_save_for(
+    entity: Entity,
+    instance: &eustress_common::classes::Instance,
+    base_part: &eustress_common::classes::BasePart,
+    local_tf: &Transform,
+    instance_file: Option<&crate::space::instance_loader::InstanceFile>,
+    part: Option<&eustress_common::classes::Part>,
+    workspace_dir: &Path,
+) -> Option<PartSave> {
+    use eustress_common::classes::ClassName;
+    // A part streamed from the database's binary cores carries a
+    // synthetic `__bin_` path with no file behind it, and its edits
+    // persist through the binary mirror. Written here, it would become
+    // a real `__bin_` folder on disk that loads as a second copy.
+    if instance_file.is_some_and(|f| is_synthetic_core_path(&f.toml_path)) {
+        return None;
+    }
+    match instance.class_name {
+        ClassName::Sky | ClassName::Atmosphere | ClassName::Camera
+        | ClassName::Star | ClassName::Moon | ClassName::Clouds => return None,
+        _ => {}
+    }
+
+    let toml_path = if let Some(inst_file) = instance_file {
+        inst_file.toml_path.clone()
+    } else {
+        // New entity without InstanceFile: its own folder.
+        workspace_dir.join(sanitize_filename(&instance.name)).join("_instance.toml")
+    };
+
+    // Preserve the display-name override when the folder name
+    // and instance name don't match: a second sibling "Block"
+    // lives in `Block-a3f2/` with `name = "Block"` in the TOML so
+    // the Explorer still renders it as "Block".
+    let stem = loader_fallback_name(&toml_path);
+    let name_override = match &stem {
+        Some(stem) if *stem != instance.name => Some(instance.name.clone()),
+        _ => None,
+    };
+
+    let color = {
+        let c = base_part.color.to_srgba();
+        [c.red, c.green, c.blue, c.alpha]
+    };
+    // Prefer the live material NAME (preserves custom MaterialService
+    // names + Material-Flip edits); fall back to the enum.
+    let material = if base_part.material_name.is_empty() {
+        format!("{:?}", base_part.material)
+    } else {
+        base_part.material_name.clone()
+    };
+    // A new part is a primitive, so its mesh comes from `Part.shape`.
+    let mesh = part
+        .map(|p| match p.shape {
+            eustress_common::classes::PartType::Block => "parts/block.glb",
+            eustress_common::classes::PartType::Ball => "parts/ball.glb",
+            eustress_common::classes::PartType::Cylinder => "parts/cylinder.glb",
+            eustress_common::classes::PartType::Wedge => "parts/wedge.glb",
+            eustress_common::classes::PartType::CornerWedge => "parts/corner_wedge.glb",
+            eustress_common::classes::PartType::Cone => "parts/cone.glb",
+        })
+        .unwrap_or("parts/block.glb");
+    let class_name = format!("{:?}", instance.class_name)
+        .trim_start_matches("ClassName::")
+        .to_string();
+
+    Some(PartSave {
+        entity,
+        name: instance.name.clone(),
+        toml_path,
+        has_file: instance_file.is_some(),
+        translation: local_tf.translation,
+        rotation: local_tf.rotation,
+        // TOML scale = BasePart.size (correct in both scale-tool
+        // branches; Transform.scale alone pinned legacy parts at 1x1x1).
+        size: base_part.size,
+        color,
+        material,
+        transparency: base_part.transparency,
+        anchored: base_part.anchored,
+        can_collide: base_part.can_collide,
+        cast_shadow: base_part.cast_shadow,
+        reflectance: base_part.reflectance,
+        locked: base_part.locked,
+        destructible: base_part.destructible,
+        archivable: instance.archivable,
+        class_name,
+        mesh,
+        name_override,
+        stem,
+    })
+}
+
+/// Save one part: the file's definition with the live values merged in,
+/// written only when they differ from what the file holds. `Ok(true)` when
+/// written, `Ok(false)` when the file already matched. Runs on a worker
+/// thread.
+fn save_part(
+    p: &PartSave,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+    now: &str,
+) -> Result<bool, String> {
+    // LOAD-MERGE: start from the EXISTING on-disk definition and overwrite
+    // only the component-authoritative fields. Rebuilding the whole
+    // `InstanceDefinition` from components alone dropped every field the ECS
+    // does not carry: a custom `asset.mesh` (V-Cell came back as blocks), the
+    // realism `[material]` / `[thermodynamic]` / `[electrochemical]` sections,
+    // the metadata audit chain, `attributes`, `tags`, `ui`, `[extra]`. Read
+    // DISK directly (NOT the active_db funnel) so the merge base is the
+    // on-disk TOML, never a stale binary `#bin` cache, and heal it in memory
+    // as the loader does. The disk heal (`load_instance_definition_with_extras`)
+    // wrote the file back whenever its canonical form differed, so a save
+    // with no edits rewrote every file before comparing anything.
+    // A part that had a file whose file is gone was trashed, moved or
+    // renamed after its values were gathered. Writing now would bring the
+    // old file back, so the write is dropped.
+    if p.has_file && !p.toml_path.is_file() {
+        return Ok(false);
+    }
+    let existing = if p.has_file {
+        std::fs::read_to_string(&p.toml_path)
+            .ok()
+            .and_then(|text| crate::space::instance_loader::load_instance_definition_from_str(&text).ok())
+    } else {
+        None
+    };
+
+    let mut def = if let Some(mut d) = existing {
+        let before = d.clone();
+        // SCALE GUARD: for a CUSTOM-mesh part (mesh not under "parts/") the
+        // TOML `scale` is the user's MULTIPLIER, while `BasePart.size` is the
+        // mesh-AABB-derived world size; writing size into scale stretches the
+        // mesh on reload. Custom meshes keep the on-disk scale. Mirrors the
+        // guard in `write_instance_changes_system` (instance_loader.rs).
+        let is_custom_mesh = d.asset.as_ref()
+            .map(|a| crate::space::representation::mesh_requires_filesystem(&a.mesh))
+            .unwrap_or(false);
+        // The live pose and, for a primitive, its size, in the file's own
+        // unit (`set_authored_transform`): a Space imported in feet stays in
+        // feet.
+        crate::space::instance_loader::set_authored_transform(
+            &mut d,
+            p.translation,
+            p.rotation,
+            (!is_custom_mesh).then_some(p.size),
+        );
+        d.properties.color = p.color;
+        d.properties.transparency = p.transparency;
+        d.properties.anchored = p.anchored;
+        d.properties.can_collide = p.can_collide;
+        d.properties.cast_shadow = p.cast_shadow;
+        d.properties.reflectance = p.reflectance;
+        d.properties.locked = p.locked;
+        d.properties.material = p.material.clone();
+        // A file that still names the part keeps its own `name` entry; only a
+        // name that differs from the one the file gives is written.
+        if d.metadata.name.as_deref().or(p.stem.as_deref()) != Some(p.name.as_str()) {
+            d.metadata.name = p.name_override.clone();
+        }
+        if saved_fields_match(&before, &d) {
+            return Ok(false);
+        }
+        d.metadata.last_modified = now.to_string();
+        d
+    } else {
+        // New entity (no on-disk TOML) or unreadable file: build from
+        // components.
+        InstanceDefinition {
+            plasma: None,
+            asset: Some(AssetReference {
+                mesh: p.mesh.to_string(),
+                scene: "Scene0".to_string(),
+            }),
+            transform: TransformData {
+                position: p.translation.to_array(),
+                rotation: p.rotation.to_array(),
+                scale: p.size.to_array(),
+            },
+            properties: InstanceProperties {
+                color: p.color,
+                material: p.material.clone(),
+                transparency: p.transparency,
+                anchored: p.anchored,
+                can_collide: p.can_collide,
+                cast_shadow: p.cast_shadow,
+                reflectance: p.reflectance,
+                locked: p.locked,
+                physics: None,
+                respect_gltf_materials: false,
+                // Persist the destructible opt-in so a part authored as
+                // destructible stays destructible across a save/load.
+                destructible: p.destructible,
+            },
+            metadata: InstanceMetadata {
+                class_name: p.class_name.clone(),
+                archivable: p.archivable,
+                name: p.name_override.clone(),
+                created: String::new(),
+                last_modified: now.to_string(),
+                ..Default::default()
+            },
+            material: None,
+            thermodynamic: None,
+            electrochemical: None,
+            ui: None,
+            attributes: None,
+            tags: None,
+            parameters: None,
+            extra: std::collections::HashMap::new(),
+        }
+    };
+
+    // Only a new part gets a folder made for it.
+    if !p.has_file {
+        if let Some(parent) = p.toml_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    crate::space::instance_loader::write_instance_definition_signed(&p.toml_path, &mut def, stamp)?;
+    Ok(true)
+}
+
+// ============================================================================
+// Persisting edits as they happen
+// ============================================================================
+//
+// Every edit reaches disk shortly after it settles, not only at the next save:
+// `track_save_dirty` records what changed, `persist_edits` gathers it on the
+// main thread about three times a second, and one background thread writes it
+// in order (`save_part`, `save_attributes`). A save, a Space switch and exit
+// first finish that queue (`persist_pending_edits`), so a queued job can never
+// overwrite something newer.
+
+/// How often, at most, `persist_edits` hands a batch to the writer, in
+/// seconds. A held nudge key or a rolled wheel writes at this rate.
+const PERSIST_INTERVAL_SECS: f64 = 0.3;
+
+/// An entity's tags and attributes as a file patch, gathered on the main thread.
+struct AttrSave {
+    entity: Entity,
+    toml_path: PathBuf,
+    tags: Option<Vec<String>>,
+    attrs: Option<std::collections::HashMap<String, toml::Value>>,
+}
+
+/// One batch of edits: values read from the World on the main thread,
+/// written later by the writer thread or by a save that takes the queue over.
+struct PersistJob {
+    /// The Space the edits belong to: a snapshot revert of it drops them.
+    space_root: PathBuf,
+    parts: Vec<PartSave>,
+    attrs: Vec<AttrSave>,
+    stamp: Option<crate::space::instance_loader::CreatorStamp>,
+    now: String,
+}
+
+/// True while a snapshot revert of `space_root` is being applied: its files
+/// are about to be, or have just been, restored, and the World that made the
+/// queued edits is being replaced. Edits of that Space are dropped, never
+/// written: the revert's safety snapshot already holds them, and writing them
+/// once the revert finishes would put the reverted state back.
+fn restore_pending(space_root: &Path) -> bool {
+    crate::space::checkpoint::restore_pending(space_root)
+}
+
+/// Drop every queued job of a Space being reverted; `true` if any went.
+fn drop_reverted_jobs(state: &mut PersistState) -> bool {
+    let before = state.jobs.len();
+    state.jobs.retain(|job| !restore_pending(&job.space_root));
+    let dropped = before - state.jobs.len();
+    if dropped > 0 {
+        info!("Snapshot revert in progress: dropped {} queued edit batches of the reverted Space", dropped);
+    }
+    dropped > 0
+}
+
+/// What writing one or more jobs did.
+#[derive(Debug, Default)]
+pub struct PersistOutcome {
+    pub written: usize,
+    pub unchanged: usize,
+    pub errors: usize,
+    /// Every file written.
+    pub paths: Vec<PathBuf>,
+    failed_parts: Vec<Entity>,
+    failed_attrs: Vec<Entity>,
+}
+
+impl PersistOutcome {
+    fn absorb(&mut self, other: PersistOutcome) {
+        self.written += other.written;
+        self.unchanged += other.unchanged;
+        self.errors += other.errors;
+        self.paths.extend(other.paths);
+        self.failed_parts.extend(other.failed_parts);
+        self.failed_attrs.extend(other.failed_attrs);
+    }
+}
+
+/// The writer's queue. `in_flight` is true only while the writer holds the
+/// git commit lock and writes a job; `failed_*` carry writes it could not
+/// make back to the main thread, which marks them due again.
+struct PersistState {
+    jobs: std::collections::VecDeque<PersistJob>,
+    in_flight: bool,
+    worker_started: bool,
+    failed_parts: Vec<Entity>,
+    failed_attrs: Vec<Entity>,
+}
+
+struct PersistQueue {
+    state: std::sync::Mutex<PersistState>,
+    changed: std::sync::Condvar,
+}
+
+static PERSIST: PersistQueue = PersistQueue {
+    state: std::sync::Mutex::new(PersistState {
+        jobs: std::collections::VecDeque::new(),
+        in_flight: false,
+        worker_started: false,
+        failed_parts: Vec::new(),
+        failed_attrs: Vec::new(),
+    }),
+    changed: std::sync::Condvar::new(),
+};
+
+fn persist_state() -> std::sync::MutexGuard<'static, PersistState> {
+    PERSIST.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Queue a job for the writer thread, starting the thread on first use. If
+/// it cannot start, the job waits in the queue for the next save.
+fn enqueue_persist_job(job: PersistJob) {
+    let mut state = persist_state();
+    state.jobs.push_back(job);
+    if !state.worker_started {
+        match std::thread::Builder::new().name("eustress-persist".into()).spawn(persist_worker) {
+            Ok(_) => state.worker_started = true,
+            Err(e) => warn!("Edit writer did not start ({e}); edits are written at the next save"),
+        }
+    }
+    drop(state);
+    PERSIST.changed.notify_all();
+}
+
+/// The writer thread: one job at a time, in queue order, each under the git
+/// commit lock so no commit's `git add` stages half a batch. It never waits
+/// on that lock: while someone else holds it, the job stays queued, so a save
+/// holding the lock can take the queue over (`flush_persist_queue`) instead
+/// of waiting on a writer that waits on it.
+fn persist_worker() {
+    loop {
+        {
+            let mut state = persist_state();
+            while state.jobs.is_empty() {
+                state = PERSIST.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            if drop_reverted_jobs(&mut state) && state.jobs.is_empty() {
+                continue;
+            }
+        }
+        let guard = match crate::editor_settings::GIT_COMMIT_LOCK.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+        };
+        let job = {
+            let mut state = persist_state();
+            let job = state.jobs.pop_front();
+            state.in_flight = job.is_some();
+            job
+        };
+        let Some(job) = job else {
+            drop(guard);
+            continue;
+        };
+        let outcome = run_persist_job(&job);
+        drop(guard);
+        {
+            let mut state = persist_state();
+            state.in_flight = false;
+            state.failed_parts.extend(outcome.failed_parts);
+            state.failed_attrs.extend(outcome.failed_attrs);
+        }
+        PERSIST.changed.notify_all();
+    }
+}
+
+/// Finish the writer's queue on the calling thread: wait for the job being
+/// written, then write every job still queued, in order. Safe to call while
+/// holding the git commit lock (autosave does): a job is only in flight
+/// while the writer holds that lock itself.
+pub fn flush_persist_queue() -> PersistOutcome {
+    let stolen: Vec<PersistJob> = {
+        let mut state = persist_state();
+        while state.in_flight {
+            state = PERSIST.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        drop_reverted_jobs(&mut state);
+        state.jobs.drain(..).collect()
+    };
+    let mut total = PersistOutcome::default();
+    for job in &stolen {
+        total.absorb(run_persist_job(job));
+    }
+    total
+}
+
+/// Write one job: its parts in parallel (distinct files), then its tags and
+/// attributes, so no file is written by two threads at once.
+fn run_persist_job(job: &PersistJob) -> PersistOutcome {
+    use rayon::prelude::*;
+    let mut out = PersistOutcome::default();
+    let parts: Vec<(Entity, &str, &Path, Result<bool, String>)> = job
+        .parts
+        .par_iter()
+        .map(|p| (p.entity, p.name.as_str(), p.toml_path.as_path(), save_part(p, job.stamp.as_ref(), &job.now)))
+        .collect();
+    for (entity, name, path, result) in parts {
+        match result {
+            Ok(true) => {
+                out.written += 1;
+                out.paths.push(path.to_path_buf());
+                debug!("💾 Saved '{}'", name);
+            }
+            Ok(false) => out.unchanged += 1,
+            Err(e) => {
+                out.errors += 1;
+                error!("❌ Failed to save '{}': {}", name, e);
+                out.failed_parts.push(entity);
+            }
+        }
+    }
+    let attrs: Vec<(Entity, &Path, Result<bool, String>)> = job
+        .attrs
+        .par_iter()
+        .map(|a| (a.entity, a.toml_path.as_path(), save_attributes(a)))
+        .collect();
+    for (entity, path, result) in attrs {
+        match result {
+            Ok(true) => {
+                out.written += 1;
+                out.paths.push(path.to_path_buf());
+            }
+            Ok(false) => out.unchanged += 1,
+            Err(e) => {
+                out.errors += 1;
+                error!("❌ Failed to save tags and attributes of {}: {}", path.display(), e);
+                out.failed_attrs.push(entity);
+            }
+        }
+    }
+    out
+}
+
+/// Patch a file's tags and attributes. A file that is gone (trashed, moved,
+/// renamed) is left gone: `Ok(false)`.
+fn save_attributes(a: &AttrSave) -> Result<bool, String> {
+    if !a.toml_path.is_file() {
+        return Ok(false);
+    }
+    crate::space::instance_loader::patch_tags_attributes_toml(&a.toml_path, a.tags.clone(), a.attrs.clone())?;
+    Ok(true)
+}
+
+/// A file-backed entity's tags and attributes, ready to write.
+fn attr_save_for(
+    entity: Entity,
+    file: &crate::space::instance_loader::InstanceFile,
+    tags: Option<&eustress_common::attributes::Tags>,
+    attributes: Option<&eustress_common::attributes::Attributes>,
+) -> Option<AttrSave> {
+    if is_synthetic_core_path(&file.toml_path) {
+        return None;
+    }
+    Some(AttrSave {
+        entity,
+        toml_path: file.toml_path.clone(),
+        tags: tags.map(|t| t.0.clone()),
+        attrs: attributes.map(|a| {
+            a.values
+                .iter()
+                // A runtime reference (an Object) never persists.
+                .filter_map(|(k, v)| eustress_common::datamodel::record::attribute_to_toml(v).map(|value| (k.clone(), value)))
+                .collect()
+        }),
+    })
+}
+
+impl PartSave {
+    /// A hash of every value `save_part` writes: two equal fingerprints mean
+    /// nothing to write. Physics re-assigns unmoved transforms every frame,
+    /// which marks parts changed; this is what filters those out.
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.toml_path.hash(&mut h);
+        self.has_file.hash(&mut h);
+        let floats = self
+            .translation
+            .to_array()
+            .into_iter()
+            .chain(self.rotation.to_array())
+            .chain(self.size.to_array())
+            .chain(self.color)
+            .chain([self.transparency, self.reflectance]);
+        for v in floats {
+            v.to_bits().hash(&mut h);
+        }
+        (self.anchored, self.can_collide, self.cast_shadow, self.locked, self.destructible, self.archivable).hash(&mut h);
+        self.material.hash(&mut h);
+        self.name.hash(&mut h);
+        self.class_name.hash(&mut h);
+        self.mesh.hash(&mut h);
+        self.name_override.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Hand what changed since the last batch to the writer thread: at most every
+/// `PERSIST_INTERVAL_SECS`, never during a drag (the tool writes one step on
+/// release), a load, or Play (the registration's run condition). Parts whose
+/// values match what was last written are skipped before any disk work.
+#[allow(clippy::type_complexity)]
+pub fn persist_edits(
+    mut dirty: ResMut<SaveDirty>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    load_in_progress: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    tools: (
+        Option<Res<crate::select_tool::SelectToolState>>,
+        Option<Res<crate::move_tool::MoveToolState>>,
+        Option<Res<crate::rotate_tool::RotateToolState>>,
+        Option<Res<crate::scale_tool::ScaleToolState>>,
+    ),
+    parts: Query<(
+        Entity,
+        &eustress_common::classes::Instance,
+        &eustress_common::classes::BasePart,
+        &Transform,
+        Option<&crate::space::instance_loader::InstanceFile>,
+        Option<&eustress_common::classes::Part>,
+    )>,
+    attributes: Query<(
+        Entity,
+        &crate::space::instance_loader::InstanceFile,
+        Option<&eustress_common::attributes::Tags>,
+        Option<&eustress_common::attributes::Attributes>,
+    )>,
+    auth: Option<Res<crate::auth::AuthState>>,
+    mut recently_written: Option<ResMut<crate::space::file_watcher::RecentlyWrittenFiles>>,
+    time: Res<Time<Real>>,
+    mut last_batch: Local<f64>,
+) {
+    let d = &mut *dirty;
+    // Writes the writer thread could not make come back due.
+    {
+        let mut state = persist_state();
+        for entity in state.failed_parts.drain(..) {
+            d.fingerprints.remove(&entity);
+            d.entities.insert(entity);
+        }
+        d.attrs.extend(state.failed_attrs.drain(..));
+    }
+    if d.entities.is_empty() && d.attrs.is_empty() {
+        return;
+    }
+    if load_in_progress.is_some_and(|l| l.active) {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    if now - *last_batch < PERSIST_INTERVAL_SECS {
+        return;
+    }
+    let (select, move_tool, rotate, scale) = tools;
+    let dragging = select.is_some_and(|s| s.dragging)
+        || move_tool.is_some_and(|m| m.dragged_axis.is_some() || m.dragged_plane.is_some() || m.free_drag)
+        || rotate.is_some_and(|r| r.dragged_axis.is_some())
+        || scale.is_some_and(|s| s.dragged_axis.is_some());
+    if dragging {
+        return;
+    }
+    let Some(root) = space_root else { return };
+    if restore_pending(&root.0) {
+        d.entities.clear();
+        d.attrs.clear();
+        return;
+    }
+    *last_batch = now;
+    let workspace_dir = root.0.join("Workspace");
+
+    let mut job_parts = Vec::new();
+    for entity in d.entities.drain() {
+        let Ok((entity, instance, base_part, transform, file, part)) = parts.get(entity) else { continue };
+        let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, &workspace_dir) else {
+            continue;
+        };
+        let fingerprint = save.fingerprint();
+        if d.fingerprints.get(&entity) == Some(&fingerprint) {
+            continue;
+        }
+        d.fingerprints.insert(entity, fingerprint);
+        job_parts.push(save);
+    }
+    let mut job_attrs = Vec::new();
+    for entity in d.attrs.drain() {
+        let Ok((entity, file, tags, attrs)) = attributes.get(entity) else { continue };
+        if let Some(save) = attr_save_for(entity, file, tags, attrs) {
+            job_attrs.push(save);
+        }
+    }
+    if job_parts.is_empty() && job_attrs.is_empty() {
+        return;
+    }
+    // Marked now, before the writer runs, so the watcher never reloads our own write.
+    if let Some(ref mut written) = recently_written {
+        for path in job_parts.iter().map(|p| &p.toml_path).chain(job_attrs.iter().map(|a| &a.toml_path)) {
+            written.mark_written(path.clone());
+        }
+    }
+    let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+    enqueue_persist_job(PersistJob {
+        space_root: root.0.clone(),
+        parts: job_parts,
+        attrs: job_attrs,
+        stamp,
+        now: Utc::now().to_rfc3339(),
+    });
+}
+
+/// Write every edit not yet on disk, on the calling thread: the writer's
+/// queue first, in order, then whatever is still marked changed. A save, a
+/// Space switch and exit run this, so nothing an edit changed is left behind
+/// and no queued job lands after it. Without the tracker (a test, a tool)
+/// every part is written.
+pub fn persist_pending_edits(world: &mut World) -> PersistOutcome {
+    let mut total = flush_persist_queue();
+    let (failed_parts, failed_attrs) = {
+        let mut state = persist_state();
+        (std::mem::take(&mut state.failed_parts), std::mem::take(&mut state.failed_attrs))
+    };
+    let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
+        return total;
+    };
+    if restore_pending(&space_root) {
+        if let Some(mut d) = world.get_resource_mut::<SaveDirty>() {
+            d.entities.clear();
+            d.attrs.clear();
+        }
+        return total;
+    }
+    let workspace_dir = space_root.join("Workspace");
+    let (dirty, dirty_attrs) = match world.get_resource_mut::<SaveDirty>() {
+        Some(mut d) => {
+            d.entities.extend(failed_parts);
+            d.attrs.extend(failed_attrs);
+            (Some(std::mem::take(&mut d.entities)), Some(std::mem::take(&mut d.attrs)))
+        }
+        None => (None, None),
+    };
+
+    let mut parts: Vec<PartSave> = Vec::new();
+    {
+        let mut query = world.query::<(
+            Entity,
+            &eustress_common::classes::Instance,
+            &eustress_common::classes::BasePart,
+            &Transform,
+            Option<&crate::space::instance_loader::InstanceFile>,
+            Option<&eustress_common::classes::Part>,
+        )>();
+        for (entity, instance, base_part, transform, file, part) in query.iter(world) {
+            if dirty.as_ref().is_some_and(|d| !d.contains(&entity)) {
+                continue;
+            }
+            if let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, &workspace_dir) {
+                parts.push(save);
+            }
+        }
+    }
+    let mut attrs: Vec<AttrSave> = Vec::new();
+    if let Some(dirty_attrs) = dirty_attrs.as_ref().filter(|d| !d.is_empty()) {
+        let mut query = world.query::<(
+            Entity,
+            &crate::space::instance_loader::InstanceFile,
+            Option<&eustress_common::attributes::Tags>,
+            Option<&eustress_common::attributes::Attributes>,
+        )>();
+        for (entity, file, tags, attributes) in query.iter(world) {
+            if dirty_attrs.contains(&entity) {
+                if let Some(save) = attr_save_for(entity, file, tags, attributes) {
+                    attrs.push(save);
+                }
+            }
+        }
+    }
+
+    let stamp = world
+        .get_resource::<crate::auth::AuthState>()
+        .and_then(crate::space::instance_loader::current_stamp);
+    let fingerprints: Vec<(Entity, u64)> = parts.iter().map(|p| (p.entity, p.fingerprint())).collect();
+    let outcome = run_persist_job(&PersistJob { space_root, parts, attrs, stamp, now: Utc::now().to_rfc3339() });
+    if let Some(mut d) = world.get_resource_mut::<SaveDirty>() {
+        d.fingerprints.extend(fingerprints);
+        // A write that failed stays due, and is compared again next time.
+        for entity in &outcome.failed_parts {
+            d.fingerprints.remove(entity);
+            d.entities.insert(*entity);
+        }
+        d.attrs.extend(outcome.failed_attrs.iter().copied());
+    }
+    total.absorb(outcome);
+    total
+}
+
+/// On exit, write every edit not yet on disk before the app closes.
+pub fn persist_edits_on_exit(world: &mut World) {
+    let exiting = world.get_resource::<Messages<AppExit>>().is_some_and(|m| !m.is_empty());
+    if exiting {
+        let outcome = persist_pending_edits(world);
+        if outcome.written > 0 || outcome.errors > 0 {
+            info!("💾 Wrote {} pending edits before exit ({} errors)", outcome.written, outcome.errors);
+        }
+    }
 }
 
 // ============================================================================
@@ -646,6 +1366,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         }
         return;
     }
+
+    // Edits of the outgoing Space not yet on disk go out before it closes.
+    persist_pending_edits(world);
 
     let author = world.get_resource::<crate::auth::AuthState>()
         .and_then(|a| a.user.as_ref())
@@ -688,23 +1411,11 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     // world reload, but file paths do — so SoulScript and ParametersEditor
     // tabs that we'd otherwise filter on restore become persistable.
     if let Some(ref outgoing) = outgoing_space {
-        // Collect entity → path mapping from the current world.
-        let entity_paths: std::collections::HashMap<bevy::prelude::Entity, std::path::PathBuf> = {
-            let mut q = world.query::<(bevy::prelude::Entity, &crate::space::file_loader::LoadedFromFile)>();
-            q.iter(world)
-                .map(|(e, lff)| (e, lff.path.clone()))
-                .collect()
-        };
+        // Save unsaved script edits before they leave with the outgoing
+        // Space: a snapshot is out of sight of the close and exit prompts.
+        // This also names each tab's source file, which the snapshot keeps.
+        crate::ui::center_tabs::save_dirty_code_tabs(world);
         if let Some(mut tab_mgr) = world.get_resource_mut::<crate::ui::center_tabs::CenterTabManager>() {
-            for tab in tab_mgr.tabs.iter_mut() {
-                if tab.file_path.is_none() {
-                    if let Some(entity) = tab.entity {
-                        if let Some(path) = entity_paths.get(&entity) {
-                            tab.file_path = Some(path.clone());
-                        }
-                    }
-                }
-            }
             tab_mgr.snapshot_for_space(outgoing);
         }
     }
@@ -817,6 +1528,15 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         {
             h.0 = None;
         }
+        // The open decision runs once per Space path, so opening the Space
+        // that is already open would clear its database above and never open
+        // it again (and a waiting revert would never run). Every open decides
+        // afresh.
+        if let Some(mut decision) =
+            world.get_resource_mut::<crate::space::world_db_plugin::WorldDbDecision>()
+        {
+            decision.0 = None;
+        }
         if let Some(mut s) =
             world.get_resource_mut::<crate::space::world_db_plugin::WorldDbSubscription>()
         {
@@ -828,6 +1548,10 @@ pub fn open_space(world: &mut World, space_path: &Path) {
             *src = crate::space::space_source::ActiveSpaceSource::disk(space_path.to_path_buf());
         }
     }
+    // The outgoing Space's entities are gone: no selection, expansion or
+    // Explorer row may still point at one.
+    crate::ui::slint_ui::reset_explorer_for_space_reload(world);
+
     // Phase 4: clear the non-gated streaming flag + the Explorer's DB-section
     // cache so the virtual "Database (streamed)" section never shows the
     // outgoing Space's classes/rows before the new boot-load re-decides. The
@@ -870,6 +1594,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     }
 
     world.insert_resource(crate::space::SpaceRoot(space_path.to_path_buf()));
+    // Gravity is live state that no Space saves: the new one starts at the
+    // default, not at whatever the outgoing Space was set to.
+    crate::plugins::physics_plugin::reset_gravity_for_new_space(world);
     // Stamp the swappable `space://` asset root IMMEDIATELY (not just via the
     // `Changed<SpaceRoot>` system next frame): the rescan triggered below can
     // begin issuing `space://` mesh loads within this same world-command, and
@@ -1725,6 +2452,28 @@ fn save_manifest<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Stri
         .map_err(|e| format!("Failed to write {:?}: {}", path, e))
 }
 
+/// The name the loader gives an instance file with no `[metadata] name`
+/// (`spawn_instance`): its folder's for an `_instance.toml`, else the file
+/// name up to its first dot.
+fn loader_fallback_name(toml_path: &Path) -> Option<String> {
+    let file = toml_path.file_name()?.to_str()?;
+    if file == "_instance.toml" {
+        toml_path.parent()?.file_name()?.to_str().map(str::to_string)
+    } else {
+        file.split('.').next().map(str::to_string)
+    }
+}
+
+/// A binary core's synthetic path, `Workspace/__bin_{class}_{id}/_instance.toml`,
+/// which no file stands behind.
+fn is_synthetic_core_path(toml_path: &Path) -> bool {
+    toml_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("__bin_"))
+}
+
 /// Strip characters that are illegal in file system names.
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -1735,4 +2484,335 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    // ── Rotations written short are not edits ─────────────────────────────
+
+    #[test]
+    fn rotations_compare_as_rotations() {
+        let short = [0.0, -0.1693, 0.0, 0.9856];
+        let live = Quat::from_xyzw(0.0, -0.1693, 0.0, 0.9856).normalize().to_array();
+        assert!(same_rotation(short, live), "a normalised short quaternion is the same rotation");
+        assert!(same_rotation(live, live.map(|c| -c)), "q and -q are one rotation");
+        let turned = (Quat::from_array(live) * Quat::from_rotation_y(1f32.to_radians())).to_array();
+        assert!(!same_rotation(live, turned), "a one-degree turn is a change");
+        assert!(!same_rotation([0.0; 4], live));
+    }
+
+    /// The build 8 regression: a part whose file holds a four-digit
+    /// quaternion, loaded (so its rotation is normalised) and touched with no
+    /// edit, must not be rewritten or stamped.
+    #[test]
+    fn a_short_written_rotation_is_not_rewritten() {
+        let root = std::env::temp_dir().join(format!("eustress_short_rotation_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("Workspace").join("Crate_1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("_instance.toml");
+        std::fs::write(
+            &file,
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [4.0, 0.5, -2.0]\nrotation = [0.0, -0.1693, 0.0, 0.9856]\nscale = [2.0, 1.0, 2.0]\n",
+        )
+        .unwrap();
+        let before = std::fs::read(&file).unwrap();
+
+        // The part as the loader spawns it from this file.
+        let def = crate::space::instance_loader::load_instance_definition_from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut part = persist_test_part(&file, 0.0);
+        part.name = "Crate_1".to_string();
+        part.stem = loader_fallback_name(&file);
+        part.translation = Vec3::from_array(def.transform.position);
+        part.rotation = Quat::from_array(def.transform.rotation).normalize();
+        part.size = Vec3::from_array(def.transform.scale);
+        part.color = def.properties.color;
+        part.material = def.properties.material.clone();
+        part.transparency = def.properties.transparency;
+        part.reflectance = def.properties.reflectance;
+        part.anchored = def.properties.anchored;
+        part.can_collide = def.properties.can_collide;
+        part.cast_shadow = def.properties.cast_shadow;
+        part.locked = def.properties.locked;
+
+        assert_eq!(save_part(&part, None, "2026-09-26T02:18:48Z"), Ok(false));
+        assert_eq!(std::fs::read(&file).unwrap(), before, "the file was rewritten");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── Persisting edits as they happen ───────────────────────────────────
+
+    /// A fresh `<tag>/Workspace/Brick/_instance.toml` holding a plain part
+    /// at the origin.
+    fn persist_test_file(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("eustress_persist_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("Workspace").join("Brick");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("_instance.toml");
+        std::fs::write(
+            &file,
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [0.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+        )
+        .unwrap();
+        (root, file)
+    }
+
+    /// The part in `file`, moved to `x`.
+    fn persist_test_part(file: &Path, x: f32) -> PartSave {
+        PartSave {
+            entity: Entity::PLACEHOLDER,
+            name: "Brick".to_string(),
+            toml_path: file.to_path_buf(),
+            has_file: true,
+            translation: Vec3::new(x, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            size: Vec3::ONE,
+            color: [0.5, 0.5, 0.5, 1.0],
+            material: "Plastic".to_string(),
+            transparency: 0.0,
+            anchored: false,
+            can_collide: true,
+            cast_shadow: true,
+            reflectance: 0.0,
+            locked: false,
+            destructible: false,
+            archivable: true,
+            class_name: "Part".to_string(),
+            mesh: "parts/block.glb",
+            name_override: None,
+            stem: loader_fallback_name(file),
+        }
+    }
+
+    fn persist_test_x(file: &Path) -> f32 {
+        let text = std::fs::read_to_string(file).unwrap();
+        crate::space::instance_loader::load_instance_definition_from_str(&text).unwrap().transform.position[0]
+    }
+
+    /// A write queued before the part's folder was trashed must not bring the
+    /// folder back.
+    #[test]
+    fn a_queued_write_never_recreates_a_trashed_folder() {
+        let (root, file) = persist_test_file("trashed");
+        let part = persist_test_part(&file, 4.0);
+        let folder = file.parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert_eq!(save_part(&part, None, "2026-09-25T00:00:00Z"), Ok(false));
+        assert!(!folder.exists(), "the trashed folder came back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A write replaces the file whole: no temporary file is left beside it,
+    /// and what is there parses and holds the new value.
+    #[test]
+    fn a_write_leaves_no_temporary_file_and_parses() {
+        let (root, file) = persist_test_file("atomic");
+        assert_eq!(save_part(&persist_test_part(&file, 3.0), None, "2026-09-25T00:00:00Z"), Ok(true));
+        let leftovers: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+        assert!((persist_test_x(&file) - 3.0).abs() < 1e-4);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An attribute and a tag edit reach the file through the edit writer.
+    #[test]
+    fn an_attribute_edit_reaches_disk() {
+        let (root, file) = persist_test_file("attributes");
+        let save = AttrSave {
+            entity: Entity::PLACEHOLDER,
+            toml_path: file.clone(),
+            tags: Some(vec!["Enemy".to_string()]),
+            attrs: Some(std::collections::HashMap::from([("Speed".to_string(), toml::Value::Integer(5))])),
+        };
+        let out = run_persist_job(&PersistJob {
+            space_root: root.clone(),
+            parts: Vec::new(),
+            attrs: vec![save],
+            stamp: None,
+            now: String::new(),
+        });
+        assert_eq!((out.written, out.errors), (1, 0));
+        assert_eq!(out.paths, vec![file.clone()]);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let doc: toml::Value = text.parse().unwrap();
+        assert_eq!(doc["tags"][0].as_str(), Some("Enemy"));
+        assert!(text.contains("Speed"), "attribute missing:\n{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jobs land in the order they were queued, whether the writer thread or
+    /// a flush writes them: the newest value is the one left on disk.
+    #[test]
+    fn queued_jobs_land_in_order() {
+        let (root, file) = persist_test_file("order");
+        for x in [1.0, 2.0, 3.0] {
+            enqueue_persist_job(PersistJob {
+                space_root: root.clone(),
+                parts: vec![persist_test_part(&file, x)],
+                attrs: Vec::new(),
+                stamp: None,
+                now: String::new(),
+            });
+        }
+        let _ = flush_persist_queue();
+        assert!((persist_test_x(&file) - 3.0).abs() < 1e-4);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    use super::*;
+
+    /// Save Space over a Space mixing a part imported in feet with one in
+    /// metres: each file keeps its own unit, and each reads back where its
+    /// part is.
+    #[test]
+    fn save_space_writes_each_file_in_its_own_unit() {
+        use eustress_common::classes::{BasePart, ClassName, Instance};
+        let root = std::env::temp_dir().join(format!("eustress_save_space_units_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |name: &str, text: &str| {
+            let dir = root.join("Workspace").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("_instance.toml"), text).unwrap();
+            dir.join("_instance.toml")
+        };
+        let feet = put(
+            "Feet",
+            "[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 1.0, 2.0]\n",
+        );
+        let metres = put(
+            "Metres",
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [1.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+        );
+        let mut world = World::new();
+        world.insert_resource(crate::space::SpaceRoot(root.clone()));
+        let spawn = |world: &mut World, name: &str, path: &std::path::Path, at: Vec3, size: Vec3| {
+            world.spawn((
+                Instance { name: name.to_string(), class_name: ClassName::Part, ..Default::default() },
+                BasePart { size, ..Default::default() },
+                Transform::from_translation(at),
+                crate::space::instance_loader::InstanceFile {
+                    toml_path: path.to_path_buf(),
+                    mesh_path: std::path::PathBuf::new(),
+                    name: name.to_string(),
+                },
+            ));
+        };
+        // Each moved 1 m along +X from where its file put it.
+        spawn(&mut world, "Feet", &feet, Vec3::new(3.048 + 1.0, 0.0, 0.0), Vec3::new(1.2192, 0.3048, 0.6096));
+        spawn(&mut world, "Metres", &metres, Vec3::new(2.0, 0.0, 0.0), Vec3::ONE);
+        save_space(&mut world);
+
+        let read = |path: &std::path::Path| -> toml::Value { std::fs::read_to_string(path).unwrap().parse().unwrap() };
+        let nums = |doc: &toml::Value, k: &str| -> Vec<f64> {
+            doc["transform"][k].as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect()
+        };
+        let f = read(&feet);
+        assert_eq!(f["metadata"]["unit"].as_str(), Some("ft"));
+        #[cfg(feature = "units_v1")]
+        {
+            assert!((nums(&f, "position")[0] - 4.048 / 0.3048).abs() < 1e-3, "{:?}", nums(&f, "position"));
+            let s = nums(&f, "scale");
+            assert!((s[0] - 4.0).abs() < 1e-3 && (s[1] - 1.0).abs() < 1e-3 && (s[2] - 2.0).abs() < 1e-3, "{s:?}");
+        }
+        let m = read(&metres);
+        assert!((nums(&m, "position")[0] - 2.0).abs() < 1e-5, "{:?}", nums(&m, "position"));
+        assert!((nums(&m, "scale")[0] - 1.0).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_loaders_fallback_name_and_the_synthetic_core_path() {
+        assert_eq!(loader_fallback_name(Path::new("W/Brick/_instance.toml")).as_deref(), Some("Brick"));
+        assert_eq!(loader_fallback_name(Path::new("W/Crate.part.toml")).as_deref(), Some("Crate"));
+        assert!(is_synthetic_core_path(Path::new("W/__bin_Part_00000000000000ff/_instance.toml")));
+        assert!(!is_synthetic_core_path(Path::new("W/Brick/_instance.toml")));
+    }
+
+    /// A save with nothing edited, as right after a Space opens (every part
+    /// marked), leaves every file byte for byte: the merge base is not healed
+    /// back to disk, a file's own `name` stays, a flat file is named by its
+    /// stem, and a baked part's synthetic path gets no folder.
+    #[test]
+    fn a_save_with_no_edits_writes_nothing() {
+        use eustress_common::classes::{BasePart, ClassName, Instance};
+        let root = std::env::temp_dir().join(format!("eustress_save_no_edits_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("Workspace");
+        std::fs::create_dir_all(workspace.join("Brick")).unwrap();
+        // Keys out of canonical order and no template sections: a disk heal
+        // rewrites this file.
+        let brick = workspace.join("Brick").join("_instance.toml");
+        std::fs::write(
+            &brick,
+            "[transform]\nscale = [2.0, 1.0, 4.0]\nposition = [1.0, 2.0, 3.0]\nrotation = [0.0, 0.0, 0.0, -1.0]\n\n[metadata]\nname = \"Brick\"\nclass_name = \"Part\"\n",
+        )
+        .unwrap();
+        let crate_file = workspace.join("Crate.part.toml");
+        std::fs::write(
+            &crate_file,
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [5.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+        )
+        .unwrap();
+        let before: Vec<Vec<u8>> = [&brick, &crate_file].iter().map(|p| std::fs::read(p).unwrap()).collect();
+
+        let mut world = World::new();
+        world.insert_resource(crate::space::SpaceRoot(root.clone()));
+        // Each part exactly as its file describes it.
+        let spawn = |world: &mut World, name: &str, path: &Path| {
+            let text = std::fs::read_to_string(path).unwrap();
+            let def = crate::space::instance_loader::load_instance_definition_from_str(&text).unwrap();
+            let c = def.properties.color;
+            world.spawn((
+                Instance { name: name.to_string(), class_name: ClassName::Part, ..Default::default() },
+                BasePart {
+                    size: Vec3::from_array(def.transform.scale),
+                    color: Color::srgba(c[0], c[1], c[2], c[3]),
+                    material_name: def.properties.material.clone(),
+                    transparency: def.properties.transparency,
+                    reflectance: def.properties.reflectance,
+                    anchored: def.properties.anchored,
+                    can_collide: def.properties.can_collide,
+                    cast_shadow: def.properties.cast_shadow,
+                    locked: def.properties.locked,
+                    ..Default::default()
+                },
+                Transform {
+                    translation: Vec3::from_array(def.transform.position),
+                    rotation: Quat::from_array(def.transform.rotation),
+                    scale: Vec3::ONE,
+                },
+                crate::space::instance_loader::InstanceFile {
+                    toml_path: path.to_path_buf(),
+                    mesh_path: std::path::PathBuf::new(),
+                    name: name.to_string(),
+                },
+            ));
+        };
+        spawn(&mut world, "Brick", &brick);
+        spawn(&mut world, "Crate", &crate_file);
+        let synthetic = workspace.join("__bin_Part_00000000000000ff").join("_instance.toml");
+        world.spawn((
+            Instance { name: "Baked".to_string(), class_name: ClassName::Part, ..Default::default() },
+            BasePart::default(),
+            Transform::default(),
+            crate::space::instance_loader::InstanceFile {
+                toml_path: synthetic.clone(),
+                mesh_path: std::path::PathBuf::new(),
+                name: "Baked".to_string(),
+            },
+        ));
+        save_space(&mut world);
+
+        let after: Vec<Vec<u8>> = [&brick, &crate_file].iter().map(|p| std::fs::read(p).unwrap()).collect();
+        assert_eq!(String::from_utf8_lossy(&after[0]), String::from_utf8_lossy(&before[0]), "Brick was rewritten");
+        assert_eq!(String::from_utf8_lossy(&after[1]), String::from_utf8_lossy(&before[1]), "Crate was rewritten");
+        assert!(!synthetic.parent().unwrap().exists(), "a baked part got a folder on disk");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

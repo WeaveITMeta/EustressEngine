@@ -1,11 +1,17 @@
 // ============================================================================
 // Eustress Engine Studio - Properties Panel
 // Dynamic property editor for selected entities
+//
+// One row grammar, set by PropStyle: every row is a help gutter, a label
+// column and a value column, 24px tall, and every value column starts at the
+// same x whatever the row's type. Fields are 20px; focus and selection are
+// the selection cyan; red is for deleting and errors only.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView, CheckBox, Slider, ComboBox, SpinBox, GridBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { TagsEditor, TagChip, TagSuggestion } from "tags_editor.slint";
+import { KitField } from "dialog_kit.slint";
 
 // One categorical-picker swatch as fed from Rust: a display name plus the
 // 0-255 sRGB channels. Shared between the Properties panel and the ribbon's
@@ -85,32 +91,68 @@ export struct PropertyData {
     slider-display: string,
 }
 
+// The panel's metrics. Every row reads these, so the columns line up.
+global PropStyle {
+    out property <length> row-height: 24px;
+    out property <length> field-height: 20px;
+    // The row's vertical inset: (row-height - field-height) / 2.
+    out property <length> row-inset: 2px;
+    out property <length> pad-left: 6px;
+    out property <length> pad-right: 8px;
+    // Between the label column and the value column.
+    out property <length> gap: 6px;
+    // The help gutter, kept on every row so every label starts at one x.
+    out property <length> help-width: 16px;
+    out property <length> font: 11px;
+    // Where text starts inside a field. Read-only values use the same inset,
+    // so they line up with editable ones.
+    out property <length> text-inset: 7px;
+
+    // The label column: 36% of the row, between 80 and 128 px, which leaves
+    // a three-field vector room at the narrowest docks.
+    public pure function label-width(row: length) -> length {
+        return max(80px, min(128px, row * 0.36));
+    }
+}
+
 // Help icon button — shown left of property label when description is present.
 // Displays a tooltip on hover; on click opens the /learn documentation page.
-// Color: grey by default, turns blue (accent) when description has a learn-url.
+// A ring in the disabled grey; with a learn-url, hovering fills it cyan.
 export component HelpIcon inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
+    // Keep the gutter on a row without help, so its label lines up with the
+    // rows that have it. The Properties rows set it; other callers keep the
+    // old behaviour (no help, no gutter).
+    in property <bool> reserve-space: false;
+    // Keep the gutter but draw no icon (Attribute and Parameter rows show
+    // their note on the binding dot instead).
+    in property <bool> suppressed: false;
+    // The gutter's width.
+    in property <length> slot-width: 18px;
 
     callback open-learn-url(string);
 
-    width: show-help-icons && description != "" ? 18px : 0px;
-    height: 18px;
-    visible: show-help-icons && description != "";
+    property <bool> shown: root.show-help-icons && root.description != "" && !root.suppressed;
+
+    width: root.shown || (root.show-help-icons && root.reserve-space) ? root.slot-width : 0px;
+    // Fills the row's height, with the circle centered in it. A fixed height
+    // would sit at the top of the row's layout, above the label's midline.
+    min-height: 14px;
 
     // Tooltip popup — uses PopupWindow so it renders above all panels
     help-popup := PopupWindow {
         x: 20px;
         y: -6px;
-        width: min(300px, max(120px, description.character-count * 6.5px + 20px));
+        width: min(300px, max(120px, root.description.character-count * 6.5px + 20px));
         height: tip-text.preferred-height + 12px;
 
         Rectangle {
             background: Theme.panel-background;
-            border-radius: 4px;
+            border-radius: Theme.radius-sm;
             border-width: 1px;
-            border-color: learn-url != "" ? Theme.accent-blue : Theme.border-color;
+            border-color: Theme.border-color;
             drop-shadow-blur: 8px;
             drop-shadow-color: Theme.shadow-float;
 
@@ -118,7 +160,7 @@ export component HelpIcon inherits Rectangle {
                 x: 8px;
                 y: 6px;
                 width: parent.width - 16px;
-                text: description;
+                text: root.description;
                 color: Theme.text-primary;
                 font-size: 11px;
                 wrap: word-wrap;
@@ -126,48 +168,155 @@ export component HelpIcon inherits Rectangle {
         }
     }
 
-    tip-area := TouchArea {
-        mouse-cursor: learn-url != "" ? pointer : default;
+    if root.shown: tip-area := TouchArea {
+        mouse-cursor: root.learn-url != "" ? pointer : default;
         clicked => {
             if root.learn-url != "" {
                 root.open-learn-url(root.learn-url);
             }
         }
         moved => {
-            if self.has-hover && root.description != "" {
+            if self.has-hover {
                 help-popup.show();
             }
         }
-    }
 
-    // Icon circle — grey when no URL, blue when has URL
-    Rectangle {
-        width: 14px;
-        height: 14px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        border-radius: 7px;
-        background: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
-                  : tip-area.has-hover ? Theme.button-hover
-                  : learn-url != "" ? Theme.selection-background
-                  : Theme.button-background;
-        border-width: 1px;
-        border-color: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
-                    : learn-url != "" ? Theme.accent-blue
-                    : Theme.border-color;
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: tip-area.has-hover && root.learn-url != "" ? Theme.accent-cyan
+                : tip-area.has-hover ? Theme.button-hover
+                : transparent;
+            border-width: 1px;
+            border-color: tip-area.has-hover && root.learn-url != "" ? Theme.accent-cyan : Theme.text-disabled;
 
-        Text {
-            text: "?";
-            color: learn-url != "" ? white : Theme.text-secondary;
-            font-size: 9px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+            Text {
+                text: "?";
+                color: tip-area.has-hover && root.learn-url != "" ? Theme.panel-background : Theme.text-secondary;
+                font-size: 8px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 }
 
-// Collapsible section header - polished with gradient and better typography
+// The left half of every row: the help gutter and the label column. With
+// `copyable`, a copy button sits at the right end of the label column, inside
+// it, so the value column still starts where every other row's does.
+component PropLabel inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> description;
+    in property <string> learn-url;
+    in property <bool> show-help-icons: true;
+    in property <bool> help-suppressed: false;
+    // The label column's width: PropStyle.label-width less any indent.
+    in property <length> column-width;
+    in property <bool> copyable: false;
+    callback open-learn-url(string);
+    callback copy();
+
+    spacing: 2px;
+
+    HelpIcon {
+        description: root.description;
+        learn-url: root.learn-url;
+        show-help-icons: root.show-help-icons;
+        reserve-space: true;
+        suppressed: root.help-suppressed;
+        slot-width: PropStyle.help-width;
+        open-learn-url(url) => { root.open-learn-url(url); }
+    }
+    Text {
+        width: root.column-width - (root.copyable ? 18px : 0px);
+        text: root.text;
+        color: Theme.text-secondary;
+        font-size: PropStyle.font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.copyable: Rectangle {
+        width: 18px;
+        border-radius: 3px;
+        background: copy-ta.has-hover ? Theme.button-hover : transparent;
+
+        copy-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.copy(); }
+        }
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 11px;
+            height: 11px;
+            source: @image-url("../../assets/icons/ui/copy.svg");
+            image-fit: contain;
+            colorize: copy-ta.has-hover ? Theme.text-primary : Theme.text-disabled;
+        }
+    }
+}
+
+// An axis letter before a vector field, in the axis's gizmo colour.
+component AxisTag inherits Text {
+    width: 9px;
+    font-size: 9px;
+    font-weight: 700;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+// A small up/down pair at the end of a rotation field: one degree a click.
+component Stepper inherits Rectangle {
+    callback up();
+    callback down();
+
+    width: 11px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            border-radius: 2px;
+            background: up-ta.has-hover ? Theme.button-hover : transparent;
+            up-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.up(); }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 7px;
+                height: 7px;
+                source: @image-url("../../assets/icons/ui/chevron-up.svg");
+                image-fit: contain;
+                colorize: up-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+            }
+        }
+        Rectangle {
+            border-radius: 2px;
+            background: down-ta.has-hover ? Theme.button-hover : transparent;
+            down-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.down(); }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 7px;
+                height: 7px;
+                source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: down-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+            }
+        }
+    }
+}
+
+// A category band: chevron, title and, on Attributes and Parameters, a "+".
+// The chevron sits in the help gutter, so titles start where labels do.
 component SectionHeader inherits Rectangle {
     in property <string> title: "";
     in property <string> category: "";
@@ -178,10 +327,10 @@ component SectionHeader inherits Rectangle {
     // Fired when the "+" add button (Attributes and Parameters sections) is clicked
     callback add-clicked();
 
-    height: 32px;
-    background: @linear-gradient(180deg, Theme.button-background 0%, Theme.background-tertiary 100%);
+    height: PropStyle.row-height;
+    background: header-ta.has-hover ? Theme.button-hover : Theme.header-background;
 
-    // Bottom border line
+    // Bottom hairline
     Rectangle {
         y: parent.height - 1px;
         width: 100%;
@@ -200,66 +349,56 @@ component SectionHeader inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 8px;
+        padding-left: PropStyle.pad-left;
+        padding-right: 4px;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: 0px;
 
-        // Chevron with smooth rotation feel
-        Text {
-            width: 14px;
-            text: root.expanded ? "▼" : "▶";
-            color: root.expanded ? Theme.accent-blue : Theme.text-secondary;
-            font-size: 8px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
+        Rectangle {
+            width: PropStyle.help-width;
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 9px;
+                height: 9px;
+                source: root.expanded ? @image-url("../../assets/icons/ui/chevron-down.svg")
+                    : @image-url("../../assets/icons/ui/chevron-right.svg");
+                image-fit: contain;
+                colorize: Theme.text-secondary;
+            }
         }
 
         Text {
+            horizontal-stretch: 1;
             text: root.title;
             color: Theme.text-primary;
-            font-size: 11px;
+            font-size: PropStyle.font;
             font-weight: 600;
-            letter-spacing: 0.3px;
             vertical-alignment: center;
+            overflow: elide;
         }
-
-        // Spacer
-        Rectangle { horizontal-stretch: 1; }
 
         // "+" add button on the Attributes and Parameters sections. Each
         // opens its own modal: an Attribute takes a name, type and value; a
         // Parameter also takes a domain and, optionally, a Connector to read.
         if root.category == "Attributes" || root.category == "Parameters": Rectangle {
             width: 20px;
-            height: 20px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: add-ta.has-hover ? Theme.accent-blue : Theme.button-background;
-            border-width: 1px;
-            border-color: add-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+            border-radius: 3px;
+            background: add-ta.has-hover ? Theme.button-background : transparent;
 
             add-ta := TouchArea {
                 mouse-cursor: pointer;
                 clicked => { root.add-clicked(); }
             }
-            Text {
-                text: "+";
-                color: add-ta.has-hover ? white : Theme.text-secondary;
-                font-size: 14px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        // Item count badge (visual polish)
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 6px;
-                height: 6px;
-                border-radius: 3px;
-                background: root.expanded ? Theme.accent-blue : Theme.text-disabled;
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 10px;
+                height: 10px;
+                source: @image-url("../../assets/icons/ui/plus.svg");
+                image-fit: contain;
+                colorize: add-ta.has-hover ? Theme.accent-cyan : Theme.text-secondary;
             }
         }
     }
@@ -289,16 +428,24 @@ component MaterialDropdown inherits Rectangle {
     // Keyboard-highlighted option index (-1 = none)
     property <int> highlight-index: -1;
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
-    // Bubble focus state up so the Bevy keybind gate
-    // (`text_input_focused`) sees the dropdown as a focused input
-    // when it has keyboard focus or its popup is open. Without this
-    // the Material / Unit rows silently lost the focus signal and
-    // global Delete/Backspace shortcuts fired through.
-    out property <bool> has-focus: mat-focus.has-focus || root.dropdown-open;
+    // Focused while the list is open: the Bevy keybind gate
+    // (`text_input_focused`) keeps Delete/Backspace and WASD for the list,
+    // and the Properties sync waits. A CLOSED dropdown is not focused, even
+    // though its scope keeps keyboard focus after a pick: counting that held
+    // `any-input-has-focus` true, which froze the whole panel on its old
+    // values until the user clicked another field ("the pick did not
+    // apply", build 13).
+    out property <bool> has-focus: root.dropdown-open;
     changed has-focus => { root.focus-changed(self.has-focus); }
+
+    // The value just picked, shown at once until the rebuilt row brings the
+    // applied value (a rebuild recreates the row, which clears it; a pick
+    // that did not apply therefore shows its real value again).
+    property <string> picked: "";
+    property <string> shown: root.picked != "" ? root.picked : root.value;
+    changed value => { root.picked = ""; }
 
     mat-focus := FocusScope {
         key-pressed(event) => {
@@ -315,6 +462,7 @@ component MaterialDropdown inherits Rectangle {
             if event.text == Key.Return {
                 if root.dropdown-open {
                     if root.highlight-index >= 0 && root.highlight-index < root.options.length {
+                        root.picked = root.options[root.highlight-index];
                         root.value-changed(root.options[root.highlight-index]);
                     }
                     root.dropdown-open = false;
@@ -344,80 +492,80 @@ component MaterialDropdown inherits Rectangle {
             return reject;
         }
 
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        HorizontalLayout {
+            padding-left: PropStyle.pad-left;
+            padding-right: PropStyle.pad-right;
+            padding-top: PropStyle.row-inset;
+            padding-bottom: PropStyle.row-inset;
+            spacing: PropStyle.gap;
 
-        HelpIcon {
-            description: root.description;
-            learn-url: root.learn-url;
-            show-help-icons: root.show-help-icons;
-            open-learn-url(url) => { root.open-learn-url(url); }
-        }
+            PropLabel {
+                text: root.label;
+                description: root.description;
+                learn-url: root.learn-url;
+                show-help-icons: root.show-help-icons;
+                column-width: PropStyle.label-width(root.width);
+                open-learn-url(url) => { root.open-learn-url(url); }
+            }
 
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
+            // Dropdown button: the value, and a chevron that says it opens.
+            mat-btn := Rectangle {
+                horizontal-stretch: 1;
+                background: mat-btn-touch.has-hover ? Theme.explorer-item-hover : Theme.input-background;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: root.dropdown-open || mat-focus.has-focus ? Theme.accent-cyan : Theme.input-border;
 
-        // Dropdown button
-        Rectangle {
-            horizontal-stretch: 1;
-            height: 22px;
-            background: mat-btn-touch.has-hover ? Theme.explorer-item-hover : Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: root.dropdown-open ? Theme.accent-blue : (mat-focus.has-focus ? Theme.accent-blue : Theme.input-border);
+                mat-btn-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        mat-focus.focus();
+                        root.dropdown-open = !root.dropdown-open;
+                        if root.dropdown-open {
+                            root.highlight-index = 0;
+                            dropdown-popup.show();
+                        } else {
+                            root.highlight-index = -1;
+                            dropdown-popup.close();
+                        }
+                    }
+                }
 
-            mat-btn-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    mat-focus.focus();
-                    root.dropdown-open = !root.dropdown-open;
-                    if root.dropdown-open {
-                        root.highlight-index = 0;
-                        dropdown-popup.show();
-                    } else {
-                        root.highlight-index = -1;
-                        dropdown-popup.close();
+                HorizontalLayout {
+                    padding-left: PropStyle.text-inset - 1px;
+                    padding-right: 6px;
+                    spacing: 4px;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.shown;
+                        color: Theme.text-primary;
+                        font-size: PropStyle.font;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Image {
+                        width: 9px;
+                        source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
                     }
                 }
             }
-
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 6px;
-                spacing: 4px;
-                alignment: center;
-
-                Text {
-                    text: root.value;
-                    color: Theme.text-primary;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-            }
         }
-    }
     } // close FocusScope
 
-    // Dropdown popup — uses PopupWindow to render above all other content
+    // Dropdown popup — uses PopupWindow to render above all other content.
+    // Opens under the button, as wide as the button.
     dropdown-popup := PopupWindow {
-        x: 112px;
+        x: mat-btn.x;
         y: parent.height;
-        width: parent.width - 120px;
-        height: min(320px, root.options.length * 24px + 12px);
+        width: mat-btn.width;
+        height: min(320px, root.options.length * 23px + 8px);
 
         Rectangle {
             background: Theme.dialog-background;
-            border-radius: 6px;
+            border-radius: Theme.radius-md;
             border-width: 1px;
             border-color: Theme.border-color;
             drop-shadow-blur: 12px;
@@ -425,63 +573,71 @@ component MaterialDropdown inherits Rectangle {
             width: 100%;
             height: 100%;
 
-        // Must be above other properties
-        // Prevent clicks from going through to viewport
-        TouchArea { }
+            // Prevent clicks from going through to viewport
+            TouchArea { }
 
-        VerticalLayout {
-            padding: 4px;
-            spacing: 2px;
+            VerticalLayout {
+                padding: 4px;
 
-            // Scrollable option list
-            ScrollView {
-                vertical-stretch: 1;
+                // Scrollable option list
+                ScrollView {
+                    vertical-stretch: 1;
 
-                VerticalLayout {
-                    spacing: 1px;
+                    VerticalLayout {
+                        spacing: 1px;
 
-                    for option[idx] in root.options: Rectangle {
-                        height: 24px;
-                        // Highlight keyboard-navigated row, hover row, or selected row
-                        background: idx == root.highlight-index ? Theme.selection-background : (opt-touch.has-hover ? Theme.button-hover : (option == root.value ? Theme.button-background : transparent));
-                        border-radius: 3px;
+                        for option[idx] in root.options: Rectangle {
+                            height: 22px;
+                            // Highlight keyboard-navigated row, hover row, or selected row
+                            background: idx == root.highlight-index ? Theme.selection-background
+                                : opt-touch.has-hover ? Theme.button-hover
+                                : transparent;
+                            border-radius: 3px;
 
-                        opt-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.value-changed(option);
-                                root.dropdown-open = false;
-                                root.highlight-index = -1;
-                                dropdown-popup.close();
-                            }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 6px;
-
-                            // Selected checkmark
-                            Text {
-                                width: 14px;
-                                text: option == root.value ? "✓" : "";
-                                color: Theme.accent-blue;
-                                font-size: 11px;
-                                vertical-alignment: center;
+                            opt-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.picked = option;
+                                    root.value-changed(option);
+                                    root.dropdown-open = false;
+                                    root.highlight-index = -1;
+                                    dropdown-popup.close();
+                                }
                             }
 
-                            Text {
-                                text: option;
-                                color: (idx == root.highlight-index || option == root.value) ? Theme.accent-blue : Theme.text-primary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 8px;
+                                spacing: 6px;
+
+                                // The current value's check, in the selection cyan.
+                                Rectangle {
+                                    width: 12px;
+                                    if option == root.shown: Image {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 10px;
+                                        height: 10px;
+                                        source: @image-url("../../assets/icons/ui/check.svg");
+                                        image-fit: contain;
+                                        colorize: Theme.accent-cyan;
+                                    }
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: option;
+                                    color: Theme.text-primary;
+                                    font-size: PropStyle.font;
+                                    font-weight: option == root.shown ? 600 : 400;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         } // close inner Rectangle
     } // close PopupWindow
 
@@ -502,7 +658,6 @@ component MaterialDropdown inherits Rectangle {
     }
 }
 
-// Generic property row with label + value editor - polished design
 // A numeric property shown as a drag slider with a formatted readout.
 //
 // Used where the underlying number has a domain the user does not naturally
@@ -524,28 +679,22 @@ component SliderRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
             open-learn-url(url) => { root.open-learn-url(url); }
-        }
-
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
         }
 
         slider := Slider {
@@ -562,10 +711,10 @@ component SliderRow inherits Rectangle {
         // Readout. Fixed width so the slider does not resize as the text
         // changes width while dragging.
         Text {
-            width: 62px;
+            width: 52px;
             text: root.display-text == "" ? round(slider.value) : root.display-text;
             color: Theme.text-primary;
-            font-size: 11px;
+            font-size: PropStyle.font;
             horizontal-alignment: right;
             vertical-alignment: center;
         }
@@ -589,7 +738,7 @@ component StateDot inherits Rectangle {
         height: dot-tip-text.preferred-height + 12px;
         Rectangle {
             background: Theme.panel-background;
-            border-radius: 4px;
+            border-radius: Theme.radius-sm;
             border-width: 1px;
             border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.border-color;
             drop-shadow-blur: 8px;
@@ -636,9 +785,8 @@ component BoundValue inherits Rectangle {
     in property <string> state;
     in property <string> note;
 
-    height: 22px;
     background: Theme.background-tertiary;
-    border-radius: 3px;
+    border-radius: Theme.radius-sm;
     border-width: 1px;
     border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.input-border;
 
@@ -649,7 +797,7 @@ component BoundValue inherits Rectangle {
         height: bound-tip-text.preferred-height + 12px;
         Rectangle {
             background: Theme.panel-background;
-            border-radius: 4px;
+            border-radius: Theme.radius-sm;
             border-width: 1px;
             border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.border-color;
             drop-shadow-blur: 8px;
@@ -673,8 +821,8 @@ component BoundValue inherits Rectangle {
         }
     }
     HorizontalLayout {
-        padding-left: 7px;
-        padding-right: 8px;
+        padding-left: PropStyle.text-inset - 1px;
+        padding-right: 6px;
         spacing: 6px;
         VerticalLayout {
             alignment: center;
@@ -691,7 +839,7 @@ component BoundValue inherits Rectangle {
             horizontal-stretch: 1;
             text: root.value;
             color: root.state == "faulted" ? Theme.text-secondary : Theme.text-primary;
-            font-size: 11px;
+            font-size: PropStyle.font;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -699,13 +847,13 @@ component BoundValue inherits Rectangle {
 }
 
 // A domain's group row inside Parameters: the domain's name and a rule. The
-// Parameters under it show only their keys.
+// Parameters under it show only their keys. Starts where labels start.
 component ParamGroupRow inherits Rectangle {
     in property <string> domain;
-    height: 24px;
+    height: PropStyle.row-height;
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
+        padding-left: PropStyle.pad-left + PropStyle.help-width;
+        padding-right: PropStyle.pad-right;
         spacing: 8px;
         Text {
             text: root.domain;
@@ -727,14 +875,14 @@ component ParamGroupRow inherits Rectangle {
 }
 
 // A muted line under an empty section, saying what the section is for and how
-// to add the first entry.
+// to add the first entry. Starts where labels start.
 component SectionHint inherits Rectangle {
     in property <string> text;
-    height: section-hint-text.preferred-height + 12px;
+    height: section-hint-text.preferred-height + 10px;
     section-hint-text := Text {
-        x: 12px;
-        y: 6px;
-        width: parent.width - 24px;
+        x: PropStyle.pad-left + PropStyle.help-width;
+        y: 5px;
+        width: parent.width - self.x - PropStyle.pad-right;
         text: root.text;
         color: Theme.text-disabled;
         font-size: 10px;
@@ -792,66 +940,55 @@ component PropRow inherits Rectangle {
     callback trash-clicked(string);
 
     // Hidden focus sink used by `accepted()` handlers to move focus away
-    // from the LineEdit on Enter. Without this, pressing Enter commits the
-    // value but the input keeps its focused-state highlight (blue border)
-    // until the user clicks elsewhere. Sized 0×0 so it's invisible; sits
-    // outside the layout so it doesn't claim space.
+    // from the field on Enter. Without this, pressing Enter commits the
+    // value but the input keeps its focused-state highlight until the user
+    // clicks elsewhere. Sized 0×0 so it's invisible; sits outside the layout
+    // so it doesn't claim space.
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px + root.indent;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left + root.indent;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        // Help icon: only takes space when description is present. Attribute
-        // and Parameter rows show their note on the state dot instead, so
-        // their labels stay in one column.
-        HelpIcon {
+        // Attribute and Parameter rows show their note on the state dot
+        // instead of a help icon; the gutter stays so labels line up.
+        PropLabel {
+            text: root.display-label != "" ? root.display-label : root.label;
             description: root.description;
             learn-url: root.learn-url;
-            show-help-icons: root.show-help-icons && !root.is-attribute;
+            show-help-icons: root.show-help-icons;
+            help-suppressed: root.is-attribute;
+            column-width: PropStyle.label-width(root.width) - root.indent;
             open-learn-url(url) => { root.open-learn-url(url); }
         }
-        
-        // Label — fixed width for consistent alignment
-        Text {
-            width: 110px - root.indent;
-            text: root.display-label != "" ? root.display-label : root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        
-        // Value editor with refined styling — always present but visibility controlled
+
+        // The value slot: an editable field, a value a Connector feeds, or
+        // plain text. One slot whichever it holds, so every value starts at
+        // the same x (and a read-only Attribute or Parameter value lines up
+        // with editable ones).
+        // A small minimum, so a narrow dock never pushes the row past the
+        // panel edge.
         Rectangle {
             horizontal-stretch: 1;
-            height: 22px;
-            // A read-only Attribute or Parameter row keeps this slot for its
-            // bound value box (below), so read-only values line up with
-            // editable ones.
-            visible: root.editable || root.is-attribute;
-            background: root.editable ? Theme.input-background : transparent;
-            border-radius: 3px;
-            border-width: root.editable ? 1px : 0px;
-            border-color: input-edit.has-focus ? Theme.accent-blue : Theme.input-border;
-            
-            input-edit := LineEdit {
-                x: 0px;
-                y: 0px;
+            min-width: 32px;
+
+            input-edit := KitField {
                 width: 100%;
                 height: 100%;
-                enabled: root.editable;
                 visible: root.editable;
+                enabled: root.editable;
+                font-size: PropStyle.font;
                 text: root.value;
                 // Report focus only — do NOT commit per keystroke.
                 //
                 // Committing on every keystroke wrote the part's TOML and
                 // rebuilt the whole property model once per character, and the
-                // rebuild re-bound this LineEdit's `text` mid-typing, which is
+                // rebuild re-bound this field's `text` mid-typing, which is
                 // what made the panel feel unresponsive. It also applied
                 // meaningless intermediates: typing "0,120,215" set the part to
                 // 0,120,2 (a green) on the way through.
@@ -864,7 +1001,7 @@ component PropRow inherits Rectangle {
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
-                    // Drop the LineEdit's focused state so the row no
+                    // Drop the field's focused state so the row no
                     // longer shows the active-input highlight.
                     focus_sink.focus();
                 }
@@ -878,20 +1015,24 @@ component PropRow inherits Rectangle {
                 state: root.binding-state;
                 note: root.description;
             }
-        }
 
-        if !root.editable && !root.is-attribute: Text {
-            horizontal-stretch: 1;
-            text: root.value;
-            color: Theme.text-primary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
+            // Any other read-only value: plain text at the field's text inset.
+            if !root.editable && !root.is-attribute: Text {
+                x: PropStyle.text-inset;
+                width: parent.width - PropStyle.text-inset;
+                height: 100%;
+                text: root.value;
+                color: Theme.text-primary;
+                font-size: PropStyle.font;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
 
         // ── Attribute controls (type badge + gear + trash) ──
         if root.is-attribute: HorizontalLayout {
-            spacing: 3px;
+            horizontal-stretch: 0;
+            spacing: 2px;
 
             // Binding state of an editable Parameter (published): a dot whose
             // hover shows the note. A read-only one carries its dot inside
@@ -901,60 +1042,60 @@ component PropRow inherits Rectangle {
                 note: root.description;
             }
 
-            // Type badge
-            Rectangle {
-                width: 46px;
-                height: 18px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 9px;
-                background: Theme.selection-background;
-                Text {
-                    text: root.attribute-type;
-                    color: Theme.accent-blue;
-                    font-size: 8px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    overflow: elide;
+            // Type badge, as wide as its text
+            VerticalLayout {
+                horizontal-stretch: 0;
+                alignment: center;
+                Rectangle {
+                    height: 16px;
+                    border-radius: 8px;
+                    background: Theme.background-tertiary;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        Text {
+                            text: root.attribute-type;
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
 
             // Gear (change type / edit) icon
             Rectangle {
                 width: 20px;
-                height: 20px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
+                border-radius: 3px;
                 background: gear-ta.has-hover ? Theme.button-hover : transparent;
                 gear-ta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.gear-clicked(root.label, root.attribute-type, root.value); }
                 }
                 Image {
-                    width: 13px;
-                    height: 13px;
+                    width: 12px;
+                    height: 12px;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     source: @image-url("../../assets/icons/ui/settings.svg");
                     image-fit: contain;
-                    colorize: gear-ta.has-hover ? Theme.accent-blue : Theme.text-secondary;
+                    colorize: gear-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
                 }
             }
 
             // Trash (delete) icon — red on hover
             Rectangle {
                 width: 20px;
-                height: 20px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
+                border-radius: 3px;
                 background: trash-ta.has-hover ? Theme.error-surface-hover : transparent;
                 trash-ta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.trash-clicked(root.label); }
                 }
                 Image {
-                    width: 13px;
-                    height: 13px;
+                    width: 12px;
+                    height: 12px;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     source: @image-url("../../assets/icons/ui/delete.svg");
@@ -966,8 +1107,9 @@ component PropRow inherits Rectangle {
     }
 }
 
-// Vec3 property row with colored X/Y/Z fields - polished design
-// Value format: "x, y, z" (comma-separated)
+// Vec3 property row: an axis letter and a field for each of X, Y and Z.
+// Value format: "x, y, z" (comma-separated). The copy button sits at the end
+// of the label column.
 component Vec3Row inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "0, 0, 0"; // "x, y, z" format
@@ -995,14 +1137,13 @@ component Vec3Row inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
-    // Fired when the user clicks the tiny copy icon at the end of
-    // the row. The argument is the full "x, y, z" triple so the
-    // parent can push it to the OS clipboard without re-parsing
-    // the LineEdit state.
+    // Fired when the user clicks the copy icon. The argument is the full
+    // "x, y, z" triple so the parent can push it to the OS clipboard without
+    // re-parsing the field state.
     callback copy-vector(string);
-    // Fired when the user clicks the paste icon. The argument is
-    // irrelevant (empty string); the parent reads the clipboard on
-    // the Rust side + pushes a value-changed.
+    // Paste has no button: the fields are plain text, so a Ctrl+V of
+    // "5, 10, 20" keeps its commas, and on Enter the Rust handler reads the
+    // three parts and applies them together. Kept for callers.
     callback paste-vector();
 
     // Hidden focus sink — see PropRow for rationale. Pressing Enter in
@@ -1010,231 +1151,90 @@ component Vec3Row inherits Rectangle {
     // visually.
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
+            copyable: true;
             open-learn-url(url) => { root.open-learn-url(url); }
-        }
-        
-        // Label — 92px instead of 110 to make room for the copy/
-        // paste pair we now anchor on the left edge of the row.
-        Text {
-            width: 92px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
+            copy => { root.copy-vector(x-edit.text + ", " + y-edit.text + ", " + z-edit.text); }
         }
 
-        // Copy button (LEFT-anchored, no paste twin).
-        //
-        // Paste doesn't need a button: the X/Y/Z LineEdits use
-        // `input-type: text` so a Ctrl+V of "5, 10, 20" keeps its
-        // commas. Hitting Enter fires the `accepted` handler, which
-        // concatenates `self.text + ", " + y + ", " + z` → the Rust
-        // value-changed handler reads ≥ 3 comma parts and takes the
-        // first three, so the pasted triple wins over the sibling
-        // fields. A single-scalar edit produces exactly 3 parts and
-        // still commits normally.
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: copy-touch.has-hover ? Theme.button-hover : transparent;
-            copy-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.copy-vector(x-edit.text + ", " + y-edit.text + ", " + z-edit.text);
-                }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/copy.svg");
-                image-fit: contain;
-                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-            }
-        }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
 
-        // X field with accent border
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 52px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-            
-            // Left accent bar
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: 3px;
-                height: 100%;
-                background: Theme.gizmo-x;
-            }
-            
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 4px;
-                spacing: 2px;
-                
-                Text {
-                    width: 12px;
-                    text: "X";
-                    color: Theme.gizmo-x;
-                    font-size: 9px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+            AxisTag { text: "X"; color: Theme.gizmo-x; }
+            x-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.x-value;
+                // A plain text field (not decimal-only), so Ctrl+V of a pasted
+                // triple like "5, 10, 20" keeps its commas: the Rust
+                // value-changed handler reads three or more comma parts and
+                // applies them to X, Y and Z together.
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
                 }
-                
-                x-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.x-value;
-                    // `text` (not `decimal`) so Ctrl+V of a pasted
-                    // triple like "5, 10, 20" keeps its commas — the
-                    // Rust value-changed handler reads ≥3 comma parts
-                    // and distributes into X/Y/Z atomically. `decimal`
-                    // stripped the commas, breaking the paste flow.
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(self.text + ", " + y-edit.text + ", " + z-edit.text);
-                        focus_sink.focus();
-                    }
+                accepted(t) => {
+                    root.value-changed(self.text + ", " + y-edit.text + ", " + z-edit.text);
+                    focus_sink.focus();
                 }
             }
-        }
-        
-        // Y field with accent border
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 52px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-            
-            // Left accent bar
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: 3px;
-                height: 100%;
-                background: Theme.gizmo-y;
-            }
-            
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 4px;
-                spacing: 2px;
-                
-                Text {
-                    width: 12px;
-                    text: "Y";
-                    color: Theme.gizmo-y;
-                    font-size: 9px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
-                
-                y-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.y-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(x-edit.text + ", " + self.text + ", " + z-edit.text);
-                        focus_sink.focus();
-                    }
-                }
-            }
-        }
-        
-        // Z field with accent border
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 52px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-            
-            // Left accent bar
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: 3px;
-                height: 100%;
-                background: Theme.gizmo-z;
-            }
-            
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 4px;
-                spacing: 2px;
-                
-                Text {
-                    width: 12px;
-                    text: "Z";
-                    color: Theme.gizmo-z;
-                    font-size: 9px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
-                
-                z-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.z-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(x-edit.text + ", " + y-edit.text + ", " + self.text);
-                        focus_sink.focus();
-                    }
-                }
-            }
-        }
 
+            AxisTag { text: "Y"; color: Theme.gizmo-y; }
+            y-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.y-value;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                }
+                accepted(t) => {
+                    root.value-changed(x-edit.text + ", " + self.text + ", " + z-edit.text);
+                    focus_sink.focus();
+                }
+            }
+
+            AxisTag { text: "Z"; color: Theme.gizmo-z; }
+            z-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.z-value;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                }
+                accepted(t) => {
+                    root.value-changed(x-edit.text + ", " + y-edit.text + ", " + self.text);
+                    focus_sink.focus();
+                }
+            }
+        }
     }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Vec2Row — Vector2 of pixel values (e.g. `BillboardGui.SizeOffset`,
-// `Frame.AnchorPoint`). Same layout as `Vec3Row` minus the Z field —
-// X / Y inputs side-by-side with axis-coloured accent bars and a
-// copy button. Roblox-style Vector2 is pure pixels (no Scale column),
-// so neither field carries a "Pixels" sub-label — the row's name
-// ("SizeOffset", "AnchorPoint", …) already communicates the unit
-// without the redundant decoration the legacy text-input variant
-// pulled in from the UDim2 widget.
+// `Frame.AnchorPoint`). Vec3Row without the Z field. Roblox-style Vector2 is
+// pure pixels (no Scale column), so neither field carries a "Pixels"
+// sub-label; the row's name already says what it is.
 // ────────────────────────────────────────────────────────────────────────────
 component Vec2Row inherits Rectangle {
     in property <string> label: "";
@@ -1254,145 +1254,68 @@ component Vec2Row inherits Rectangle {
 
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
+            copyable: true;
             open-learn-url(url) => { root.open-learn-url(url); }
-        }
-        Text {
-            width: 92px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        Rectangle {
-            width: 18px; height: 22px;
-            border-radius: 3px;
-            background: copy-touch.has-hover ? Theme.button-hover : transparent;
-            copy-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.copy-vector(x-edit.text + ", " + y-edit.text);
-                }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px; height: 12px;
-                source: @image-url("../../assets/icons/ui/copy.svg");
-                image-fit: contain;
-                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-            }
+            copy => { root.copy-vector(x-edit.text + ", " + y-edit.text); }
         }
 
-        // X field
-        Rectangle {
+        HorizontalLayout {
             horizontal-stretch: 1;
-            min-width: 60px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-            Rectangle {
-                x: 0px; y: 0px; width: 3px; height: 100%;
-                background: Theme.gizmo-x;
-            }
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 4px;
-                spacing: 2px;
-                Text {
-                    width: 12px;
-                    text: "X";
-                    color: Theme.gizmo-x;
-                    font-size: 9px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
-                x-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.x-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => { root.focus-changed(true); }
-                    accepted(t) => {
-                        root.value-changed(self.text + ", " + y-edit.text);
-                        focus_sink.focus();
-                    }
-                }
-            }
-        }
+            spacing: 3px;
 
-        // Y field
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 60px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-            Rectangle {
-                x: 0px; y: 0px; width: 3px; height: 100%;
-                background: Theme.gizmo-y;
-            }
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 4px;
-                spacing: 2px;
-                Text {
-                    width: 12px;
-                    text: "Y";
-                    color: Theme.gizmo-y;
-                    font-size: 9px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+            AxisTag { text: "X"; color: Theme.gizmo-x; }
+            x-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.x-value;
+                enabled: root.editable;
+                edited(t) => { root.focus-changed(true); }
+                accepted(t) => {
+                    root.value-changed(self.text + ", " + y-edit.text);
+                    focus_sink.focus();
                 }
-                y-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.y-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => { root.focus-changed(true); }
-                    accepted(t) => {
-                        root.value-changed(x-edit.text + ", " + self.text);
-                        focus_sink.focus();
-                    }
+            }
+
+            AxisTag { text: "Y"; color: Theme.gizmo-y; }
+            y-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.y-value;
+                enabled: root.editable;
+                edited(t) => { root.focus-changed(true); }
+                accepted(t) => {
+                    root.value-changed(x-edit.text + ", " + self.text);
+                    focus_sink.focus();
                 }
             }
         }
     }
 }
 
-// Rotation Vec3 row — degrees, supports negative values and +/- step buttons
-// Step buttons use a special "step:X:±1" prefix that Rust's on-property-changed handles
-// by parsing the current value, applying the step, and writing back.
-// Direct text edits send "X, Y, Z" as usual.
 // ────────────────────────────────────────────────────────────────────────────
 // UDim2Row — Roblox-parity 2D layout coordinate (Position / Size).
-// Renders four numeric inputs in a 2×2 grid: rows are X / Y axes,
-// columns are Scale / Pixels (the Roblox `UDim` Offset component
-// is shown as "Pixels" in the UI for clarity — "Offset" is
-// ambiguous next to a position/size widget). Header line carries
-// the property name + copy button. Total height ≈ 76 px (header
-// 24 px + two 24 px field rows with 2 px spacing + 4 px top/bottom
-// padding).
+// A label line with the copy button, then one line per axis with its Scale
+// and Pixels fields (the Roblox `UDim` Offset component is shown as "Pixels":
+// "Offset" is ambiguous next to a position/size widget).
 //
-//   Size                                                       [📋]
+//   Size                                   [copy]
 //     X  Scale [ 0   ]   Pixels [ 200 ]
 //     Y  Scale [ 0   ]   Pixels [ 50  ]
 //
@@ -1427,201 +1350,148 @@ component UDim2Row inherits Rectangle {
     // Hidden focus sink — see PropRow for rationale.
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    // Explicit height — header + 2 axis rows + 4px gaps. Slint's
-    // `preferred-height` doesn't propagate through a `for prop[i]`
-    // loop, so the host VerticalLayout uses this fixed height to
-    // allocate the row slot. Drift in any line height below requires
-    // bumping this number.
-    height: 76px;
-    border-radius: 2px;
+    // Three 20px lines, 2px apart, inside the row's 2px insets. Explicit,
+    // because Slint's `preferred-height` doesn't propagate through a
+    // `for prop[i]` loop and the host layout sizes the row from this.
+    height: 3 * PropStyle.field-height + 2 * 2px + 2 * PropStyle.row-inset;
 
     VerticalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        padding-top: 4px;
-        padding-bottom: 4px;
-        spacing: 3px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: 2px;
 
-        // ── Header: label + copy button ────────────────────────────────
-        Rectangle {
-            height: 22px;
-            HorizontalLayout {
-                spacing: 4px;
-                HelpIcon {
-                    description: root.description;
-                    learn-url: root.learn-url;
-                    show-help-icons: root.show-help-icons;
-                    open-learn-url(url) => { root.open-learn-url(url); }
+        // ── Label line: label + copy button ────────────────────────────
+        HorizontalLayout {
+            height: PropStyle.field-height;
+            PropLabel {
+                text: root.label;
+                description: root.description;
+                learn-url: root.learn-url;
+                show-help-icons: root.show-help-icons;
+                column-width: PropStyle.label-width(root.width);
+                copyable: true;
+                open-learn-url(url) => { root.open-learn-url(url); }
+                copy => {
+                    root.copy-vector(xs.text + ", " + xo.text + ", " + ys.text + ", " + yo.text);
                 }
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.label;
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    overflow: elide;
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // ── X-axis line: Scale | Pixels ────────────────────────────────
+        HorizontalLayout {
+            height: PropStyle.field-height;
+            padding-left: PropStyle.help-width;
+            spacing: 4px;
+            AxisTag { text: "X"; color: Theme.gizmo-x; }
+            Text {
+                width: 30px;
+                text: "Scale";
+                color: Theme.text-disabled;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+            xs := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.x-scale;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                    root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
                 }
-                Rectangle {
-                    width: 18px; height: 22px;
-                    border-radius: 3px;
-                    background: copy-touch.has-hover ? Theme.button-hover : transparent;
-                    copy-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.copy-vector(
-                                xs.text + ", " + xo.text + ", " + ys.text + ", " + yo.text
-                            );
-                        }
-                    }
-                    Image {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: 12px; height: 12px;
-                        source: @image-url("../../assets/icons/ui/copy.svg");
-                        image-fit: contain;
-                        colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-                    }
+                accepted(t) => {
+                    root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
+                    focus_sink.focus();
+                }
+            }
+            Text {
+                width: 34px;
+                text: "Pixels";
+                color: Theme.text-disabled;
+                font-size: 10px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+            xo := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.x-offset;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                    root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
+                }
+                accepted(t) => {
+                    root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
+                    focus_sink.focus();
                 }
             }
         }
 
-        // ── X-axis row: Scale | Pixels ─────────────────────────────────
-        Rectangle {
-            height: 22px;
-            // Coloured accent strip on the left edge (red = X) matches
-            // the Vec3Row convention so the user can scan rows by axis.
-            Rectangle {
-                x: 0px;
-                y: 1px;
-                width: 3px;
-                height: parent.height - 2px;
-                background: Theme.gizmo-x;
-                border-radius: 1.5px;
+        // ── Y-axis line: Scale | Pixels ────────────────────────────────
+        HorizontalLayout {
+            height: PropStyle.field-height;
+            padding-left: PropStyle.help-width;
+            spacing: 4px;
+            AxisTag { text: "Y"; color: Theme.gizmo-y; }
+            Text {
+                width: 30px;
+                text: "Scale";
+                color: Theme.text-disabled;
+                font-size: 10px;
+                vertical-alignment: center;
             }
-            HorizontalLayout {
-                padding-left: 10px;
-                spacing: 6px;
-                Text {
-                    text: "X";
-                    color: Theme.gizmo-x;
-                    font-size: 11px;
-                    font-weight: 600;
-                    width: 12px;
-                    vertical-alignment: center;
+            ys := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.y-scale;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                    root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
                 }
-                Text {
-                    text: "Scale";
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    width: 36px;
-                    vertical-alignment: center;
+                accepted(t) => {
+                    root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
+                    focus_sink.focus();
                 }
-                xs := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.x-scale;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                        root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
-                    }
-                    accepted(t) => {
-                        root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
-                        focus_sink.focus();
-                    }
+            }
+            Text {
+                width: 34px;
+                text: "Pixels";
+                color: Theme.text-disabled;
+                font-size: 10px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+            yo := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.y-offset;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
+                    root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
                 }
-                Text {
-                    text: "Pixels";
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    width: 38px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-                xo := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.x-offset;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                        root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
-                    }
-                    accepted(t) => {
-                        root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
-                        focus_sink.focus();
-                    }
+                accepted(t) => {
+                    root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
+                    focus_sink.focus();
                 }
             }
         }
+    }
+}
 
-        // ── Y-axis row: Scale | Pixels ─────────────────────────────────
-        Rectangle {
-            height: 22px;
-            // Green accent strip — matches the Vec3 Y axis colour.
-            Rectangle {
-                x: 0px;
-                y: 1px;
-                width: 3px;
-                height: parent.height - 2px;
-                background: Theme.gizmo-y;
-                border-radius: 1.5px;
-            }
-            HorizontalLayout {
-                padding-left: 10px;
-                spacing: 6px;
-                Text {
-                    text: "Y";
-                    color: Theme.gizmo-y;
-                    font-size: 11px;
-                    font-weight: 600;
-                    width: 12px;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: "Scale";
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    width: 36px;
-                    vertical-alignment: center;
-                }
-                ys := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.y-scale;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                        root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
-                    }
-                    accepted(t) => {
-                        root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
-                        focus_sink.focus();
-                    }
-                }
-                Text {
-                    text: "Pixels";
-                    color: Theme.text-disabled;
-                    font-size: 10px;
-                    width: 38px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-                yo := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.y-offset;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                        root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
-                    }
-                    accepted(t) => {
-                        root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
-                        focus_sink.focus();
-                    }
-                }
-            }   // close HorizontalLayout (Y row)
-        }       // close Rectangle wrapper (Y row)
-    }           // close VerticalLayout
-}               // close UDim2Row Rectangle
-
+// Rotation row: degrees, negatives allowed, with a one-degree stepper at the
+// end of each field when the dock is wide enough to hold them. A stepper click sends "step:<axis>:±1:<x>,<y>,<z>", which
+// Rust's on-property-changed applies to the current value; a typed edit sends
+// "x, y, z" as usual.
 component RotationVec3Row inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "0, 0, 0";
@@ -1632,7 +1502,7 @@ component RotationVec3Row inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
-    
+
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: rx-edit.has-focus || ry-edit.has-focus || rz-edit.has-focus;
 
@@ -1651,214 +1521,94 @@ component RotationVec3Row inherits Rectangle {
     // Hidden focus sink — see PropRow for rationale.
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    height: 28px;
-    border-radius: 2px;
+    // The steppers need room: on a narrow dock the three fields keep it
+    // instead, and the value is typed.
+    property <bool> show-steppers: root.width >= 360px;
+
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
+            copyable: true;
             open-learn-url(url) => { root.open-learn-url(url); }
+            copy => { root.copy-vector(rx-edit.text + ", " + ry-edit.text + ", " + rz-edit.text); }
         }
 
-        // Label — 92px instead of 110 to make room for the left-
-        // anchored copy button; matches `Vec3Row`.
-        Text {
-            width: 92px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        // Copy button (LEFT-anchored). Paste doesn't need a button:
-        // Ctrl+V of a triple like "90, 0, 45" into any rx/ry/rz field
-        // then Enter is detected by the Rust value-changed handler
-        // (>=3 comma parts) and applied atomically.
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: r-copy-touch.has-hover ? Theme.button-hover : transparent;
-            r-copy-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.copy-vector(rx-edit.text + ", " + ry-edit.text + ", " + rz-edit.text);
-                }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/copy.svg");
-                image-fit: contain;
-                colorize: r-copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-            }
-        }
-
-        // ── X ──────────────────────────────────────────────
-        Rectangle {
+        HorizontalLayout {
             horizontal-stretch: 1;
-            min-width: 68px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
+            spacing: 3px;
 
-            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-x; }
-
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 2px;
-                spacing: 2px;
-
-                Text { width: 12px; text: "X"; color: Theme.gizmo-x; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
-
-                rx-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.x-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(self.text + ", " + ry-edit.text + ", " + rz-edit.text);
-                        focus_sink.focus();
-                    }
+            AxisTag { text: "X"; color: Theme.gizmo-x; }
+            rx-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.x-value;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
                 }
-
-                Rectangle {
-                    width: 16px; height: 18px; background: rx-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    rx-m := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:x:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Rectangle {
-                    width: 16px; height: 18px; background: rx-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    rx-p := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:x:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                accepted(t) => {
+                    root.value-changed(self.text + ", " + ry-edit.text + ", " + rz-edit.text);
+                    focus_sink.focus();
                 }
             }
-        }
+            if root.show-steppers: Stepper {
+                up => { root.value-changed("step:x:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                down => { root.value-changed("step:x:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+            }
 
-        // ── Y ──────────────────────────────────────────────
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 68px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-
-            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-y; }
-
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 2px;
-                spacing: 2px;
-
-                Text { width: 12px; text: "Y"; color: Theme.gizmo-y; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
-
-                ry-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.y-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(rx-edit.text + ", " + self.text + ", " + rz-edit.text);
-                        focus_sink.focus();
-                    }
+            AxisTag { text: "Y"; color: Theme.gizmo-y; }
+            ry-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.y-value;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
                 }
-
-                Rectangle {
-                    width: 16px; height: 18px; background: ry-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    ry-m := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:y:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Rectangle {
-                    width: 16px; height: 18px; background: ry-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    ry-p := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:y:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                accepted(t) => {
+                    root.value-changed(rx-edit.text + ", " + self.text + ", " + rz-edit.text);
+                    focus_sink.focus();
                 }
             }
-        }
+            if root.show-steppers: Stepper {
+                up => { root.value-changed("step:y:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                down => { root.value-changed("step:y:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+            }
 
-        // ── Z ──────────────────────────────────────────────
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: 68px;
-            height: 22px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
-
-            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-z; }
-
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 2px;
-                spacing: 2px;
-
-                Text { width: 12px; text: "Z"; color: Theme.gizmo-z; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
-
-                rz-edit := LineEdit {
-                    horizontal-stretch: 1;
-                    text: root.z-value;
-                    input-type: text;
-                    enabled: root.editable;
-                    edited(t) => {
-                        root.focus-changed(true);
-                    }
-                    accepted(t) => {
-                        root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + self.text);
-                        focus_sink.focus();
-                    }
+            AxisTag { text: "Z"; color: Theme.gizmo-z; }
+            rz-edit := KitField {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                font-size: PropStyle.font;
+                text: root.z-value;
+                enabled: root.editable;
+                edited(t) => {
+                    root.focus-changed(true);
                 }
-
-                Rectangle {
-                    width: 16px; height: 18px; background: rz-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    rz-m := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:z:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Rectangle {
-                    width: 16px; height: 18px; background: rz-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
-                    rz-p := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.value-changed("step:z:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
-                    }
-                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                accepted(t) => {
+                    root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + self.text);
+                    focus_sink.focus();
                 }
             }
+            if root.show-steppers: Stepper {
+                up => { root.value-changed("step:z:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                down => { root.value-changed("step:z:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+            }
         }
-
     }
 }
 
@@ -1897,7 +1647,7 @@ export component ColorSwatchCell inherits Rectangle {
         viewbox-width: 18;
         viewbox-height: 16;
         fill: rgb(root.r, root.g, root.b);
-        stroke: touch.has-hover ? Theme.accent-blue : #20202080;  // theme-exempt: semi-transparent swatch outline, no alpha border token
+        stroke: touch.has-hover ? Theme.accent-cyan : #20202080;  // theme-exempt: semi-transparent swatch outline, no alpha border token
         stroke-width: touch.has-hover ? 1.5px : 0.5px;
         commands: "M 0 8 L 4.5 0 L 13.5 0 L 18 8 L 13.5 16 L 4.5 16 Z";
         animate stroke-width { duration: 80ms; }
@@ -1933,12 +1683,124 @@ export component ColorSwatchCell inherits Rectangle {
     }
 }
 
-// Color property row with swatch + hex value - polished design
+// Colors committed from any ColorRow picker this Studio session, newest
+// first. A global, so every color row shares one list and the list outlives
+// the rows the Properties panel rebuilds on each refresh. Eight fixed slots;
+// `count` says how many are filled.
+global ColorPickerRecents {
+    in-out property <[color]> colors: [
+        Colors.transparent, Colors.transparent, Colors.transparent, Colors.transparent,
+        Colors.transparent, Colors.transparent, Colors.transparent, Colors.transparent
+    ];
+    in-out property <int> count: 0;
+}
+
+// One captioned field in the ColorRow picker (Hex, R, G, B, H, S, V).
+//
+// The text follows `display` until the user types. Typed text is a draft,
+// reported through `accepted` on Enter or when the field loses focus (Tab, a
+// click into another field), then replaced by `display` as it landed (clamped,
+// normalised). Bumping `reset-epoch` drops a draft: the picker does that when a
+// drag or a swatch changes the color, so a half-typed number can never land
+// on top of that change.
+component ColorPickerField inherits Rectangle {
+    in property <string> caption;
+    in property <color> caption-color: Theme.text-secondary;
+    in property <length> caption-width: 10px;
+    in property <string> display;
+    in property <string> unit: "";
+    in property <int> reset-epoch: 0;
+    callback accepted(string);
+    callback edited();
+
+    property <bool> dirty: false;
+
+    changed display => {
+        if !root.dirty {
+            input.text = root.display;
+        }
+    }
+    changed reset-epoch => {
+        root.dirty = false;
+        input.text = root.display;
+    }
+
+    height: 22px;
+
+    HorizontalLayout {
+        spacing: 4px;
+
+        Text {
+            width: root.caption-width;
+            text: root.caption;
+            color: root.caption-color;
+            font-size: 10px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: input.has-focus ? Theme.accent-cyan : Theme.input-border;
+
+            input := TextInput {
+                x: 5px;
+                width: parent.width - 10px - (root.unit != "" ? 8px : 0px);
+                height: 100%;
+                text: root.display;
+                color: Theme.text-primary;
+                font-size: 11px;
+                vertical-alignment: center;
+                single-line: true;
+                edited => {
+                    root.dirty = true;
+                    root.edited();
+                }
+                accepted => {
+                    root.dirty = false;
+                    root.accepted(self.text);
+                    self.text = root.display;
+                }
+                changed has-focus => {
+                    if !self.has-focus && root.dirty {
+                        root.dirty = false;
+                        root.accepted(self.text);
+                        self.text = root.display;
+                    }
+                }
+            }
+
+            if root.unit != "": Text {
+                x: parent.width - self.width - 5px;
+                height: 100%;
+                text: root.unit;
+                color: Theme.text-disabled;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// Color property row: a swatch that opens the picker, and a text field that
+// takes "r, g, b" or hex.
+//
+// The picker edits a local color while it is open: a saturation/value square
+// over a hue strip, Hex, RGB and HSV fields, an old/new swatch, preset
+// swatches and this session's recent colors. It commits through
+// `value-changed` only when a gesture ends (pointer released, field entered,
+// swatch clicked), so a drag writes the instance file once instead of once per
+// frame. While the picker is open the row reports focus, which pauses the
+// panel sync; without that, the first commit would rebuild this row and close
+// the picker under the pointer.
 component ColorRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "#808080";
     // Live preview color, populated by Rust from the same RGB the
-    // `value` string represents. Used for the swatch chip — Slint can't
+    // `value` string represents. Used for the swatch chip: Slint can't
     // parse the "r, g, b" string into a typed color at runtime so the
     // parsing has to happen Rust-side.
     in property <color> preview-color: #808080;  // theme-exempt: neutral placeholder, runtime-overridden by Rust color-value
@@ -1954,23 +1816,21 @@ component ColorRow inherits Rectangle {
     callback open-learn-url(string);
     callback focus-changed(bool);
 
-    // Hidden focus sink — see PropRow for rationale.
+    // Hidden focus sink (see PropRow for rationale).
     focus_sink := FocusScope { width: 0px; height: 0px; }
 
-    // RGB modal state — three sliders (0-255). Seeded from the live
-    // `preview-color` whenever the modal opens (Slint can't parse the
-    // "r, g, b" string, but a `color` exposes typed .red/.green/.blue
-    // channels). On any slider move we emit the rounded triple back
-    // through `value-changed` so the Rust property pipeline handles it
-    // identically to manual hex entry.
+    // The picker's working color as 0-255 channels. Seeded from
+    // `preview-color` when the picker opens (a `color` exposes typed
+    // .red/.green/.blue channels, the "r, g, b" string does not), and kept in
+    // step with the HSV state below by `set-hsv` and `set-rgb`.
     in-out property <float> r-val: 128;
     in-out property <float> g-val: 128;
     in-out property <float> b-val: 128;
 
     // ── Hex helpers ─────────────────────────────────────────────────────
     // Slint has no integer formatting, so the two nibbles are spelled out.
-    // Kept here rather than pushed from Rust so the field tracks the sliders
-    // live, without a round-trip on every drag frame.
+    // Kept here rather than pushed from Rust so the fields track a drag
+    // live, without a round-trip on every frame.
     pure function hex-nibble(v: int) -> string {
         v == 0  ? "0" : v == 1  ? "1" : v == 2  ? "2" : v == 3  ? "3" :
         v == 4  ? "4" : v == 5  ? "5" : v == 6  ? "6" : v == 7  ? "7" :
@@ -1985,117 +1845,307 @@ component ColorRow inherits Rectangle {
     out property <string> hex-text:
         "#" + root.hex-byte(root.r-val) + root.hex-byte(root.g-val) + root.hex-byte(root.b-val);
 
-    // Commit the current channel triple through the normal property pipeline.
-    function commit-rgb() {
-        root.value-changed(
-            Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val)
-        );
+    // ── Picker state ────────────────────────────────────────────────────
+    // HSV is what the square and the strip draw. Hue survives greys and
+    // saturation survives black (RGB carries neither), so the handles stay
+    // where they were when the color passes through those.
+    property <float> hsv-h: 0;      // degrees, 0-360
+    property <float> hsv-s: 0;      // 0-1
+    property <float> hsv-v: 0.5;    // 0-1
+    property <color> picked: rgb(Math.round(root.r-val), Math.round(root.g-val), Math.round(root.b-val));
+    property <string> rgb-text: Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val);
+    // The color the picker opened on: the "old" half of the old/new swatch.
+    property <color> original-color: #808080;  // theme-exempt: neutral placeholder, set from preview-color when the picker opens
+    // Last value sent through `value-changed`, so a release that moved
+    // nothing writes nothing.
+    property <string> committed-text: "";
+    // Whether this opening of the picker already holds a recent-colors slot.
+    property <bool> recent-claimed: false;
+    // Bumped when a drag or a swatch changes the color; the fields drop any
+    // half-typed draft (see ColorPickerField).
+    property <int> draft-epoch: 0;
+    // Name and hex of the swatch under the pointer, shown in the header.
+    property <string> hover-caption: "";
+
+    // Focus is reported while the text field is focused OR the picker is
+    // open. It pauses the panel sync (and keeps keys away from the viewport);
+    // closing the picker, however it closes, hands the panel back.
+    property <bool> editing: color-edit.has-focus || color-picker-popup.is-open;
+    changed editing => {
+        root.focus-changed(self.editing);
     }
 
-    height: 28px;
-    border-radius: 2px;
+    // ── Color math ──────────────────────────────────────────────────────
+    // Move to an HSV point; the channels follow (Slint's `hsv()` rounds to
+    // 8 bits, which is exactly the 0-255 the property stores).
+    function set-hsv(h: float, s: float, v: float) {
+        root.hsv-h = Math.clamp(h, 0, 360);
+        root.hsv-s = Math.clamp(s, 0, 1);
+        root.hsv-v = Math.clamp(v, 0, 1);
+        let from-hsv = hsv(root.hsv-h, root.hsv-s, root.hsv-v);
+        root.r-val = from-hsv.red;
+        root.g-val = from-hsv.green;
+        root.b-val = from-hsv.blue;
+    }
+
+    // Set the channels; HSV follows, keeping the hue of a grey and the
+    // saturation of black.
+    function set-rgb(r: float, g: float, b: float) {
+        root.r-val = Math.clamp(Math.round(r), 0, 255);
+        root.g-val = Math.clamp(Math.round(g), 0, 255);
+        root.b-val = Math.clamp(Math.round(b), 0, 255);
+        let as-hsv = rgb(root.r-val, root.g-val, root.b-val).to-hsv();
+        if as-hsv.saturation > 0 {
+            root.hsv-h = as-hsv.hue;
+        }
+        if as-hsv.value > 0 {
+            root.hsv-s = as-hsv.saturation;
+        }
+        root.hsv-v = as-hsv.value;
+    }
+
+    pure function hex-of(c: color) -> string {
+        "#" + root.hex-byte(c.red) + root.hex-byte(c.green) + root.hex-byte(c.blue)
+    }
+
+    // ── Hex parsing ─────────────────────────────────────────────────────
+    // Slint strings have no indexing, but they do compare. Uppercase hex
+    // spellings of one length sort exactly like the numbers they spell ('0'-'9'
+    // sort before 'A'-'F'), so halving the range 24 times finds the largest
+    // value whose "#RRGGBB" sorts at or before the text. When the text IS a
+    // color, that value spells it back exactly; anything else does not.
+    pure function hex24(v: float) -> string {
+        "#" + root.hex-byte(Math.floor(v / 65536))
+            + root.hex-byte(Math.mod(Math.floor(v / 256), 256))
+            + root.hex-byte(Math.mod(v, 256))
+    }
+    pure function hex12(v: float) -> string {
+        "#" + root.hex-nibble(Math.floor(v / 256))
+            + root.hex-nibble(Math.mod(Math.floor(v / 16), 16))
+            + root.hex-nibble(Math.mod(v, 16))
+    }
+    pure function hex6-floor(s: string) -> float {
+        let f23 = root.hex24(8388608) <= s ? 8388608 : 0;
+        let f22 = f23 + (root.hex24(f23 + 4194304) <= s ? 4194304 : 0);
+        let f21 = f22 + (root.hex24(f22 + 2097152) <= s ? 2097152 : 0);
+        let f20 = f21 + (root.hex24(f21 + 1048576) <= s ? 1048576 : 0);
+        let f19 = f20 + (root.hex24(f20 + 524288) <= s ? 524288 : 0);
+        let f18 = f19 + (root.hex24(f19 + 262144) <= s ? 262144 : 0);
+        let f17 = f18 + (root.hex24(f18 + 131072) <= s ? 131072 : 0);
+        let f16 = f17 + (root.hex24(f17 + 65536) <= s ? 65536 : 0);
+        let f15 = f16 + (root.hex24(f16 + 32768) <= s ? 32768 : 0);
+        let f14 = f15 + (root.hex24(f15 + 16384) <= s ? 16384 : 0);
+        let f13 = f14 + (root.hex24(f14 + 8192) <= s ? 8192 : 0);
+        let f12 = f13 + (root.hex24(f13 + 4096) <= s ? 4096 : 0);
+        let f11 = f12 + (root.hex24(f12 + 2048) <= s ? 2048 : 0);
+        let f10 = f11 + (root.hex24(f11 + 1024) <= s ? 1024 : 0);
+        let f9 = f10 + (root.hex24(f10 + 512) <= s ? 512 : 0);
+        let f8 = f9 + (root.hex24(f9 + 256) <= s ? 256 : 0);
+        let f7 = f8 + (root.hex24(f8 + 128) <= s ? 128 : 0);
+        let f6 = f7 + (root.hex24(f7 + 64) <= s ? 64 : 0);
+        let f5 = f6 + (root.hex24(f6 + 32) <= s ? 32 : 0);
+        let f4 = f5 + (root.hex24(f5 + 16) <= s ? 16 : 0);
+        let f3 = f4 + (root.hex24(f4 + 8) <= s ? 8 : 0);
+        let f2 = f3 + (root.hex24(f3 + 4) <= s ? 4 : 0);
+        let f1 = f2 + (root.hex24(f2 + 2) <= s ? 2 : 0);
+        let f0 = f1 + (root.hex24(f1 + 1) <= s ? 1 : 0);
+        f0
+    }
+    pure function hex3-floor(s: string) -> float {
+        let t11 = root.hex12(2048) <= s ? 2048 : 0;
+        let t10 = t11 + (root.hex12(t11 + 1024) <= s ? 1024 : 0);
+        let t9 = t10 + (root.hex12(t10 + 512) <= s ? 512 : 0);
+        let t8 = t9 + (root.hex12(t9 + 256) <= s ? 256 : 0);
+        let t7 = t8 + (root.hex12(t8 + 128) <= s ? 128 : 0);
+        let t6 = t7 + (root.hex12(t7 + 64) <= s ? 64 : 0);
+        let t5 = t6 + (root.hex12(t6 + 32) <= s ? 32 : 0);
+        let t4 = t5 + (root.hex12(t5 + 16) <= s ? 16 : 0);
+        let t3 = t4 + (root.hex12(t4 + 8) <= s ? 8 : 0);
+        let t2 = t3 + (root.hex12(t3 + 4) <= s ? 4 : 0);
+        let t1 = t2 + (root.hex12(t2 + 2) <= s ? 2 : 0);
+        let t0 = t1 + (root.hex12(t1 + 1) <= s ? 1 : 0);
+        t0
+    }
+    // "#" in front of `upper` unless it already starts with one. Every string
+    // that starts with '#' sorts from "#" up to, but not including, "$" (the
+    // next character).
+    pure function spell-hex(upper: string) -> string {
+        upper >= "#" && upper < "$" ? upper : "#" + upper
+    }
+    // The 24-bit value of "#RRGGBB", "RRGGBB", "#RGB" or "RGB" (any case), or
+    // -1 when the text is not hex.
+    pure function hex-value(t: string) -> float {
+        root.hex-value-spelled(root.spell-hex(t.to-uppercase()))
+    }
+    // `hex-value` for text already uppercase and starting with "#".
+    //
+    // The text is a parameter, never a `let` local, on purpose: Slint's Rust
+    // code clones a parameter at every use but moves a string local into the
+    // first function it is passed to, so a local passed to two functions
+    // does not compile (E0382 in build 8).
+    pure function hex-value-spelled(s: string) -> float {
+        let six = root.hex6-floor(s);
+        let three = root.hex3-floor(s);
+        s.character-count == 7 && root.hex24(six) == s ? six
+            : s.character-count == 4 && root.hex12(three) == s
+                ? Math.floor(three / 256) * 17 * 65536
+                    + Math.mod(Math.floor(three / 16), 16) * 17 * 256
+                    + Math.mod(three, 16) * 17
+                : -1
+    }
+
+    // ── Recent colors ───────────────────────────────────────────────────
+    pure function recent-at(i: int) -> color {
+        i >= 0 && i < ColorPickerRecents.count ? ColorPickerRecents.colors[i] : transparent
+    }
+
+    // Put `c` at the front of the recent colors, without duplicates. One slot
+    // per opening of the picker: later commits in the same opening replace
+    // it, so fine-tuning with several drags leaves one color, not eight.
+    function remember(c: color) {
+        let skip = (root.recent-claimed && ColorPickerRecents.count > 0) ? 1 : 0;
+        let kept = ColorPickerRecents.count - skip;
+        // Where `c` already sits among the kept entries, or `kept` when new.
+        let at = root.recent-at(skip + 0) == c ? 0
+            : root.recent-at(skip + 1) == c ? 1
+            : root.recent-at(skip + 2) == c ? 2
+            : root.recent-at(skip + 3) == c ? 3
+            : root.recent-at(skip + 4) == c ? 4
+            : root.recent-at(skip + 5) == c ? 5
+            : root.recent-at(skip + 6) == c ? 6
+            : root.recent-at(skip + 7) == c ? 7
+            : kept;
+        ColorPickerRecents.colors = [
+            c,
+            root.recent-at(skip + (0 < at ? 0 : 1)),
+            root.recent-at(skip + (1 < at ? 1 : 2)),
+            root.recent-at(skip + (2 < at ? 2 : 3)),
+            root.recent-at(skip + (3 < at ? 3 : 4)),
+            root.recent-at(skip + (4 < at ? 4 : 5)),
+            root.recent-at(skip + (5 < at ? 5 : 6)),
+            root.recent-at(skip + (6 < at ? 6 : 7))
+        ];
+        ColorPickerRecents.count = Math.min(8, 1 + kept - (at < kept ? 1 : 0));
+        root.recent-claimed = true;
+    }
+
+    // ── Commit and open ─────────────────────────────────────────────────
+    // Send the working color through the normal property pipeline (the same
+    // path as typing into the row), once per actual change.
+    function commit-rgb() {
+        if root.rgb-text != root.committed-text {
+            root.committed-text = root.rgb-text;
+            root.value-changed(root.rgb-text);
+            root.remember(root.picked);
+        }
+    }
+
+    // A swatch, a recent color or the "old" half: jump there and commit.
+    function pick(c: color) {
+        root.draft-epoch += 1;
+        root.set-rgb(c.red, c.green, c.blue);
+        root.commit-rgb();
+    }
+
+    function open-picker() {
+        root.set-rgb(root.preview-color.red, root.preview-color.green, root.preview-color.blue);
+        root.original-color = root.picked;
+        root.committed-text = root.rgb-text;
+        root.recent-claimed = false;
+        root.hover-caption = "";
+        color-picker-popup.show();
+    }
+
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
             open-learn-url(url) => { root.open-learn-url(url); }
         }
 
-        // Label
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        // Color swatch — live preview of the row's RGB value, opens
-        // the named-palette picker on click.
-        Rectangle {
-            width: 28px;
-            height: 20px;
-            background: root.preview-color;
-            border-radius: 4px;
+        // Color swatch: the row's color (the picker's working color while
+        // the picker is open). Click to open the picker.
+        row-swatch := Rectangle {
+            width: 24px;
+            background: color-picker-popup.is-open ? root.picked : root.preview-color;
+            border-radius: 3px;
             border-width: 1px;
-            border-color: swatch-touch.has-hover ? Theme.accent-blue : Theme.border-color;
-            drop-shadow-blur: 2px;
-            drop-shadow-color: Theme.shadow-color;
+            border-color: swatch-touch.has-hover || color-picker-popup.is-open ? Theme.accent-cyan : Theme.border-color;
 
             swatch-touch := TouchArea {
                 mouse-cursor: root.editable ? pointer : default;
                 clicked => {
                     if root.editable {
-                        // Seed sliders from the current preview color so the
-                        // modal opens on the row's actual RGB.
-                        root.r-val = root.preview-color.red;
-                        root.g-val = root.preview-color.green;
-                        root.b-val = root.preview-color.blue;
-                        color-picker-popup.show();
+                        root.open-picker();
                     }
                 }
             }
         }
 
-        // Hex input with refined styling — always present but visibility controlled
+        // The value: a text input ("r, g, b" or hex), or plain text when the
+        // row is read-only. One slot either way, so the value starts at the
+        // same x as every other row's.
         Rectangle {
             horizontal-stretch: 1;
-            height: 22px;
-            visible: root.editable;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: color-edit.has-focus ? Theme.accent-blue : Theme.input-border;
-            
-            color-edit := LineEdit {
-                x: 0px;
-                y: 0px;
+            min-width: 32px;
+
+            color-edit := KitField {
                 width: 100%;
                 height: 100%;
+                visible: root.editable;
                 enabled: root.editable;
+                font-size: PropStyle.font;
                 text: root.value;
                 edited(text) => {
                     root.focus-changed(true);
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
-                    // Drop the LineEdit's focused state on Enter — see
-                    // PropRow for rationale.
+                    // Drop the field's focused state on Enter (see
+                    // PropRow for rationale).
                     focus_sink.focus();
                 }
             }
-        }
 
-        if !root.editable: Text {
-            horizontal-stretch: 1;
-            text: root.value;
-            color: Theme.text-primary;
-            font-size: 11px;
-            vertical-alignment: center;
+            if !root.editable: Text {
+                x: PropStyle.text-inset;
+                width: parent.width - PropStyle.text-inset;
+                height: 100%;
+                text: root.value;
+                color: Theme.text-primary;
+                font-size: PropStyle.font;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
     }
 
-    // RGB modal. Sibling of the HorizontalLayout so the PopupWindow
-    // gets root-level placement (Slint requirement). Three sliders
-    // (0-255) + numeric readouts + a live preview swatch. Any slider
-    // change emits the rounded "r, g, b" triple through the normal
-    // value-changed callback so the Rust property pipeline handles it
-    // identically to manual hex entry.
+    // The picker. Sibling of the HorizontalLayout so the PopupWindow gets
+    // root-level placement (Slint requirement).
     color-picker-popup := PopupWindow {
-        x: 140px;
+        // Under the swatch, shifted left when the panel is too narrow to
+        // hold it there, so it stays inside the panel.
+        x: Math.max(0px, Math.min(row-swatch.x, root.width - self.width - 4px));
         y: parent.height;
-        // Wider so the typed channel fields and the hex field are comfortable;
-        // taller by one row (hex) plus the extra height the LineEdits take over
-        // the flat Text readouts they replaced.
-        width: 300px;
-        height: 262px;
+        width: 292px;
+        // 12 pad + 22 header + 8 + 136 square + 8 + 16 hue strip + 8
+        //   + 78 fields (3 x 22 + 2 x 6) + 8 + 1 rule + 8
+        //   + 42 swatches (2 x 18 + 6) + 12 pad = 363
+        height: 363px;
+        // Only a click OUTSIDE closes it. Slint's default closes on any click,
+        // which would dismiss the picker as soon as the square was pressed.
+        close-policy: close-on-click-outside;
 
         Rectangle {
             width: 100%;
@@ -2107,196 +2157,506 @@ component ColorRow inherits Rectangle {
             drop-shadow-blur: 16px;
             drop-shadow-color: Theme.shadow-float;
 
-            // Swallow clicks so they don't bubble to the viewport.
-            TouchArea { }
+            // Takes keyboard focus as the picker opens, so Escape closes it
+            // before any field is touched; the capture sees Escape even while
+            // a field has focus.
+            FocusScope {
+                init => {
+                    self.focus();
+                }
+                capture-key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        color-picker-popup.close();
+                        return accept;
+                    }
+                    reject
+                }
 
-            VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
+                // Swallow clicks so they don't bubble to the viewport.
+                TouchArea { }
 
-                // Title + live preview swatch on the same row.
-                HorizontalLayout {
+                VerticalLayout {
+                    padding: 12px;
                     spacing: 8px;
-                    Text {
-                        text: "RGB Color";
-                        color: Theme.text-primary;
-                        font-size: 13px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+
+                    // ── Header: title, old/new swatch, close ──
+                    HorizontalLayout {
+                        height: 22px;
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.hover-caption != "" ? root.hover-caption
+                                : old-touch.has-hover ? "Restore original"
+                                : root.label;
+                            color: root.hover-caption != "" || old-touch.has-hover ? Theme.text-secondary : Theme.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        // Old (left, click to restore) and new (right).
+                        Rectangle {
+                            width: 60px;
+
+                            Rectangle {
+                                x: 0px;
+                                width: parent.width / 2;
+                                background: root.original-color;
+                                border-top-left-radius: 4px;
+                                border-bottom-left-radius: 4px;
+
+                                old-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.pick(root.original-color); }
+                                }
+                            }
+                            Rectangle {
+                                x: parent.width / 2;
+                                width: parent.width / 2;
+                                background: root.picked;
+                                border-top-right-radius: 4px;
+                                border-bottom-right-radius: 4px;
+                            }
+                            Rectangle {
+                                x: parent.width / 2;
+                                width: 1px;
+                                background: Theme.dialog-background;
+                            }
+                            Rectangle {
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: old-touch.has-hover ? Theme.accent-cyan : Theme.text-disabled;
+                            }
+                        }
+
+                        // Close
+                        Rectangle {
+                            width: 22px;
+                            border-radius: 4px;
+                            background: close-touch.has-hover ? Theme.button-hover : transparent;
+
+                            Path {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 8px;
+                                height: 8px;
+                                viewbox-x: 0;
+                                viewbox-y: 0;
+                                viewbox-width: 8;
+                                viewbox-height: 8;
+                                commands: "M 0 0 L 8 8 M 8 0 L 0 8";
+                                stroke: close-touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                stroke-width: 1.5px;
+                            }
+
+                            close-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { color-picker-popup.close(); }
+                            }
+                        }
                     }
+
+                    // ── Saturation (left to right) / value (top to bottom) ──
+                    // The pure hue, washed toward white on the left and toward
+                    // black at the bottom: the classic HSV square.
+                    //
+                    // The software renderer draws gradients with square
+                    // corners whatever their radius (and `clip` does not round
+                    // them), so the ramps are square and four small masks in
+                    // the popup's own color round the corners.
                     Rectangle {
-                        width: 36px;
-                        height: 20px;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-                        background: rgb(Math.round(root.r-val), Math.round(root.g-val), Math.round(root.b-val));
-                    }
-                }
+                        height: 136px;
 
-                // ── R row ──
-                HorizontalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: "R";
-                        width: 14px;
-                        color: Theme.accent-red;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Slider {
-                        horizontal-stretch: 1;
-                        minimum: 0;
-                        maximum: 255;
-                        value: root.r-val;
-                        changed(v) => {
-                            root.r-val = v;
-                            root.commit-rgb();
+                        Rectangle {
+                            background: hsv(root.hsv-h, 1, 1);
+                        }
+                        Rectangle {
+                            background: @linear-gradient(90deg, #ffffff 0%, #ffffff00 100%);  // theme-exempt: saturation ramp is color math, not chrome
+                        }
+                        Rectangle {
+                            background: @linear-gradient(180deg, #00000000 0%, #000000 100%);  // theme-exempt: value ramp is color math, not chrome
+                        }
+                        for corner in [
+                            { x: 0, y: 0, d: "M 0 0 L 4 0 A 4 4 0 0 0 0 4 Z" },
+                            { x: 1, y: 0, d: "M 4 0 L 4 4 A 4 4 0 0 0 0 0 Z" },
+                            { x: 1, y: 1, d: "M 4 4 L 0 4 A 4 4 0 0 0 4 0 Z" },
+                            { x: 0, y: 1, d: "M 0 4 L 0 0 A 4 4 0 0 0 4 4 Z" },
+                        ]: Path {
+                            x: corner.x * (parent.width - self.width);
+                            y: corner.y * (parent.height - self.height);
+                            width: 4px;
+                            height: 4px;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: 4;
+                            viewbox-height: 4;
+                            commands: corner.d;
+                            fill: Theme.dialog-background;
+                        }
+                        Rectangle {
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                        }
+
+                        sv-touch := TouchArea {
+                            mouse-cursor: crosshair;
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                    root.draft-epoch += 1;
+                                    root.set-hsv(root.hsv-h, self.mouse-x / self.width, 1 - self.mouse-y / self.height);
+                                }
+                                if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                                    || event.kind == PointerEventKind.cancel {
+                                    root.commit-rgb();
+                                }
+                            }
+                            moved => {
+                                if self.pressed {
+                                    root.set-hsv(root.hsv-h, self.mouse-x / self.width, 1 - self.mouse-y / self.height);
+                                }
+                            }
+                        }
+
+                        // Handle: a dark outer ring and a light inner ring,
+                        // so it reads on white, black and everything between.
+                        Rectangle {
+                            x: root.hsv-s * parent.width - self.width / 2;
+                            y: (1 - root.hsv-v) * parent.height - self.height / 2;
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            border-width: 1px;
+                            border-color: #00000099;  // theme-exempt: dark contrast ring, must read on light colors on every theme
+
+                            Rectangle {
+                                x: 1px;
+                                y: 1px;
+                                width: 12px;
+                                height: 12px;
+                                border-radius: 6px;
+                                border-width: 2px;
+                                border-color: #ffffff;  // theme-exempt: light contrast ring, must read on dark colors on every theme
+                                background: root.picked;
+                            }
                         }
                     }
-                    // Typed entry for this channel. `to-float()` yields 0 for
-                    // junk, so the clamp keeps a stray keystroke in range rather
-                    // than writing a nonsense channel. Committing on `accepted`
-                    // (Enter / focus-out) instead of `edited` means a half-typed
-                    // "2" on the way to "250" does not repaint the part.
-                    r-edit := LineEdit {
-                        width: 44px;
-                        font-size: 11px;
-                        horizontal-alignment: right;
-                        text: Math.round(root.r-val);
-                        accepted(t) => {
-                            root.r-val = Math.clamp(t.to-float(), 0, 255);
-                            root.commit-rgb();
-                        }
-                        edited(t) => { root.focus-changed(true); }
-                    }
-                }
 
-                // ── G row ──
-                HorizontalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: "G";
-                        width: 14px;
-                        color: Theme.accent-green;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Slider {
-                        horizontal-stretch: 1;
-                        minimum: 0;
-                        maximum: 255;
-                        value: root.g-val;
-                        changed(v) => {
-                            root.g-val = v;
-                            root.commit-rgb();
-                        }
-                    }
-                    // Typed entry for this channel. `to-float()` yields 0 for
-                    // junk, so the clamp keeps a stray keystroke in range rather
-                    // than writing a nonsense channel. Committing on `accepted`
-                    // (Enter / focus-out) instead of `edited` means a half-typed
-                    // "2" on the way to "250" does not repaint the part.
-                    g-edit := LineEdit {
-                        width: 44px;
-                        font-size: 11px;
-                        horizontal-alignment: right;
-                        text: Math.round(root.g-val);
-                        accepted(t) => {
-                            root.g-val = Math.clamp(t.to-float(), 0, 255);
-                            root.commit-rgb();
-                        }
-                        edited(t) => { root.focus-changed(true); }
-                    }
-                }
+                    // ── Hue strip ──
+                    // A pill: the spectrum runs between two solid red end caps
+                    // (solid fills keep their radius in the software renderer,
+                    // gradients do not). Hue 0-360 maps onto the spectrum's
+                    // own span, `cap` in from either end.
+                    hue-strip := Rectangle {
+                        property <length> cap: 5px;
+                        height: 16px;
 
-                // ── B row ──
-                HorizontalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: "B";
-                        width: 14px;
-                        color: Theme.accent-blue;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Slider {
-                        horizontal-stretch: 1;
-                        minimum: 0;
-                        maximum: 255;
-                        value: root.b-val;
-                        changed(v) => {
-                            root.b-val = v;
-                            root.commit-rgb();
+                        Rectangle {
+                            x: 0px;
+                            y: 3px;
+                            width: 2 * hue-strip.cap;
+                            height: 10px;
+                            border-radius: hue-strip.cap;
+                            background: #ff0000;  // theme-exempt: hue 0 end cap, part of the spectrum
                         }
-                    }
-                    // Typed entry for this channel. `to-float()` yields 0 for
-                    // junk, so the clamp keeps a stray keystroke in range rather
-                    // than writing a nonsense channel. Committing on `accepted`
-                    // (Enter / focus-out) instead of `edited` means a half-typed
-                    // "2" on the way to "250" does not repaint the part.
-                    b-edit := LineEdit {
-                        width: 44px;
-                        font-size: 11px;
-                        horizontal-alignment: right;
-                        text: Math.round(root.b-val);
-                        accepted(t) => {
-                            root.b-val = Math.clamp(t.to-float(), 0, 255);
-                            root.commit-rgb();
+                        Rectangle {
+                            x: parent.width - 2 * hue-strip.cap;
+                            y: 3px;
+                            width: 2 * hue-strip.cap;
+                            height: 10px;
+                            border-radius: hue-strip.cap;
+                            background: #ff0000;  // theme-exempt: hue 360 end cap, part of the spectrum
                         }
-                        edited(t) => { root.focus-changed(true); }
-                    }
-                }
-
-                // ── Hex row ──
-                // Accepts `#RRGGBB`, `RRGGBB`, and the 3-digit shorthand. The
-                // raw text goes straight to Rust, which owns colour parsing for
-                // every entry path, so Slint never has to hex-decode.
-                HorizontalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: "Hex";
-                        width: 24px;
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    hex-edit := LineEdit {
-                        horizontal-stretch: 1;
-                        font-size: 11px;
-                        text: root.hex-text;
-                        placeholder-text: "#RRGGBB";
-                        accepted(t) => {
-                            root.value-changed(t);
+                        Rectangle {
+                            x: hue-strip.cap;
+                            y: 3px;
+                            width: parent.width - 2 * hue-strip.cap;
+                            height: 10px;
+                            background: @linear-gradient(90deg, #ff0000 0%, #ffff00 16.667%, #00ff00 33.333%, #00ffff 50%, #0000ff 66.667%, #ff00ff 83.333%, #ff0000 100%);  // theme-exempt: the hue spectrum is color math, not chrome
                         }
-                        edited(t) => { root.focus-changed(true); }
-                    }
-                }
+                        Rectangle {
+                            x: 0px;
+                            y: 3px;
+                            width: parent.width;
+                            height: 10px;
+                            border-radius: hue-strip.cap;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                        }
 
-                Rectangle {
-                    height: 24px;
-                    width: 70px;
-                    background: close-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.border-color;
+                        hue-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                    root.draft-epoch += 1;
+                                    root.set-hsv((self.mouse-x - hue-strip.cap) / (self.width - 2 * hue-strip.cap) * 360, root.hsv-s, root.hsv-v);
+                                }
+                                if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                                    || event.kind == PointerEventKind.cancel {
+                                    root.commit-rgb();
+                                }
+                            }
+                            moved => {
+                                if self.pressed {
+                                    root.set-hsv((self.mouse-x - hue-strip.cap) / (self.width - 2 * hue-strip.cap) * 360, root.hsv-s, root.hsv-v);
+                                }
+                            }
+                        }
 
-                    Text {
-                        text: "Close";
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                        Rectangle {
+                            x: hue-strip.cap + root.hsv-h / 360 * (parent.width - 2 * hue-strip.cap) - self.width / 2;
+                            y: 0px;
+                            width: 10px;
+                            height: 16px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #00000099;  // theme-exempt: dark contrast ring, must read on light hues on every theme
+
+                            Rectangle {
+                                x: 1px;
+                                y: 1px;
+                                width: 8px;
+                                height: 14px;
+                                border-radius: 3px;
+                                border-width: 2px;
+                                border-color: #ffffff;  // theme-exempt: light contrast ring, must read on dark hues on every theme
+                                background: hsv(root.hsv-h, 1, 1);
+                            }
+                        }
                     }
 
-                    close-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { color-picker-popup.close(); }
+                    // ── Fields ──
+                    // Enter (or leaving a field) applies what was typed and
+                    // commits it; every field follows the square and strip.
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        // Hex takes "#RRGGBB", "RRGGBB" and the 3-digit
+                        // shorthand, parsed here so the square follows. Other
+                        // text ("r, g, b") goes to Rust as before.
+                        ColorPickerField {
+                            caption: "Hex";
+                            caption-width: 22px;
+                            display: root.hex-text;
+                            reset-epoch: root.draft-epoch;
+                            edited => { root.focus-changed(true); }
+                            accepted(text) => {
+                                let hex-v = root.hex-value(text);
+                                if hex-v >= 0 {
+                                    root.set-rgb(Math.floor(hex-v / 65536), Math.mod(Math.floor(hex-v / 256), 256), Math.mod(hex-v, 256));
+                                    root.commit-rgb();
+                                } else {
+                                    root.value-changed(text);
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+
+                            ColorPickerField {
+                                caption: "R";
+                                caption-color: Theme.accent-red;
+                                display: Math.round(root.r-val) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-rgb(text.to-float(), root.g-val, root.b-val);
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                            ColorPickerField {
+                                caption: "G";
+                                caption-color: Theme.accent-green;
+                                display: Math.round(root.g-val) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-rgb(root.r-val, text.to-float(), root.b-val);
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                            ColorPickerField {
+                                caption: "B";
+                                caption-color: Theme.accent-blue;
+                                display: Math.round(root.b-val) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-rgb(root.r-val, root.g-val, text.to-float());
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+
+                            ColorPickerField {
+                                caption: "H";
+                                unit: "°";
+                                display: Math.round(root.hsv-h) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-hsv(text.to-float(), root.hsv-s, root.hsv-v);
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                            ColorPickerField {
+                                caption: "S";
+                                unit: "%";
+                                display: Math.round(root.hsv-s * 100) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-hsv(root.hsv-h, text.to-float() / 100, root.hsv-v);
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                            ColorPickerField {
+                                caption: "V";
+                                unit: "%";
+                                display: Math.round(root.hsv-v * 100) + "";
+                                reset-epoch: root.draft-epoch;
+                                edited => { root.focus-changed(true); }
+                                accepted(text) => {
+                                    if text.is-float() {
+                                        root.set-hsv(root.hsv-h, root.hsv-s, text.to-float() / 100);
+                                        root.commit-rgb();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border-color;
+                    }
+
+                    // ── Swatches and recent colors ──
+                    // Both rows share one 13-column grid, so they line up.
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        Rectangle {
+                            height: 18px;
+
+                            // theme-exempt: preset swatches are colors to pick, not chrome
+                            for swatch[idx] in [
+                                { name: "White",      c: #ffffff },
+                                { name: "Light gray", c: #c0c0c0 },
+                                { name: "Gray",       c: #808080 },
+                                { name: "Dark gray",  c: #404040 },
+                                { name: "Black",      c: #000000 },
+                                { name: "Red",        c: #e53935 },
+                                { name: "Orange",     c: #fb8c00 },
+                                { name: "Yellow",     c: #fdd835 },
+                                { name: "Green",      c: #43a047 },
+                                { name: "Cyan",       c: #00bcd4 },
+                                { name: "Blue",       c: #1e88e5 },
+                                { name: "Purple",     c: #8e24aa },
+                                { name: "Pink",       c: #ec407a },
+                            ]: Rectangle {
+                                x: idx * (parent.width - self.width) / 12;
+                                y: 0px;
+                                width: 18px;
+                                height: 18px;
+                                background: swatch.c;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: preset-touch.has-hover ? Theme.accent-cyan : Theme.text-disabled;
+
+                                // Ring around the swatch that matches the
+                                // working color (a border alone vanishes on a
+                                // cyan or blue swatch).
+                                if swatch.c == root.picked: Rectangle {
+                                    x: -3px;
+                                    y: -3px;
+                                    width: parent.width + 6px;
+                                    height: parent.height + 6px;
+                                    border-radius: 6px;
+                                    border-width: 1.5px;
+                                    border-color: Theme.accent-cyan;
+                                }
+
+                                preset-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.pick(swatch.c); }
+                                    changed has-hover => {
+                                        if self.has-hover {
+                                            root.hover-caption = swatch.name + "  " + root.hex-of(swatch.c);
+                                        } else if root.hover-caption == swatch.name + "  " + root.hex-of(swatch.c) {
+                                            root.hover-caption = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 18px;
+
+                            Text {
+                                x: 0px;
+                                height: 100%;
+                                text: "Recent";
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+
+                            // Columns 5-12 of the swatch grid, newest first.
+                            for slot in 8: slot-box := Rectangle {
+                                property <bool> filled: slot < ColorPickerRecents.count;
+                                property <color> slot-color: root.recent-at(slot);
+                                x: (5 + slot) * (parent.width - self.width) / 12;
+                                y: 0px;
+                                width: 18px;
+                                height: 18px;
+                                background: self.filled ? self.slot-color : Theme.input-background;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: self.filled && recent-touch.has-hover ? Theme.accent-cyan
+                                    : self.filled ? Theme.text-disabled : Theme.border-color;
+
+                                if slot-box.filled && slot-box.slot-color == root.picked: Rectangle {
+                                    x: -3px;
+                                    y: -3px;
+                                    width: parent.width + 6px;
+                                    height: parent.height + 6px;
+                                    border-radius: 6px;
+                                    border-width: 1.5px;
+                                    border-color: Theme.accent-cyan;
+                                }
+
+                                recent-touch := TouchArea {
+                                    enabled: parent.filled;
+                                    mouse-cursor: parent.filled ? pointer : default;
+                                    clicked => { root.pick(parent.slot-color); }
+                                    changed has-hover => {
+                                        if self.has-hover && parent.filled {
+                                            root.hover-caption = "Recent  " + root.hex-of(parent.slot-color);
+                                        } else if root.hover-caption == "Recent  " + root.hex-of(parent.slot-color) {
+                                            root.hover-caption = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2335,40 +2695,31 @@ component BrickColorRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
 
-    height: 28px;
-    border-radius: 2px;
+    height: PropStyle.row-height;
 
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
 
-        HelpIcon {
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
             open-learn-url(url) => { root.open-learn-url(url); }
         }
 
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
         // Preview swatch — opens the wheel picker on click.
-        Rectangle {
-            width: 28px;
-            height: 20px;
+        bc-swatch := Rectangle {
+            width: 24px;
             background: root.preview-color;
-            border-radius: 4px;
+            border-radius: 3px;
             border-width: 1px;
-            border-color: bc-swatch-touch.has-hover ? Theme.accent-blue : Theme.border-color;
-            drop-shadow-blur: 2px;
-            drop-shadow-color: Theme.shadow-color;
+            border-color: bc-swatch-touch.has-hover ? Theme.accent-cyan : Theme.border-color;
 
             bc-swatch-touch := TouchArea {
                 mouse-cursor: root.editable ? pointer : default;
@@ -2387,13 +2738,16 @@ component BrickColorRow inherits Rectangle {
             horizontal-stretch: 1;
             text: root.value;
             color: Theme.text-primary;
-            font-size: 11px;
+            font-size: PropStyle.font;
             vertical-alignment: center;
+            overflow: elide;
         }
     }
 
     brick-color-popup := PopupWindow {
-        x: 140px;
+        // Under the swatch, shifted left when the panel is too narrow to
+        // hold it there.
+        x: Math.max(0px, Math.min(bc-swatch.x, root.width - self.width - 4px));
         y: parent.height;
         // Wide enough for the 286px honeycomb plus the 12px padding either
         // side, with a little breathing room.
@@ -2502,12 +2856,14 @@ component BrickColorRow inherits Rectangle {
                             font-size: 9px;
                         }
 
-                        Text {
+                        Image {
                             x: parent.width - self.width - 12px;
                             y: (parent.height - self.height) / 2;
-                            text: "›";
-                            color: Theme.text-secondary;
-                            font-size: 14px;
+                            width: 9px;
+                            height: 9px;
+                            source: @image-url("../../assets/icons/ui/chevron-right.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-secondary;
                         }
                     }
                 }
@@ -2528,10 +2884,17 @@ component BrickColorRow inherits Rectangle {
                         }
 
                         HorizontalLayout {
-                            padding-left: 8px;
+                            padding-left: 6px;
+                            spacing: 6px;
                             alignment: start;
+                            Image {
+                                width: 9px;
+                                source: @image-url("../../assets/icons/ui/arrow-left.svg");
+                                image-fit: contain;
+                                colorize: Theme.text-primary;
+                            }
                             Text {
-                                text: "‹ Back";
+                                text: "Back";
                                 color: Theme.text-primary;
                                 font-size: 11px;
                                 font-weight: 600;
@@ -2668,7 +3031,8 @@ component BrickColorRow inherits Rectangle {
     }
 }
 
-// Bool property row with true/false toggle - polished design
+// Bool property row: a checkbox in the value column. A click anywhere on the
+// row toggles it.
 component BoolRow inherits Rectangle {
     in property <string> label: "";
     in-out property <string> value: "false";
@@ -2676,16 +3040,15 @@ component BoolRow inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
-    
+
     callback value-changed(string);
     callback open-learn-url(string);
-    
+
     // Derived: is the value currently "true"?
     property <bool> checked: root.value == "true";
-    
-    height: 28px;
-    border-radius: 2px;
-    
+
+    height: PropStyle.row-height;
+
     touch := TouchArea {
         mouse-cursor: root.editable ? pointer : default;
         clicked => {
@@ -2696,61 +3059,49 @@ component BoolRow inherits Rectangle {
             }
         }
     }
-    
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 4px;
 
-        HelpIcon {
+    HorizontalLayout {
+        padding-left: PropStyle.pad-left;
+        padding-right: PropStyle.pad-right;
+        padding-top: PropStyle.row-inset;
+        padding-bottom: PropStyle.row-inset;
+        spacing: PropStyle.gap;
+
+        PropLabel {
+            text: root.label;
             description: root.description;
             learn-url: root.learn-url;
             show-help-icons: root.show-help-icons;
+            column-width: PropStyle.label-width(root.width);
             open-learn-url(url) => { root.open-learn-url(url); }
         }
-        
-        // Label
-        Text {
-            width: 110px;
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        
-        // Checkbox — vertically centered, checkmark icon when true, empty box when false
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 16px;
-                height: 16px;
-                background: root.checked ? Theme.accent-blue : Theme.input-background;
-                border-radius: 3px;
-                border-width: 1px;
-                border-color: touch.has-hover
-                    ? Theme.accent-blue
-                    : root.checked ? Theme.accent-blue : Theme.input-border;
-                
-                // Checkmark icon (visible only when checked)
-                Text {
-                    text: root.checked ? "✓" : "";
-                    color: white;
-                    font-size: 12px;
-                    font-weight: 900;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 3px;
+                    background: root.checked ? Theme.accent-cyan : Theme.input-background;
+                    border-width: 1px;
+                    border-color: root.checked || (touch.has-hover && root.editable) ? Theme.accent-cyan : Theme.input-border;
+                    opacity: root.editable ? 1.0 : 0.5;
+
+                    if root.checked: Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 10px;
+                        height: 10px;
+                        source: @image-url("../../assets/icons/ui/check.svg");
+                        image-fit: contain;
+                        colorize: Theme.panel-background;
+                    }
                 }
             }
-        }
-        
-        // State label
-        Text {
-            horizontal-stretch: 1;
-            text: root.checked ? "Enabled" : "Disabled";
-            color: root.checked ? Theme.text-primary : Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
         }
     }
 }
@@ -2850,16 +3201,16 @@ export component PropertiesPanel inherits Rectangle {
     callback on-search-focus-changed(bool);
 
     background: Theme.panel-background;
-    
+
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
-        
-        // Header showing selection info - polished design
+
+        // Header: what is selected. The class icon and name, or how many.
         Rectangle {
-            height: 36px;
-            background: @linear-gradient(180deg, Theme.header-background 0%, Theme.tab-inactive 100%);
-            
+            height: 30px;
+            background: Theme.header-background;
+
             // Bottom border
             Rectangle {
                 y: parent.height - 1px;
@@ -2867,18 +3218,16 @@ export component PropertiesPanel inherits Rectangle {
                 height: 1px;
                 background: Theme.border-color;
             }
-            
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 8px;
-                alignment: start;
 
-                // Class icon — SVG image when something is selected, fallback placeholder
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
                 if root.selected-count > 0: VerticalLayout {
                     width: 16px;
                     alignment: center;
-                    
+
                     Image {
                         width: 16px;
                         height: 16px;
@@ -2886,57 +3235,21 @@ export component PropertiesPanel inherits Rectangle {
                         image-fit: contain;
                     }
                 }
-                if root.selected-count == 0: VerticalLayout {
-                    width: 16px;
-                    alignment: center;
-                    
-                    Rectangle {
-                        width: 16px;
-                        height: 16px;
-                        border-radius: 3px;
-                        background: Theme.button-background;
-                        Text {
-                            text: "?";
-                            color: Theme.text-secondary;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
 
                 Text {
-                    text: root.selected-count == 0 ? "No Selection" :
-                          root.selected-count == 1 ? root.selected-class :
-                          root.selected-count + " Objects Selected";
-                    color: Theme.text-primary;
+                    horizontal-stretch: 1;
+                    text: root.selected-count == 0 ? "Properties"
+                        : root.selected-count == 1 ? root.selected-class
+                        : root.selected-count + " selected";
+                    color: root.selected-count == 0 ? Theme.text-secondary : Theme.text-primary;
                     font-weight: 600;
                     font-size: 12px;
-                    letter-spacing: 0.3px;
                     vertical-alignment: center;
-                }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
-                // Selection count badge
-                if root.selected-count > 1: Rectangle {
-                    width: 24px;
-                    height: 18px;
-                    border-radius: 9px;
-                    background: Theme.accent-blue;
-                    
-                    Text {
-                        text: root.selected-count;
-                        color: white;
-                        font-size: 10px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                    overflow: elide;
                 }
             }
         }
-        
+
         // Property filter bar. Only shown with a live selection — there is
         // nothing to filter on the empty state, and an inert search box there
         // just looks broken. Same layout as the Explorer's search bar so the
@@ -2952,8 +3265,8 @@ export component PropertiesPanel inherits Rectangle {
                 background: Theme.border-color;
             }
 
-            // Escape clears the filter. A LineEdit's internal text input
-            // rejects Escape, so it bubbles to this ancestor scope.
+            // Escape clears the filter. The field's text input rejects
+            // Escape, so it bubbles to this ancestor scope.
             //
             // Explicit 100% sizing: the parent is a Rectangle, not a layout, so
             // a bare FocusScope would shrink to its content's preferred width
@@ -2972,50 +3285,53 @@ export component PropertiesPanel inherits Rectangle {
                 }
 
                 HorizontalLayout {
-                    padding: 4px;
+                    padding-left: PropStyle.pad-left;
+                    padding-right: PropStyle.pad-right;
+                    padding-top: 4px;
+                    padding-bottom: 5px;
                     spacing: 4px;
 
                     Rectangle {
-                        width: 22px;
-                        height: 22px;
+                        width: PropStyle.help-width;
 
                         Image {
-                            width: 14px;
-                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
                             source: @image-url("../../assets/icons/ui/search.svg");
                             image-fit: contain;
                             colorize: Theme.text-secondary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
                         }
                     }
 
-                    filter-edit := LineEdit {
+                    filter-edit := KitField {
                         // The field lives inside a conditional, so it takes
                         // the focus pulse through its own property.
                         property <int> pulse: root.focus-pulse;
                         changed pulse => { self.focus(); }
                         horizontal-stretch: 1;
-                        placeholder-text: "Filter properties...";
+                        min-width: 0px;
+                        font-size: PropStyle.font;
+                        placeholder-text: "Filter properties";
                         text <=> root.search-query;
                         edited(text) => { root.on-search-changed(text); }
                         changed has-focus => { root.on-search-focus-changed(self.has-focus); }
                     }
 
                     if root.search-query != "": Rectangle {
-                        width: 22px;
-                        height: 22px;
+                        width: 20px;
                         border-radius: 3px;
                         background: prop-search-clear.has-hover ? Theme.button-hover : transparent;
 
                         Image {
-                            width: 14px;
-                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 10px;
+                            height: 10px;
                             source: @image-url("../../assets/icons/ui/close.svg");
                             image-fit: contain;
                             colorize: Theme.text-secondary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
                         }
 
                         prop-search-clear := TouchArea {
@@ -3030,64 +3346,66 @@ export component PropertiesPanel inherits Rectangle {
             }
         }
 
-        // Empty state - polished design
+        // Empty state
         if root.selected-count == 0: Rectangle {
             vertical-stretch: 1;
             background: Theme.panel-background;
-            
+
             VerticalLayout {
                 alignment: center;
-                spacing: 12px;
-                
-                // Empty state icon — centered horizontally
+                padding-left: 24px;
+                padding-right: 24px;
+                spacing: 6px;
+
                 HorizontalLayout {
                     alignment: center;
-                    height: 48px;
-
                     Rectangle {
-                        width: 48px;
-                        height: 48px;
-                        border-radius: 24px;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 18px;
                         background: Theme.background-tertiary;
                         border-width: 1px;
                         border-color: Theme.border-color;
-                        
+
                         Text {
                             text: "◇";
                             color: Theme.text-secondary;
-                            font-size: 20px;
+                            font-size: 16px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
                 }
-                
+
                 Text {
-                    text: "No Selection";
+                    text: "Nothing selected";
                     color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 500;
+                    font-size: 12px;
+                    font-weight: 600;
                     horizontal-alignment: center;
                 }
-                
+
                 Text {
-                    text: "Select an object in the viewport\nor Explorer to view its properties";
+                    text: "Select something in the viewport or the Explorer to see its properties.";
                     color: Theme.text-secondary;
-                    font-size: 11px;
+                    font-size: PropStyle.font;
                     horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
             }
         }
-        
-        // Dynamic property list — fully driven by Rust binding
-        if root.selected-count > 0: ScrollView {
+
+        // Dynamic property list — fully driven by Rust binding. The rows are
+        // bound to the viewport's width, so nothing runs past the right edge.
+        if root.selected-count > 0: list := ScrollView {
             vertical-stretch: 1;
             horizontal-scrollbar-policy: always-off;
-            
+
             VerticalLayout {
-                padding: 4px;
-                padding-top: 6px;
-                spacing: 1px;
+                width: list.visible-width;
+                padding: 0px;
+                padding-bottom: 8px;
+                spacing: 0px;
                 alignment: start;
 
                 // First-class Tag system — uses the standard SectionHeader for
@@ -3118,7 +3436,7 @@ export component PropertiesPanel inherits Rectangle {
                     // Hide collapsed rows (height 0 + invisible)
                     visible: prop.is-header || !prop.section-collapsed;
                     height: (prop.is-header || !prop.section-collapsed) ? self.preferred-height : 0px;
-                    
+
                     // Category header — fires on-section-toggle so Rust updates section-collapsed
                     if prop.is-header: SectionHeader {
                         title: prop.category;
@@ -3133,7 +3451,7 @@ export component PropertiesPanel inherits Rectangle {
                             }
                         }
                     }
-                    
+
                     // UDim2 property (Roblox-parity 2D layout: Position / Size)
                     if !prop.is-header && !prop.section-collapsed && prop.property-type == "udim2": UDim2Row {
                         label: prop.name;

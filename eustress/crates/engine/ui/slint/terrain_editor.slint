@@ -1,12 +1,14 @@
 // ============================================================================
 // Eustress Engine Studio - Terrain Panel
 // Paint material picker, terrain properties, chunk list, and import/export.
-// Brush tools and settings live in the Terrain ribbon tab toolbar; the Paint
-// brush settings there show the same material picker as a swatch grid.
+// The terrain tools live in the Terrain ribbon tab and the tool bar over the
+// viewport (terrain_tool_bar.slint), which shows the same materials as a
+// thumbnail picker.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox, LineEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
+import { TerrainToolsUi } from "terrain_tool_bar.slint";
 
 // One terrain material slot for the pickers, pushed from Rust
 // (`sync_terrain_materials_to_slint`) off `TerrainMaterialSlots`: the slot
@@ -477,7 +479,12 @@ export component TerrainEditor inherits Rectangle {
                             horizontal-stretch: 1;
                             min-width: 200px;
                             height: 28px;
-                            background: root.edit-mode ? Theme.accent-blue : Theme.button-background;
+                            // Lit in selection cyan while the terrain tools
+                            // are the current tool (the tool bar holds their
+                            // settings; this panel does not repeat them).
+                            background: root.edit-mode ? Theme.accent-cyan.with-alpha(0.18) : Theme.button-background;
+                            border-width: 1px;
+                            border-color: root.edit-mode ? Theme.accent-cyan : transparent;
                             border-radius: 4px;
                             
                             TouchArea {
@@ -505,8 +512,8 @@ export component TerrainEditor inherits Rectangle {
                                 }
                                 
                                 Text {
-                                    text: root.edit-mode ? "Editing (T)" : "Edit Mode (T)";
-                                    color: root.edit-mode ? white : Theme.text-primary;
+                                    text: "Terrain tools (" + TerrainToolsUi.tools-key + ")";
+                                    color: root.edit-mode ? Theme.accent-cyan : Theme.text-primary;
                                     font-size: 11px;
                                     font-weight: 500;
                                     vertical-alignment: center;
@@ -515,12 +522,9 @@ export component TerrainEditor inherits Rectangle {
                                 }
                                 
                                 if root.edit-mode: Text {
-                                    // The 3D brushes carry internal ids; show the ribbon's names.
-                                    text: root.current-brush == "voxeladd" ? "ADD"
-                                        : (root.current-brush == "voxelremove" ? "SUBTRACT"
-                                        : (root.current-brush == "voxelsmooth" ? "SMOOTH 3D"
-                                        : root.current-brush.to-uppercase()));
-                                    color: #ffffff80;  // theme-exempt: translucent white label on accent-blue button
+                                    // The active tool's name, as the ribbon shows it.
+                                    text: root.current-brush == "sealevel" ? "SEA LEVEL" : root.current-brush.to-uppercase();
+                                    color: Theme.text-secondary;
                                     font-size: 10px;
                                     vertical-alignment: center;
                                     min-width: 40px;

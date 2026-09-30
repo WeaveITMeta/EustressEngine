@@ -185,7 +185,8 @@ impl ToolHandler for WebsiteStatusTool {
         if !namespace.is_empty() {
             lines.push(String::new());
             lines.push(format!(
-                "  consumers fetch: https://api.eustress.dev/api/simulation/{namespace}/latest/manifest"
+                "  consumers fetch: {api}/api/simulation/{namespace}/latest/manifest",
+                api = eustress_common::api_base::api_base()
             ));
         }
 
@@ -310,14 +311,15 @@ impl ToolHandler for WebsiteSetupTool {
                 "{} Website service\n  namespace:      {namespace}\n  schema_version: {schema_version}\n\
                  \n\
                  Next: website_add_reference to mark values, then Publish.\n\
-                 Consumers will fetch:\n  https://api.eustress.dev/api/simulation/{namespace}/latest/manifest",
-                if existed { "Updated" } else { "Created" }
+                 Consumers will fetch:\n  {api}/api/simulation/{namespace}/latest/manifest",
+                if existed { "Updated" } else { "Created" },
+                api = eustress_common::api_base::api_base()
             ),
             json!({
                 "created": !existed,
                 "namespace": namespace,
                 "schema_version": schema_version,
-                "manifest_url": format!("https://api.eustress.dev/api/simulation/{namespace}/latest/manifest"),
+                "manifest_url": eustress_common::api_base::api_url(&format!("/api/simulation/{namespace}/latest/manifest")),
             }),
         )
     }
@@ -567,7 +569,7 @@ impl ToolHandler for WebsiteManifestUrlTool {
         if namespace.is_empty() {
             return err("website_manifest_url", "The Website service has no namespace set. Run website_setup.");
         }
-        let url = format!("https://api.eustress.dev/api/simulation/{namespace}/latest/manifest");
+        let url = eustress_common::api_base::api_url(&format!("/api/simulation/{namespace}/latest/manifest"));
         let key_id = service_scalar(&text, "key_id").unwrap_or_default();
 
         ok(

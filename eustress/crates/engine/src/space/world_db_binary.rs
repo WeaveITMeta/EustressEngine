@@ -172,7 +172,6 @@ fn def_from_components(
         .unwrap_or_default();
 
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset: if mesh.is_empty() {
             None
@@ -585,7 +584,10 @@ pub(crate) fn spawn_binary_core(
     // that lit nothing. Lights load from their folder form instead
     // (`representation::class_is_file_natured`); cores stored before that
     // rule are skipped.
-    if matches!(arch.class_name.as_str(), "PointLight" | "SpotLight" | "SurfaceLight") {
+    if matches!(
+        arch.class_name.as_str(),
+        "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight"
+    ) {
         static SKIPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         if SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
             warn!(

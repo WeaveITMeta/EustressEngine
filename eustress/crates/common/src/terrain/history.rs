@@ -4,8 +4,9 @@
 //! `chunk_resolution` x `chunk_resolution` cells of the global raster, laid
 //! out like the per-chunk `.r16` and matmap PNG blocks
 //! `toml_loader::write_chunk_to_cache` copies in, so tile `(tx, tz)` holds
-//! chunk `(tx - chunks_x, tz - chunks_z)`. The first write into a tile
-//! snapshots its heights and material cells; when the edit ends,
+//! chunk `chunk_min + (tx, tz)`: tiles are `TerrainConfig::chunk_grid_index`
+//! values. The first write into a tile snapshots its heights and material
+//! cells; when the edit ends,
 //! [`TerrainEditRecorder::finish`] takes after-snapshots, drops the tiles
 //! that did not change and returns the rest as [`TerrainTileDelta`]s. Undo
 //! and redo write one side back with [`apply_terrain_tiles`].
@@ -20,6 +21,14 @@
 //! as [`TerrainBrickDelta`]s. Undo and redo put one side back with
 //! [`apply_terrain_bricks`].
 //!
+//! Water levels (`TerrainVoxelWater`, one surface height per raster cell)
+//! are recorded by the same tiles: [`TerrainEditRecorder::record_water_rect`]
+//! snapshots the water of every tile a water edit may change, and
+//! [`TerrainEditRecorder::finish_with_water`] keeps the tiles whose water
+//! changed as [`TerrainWaterTileDelta`]s, which [`apply_terrain_water_tiles`]
+//! writes back. A terrain without water reads as dry everywhere, so an edit
+//! that gave a root its first water undoes to dry ground.
+//!
 //! The brush takes the recorder as an optional resource: the Studio engine
 //! inserts it and pushes each finished stroke onto its undo stack, while the
 //! Client never inserts it, so its brush records nothing.
@@ -32,20 +41,21 @@ use serde::{Deserialize, Serialize};
 use super::height_query::{cache_cell_at_world, ensure_material_cache};
 use super::material::MaterialCell;
 use super::volume::{brick_coords_in_aabb, lattice_cell_size, TerrainVolume, VolumeBrick, VolumeEdit, VBK_PAYLOAD_LEN};
+use super::voxel_water::TerrainVoxelWater;
 use super::{BrushMode, HeightBand, TerrainConfig, TerrainData, TerrainDirtyChunks};
 
-/// Undo label for a brush stroke made in `mode`.
+/// Undo label for a brush stroke made in `mode`: what the stroke did, in the
+/// terrain tools' words (design section 4.2).
 pub fn terrain_stroke_label(mode: BrushMode) -> &'static str {
     match mode {
-        BrushMode::PaintTexture | BrushMode::Fill => "Paint Terrain",
-        BrushMode::VoxelAdd => "Add Terrain",
+        BrushMode::Raise => "Grow Terrain",
+        BrushMode::Lower => "Erode Terrain",
+        BrushMode::Smooth | BrushMode::VoxelSmooth => "Smooth Terrain",
+        BrushMode::Flatten => "Flatten Terrain",
+        BrushMode::PaintTexture => "Paint Terrain",
+        BrushMode::Replace => "Replace Terrain Material",
+        BrushMode::VoxelAdd => "Draw Terrain",
         BrushMode::VoxelRemove => "Subtract Terrain",
-        BrushMode::VoxelSmooth => "Smooth Terrain",
-        BrushMode::Raise
-        | BrushMode::Lower
-        | BrushMode::Smooth
-        | BrushMode::Flatten
-        | BrushMode::Region => "Sculpt Terrain",
     }
 }
 
@@ -189,6 +199,69 @@ pub struct RecordedTerrainEdit {
     pub tiles: Vec<TerrainTileDelta>,
     /// Empty for an edit that only wrote the raster.
     pub bricks: Vec<TerrainBrickDelta>,
+    /// Empty for an edit that changed no water.
+    pub water: Vec<TerrainWaterTileDelta>,
+}
+
+// ============================================================================
+// Water deltas
+// ============================================================================
+
+/// Before and after water levels of one cache tile, row-major over the
+/// tile's cells: world Y of the water surface, NaN where the column is dry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerrainWaterTileDelta {
+    /// Tile column and row, as [`TerrainTileDelta::tile`].
+    pub tile: UVec2,
+    /// Tile edge in cells when recorded.
+    pub resolution: u32,
+    /// Raster width when recorded. Undo refuses a raster of another size.
+    pub cache_width: u32,
+    /// Raster depth when recorded.
+    pub cache_height: u32,
+    pub before: Vec<f32>,
+    pub after: Vec<f32>,
+}
+
+impl TerrainWaterTileDelta {
+    /// Bytes of water data this delta holds, for the host's history budget.
+    pub fn byte_len(&self) -> usize {
+        (self.before.len() + self.after.len()) * std::mem::size_of::<f32>()
+    }
+}
+
+/// Whether two water level lists hold the same levels, NaN (dry) equal to
+/// NaN.
+fn same_levels(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
+}
+
+/// The water levels of one tile of `water`, dry where `water` is absent or
+/// laid out for another raster.
+fn snapshot_water_tile(
+    water: Option<&TerrainVoxelWater>,
+    cache_width: u32,
+    cache_height: u32,
+    rect: (usize, usize, usize, usize),
+) -> Vec<f32> {
+    let (x0, z0, tw, th) = rect;
+    let w = cache_width as usize;
+    let fits = water.filter(|water| {
+        water.width == cache_width
+            && water.height == cache_height
+            && water.levels.len() == cache_width as usize * cache_height as usize
+    });
+    match fits {
+        Some(water) => {
+            let mut levels = Vec::with_capacity(tw * th);
+            for z in z0..z0 + th {
+                let start = z * w + x0;
+                levels.extend_from_slice(&water.levels[start..start + tw]);
+            }
+            levels
+        }
+        None => vec![f32::NAN; tw * th],
+    }
 }
 
 /// One tile's contents at one moment.
@@ -339,6 +412,9 @@ struct OpenEdit {
     /// Every brick coordinate the edit may write, holding the brick as it
     /// was before the edit's first write there (`None`: no brick yet).
     bricks_before: HashMap<IVec3, Option<VolumeBrick>>,
+    /// Water levels of every tile a water write may change, as they were
+    /// before the edit's first write there.
+    water_before: HashMap<UVec2, Vec<f32>>,
 }
 
 impl OpenEdit {
@@ -401,8 +477,47 @@ impl TerrainEditRecorder {
             last_tile: None,
             cell_size: lattice_cell_size(config),
             bricks_before: HashMap::new(),
+            water_before: HashMap::new(),
         });
         true
+    }
+
+    /// Record the water of every tile under world XZ box `min_xz..max_xz`,
+    /// ahead of a water write there. `water` is the root's water, `None`
+    /// when it has none yet (every column dry).
+    pub fn record_water_rect(
+        &mut self,
+        config: &TerrainConfig,
+        data: &TerrainData,
+        water: Option<&TerrainVoxelWater>,
+        min_xz: Vec2,
+        max_xz: Vec2,
+    ) {
+        let Some(edit) = self.edit.as_mut() else { return };
+        if !(min_xz.is_finite() && max_xz.is_finite()) || !edit.matches(data) {
+            return;
+        }
+        let lo = min_xz.min(max_xz);
+        let hi = min_xz.max(max_xz);
+        let (Some(first), Some(last)) =
+            (cache_cell_at_world(config, data, lo.x, lo.y), cache_cell_at_world(config, data, hi.x, hi.y))
+        else {
+            return;
+        };
+        let (first, last) = (first / edit.resolution, last / edit.resolution);
+        for tz in first.y..=last.y {
+            for tx in first.x..=last.x {
+                let tile = UVec2::new(tx, tz);
+                if edit.water_before.contains_key(&tile) {
+                    continue;
+                }
+                let Some(rect) = tile_rect(tile, edit.resolution, edit.cache_width, edit.cache_height) else {
+                    continue;
+                };
+                let levels = snapshot_water_tile(water, edit.cache_width, edit.cache_height, rect);
+                edit.water_before.insert(tile, levels);
+            }
+        }
     }
 
     /// Record the tile holding cache cell `cell`, ahead of a write to it.
@@ -520,11 +635,48 @@ impl TerrainEditRecorder {
         data: &TerrainData,
         volume: &TerrainVolume,
     ) -> Option<RecordedTerrainEdit> {
+        if self.edit.as_ref().is_some_and(|edit| !edit.water_before.is_empty()) {
+            tracing::warn!("a terrain edit that recorded water was closed without its water; its water is not undoable");
+            if let Some(edit) = self.edit.as_mut() {
+                edit.water_before.clear();
+            }
+        }
+        self.finish_with_water(root, data, volume, None)
+    }
+
+    /// [`Self::finish_with_volume`] for an edit that also recorded water:
+    /// `water` is the edited root's water after the edit (`None` when it has
+    /// none, every column dry).
+    pub fn finish_with_water(
+        &mut self,
+        root: Option<Entity>,
+        data: &TerrainData,
+        volume: &TerrainVolume,
+        water: Option<&TerrainVoxelWater>,
+    ) -> Option<RecordedTerrainEdit> {
         let edit = self.edit.take()?;
         if (edit.root.is_some() && edit.root != root) || !edit.matches(data) {
             return None;
         }
-        let OpenEdit { label, resolution, cache_width, cache_height, before, cell_size, bricks_before, .. } = edit;
+        let OpenEdit { label, resolution, cache_width, cache_height, before, cell_size, bricks_before, water_before, .. } =
+            edit;
+        let mut water_tiles: Vec<(UVec2, Vec<f32>)> = water_before.into_iter().collect();
+        water_tiles.sort_by_key(|(tile, _)| (tile.y, tile.x));
+        let water: Vec<TerrainWaterTileDelta> = water_tiles
+            .into_iter()
+            .filter_map(|(tile, before)| {
+                let rect = tile_rect(tile, resolution, cache_width, cache_height)?;
+                let after = snapshot_water_tile(water, cache_width, cache_height, rect);
+                (!same_levels(&before, &after)).then_some(TerrainWaterTileDelta {
+                    tile,
+                    resolution,
+                    cache_width,
+                    cache_height,
+                    before,
+                    after,
+                })
+            })
+            .collect();
         let mut before: Vec<(UVec2, TileSnapshot)> = before.into_iter().collect();
         before.sort_by_key(|(tile, _)| (tile.y, tile.x));
         let tiles: Vec<TerrainTileDelta> = before
@@ -547,11 +699,54 @@ impl TerrainEditRecorder {
             })
             .collect();
         bricks.sort_by_key(|delta| (delta.coord.z, delta.coord.y, delta.coord.x));
-        if tiles.is_empty() && bricks.is_empty() {
+        if tiles.is_empty() && bricks.is_empty() && water.is_empty() {
             return None;
         }
-        Some(RecordedTerrainEdit { label, tiles, bricks })
+        Some(RecordedTerrainEdit { label, tiles, bricks, water })
     }
+}
+
+/// Write `side` of `deltas` into `water`, sizing it to `data`'s raster first
+/// (every column dry) when it was laid out for another. Every delta is
+/// checked before the first write, so a refused list changes nothing.
+pub fn apply_terrain_water_tiles(
+    water: &mut TerrainVoxelWater,
+    data: &TerrainData,
+    deltas: &[TerrainWaterTileDelta],
+    side: TerrainTileSide,
+) -> Result<(), String> {
+    let (w, h) = (data.cache_width, data.cache_height);
+    let mut rects = Vec::with_capacity(deltas.len());
+    for delta in deltas {
+        if delta.cache_width != w || delta.cache_height != h {
+            return Err(format!(
+                "water recorded on a {}x{} raster, the terrain is now {w}x{h}",
+                delta.cache_width, delta.cache_height
+            ));
+        }
+        let rect = tile_rect(delta.tile, delta.resolution, w, h).ok_or("a water tile lies off the raster")?;
+        let levels = match side {
+            TerrainTileSide::Before => &delta.before,
+            TerrainTileSide::After => &delta.after,
+        };
+        if levels.len() != rect.2 * rect.3 {
+            return Err("a water tile holds the wrong number of cells".to_string());
+        }
+        rects.push((rect, levels));
+    }
+    let total = w as usize * h as usize;
+    if water.width != w || water.height != h || water.levels.len() != total {
+        water.width = w;
+        water.height = h;
+        water.levels = vec![f32::NAN; total];
+    }
+    for ((x0, z0, tw, th), levels) in rects {
+        for row in 0..th {
+            let start = (z0 + row) * w as usize + x0;
+            water.levels[start..start + tw].copy_from_slice(&levels[row * tw..(row + 1) * tw]);
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -591,14 +786,12 @@ impl AppliedTerrainTiles {
         if self.chunks.is_empty() {
             return;
         }
-        let extent_x = config.chunks_x as i32;
-        let extent_z = config.chunks_z as i32;
         let mut centre_sum = Vec2::ZERO;
         for chunk in &self.chunks {
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     let neighbour = *chunk + IVec2::new(dx, dz);
-                    if neighbour.x.abs() <= extent_x && neighbour.y.abs() <= extent_z {
+                    if config.contains_chunk(neighbour) {
                         dirty.mark(neighbour);
                     }
                 }
@@ -694,10 +887,8 @@ pub fn apply_terrain_tiles(
             }
             data.material_dirty = true;
         }
-        applied.chunks.push(IVec2::new(
-            t.tile.x as i32 - config.chunks_x as i32,
-            t.tile.y as i32 - config.chunks_z as i32,
-        ));
+        // Tiles are grid indices, counted from the grid's lowest chunk.
+        applied.chunks.push(config.chunk_min() + t.tile.as_ivec2());
     }
     Ok(applied)
 }
@@ -1080,12 +1271,53 @@ mod tests {
 
     #[test]
     fn stroke_labels_follow_the_brush_mode() {
-        assert_eq!(terrain_stroke_label(BrushMode::Raise), "Sculpt Terrain");
-        assert_eq!(terrain_stroke_label(BrushMode::Smooth), "Sculpt Terrain");
+        assert_eq!(terrain_stroke_label(BrushMode::Raise), "Grow Terrain");
+        assert_eq!(terrain_stroke_label(BrushMode::Lower), "Erode Terrain");
+        assert_eq!(terrain_stroke_label(BrushMode::Smooth), "Smooth Terrain");
+        assert_eq!(terrain_stroke_label(BrushMode::Flatten), "Flatten Terrain");
         assert_eq!(terrain_stroke_label(BrushMode::PaintTexture), "Paint Terrain");
-        assert_eq!(terrain_stroke_label(BrushMode::VoxelAdd), "Add Terrain");
+        assert_eq!(terrain_stroke_label(BrushMode::Replace), "Replace Terrain Material");
+        assert_eq!(terrain_stroke_label(BrushMode::VoxelAdd), "Draw Terrain");
         assert_eq!(terrain_stroke_label(BrushMode::VoxelRemove), "Subtract Terrain");
         assert_eq!(terrain_stroke_label(BrushMode::VoxelSmooth), "Smooth Terrain");
+    }
+
+    #[test]
+    fn a_water_edit_undoes_to_dry_ground_and_redoes() {
+        let config = TerrainConfig { chunk_size: 16.0, chunk_resolution: 8, chunks_x: 1, chunks_z: 1, ..TerrainConfig::default() };
+        let mut data = TerrainData::procedural();
+        data.resize_cache(&config);
+        let mut recorder = TerrainEditRecorder::default();
+        assert!(recorder.begin("Sea Level", None, &config, &data));
+        // The root had no water: every column reads dry before the edit.
+        recorder.record_water_rect(&config, &data, None, Vec2::new(-4.0, -4.0), Vec2::new(4.0, 4.0));
+        let total = data.cache_width as usize * data.cache_height as usize;
+        let mut water = TerrainVoxelWater {
+            levels: vec![f32::NAN; total],
+            width: data.cache_width,
+            height: data.cache_height,
+            ..TerrainVoxelWater::default()
+        };
+        let cell = cache_cell_at_world(&config, &data, 0.0, 0.0).unwrap();
+        let index = cell.y as usize * data.cache_width as usize + cell.x as usize;
+        water.levels[index] = 3.5;
+        let edit = recorder
+            .finish_with_water(None, &data, TerrainVolume::empty(), Some(&water))
+            .expect("the water changed");
+        assert!(edit.tiles.is_empty() && edit.bricks.is_empty());
+        assert_eq!(edit.water.len(), 1, "only the tile that holds the new water");
+
+        let mut undone = water.clone();
+        apply_terrain_water_tiles(&mut undone, &data, &edit.water, TerrainTileSide::Before).unwrap();
+        assert!(undone.levels.iter().all(|level| level.is_nan()), "undo leaves every column dry");
+        apply_terrain_water_tiles(&mut undone, &data, &edit.water, TerrainTileSide::After).unwrap();
+        assert_eq!(undone.levels[index], 3.5, "redo puts the water back");
+
+        // A water component laid out for another raster is resized dry first.
+        let mut stale = TerrainVoxelWater::default();
+        apply_terrain_water_tiles(&mut stale, &data, &edit.water, TerrainTileSide::After).unwrap();
+        assert_eq!(stale.levels.len(), total);
+        assert_eq!(stale.levels[index], 3.5);
     }
 
     // ------------------------------------------------------------------------

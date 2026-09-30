@@ -88,6 +88,11 @@ pub struct EditorSettings {
     /// Most recently opened Space paths, newest first, for File > Recent.
     #[serde(default)]
     pub recent_spaces: Vec<String>,
+    /// Most recent inserts, newest first, as the id after `insert:`
+    /// ("PointLight", "sphere"). The Insert menu's Recent section; kept by
+    /// `ui::insert_classes::recent_after_insert`.
+    #[serde(default)]
+    pub recent_inserts: Vec<String>,
 
     /// Modern (dark/glass, high-tech) vs Classic (today's flat look)
     /// theme. Classic is the default for new/never-saved settings — see
@@ -148,6 +153,53 @@ pub struct EditorSettings {
     /// toggle). Same reasoning: an explicit opt-out must survive a restart.
     #[serde(default = "default_bliss_enabled")]
     pub bliss_enabled: bool,
+
+    /// The Ribbon's tool rows are folded away (menu bar and tab row only).
+    #[serde(default)]
+    pub ribbon_collapsed: bool,
+
+    // Settings > Graphics and Audio, applied by `crate::preferences`.
+
+    /// Shadow quality, 0 Low to 3 Ultra. High (2) is the engine's defaults.
+    #[serde(default = "default_render_quality")]
+    pub render_quality: u8,
+    /// Lights cast shadows.
+    #[serde(default = "default_true")]
+    pub shadows_enabled: bool,
+    /// SMAA on the Studio cameras.
+    #[serde(default = "default_true")]
+    pub anti_aliasing: bool,
+    /// Present in step with the monitor's refresh.
+    #[serde(default)]
+    pub vsync: bool,
+    /// The most frames per second while editing; 0 is unlimited.
+    #[serde(default = "default_max_fps")]
+    pub max_fps: u32,
+    /// Every sound, 0 to 1.
+    #[serde(default = "default_volume")]
+    pub master_volume: f32,
+    /// SFX, Voice and UI sounds, 0 to 1.
+    #[serde(default = "default_volume")]
+    pub effects_volume: f32,
+    /// Music and Ambient sounds (and looping sounds in Play), 0 to 1.
+    #[serde(default = "default_volume")]
+    pub music_volume: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_render_quality() -> u8 {
+    2
+}
+
+fn default_max_fps() -> u32 {
+    120
+}
+
+fn default_volume() -> f32 {
+    1.0
 }
 
 fn default_usage_telemetry_enabled() -> bool {
@@ -228,6 +280,7 @@ impl Default for EditorSettings {
             saved_identities: Vec::new(),
             last_space_path: None,
             recent_spaces: Vec::new(),
+            recent_inserts: Vec::new(),
 
             theme_modern: false,
             active_theme_id: Some("classic".to_string()),
@@ -238,6 +291,15 @@ impl Default for EditorSettings {
             telemetry_notice_shown: false,
             bliss_node_mode: default_bliss_node_mode(),
             bliss_enabled: default_bliss_enabled(),
+            ribbon_collapsed: false,
+            render_quality: default_render_quality(),
+            shadows_enabled: true,
+            anti_aliasing: true,
+            vsync: false,
+            max_fps: default_max_fps(),
+            master_volume: default_volume(),
+            effects_volume: default_volume(),
+            music_volume: default_volume(),
         }
     }
 }
@@ -362,7 +424,8 @@ impl Plugin for EditorSettingsPlugin {
             .init_resource::<AutoSaveState>()
             .add_systems(Update, auto_save_settings)
             .add_systems(Update, auto_save_scene_system)
-            .add_systems(Update, track_recent_spaces);
+            .add_systems(Update, track_recent_spaces)
+            .add_plugins(crate::preferences::PreferencesPlugin);
     }
 }
 
@@ -425,14 +488,15 @@ fn auto_save_settings(
 /// editor) already knows, and piggybacks on git's delta compression
 /// so autosaves cost effectively nothing on disk past the first one.
 ///
-/// Entity edits already reach disk as they happen (every tool edits TOML
-/// files directly via `write_instance_changes_system`), so for them autosave
-/// only needs to capture a commit boundary. Terrain is the exception: brush,
-/// road, Part to Terrain and volume edits live in memory until
-/// `save_terrain_to_disk` writes them, so when the terrain itself changed
-/// since its last save the autosave writes it through that same function
-/// Save uses before it commits. Nothing changed makes autosave a no-op,
-/// which is the common case while the user is just looking around.
+/// Some entity edits reach disk as they happen (the move and scale tools, the
+/// property panel), and some only through `save_space`: in the default build
+/// `write_instance_changes_system` is not registered, so a rotate-tool drag
+/// or an undo lives in the ECS until a save. So when anything is unsaved the
+/// autosave runs `save_space` first, which writes only the parts that differ
+/// from their files, then the terrain when it changed (brush, road, Part to
+/// Terrain and volume edits live in memory until `save_terrain_to_disk`),
+/// then commits. Nothing changed makes autosave a no-op, which is the common
+/// case while the user is just looking around.
 ///
 /// The work runs as a queued command, which gets the whole `World` the
 /// terrain save needs.
@@ -488,10 +552,41 @@ fn autosave_space(world: &mut World, space_path: PathBuf, identity: Option<GitId
         (Some(state), Some(sequence)) => state.has_unsaved_changes || state.saved_undo_sequence != sequence,
         _ => true,
     };
-    // Only terrain edits need the whole-terrain rewrite; entity edits are
-    // already on disk and just need the git commit below.
+    // Never during Play: physics and scripts move parts there and terrain
+    // tools edit the terrain, and Stop restores all of it, so nothing Play
+    // changes is an edit to persist or commit. The autosave waits for Edit.
+    let editing = world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .map_or(true, |s| *s.get() == crate::play_mode::PlayModeState::Editing);
+    if !editing {
+        retry_autosave_soon(world);
+        return;
+    }
+    // A revert waits for this Space to reopen (`checkpoint::request_restore`),
+    // and anything saved now would land over the files it restores.
+    if crate::space::checkpoint::restore_pending(&space_path) {
+        retry_autosave_soon(world);
+        return;
+    }
+    // Both saves run under the commit lock, so no commit's `git add` stages a
+    // half-written save. While a commit is still running, this autosave tries
+    // again in a few seconds rather than hold the frame.
+    let commit_guard = match GIT_COMMIT_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            retry_autosave_soon(world);
+            return;
+        }
+    };
+    // Edits that live only in the ECS until a save (a rotate, an undo).
+    if unsaved {
+        crate::space::space_ops::save_space(world);
+    }
+    // Only terrain edits need the whole-terrain rewrite.
     let terrain_unsaved = crate::ui::file_event_handler::terrain_changed_since_save(world, unsaved)
         && crate::ui::file_event_handler::save_terrain_to_disk(world);
+    drop(commit_guard);
 
     // Dispatch the git work to a background thread. `git add -A` +
     // commit can hit the filesystem harder than we want to pay for on
@@ -537,9 +632,34 @@ fn autosave_space(world: &mut World, space_path: PathBuf, identity: Option<GitId
     }
 }
 
+/// Try an autosave that could not run now again in a few seconds.
+fn retry_autosave_soon(world: &mut World) {
+    let interval = world
+        .get_resource::<EditorSettings>()
+        .map(|s| s.auto_save_interval)
+        .unwrap_or(0.0);
+    if let Some(mut auto_save) = world.get_resource_mut::<AutoSaveState>() {
+        auto_save.timer = (interval - 5.0).max(0.0);
+    }
+}
+
+/// One git commit of a Space at a time in this process
+/// (`git_autosave_commit`), and no autosave writing files while a commit
+/// stages them (`autosave_space`).
+pub(crate) static GIT_COMMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) enum GitAutosave {
     Committed(String),
     NoChanges,
+}
+
+/// Whether [`git_commit_locked`] records a commit when nothing changed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyCommit {
+    /// Report [`GitAutosave::NoChanges`] and commit nothing.
+    Skip,
+    /// Commit anyway, so the message (a snapshot trailer) is recorded.
+    Allow,
 }
 
 /// Per-commit git author identity. Pulled from `AuthState` when the
@@ -578,6 +698,28 @@ pub(crate) fn git_autosave_commit(
     space_path: &std::path::Path,
     message: &str,
     identity: Option<&GitIdentity>,
+) -> Result<GitAutosave, String> {
+    // One commit at a time in this process. The periodic autosave and a
+    // manual save each run this on their own background thread, and git
+    // guards its index with `index.lock`: a second concurrent `git add`
+    // fails outright instead of waiting, so a save that lands while the
+    // autosave runs lost its commit and reported "git snapshot commit
+    // failed". Held across add, commit and rev-parse, so the sha returned
+    // is this call's commit and not a neighbour's. A second engine process
+    // on the same Space is not covered; git's own lock still refuses it.
+    let _commit_guard = GIT_COMMIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    git_commit_locked(space_path, message, identity, EmptyCommit::Skip)
+}
+
+/// [`git_autosave_commit`] for a caller that already holds
+/// [`GIT_COMMIT_LOCK`], so it can write the Space and commit it with no
+/// other commit in between. Called without the lock, a concurrent commit's
+/// `git add` can fail on git's `index.lock`.
+pub(crate) fn git_commit_locked(
+    space_path: &std::path::Path,
+    message: &str,
+    identity: Option<&GitIdentity>,
+    empty: EmptyCommit,
 ) -> Result<GitAutosave, String> {
     use std::process::Command;
 
@@ -641,6 +783,19 @@ pub(crate) fn git_autosave_commit(
     // removes them from the index (no-op once gone; --ignore-unmatch
     // stays quiet when nothing matched).
     let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", "world.fjalldb"]);
+    let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", ".eustress/host"]);
+    // Each file stays on disk and leaves the index once; that one time is
+    // logged (git names what it removed).
+    for &runtime in RUNTIME_STATE {
+        if let Ok(out) = run(&["rm", "--cached", "--ignore-unmatch", runtime]) {
+            if out.status.success() && !out.stdout.is_empty() {
+                info!(
+                    "Stopped tracking {runtime} in {}: it is this machine's session state, not the Space's",
+                    space_path.display()
+                );
+            }
+        }
+    }
 
     // Stage everything. `-A` picks up adds / modifies / deletes in one
     // pass without requiring the caller to enumerate paths.
@@ -653,7 +808,7 @@ pub(crate) fn git_autosave_commit(
     // index matches HEAD (nothing to commit). Only on exit 1 do we
     // actually have changes to record.
     let diff = run(&["diff", "--cached", "--quiet"])?;
-    if diff.status.success() {
+    if diff.status.success() && empty == EmptyCommit::Skip {
         return Ok(GitAutosave::NoChanges);
     }
 
@@ -675,6 +830,9 @@ pub(crate) fn git_autosave_commit(
     commit_args.push("-m".into());
     commit_args.push(message.to_string());
     commit_args.push("--quiet".into());
+    if empty == EmptyCommit::Allow {
+        commit_args.push("--allow-empty".into());
+    }
     let commit_args_ref: Vec<&str> = commit_args.iter().map(|s| s.as_str()).collect();
     let commit = run(&commit_args_ref)?;
     if !commit.status.success() {
@@ -691,6 +849,28 @@ pub(crate) fn git_autosave_commit(
 
     Ok(GitAutosave::Committed(sha))
 }
+
+/// Files in a Space that are this machine's state, not the Space's: what
+/// the engine rewrites as it runs, and its caches of server state. Kept out
+/// of git, so opening a Space changes no tracked file and snapshots do not
+/// churn, and a revert never writes an old value back. Exact paths.
+///
+/// `last_reconcile`: when the database last matched the files; the next
+/// open re-reads every file changed since. `lsp.port`: the port this
+/// session's language server listens on. `output.log`: the Output panel,
+/// saved into its Space on every switch and exit. `.last_name`: the folder
+/// name the Space last opened under, so a rename is noticed.
+/// `review.toml`: the Gallery's review of the Space's listing, as last
+/// fetched from api.eustress.dev, and the temporary file it is written
+/// through.
+pub(crate) const RUNTIME_STATE: &[&str] = &[
+    ".eustress/last_reconcile",
+    ".eustress/lsp.port",
+    ".eustress/output.log",
+    ".eustress/.last_name",
+    ".eustress/review.toml",
+    ".eustress/review.toml.tmp",
+];
 
 /// Ensure the Space's autosave `.gitignore` excludes the binary Fjall DB,
 /// the `.eustress` sidecar/trash, and recovery `.bak-*` backups so
@@ -739,9 +919,29 @@ fn ensure_autosave_gitignore(space_path: &std::path::Path) {
         existing
     };
 
-    let needed = ["world.fjalldb/", ".eustress/trash/", "*.bak-*"];
+    // `.eustress/host/`: a hosting export an earlier build wrote inside the
+    // Space (now written to the workspace's own cache).
+    // `.eustress/hosts/`: a running host's join link, written again every
+    // 10 s, when the workspace folder is itself inside a Space's repository.
+    // `.eustress/snapshots/`: database checkpoints paired with snapshot
+    // commits. They are stored outside git on purpose, and an unignored one
+    // would be staged by the very commit it belongs to.
+    // `world.fjalldb.*/`: the database copies a restore makes beside the live
+    // one (`world.fjalldb.restoring/`, `world.fjalldb.pre-restore-<id>/`).
+    // `world.fjalldb/` matches only its exact name, so without this entry a
+    // pre-restore copy would be committed by the next autosave.
+    // `RUNTIME_STATE`: the engine's per-machine files (see there).
+    let needed = [
+        "world.fjalldb/",
+        "world.fjalldb.*/",
+        ".eustress/trash/",
+        ".eustress/host/",
+        ".eustress/hosts/",
+        ".eustress/snapshots/",
+        "*.bak-*",
+    ];
     let mut additions = String::new();
-    for entry in needed {
+    for entry in needed.into_iter().chain(RUNTIME_STATE.iter().copied()) {
         if !content.lines().any(|l| l.trim() == entry) {
             additions.push_str(entry);
             additions.push('\n');

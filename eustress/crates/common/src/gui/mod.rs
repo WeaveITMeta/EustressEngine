@@ -37,7 +37,8 @@ pub use billboard_renderer::BillboardRendererPlugin;
 
 pub mod gui_commands;
 pub use gui_commands::{GuiCommand, push_gui_command, drain_gui_commands, set_gui_snapshot, gui_snapshot_get, clear_gui_snapshot,
-    ScriptLogLevel, ScriptLogEntry, push_script_log, drain_script_logs};
+    ScriptLogLevel, ScriptLogEntry, push_script_log, push_script_log_detail, drain_script_logs,
+    script_scope, current_script, ScriptScope};
 
 #[cfg(feature = "gui")]
 pub mod gui_bridge;

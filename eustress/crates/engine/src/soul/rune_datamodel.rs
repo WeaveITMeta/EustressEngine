@@ -209,6 +209,24 @@ fn set_color(i: i64, r: f64, gr: f64, b: f64) -> bool {
     with(false, |g| g.set_prop(id(i), "Color", DmValue::Color3(Color3::new(r, gr, b))).is_ok())
 }
 
+/// An instance-valued property (`Attachment0`, `Part0`, `PrimaryPart`,
+/// `Occupant`, `Adornee`, an ObjectValue's `Value`); `0` when it is empty.
+#[rune::function]
+fn get_instance(i: i64, prop: &str) -> i64 {
+    with(0, |g| match g.get_prop(id(i), prop) {
+        Some(DmValue::Instance(other)) => raw(other),
+        _ => 0,
+    })
+}
+
+/// Sets an instance-valued property, such as a constraint's `Attachment0`;
+/// `0` clears it.
+#[rune::function]
+fn set_instance(i: i64, prop: &str, other: i64) -> bool {
+    let value = if other == 0 { DmValue::Nil } else { DmValue::Instance(id(other)) };
+    with(false, |g| g.set_prop(id(i), prop, value).is_ok())
+}
+
 // ── Attributes ──────────────────────────────────────────────────────────
 
 #[rune::function]
@@ -372,6 +390,128 @@ fn mouse_target() -> i64 {
     with(0, |g| opt(g.mouse.target))
 }
 
+// ── Animation: Animator tracks, as Luau's AnimationTrack ────────────────
+
+/// A track call's error goes to Output as a warning; the call returns false.
+fn done(g: &mut DataModel, result: Result<(), String>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            g.print(OutputLevel::Warn, "Rune", e);
+            false
+        }
+    }
+}
+
+/// `animator:LoadAnimation(animation)`: a track, or 0 with the reason in
+/// Output. A Humanoid or AnimationController stands for its Animator.
+#[rune::function]
+fn load_animation(animator: i64, animation: i64) -> i64 {
+    with(0, |g| match g.load_animation(id(animator), id(animation)) {
+        Ok(track) => raw(track),
+        Err(e) => {
+            g.print(OutputLevel::Warn, "Rune", e);
+            0
+        }
+    })
+}
+
+/// The same, from a content id (`space://...`, `rig://walk`), with no
+/// Animation instance.
+#[rune::function]
+fn load_animation_id(animator: i64, content: &str) -> i64 {
+    with(0, |g| match g.load_animation_content(id(animator), content) {
+        Ok(track) => raw(track),
+        Err(e) => {
+            g.print(OutputLevel::Warn, "Rune", e);
+            0
+        }
+    })
+}
+
+/// `track:Play(fade, weight, speed)`.
+#[rune::function]
+fn play(track: i64, fade: f64, weight: f64, speed: f64) -> bool {
+    with(false, |g| {
+        let r = g.play_track(id(track), fade as f32, weight as f32, speed as f32);
+        done(g, r)
+    })
+}
+
+/// `track:Stop(fade)`.
+#[rune::function]
+fn stop(track: i64, fade: f64) -> bool {
+    with(false, |g| {
+        let r = g.stop_track(id(track), fade as f32);
+        done(g, r)
+    })
+}
+
+/// `track:AdjustSpeed(speed)`.
+#[rune::function]
+fn adjust_speed(track: i64, speed: f64) -> bool {
+    with(false, |g| {
+        let r = g.adjust_track_speed(id(track), speed as f32);
+        done(g, r)
+    })
+}
+
+/// `track:AdjustWeight(weight, fade)`.
+#[rune::function]
+fn adjust_weight(track: i64, weight: f64, fade: f64) -> bool {
+    with(false, |g| {
+        let r = g.adjust_track_weight(id(track), weight as f32, fade as f32);
+        done(g, r)
+    })
+}
+
+/// `track.TimePosition`, seconds.
+#[rune::function]
+fn track_time(track: i64) -> f64 {
+    with(0.0, |g| g.get_prop(id(track), "TimePosition").and_then(|v| v.as_number()).unwrap_or(0.0))
+}
+
+/// `track.TimePosition = t`: a seek, which fires no events for what it skips.
+#[rune::function]
+fn set_track_time(track: i64, t: f64) -> bool {
+    with(false, |g| {
+        let r = g.set_prop(id(track), "TimePosition", DmValue::Number(t));
+        done(g, r)
+    })
+}
+
+/// `track.Length`, seconds: 0 until the clip has loaded.
+#[rune::function]
+fn track_length(track: i64) -> f64 {
+    with(0.0, |g| g.get_prop(id(track), "Length").and_then(|v| v.as_number()).unwrap_or(0.0))
+}
+
+/// `track.IsPlaying`.
+#[rune::function]
+fn is_playing(track: i64) -> bool {
+    with(false, |g| g.get_prop(id(track), "IsPlaying").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+/// `animator:GetPlayingAnimationTracks()`: playing, or still fading out.
+#[rune::function]
+fn playing_tracks(animator: i64) -> Vec<i64> {
+    with(Vec::new(), |g| g.playing_tracks(id(animator)).into_iter().map(raw).collect())
+}
+
+/// This frame's track events, in the order they fired: the track, the kind
+/// (`stopped`, `ended`, `looped`, `keyframe`, `marker`), the keyframe's or
+/// marker's name, and the marker's value. Rune polls where Luau connects.
+#[rune::function]
+fn animation_events() -> Vec<(i64, String, String, String)> {
+    with(Vec::new(), |g| {
+        g.animation
+            .frame_events()
+            .iter()
+            .map(|e| (raw(e.track), e.kind.to_string(), e.name.clone(), e.value.clone()))
+            .collect()
+    })
+}
+
 /// The `eustress::dm` module.
 pub fn create_datamodel_module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate_item("eustress", ["dm"])?;
@@ -398,6 +538,8 @@ pub fn create_datamodel_module() -> Result<Module, ContextError> {
     m.function_meta(get_position)?;
     m.function_meta(set_position)?;
     m.function_meta(set_color)?;
+    m.function_meta(get_instance)?;
+    m.function_meta(set_instance)?;
     m.function_meta(get_attribute_number)?;
     m.function_meta(set_attribute_number)?;
     m.function_meta(get_attribute_bool)?;
@@ -419,5 +561,17 @@ pub fn create_datamodel_module() -> Result<Module, ContextError> {
     m.function_meta(mouse_position)?;
     m.function_meta(mouse_hit)?;
     m.function_meta(mouse_target)?;
+    m.function_meta(load_animation)?;
+    m.function_meta(load_animation_id)?;
+    m.function_meta(play)?;
+    m.function_meta(stop)?;
+    m.function_meta(adjust_speed)?;
+    m.function_meta(adjust_weight)?;
+    m.function_meta(track_time)?;
+    m.function_meta(set_track_time)?;
+    m.function_meta(track_length)?;
+    m.function_meta(is_playing)?;
+    m.function_meta(playing_tracks)?;
+    m.function_meta(animation_events)?;
     Ok(m)
 }

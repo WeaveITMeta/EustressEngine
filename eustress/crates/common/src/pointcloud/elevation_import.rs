@@ -207,6 +207,7 @@ pub fn elevation_to_terrain(
         chunk_resolution: config.chunk_resolution,
         chunks_x: chunks_x / 2,  // TerrainConfig uses half-extents from center
         chunks_z: chunks_z / 2,
+        center_chunk: IVec2::ZERO,
         lod_levels: config.lod_levels,
         lod_distances: generate_lod_distances(config.lod_levels, config.chunk_size),
         view_distance: config.chunk_size * (chunks_x.max(chunks_z) as f32) * 1.5,
@@ -226,6 +227,7 @@ pub fn elevation_to_terrain(
         material_cache: Vec::new(),
         material_dirty: false,
         slot_palette: Default::default(),
+        sparse_surface: false,
     };
     
     Ok(ElevationImportResult {

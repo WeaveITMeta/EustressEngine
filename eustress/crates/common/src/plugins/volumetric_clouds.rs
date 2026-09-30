@@ -230,6 +230,14 @@ struct CloudWind {
     detail: Vec3,
 }
 
+/// Whether a Space with no Clouds object gets a cloud layer anyway.
+///
+/// `false`, Roblox's rule and McKale's choice (2026-09-26): no Clouds object,
+/// no clouds. New Spaces get a visible, editable Clouds object set to fair
+/// weather from the Lighting templates, and imported places keep exactly
+/// the Clouds they carry. `true` restores the old invisible default layer.
+pub const CLOUDS_WITHOUT_AN_OBJECT: bool = false;
+
 /// Draws the cloud layer. Added by `SharedLightingPlugin`.
 pub struct VolumetricCloudsPlugin;
 
@@ -692,13 +700,13 @@ fn sync_cloud_dome(
         return;
     };
 
-    // The Space's own Clouds if it has one, the default fair-weather layer
-    // if not.
+    // The Space's own Clouds; without one, none (see
+    // `CLOUDS_WITHOUT_AN_OBJECT`).
     let fallback;
     let clouds = match authored.iter().next() {
         Some(clouds) => clouds,
         None => {
-            fallback = Clouds::default();
+            fallback = Clouds { enabled: CLOUDS_WITHOUT_AN_OBJECT, ..Clouds::default() };
             &fallback
         }
     };
@@ -844,7 +852,7 @@ mod tests {
         // shadow, the bases at 1.5 km are losing the last of the light, and
         // the tops at 2.7 km still see the sun and are lit red.
         let medium = SkyMedium::default();
-        let clouds = Clouds::default();
+        let clouds = Clouds { altitude: 1500.0, thickness: 1200.0, ..Clouds::default() };
         let dir = Vec3::new(0.0, -1.0f32.to_radians().sin(), 1.0).normalize();
         let sky = SkyLight {
             sun_direction: dir,

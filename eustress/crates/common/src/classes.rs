@@ -465,6 +465,7 @@ pub enum ClassName {
     UIDragDetector,          // Makes a GuiObject draggable
     // ── Wave 7: meshes / surfaces / visual adornments (7.C) ──
     BlockMesh,               // Legacy block mesh shape modifier
+    CylinderMesh,            // Legacy cylinder mesh shape modifier (stands on Y)
     FileMesh,                // Legacy file-backed mesh shape modifier
     Texture,                 // Tiling texture decal on a face
     SurfaceAppearance,       // PBR texture-map override for a MeshPart
@@ -558,8 +559,6 @@ pub enum ClassName {
     ColorGradingEffect,      // Post-FX color grade + tonemapper (distinct from ColorCorrectionEffect)
     TerrainDetail,           // Per-material terrain detail config (child of Terrain)
     TerrainRegion,           // Saved voxel region serialized out of Terrain
-    // ── Fission branch: nuclear simulation ──
-    ArcReactorCore,          // ARC-1 compact fission reactor — carries nuclear kinetics + thermal-hydraulics components
     // Terrain layers: non-destructive edits baked over a terrain's base (see
     // `terrain::layer_instances`). Appended last so no existing variant moves.
     /// A road, path, river, canyon or embankment along a spline through its
@@ -776,6 +775,7 @@ impl ClassName {
             ClassName::CanvasGroup => "CanvasGroup",
             ClassName::UIDragDetector => "UIDragDetector",
             ClassName::BlockMesh => "BlockMesh",
+            ClassName::CylinderMesh => "CylinderMesh",
             ClassName::FileMesh => "FileMesh",
             ClassName::Texture => "Texture",
             ClassName::SurfaceAppearance => "SurfaceAppearance",
@@ -869,7 +869,6 @@ impl ClassName {
             ClassName::ColorGradingEffect => "ColorGradingEffect",
             ClassName::TerrainDetail => "TerrainDetail",
             ClassName::TerrainRegion => "TerrainRegion",
-            ClassName::ArcReactorCore => "ArcReactorCore",
             ClassName::TerrainSpline => "TerrainSpline",
             ClassName::TerrainSplinePoint => "TerrainSplinePoint",
             ClassName::TerrainStamp => "TerrainStamp",
@@ -1086,6 +1085,7 @@ impl ClassName {
             "CanvasGroup" => Ok(ClassName::CanvasGroup),
             "UIDragDetector" => Ok(ClassName::UIDragDetector),
             "BlockMesh" => Ok(ClassName::BlockMesh),
+            "CylinderMesh" => Ok(ClassName::CylinderMesh),
             "FileMesh" => Ok(ClassName::FileMesh),
             "Texture" => Ok(ClassName::Texture),
             "SurfaceAppearance" => Ok(ClassName::SurfaceAppearance),
@@ -1179,7 +1179,6 @@ impl ClassName {
             "ColorGradingEffect" => Ok(ClassName::ColorGradingEffect),
             "TerrainDetail" => Ok(ClassName::TerrainDetail),
             "TerrainRegion" => Ok(ClassName::TerrainRegion),
-            "ArcReactorCore" => Ok(ClassName::ArcReactorCore),
             "TerrainSpline" => Ok(ClassName::TerrainSpline),
             "TerrainSplinePoint" => Ok(ClassName::TerrainSplinePoint),
             "TerrainStamp" => Ok(ClassName::TerrainStamp),
@@ -1559,7 +1558,7 @@ impl BasePart {
             Material::Sand => 1600.0,
             Material::Fabric => 300.0,
             Material::Glass => 2500.0,
-            Material::Neon => 0.9,         // Light/gas
+            Material::Neon => 900.0,       // Glowing plastic: weighs as Plastic, as in Roblox
             Material::Ice => 918.0,
             Material::Gold => 19300.0,
             Material::Silver => 10490.0,
@@ -1572,12 +1571,33 @@ impl BasePart {
         self.density = Self::material_default_density(&self.material);
         self.update_mass();
     }
+
+    /// The density this part weighs at, kg/m³: its custom physical
+    /// properties' when it has them (an authored override), otherwise its
+    /// material's. The physics plugin keeps `density`, `mass` and Avian's
+    /// collider density equal to this.
+    pub fn effective_density(&self) -> f32 {
+        self.custom_physical_properties
+            .map(|p| p.density)
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .unwrap_or_else(|| Self::material_default_density(&self.material))
+    }
+
+    /// Keep the current `density` as this part's own from now on (an
+    /// authored override), keeping any other custom physical properties.
+    pub fn author_density(&mut self) {
+        let mut props = self.custom_physical_properties.unwrap_or_default();
+        props.density = self.density;
+        self.custom_physical_properties = Some(props);
+    }
 }
 
-/// Custom physics properties (Eustress PhysicalProperties)
+/// Custom physics properties (Eustress PhysicalProperties). On a part, its
+/// presence is an authored override of what the material would give.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Reflect)]
 pub struct PhysicalProperties {
-    pub density: f32,        // kg/stud³
+    /// kg/m³. Roblox's PhysicalProperties density is g/cm³: × 1000.
+    pub density: f32,
     pub friction: f32,       // 0-2
     pub elasticity: f32,     // 0-1 (bounciness)
     pub friction_weight: f32,
@@ -1587,7 +1607,7 @@ pub struct PhysicalProperties {
 impl Default for PhysicalProperties {
     fn default() -> Self {
         Self {
-            density: 0.7,  // Plastic default
+            density: 900.0,  // Plastic, as material_default_density
             friction: 0.3,
             elasticity: 0.5,
             friction_weight: 1.0,
@@ -2217,29 +2237,43 @@ impl Default for EustressCamera {
 // 10. Light Classes
 // ============================================================================
 
+// The four light classes share one authoring model, resolved to Bevy lights by
+// `plugins::light_classes`:
+//
+// - `brightness` is a Roblox-style dial (1 = a normal lamp), display-referred:
+//   a brightness-1 light lights a surface the same on screen at noon and at
+//   midnight, because the physical lumens follow the camera's adapted exposure.
+// - `range` is the light's reach in metres, as Roblox's Range is its reach in
+//   studs: the light fades to nothing at `range`, and a longer range lights
+//   further out rather than only clipping later.
+// - `angle` (SpotLight, SurfaceLight) is the cone's full apex angle in
+//   degrees, 0 to 180, as in Roblox.
+// - `face` (SpotLight, SurfaceLight) is the face of the parent part the light
+//   shines out of: "Top", "Bottom", "Front", "Back", "Left" or "Right".
+
 /// Omni light (Eustress PointLight)
-/// Bevy: PointLightBundle with optional PointLightTexture
+/// Bevy: PointLight, resolved by `plugins::light_classes`
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressPointLight {
-    /// Intensity in lumens (Eustress "Brightness")
-    /// Bevy: PointLight.intensity
+    /// Roblox-style brightness dial (Eustress "Brightness"); see the note
+    /// above the light classes for what it means physically.
     pub brightness: f32,
 
     /// Hue (Eustress "Color")
     /// Bevy: PointLight.color
     pub color: Color,
 
-    /// Falloff distance (Eustress "Range")
-    /// Bevy: PointLight.range
+    /// Reach in metres (Eustress "Range"): the light fades to nothing here.
     pub range: f32,
 
-    /// Spherical area light radius — larger radius = softer shadows and wider illumination
-    /// Bevy: PointLight.radius
+    /// Radius of the emitting sphere in metres. Widens specular highlights;
+    /// diffuse lighting is unchanged. Bevy: PointLight.radius
     #[serde(default)]
     pub radius: f32,
 
-    /// Cast shadows (Eustress "Shadows")
+    /// Cast shadows (Eustress "Shadows"). Off by default, as in Roblox: a
+    /// shadowed point light renders six shadow views every frame.
     pub shadows: bool,
 
     /// Roblox `Light.Enabled`: a disabled light emits nothing and casts no
@@ -2256,14 +2290,20 @@ pub struct EustressPointLight {
     pub texture: Option<String>,
 }
 
+/// Reach of a new light, in metres. The class templates carry the same value.
+pub const DEFAULT_LIGHT_RANGE: f32 = 16.0;
+/// Cone of a new SpotLight or SurfaceLight: Roblox's default, a full apex
+/// angle of 90 degrees.
+pub const DEFAULT_LIGHT_ANGLE: f32 = 90.0;
+
 impl Default for EustressPointLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
+            brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
+            range: DEFAULT_LIGHT_RANGE,
             radius: 0.0, // Point source by default, increase for area light
-            shadows: true,
+            shadows: false,
             enabled: true,
             texture: None,
         }
@@ -2275,20 +2315,36 @@ fn light_enabled_default() -> bool {
     true
 }
 
+/// Serde default for the SpotLight and SurfaceLight `angle` field.
+fn light_angle_default() -> f32 {
+    DEFAULT_LIGHT_ANGLE
+}
+
+/// Serde default for the SpotLight and SurfaceLight `face` field.
+fn light_face_default() -> String {
+    "Front".to_string()
+}
+
 /// Spot light (Eustress SpotLight)
-/// Bevy: SpotLightBundle with optional SpotLightTexture
+/// Bevy: SpotLight on an emitter child, resolved by `plugins::light_classes`
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressSpotLight {
     pub brightness: f32,
     pub color: Color,
     pub range: f32,
-    /// Cone angle in degrees (Eustress "Angle")
+    /// Full apex angle of the cone in degrees, 0 to 180 (Eustress "Angle")
+    #[serde(default = "light_angle_default")]
     pub angle: f32,
     pub shadows: bool,
     /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
     #[serde(default = "light_enabled_default")]
     pub enabled: bool,
+    /// Face of the parent part the cone shines out of (Eustress "Face"). With
+    /// no part parent it turns the cone relative to the light itself; "Front"
+    /// shines along the light's -Z.
+    #[serde(default = "light_face_default")]
+    pub face: String,
 
     /// Optional light texture/cookie (Bevy 0.17+: SpotLightTexture)
     /// Asset path to a 2D texture that modulates light intensity.
@@ -2301,26 +2357,33 @@ pub struct EustressSpotLight {
 impl Default for EustressSpotLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
+            brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
-            angle: 45.0, // Degrees — typical spotlight cone
-            shadows: true,
+            range: DEFAULT_LIGHT_RANGE,
+            angle: DEFAULT_LIGHT_ANGLE,
+            shadows: false,
             enabled: true,
+            face: light_face_default(),
             texture: None,
         }
     }
 }
 
 /// Surface light (Eustress SurfaceLight)
-/// Emits light from a specific face of a part
+/// Emits a cone of light out of one face of its parent part. Bevy: SpotLight
+/// on an emitter child at the face, resolved by `plugins::light_classes`.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct SurfaceLight {
     pub brightness: f32,
     pub color: Color,
     pub range: f32,
+    #[serde(default = "light_face_default")]
     pub face: String,  // "Top", "Bottom", "Front", "Back", "Left", "Right"
+    /// Full apex angle of the cone in degrees, 0 to 180 (Eustress "Angle").
+    /// 180 lights the whole half-space in front of the face.
+    #[serde(default = "light_angle_default")]
+    pub angle: f32,
     pub shadows: bool,
     /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
     #[serde(default = "light_enabled_default")]
@@ -2338,31 +2401,38 @@ impl Default for SurfaceLight {
         Self {
             brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
-            face: "Front".to_string(),
-            shadows: true,
+            range: DEFAULT_LIGHT_RANGE,
+            face: light_face_default(),
+            angle: DEFAULT_LIGHT_ANGLE,
+            shadows: false,
             enabled: true,
             texture: None,
         }
     }
 }
 
-/// Directional light (Eustress DirectionalLight / Sun)
-/// Bevy: DirectionalLight with optional DirectionalLightTexture
-/// 
-/// Simulates distant light sources like the sun. All rays are parallel.
+/// Directional light (Eustress DirectionalLight)
+/// Bevy: DirectionalLight, resolved by `plugins::light_classes`
+///
+/// A distant light with parallel rays, shining along the entity's -Z. It is
+/// not the sun: the sun and moon belong to the Lighting service.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressDirectionalLight {
-    /// Light intensity/brightness
+    /// Brightness dial: 1 is 10,000 lux on screen at daylight exposure,
+    /// display-referred like the other light classes.
     pub brightness: f32,
-    
+
     /// Light color
     pub color: Color,
-    
+
     /// Cast shadows
     pub shadows: bool,
-    
+
+    /// A disabled light emits nothing and casts no shadow.
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Shadow depth bias (prevents shadow acne)
     #[serde(default = "default_shadow_depth_bias")]
     pub shadow_depth_bias: f32,
@@ -2388,6 +2458,7 @@ impl Default for EustressDirectionalLight {
             brightness: 1.0,
             color: Color::WHITE,
             shadows: true,
+            enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             texture: None,
@@ -3946,7 +4017,10 @@ impl Default for ShirtGraphic {
 // 14. SpecialMesh (Legacy Mesh Scaler)
 // ============================================================================
 
-/// Scales imported meshes
+/// Roblox `SpecialMesh`: what its parent part draws, never what it collides
+/// as. `MeshType` picks the shape (a `Cylinder` lies along the part's X
+/// axis, unlike a `CylinderMesh`), drawn at the part's Size times `Scale`
+/// and moved by `Offset`; a `FileMesh` draws `MeshId`.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct SpecialMesh {
@@ -3954,18 +4028,28 @@ pub struct SpecialMesh {
     pub mesh_type: MeshType,
     
     /// Non-uniform scale (Eustress "Scale")
-    /// Bevy: Transform.scale
     pub scale: Vec3,
     
     /// Asset reference (Eustress "MeshId")
-    /// Bevy: Handle<Mesh>
     pub mesh_id: String,
     
-    /// Offset position (Eustress "Offset")
+    /// Offset position (Eustress "Offset"), metres in the part's axes
     pub offset: Vec3,
+
+    /// Texture asset reference (Roblox "TextureId")
+    #[serde(default)]
+    pub texture_id: String,
+
+    /// Per-vertex tint RGB (Roblox "VertexColor")
+    #[serde(default = "default_vertex_color")]
+    pub vertex_color: [f32; 3],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect)]
+fn default_vertex_color() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 pub enum MeshType {
     FileMesh,
     Head,
@@ -3973,9 +4057,32 @@ pub enum MeshType {
     Brick,
     Sphere,
     Cylinder,
+    Wedge,
+    Prism,
+    Pyramid,
+    ParallelRamp,
+    RightAngleRamp,
+    CornerWedge,
 }
 
 impl MeshType {
+    /// Every value, at its Roblox `Enum.MeshType` number (Head = 0 ...
+    /// CornerWedge = 11), so a place file's number indexes it.
+    pub const ALL: [MeshType; 12] = [
+        MeshType::Head,
+        MeshType::Torso,
+        MeshType::Wedge,
+        MeshType::Sphere,
+        MeshType::Cylinder,
+        MeshType::FileMesh,
+        MeshType::Brick,
+        MeshType::Prism,
+        MeshType::Pyramid,
+        MeshType::ParallelRamp,
+        MeshType::RightAngleRamp,
+        MeshType::CornerWedge,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             MeshType::FileMesh => "FileMesh",
@@ -3984,7 +4091,24 @@ impl MeshType {
             MeshType::Brick => "Brick",
             MeshType::Sphere => "Sphere",
             MeshType::Cylinder => "Cylinder",
+            MeshType::Wedge => "Wedge",
+            MeshType::Prism => "Prism",
+            MeshType::Pyramid => "Pyramid",
+            MeshType::ParallelRamp => "ParallelRamp",
+            MeshType::RightAngleRamp => "RightAngleRamp",
+            MeshType::CornerWedge => "CornerWedge",
         }
+    }
+
+    /// The value a name (`"Cylinder"`, or `"Enum.MeshType.Cylinder"`) names.
+    pub fn from_name(name: &str) -> Option<MeshType> {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        MeshType::ALL.into_iter().find(|t| t.as_str() == bare)
+    }
+
+    /// The value a Roblox `Enum.MeshType` number stands for.
+    pub fn from_roblox(number: u32) -> Option<MeshType> {
+        MeshType::ALL.get(number as usize).copied()
     }
 }
 
@@ -3995,6 +4119,8 @@ impl Default for SpecialMesh {
             scale: Vec3::ONE,
             mesh_id: String::new(),
             offset: Vec3::ZERO,
+            texture_id: String::new(),
+            vertex_color: default_vertex_color(),
         }
     }
 }
@@ -6828,6 +6954,9 @@ impl Terrain {
             chunk_resolution: self.chunk_resolution,
             chunks_x: self.chunks_x,
             chunks_z: self.chunks_z,
+            // The class has no grid centre property; its grid is centred on
+            // the world origin.
+            center_chunk: IVec2::ZERO,
             lod_levels: self.lod_levels,
             lod_distances: (0..self.lod_levels)
                 .map(|i| self.view_distance * (i as f32 + 1.0) / self.lod_levels as f32)
@@ -6883,11 +7012,10 @@ impl Default for Sky {
                 up: String::new(),
                 down: String::new(),
             },
-            // Roughly the naked-eye population down to magnitude 6.5 across the
-            // whole sphere. 3000 is what a decent suburban sky shows and reads
-            // sparse once stars are drawn at their true (sub-pixel) size rather
-            // than as discs.
-            star_count: 9000,
+            // A clear rural sky's worth across the whole sphere. 3000 read
+            // sparse; 9000 at the richer star spread crowded the sky. 5000
+            // is the default McKale chose (2026-09-25).
+            star_count: 5000,
             celestial_bodies_shown: true,
         }
     }
@@ -7083,19 +7211,21 @@ impl Default for Clouds {
     fn default() -> Self {
         Self {
             enabled: true,
-            density: 0.5,
-            coverage: 0.45,
+            density: 0.45,
+            coverage: 0.3,
             spread: 1.0,
-            // Fair-weather cumulus: bases around 1.5 km, tops near 2.7 km. The
-            // renderer raymarches this shell over a curved planet, so a layer
-            // 100 m thick at 500 m (the old default) drew as a low, flat mist.
-            altitude: 1500.0,
-            thickness: 1200.0,
+            // Fair weather (McKale, 2026-09-26): scattered cumulus humilis,
+            // flat bases around 1.4 km, bright tops about 900 m higher, over
+            // roughly a third of the sky. The renderer raymarches this shell
+            // over a curved planet, so a layer 100 m thick at 500 m (an old
+            // default) drew as a low, flat mist.
+            altitude: 1400.0,
+            thickness: 900.0,
             color: [1.0, 1.0, 1.0, 1.0],
             shadow_color: [0.4, 0.4, 0.5, 1.0],
-            softness: 0.7,
+            softness: 0.6,
             wind_direction: 45.0,  // Northeast
-            wind_speed: 10.0,
+            wind_speed: 6.0,
             coverage_mode: CloudCoverage::Full,
             coverage_bias: 0.5,
             layer_type: CloudLayerType::Cumulus,
@@ -10093,6 +10223,27 @@ impl Default for BlockMesh {
     }
 }
 
+/// Legacy cylinder mesh shape modifier. Roblox `CylinderMesh`: its parent part
+/// draws as a cylinder STANDING on the part's Y axis (a `SpecialMesh` with
+/// `MeshType` Cylinder lies along X instead), at the part's Size times
+/// `Scale`, moved by `Offset`. The part still collides as its own shape.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CylinderMesh {
+    /// Position offset (Roblox "Offset"), metres in the part's axes
+    pub offset: Vec3,
+    /// Non-uniform scale (Roblox "Scale")
+    pub scale: Vec3,
+    /// Per-vertex tint RGB (Roblox "VertexColor")
+    pub vertex_color: [f32; 3],
+}
+
+impl Default for CylinderMesh {
+    fn default() -> Self {
+        Self { offset: Vec3::ZERO, scale: Vec3::ONE, vertex_color: [1.0, 1.0, 1.0] }
+    }
+}
+
 /// Legacy file-backed mesh shape modifier with a texture. Roblox `FileMesh`.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
@@ -11743,5 +11894,61 @@ pub struct TerrainRegion {
 impl Default for TerrainRegion {
     fn default() -> Self {
         Self { region_ref: String::new() }
+    }
+}
+
+#[cfg(test)]
+mod density_tests {
+    use super::*;
+
+    fn part(material: Material, custom: Option<f32>) -> BasePart {
+        BasePart {
+            material,
+            custom_physical_properties: custom.map(|density| PhysicalProperties { density, ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    /// A part weighs its material, unless it carries an authored density.
+    #[test]
+    fn a_part_weighs_its_material_unless_it_has_its_own_density() {
+        assert_eq!(part(Material::Wood, None).effective_density(), 600.0);
+        assert_eq!(part(Material::Metal, None).effective_density(), 7850.0);
+        assert_eq!(part(Material::Wood, Some(1234.0)).effective_density(), 1234.0);
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -5.0] {
+            assert_eq!(part(Material::Wood, Some(bad)).effective_density(), 600.0, "override {bad}");
+        }
+    }
+
+    /// A density typed into Properties is the part's own: a material change
+    /// afterwards leaves it, and its other custom properties are kept.
+    #[test]
+    fn a_typed_density_outlives_a_material_change() {
+        let mut p = part(Material::Wood, None);
+        p.set_property("Density", PropertyValue::Float(2000.0)).unwrap();
+        p.material = Material::Metal;
+        assert_eq!(p.effective_density(), 2000.0);
+
+        let mut q = part(Material::Wood, Some(700.0));
+        q.custom_physical_properties.as_mut().unwrap().friction = 0.9;
+        q.set_property("Mass", PropertyValue::Float(q.volume() * 1500.0)).unwrap();
+        let props = q.custom_physical_properties.unwrap();
+        assert!((props.density - 1500.0).abs() < 1e-2, "{}", props.density);
+        assert_eq!(props.friction, 0.9);
+    }
+
+    /// Every material weighs something solid; Neon is glowing plastic, not gas.
+    #[test]
+    fn every_material_has_a_solid_density() {
+        assert_eq!(BasePart::material_default_density(&Material::Neon), 900.0);
+        for material in [
+            Material::Plastic, Material::SmoothPlastic, Material::Wood, Material::WoodPlanks, Material::Metal,
+            Material::CorrodedMetal, Material::DiamondPlate, Material::Foil, Material::Grass, Material::Concrete,
+            Material::Brick, Material::Granite, Material::Marble, Material::Slate, Material::Sand, Material::Fabric,
+            Material::Glass, Material::Neon, Material::Ice, Material::Gold, Material::Silver, Material::Bronze,
+        ] {
+            let d = BasePart::material_default_density(&material);
+            assert!((100.0..=25_000.0).contains(&d), "{material:?} at {d} kg/m³");
+        }
     }
 }

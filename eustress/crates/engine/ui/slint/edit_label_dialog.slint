@@ -1,11 +1,14 @@
 // ============================================================================
-// Edit Label Text dialog — triggered by Enter on a selected part that has a
-// TextLabel descendant. Window-root modal (same proven pattern as NewSpace /
+// Edit Label Text dialog: opened by Enter on a selected part that has a
+// TextLabel descendant. Window-root modal (same pattern as NewSpace /
 // RenameTag), so it never mutates the 3D billboard / part subtree.
+// Law 1 chrome: DialogScrim > DialogCard > DialogFooter (dialog_kit.slint).
+// Enter saves, Escape cancels.
 // ============================================================================
 
-import { LineEdit, Button } from "std-widgets.slint";
+import { LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton } from "dialog_kit.slint";
 
 export component EditLabelDialog inherits Rectangle {
     in-out property <string> label-text: "";
@@ -15,111 +18,73 @@ export component EditLabelDialog inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    TouchArea {
-        clicked => { root.on-cancel(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-cancel(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 440px;
-        height: 230px;
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(440px, parent.width - 32px);
+            height: min(card.preferred-height, parent.height - 32px);
+            icon: @image-url("../../assets/icons/ui/text.svg");
+            title: "Edit label text";
+            subtitle: "The TextLabel on the selected part";
+            close => { root.on-cancel(); }
 
-        TouchArea { scroll-event(event) => { return accept; } }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // Title bar
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-                Text {
-                    width: parent.width; height: parent.height;
-                    text: "Edit Text";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no matching surface token
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+            keys := FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        root.on-cancel();
+                        return accept;
                     }
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-cancel(); }
+                    return reject;
+                }
+
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
+
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 14px;
+                        padding-bottom: 16px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        Text {
+                            text: "Text";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+
+                        text-edit := LineEdit {
+                            text <=> root.label-text;
+                            placeholder-text: "Label text";
+                            init => { self.focus(); }
+                            accepted(t) => { root.on-confirm(t); }
+                        }
+
+                        Text {
+                            text: "Enter saves. Esc cancels.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                        }
                     }
-                }
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
 
-            // Body
-            VerticalLayout {
-                padding: 20px;
-                spacing: 12px;
-
-                Text {
-                    text: "Edit label text — Enter to commit, Escape to cancel:";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle {
-                    height: 32px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    text-edit := LineEdit {
-                        x: 0px; y: 0px; width: 100%; height: 100%;
-                        text <=> root.label-text;
-                        placeholder-text: "Label text";
-                        accepted(t) => { root.on-confirm(t); }
-                    }
-                }
-
-                Rectangle { height: 2px; }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Cancel";
-                        width: 84px;
-                        clicked => { root.on-cancel(); }
-                    }
-                    Button {
-                        text: "Save";
-                        primary: true;
-                        width: 84px;
-                        clicked => { root.on-confirm(root.label-text); }
+                    DialogFooter {
+                        KitButton {
+                            text: "Cancel";
+                            clicked => { root.on-cancel(); }
+                        }
+                        KitButton {
+                            text: "Save";
+                            kind: "primary";
+                            clicked => { root.on-confirm(root.label-text); }
+                        }
                     }
                 }
             }

@@ -1440,32 +1440,23 @@ pub fn find_spawn_position<'a>(
     spawn_locations: impl Iterator<Item = (&'a Transform, &'a crate::classes::SpawnLocation)>,
     player_team: Option<&str>,
 ) -> Option<(Vec3, f32)> {
-    let mut valid_spawns: Vec<_> = spawn_locations
-        .filter(|(_, spawn)| spawn.can_spawn(player_team))
-        .collect();
-    
-    if valid_spawns.is_empty() {
-        return None;
-    }
-    
-    // Sort by priority (highest first)
-    valid_spawns.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
-    
-    // Get highest priority spawns
-    let max_priority = valid_spawns[0].1.priority;
-    let top_spawns: Vec<_> = valid_spawns
-        .into_iter()
-        .filter(|(_, spawn)| spawn.priority == max_priority)
-        .collect();
-    
-    // Pick a random spawn from top priority (or first if only one)
-    // For now, just pick the first one - could add randomization later
-    let (transform, spawn) = top_spawns.first()?;
-    
-    // Spawn slightly above the spawn location to avoid clipping
+    let (transform, spawn) = best_spawn(spawn_locations, player_team)?;
+    // The pad's centre, lifted: for callers that place a body's CENTRE. A
+    // character's feet go on the pad's top face (`spawn_feet_position`).
     let spawn_pos = transform.translation + Vec3::Y * 2.0;
-    
     Some((spawn_pos, spawn.spawn_protection_duration))
+}
+
+/// The SpawnLocation a player of `player_team` appears at: the enabled one
+/// with the highest priority that admits the team, the first of equals.
+fn best_spawn<'a>(
+    spawn_locations: impl Iterator<Item = (&'a Transform, &'a crate::classes::SpawnLocation)>,
+    player_team: Option<&str>,
+) -> Option<(&'a Transform, &'a crate::classes::SpawnLocation)> {
+    let mut valid: Vec<_> = spawn_locations.filter(|(_, spawn)| spawn.can_spawn(player_team)).collect();
+    // A stable sort, so the first of the highest priority stays first.
+    valid.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+    valid.into_iter().next()
 }
 
 /// Get spawn position by team ID, falling back to default if no SpawnLocations exist
@@ -1486,6 +1477,38 @@ pub fn get_spawn_position_or_default<'a>(
 ) -> (Vec3, f32) {
     find_spawn_position(spawn_locations, player_team)
         .unwrap_or((default_position + Vec3::Y * 2.0, 0.0))
+}
+
+/// How far above a SpawnLocation's top face a character's feet are placed:
+/// clear of the surface, so the body settles onto it rather than starting
+/// inside it, and close enough that the landing is a step, not a drop.
+pub const SPAWN_FEET_CLEARANCE: f32 = 0.1;
+
+/// The highest point of a box part posed by `transform`, whose scale is its
+/// size: straight above its centre, at the height of its highest corner, so a
+/// tilted part is measured by the corner that stands up.
+pub fn part_top(transform: &Transform) -> Vec3 {
+    let half = transform.scale.abs() * 0.5;
+    let r = transform.rotation;
+    let rise = (r * Vec3::X).y.abs() * half.x + (r * Vec3::Y).y.abs() * half.y + (r * Vec3::Z).y.abs() * half.z;
+    transform.translation + Vec3::Y * rise
+}
+
+/// Where a character's FEET go on a SpawnLocation posed by `transform`. Studio's
+/// Play and the Player place a character by this one rule.
+pub fn spawn_feet_on(transform: &Transform) -> Vec3 {
+    part_top(transform) + Vec3::Y * SPAWN_FEET_CLEARANCE
+}
+
+/// Where a character's FEET go, with the spawn protection: on top of the
+/// SpawnLocation `find_spawn_position` picks, else at `default_feet`.
+pub fn spawn_feet_position<'a>(
+    spawn_locations: impl Iterator<Item = (&'a Transform, &'a crate::classes::SpawnLocation)>,
+    player_team: Option<&str>,
+    default_feet: Vec3,
+) -> (Vec3, f32) {
+    best_spawn(spawn_locations, player_team)
+        .map_or((default_feet, 0.0), |(transform, spawn)| (spawn_feet_on(transform), spawn.spawn_protection_duration))
 }
 
 // ============================================================================
@@ -1646,4 +1669,50 @@ pub fn spawn_character_for_user_id(
         model,
         gender,
     )
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+    use crate::classes::SpawnLocation;
+
+    #[test]
+    fn feet_go_on_top_of_the_best_pad() {
+        let pads = [
+            (Transform::from_xyz(0.0, 0.1, 0.0).with_scale(Vec3::new(6.0, 0.2, 6.0)), SpawnLocation::default()),
+            (
+                Transform::from_xyz(10.0, 2.0, 0.0).with_scale(Vec3::new(4.0, 1.0, 4.0)),
+                SpawnLocation { priority: 5, ..Default::default() },
+            ),
+            (
+                Transform::from_xyz(-10.0, 0.0, 0.0).with_scale(Vec3::new(4.0, 1.0, 4.0)),
+                SpawnLocation { priority: 5, ..Default::default() },
+            ),
+        ];
+        let (feet, protection) = spawn_feet_position(pads.iter().map(|(t, s)| (t, s)), None, Vec3::ZERO);
+        // The first of the highest priority, its top face at 2.5.
+        assert!((feet - Vec3::new(10.0, 2.5 + SPAWN_FEET_CLEARANCE, 0.0)).length() < 1e-5, "got {feet}");
+        assert_eq!(protection, 3.0);
+
+        // Body-centre callers keep their lift above the pad's centre.
+        let (centre, _) = get_spawn_position_or_default(pads.iter().map(|(t, s)| (t, s)), None, Vec3::ZERO);
+        assert!((centre - Vec3::new(10.0, 4.0, 0.0)).length() < 1e-5, "got {centre}");
+
+        // With no pad, the default is the feet position, as given.
+        let default_feet = Vec3::new(0.0, 5.0, 0.0);
+        assert_eq!(spawn_feet_position(std::iter::empty(), None, default_feet), (default_feet, 0.0));
+
+        // A disabled pad is passed over.
+        let off = [(Transform::default(), SpawnLocation { enabled: false, ..Default::default() })];
+        assert_eq!(spawn_feet_position(off.iter().map(|(t, s)| (t, s)), None, default_feet).0, default_feet);
+    }
+
+    #[test]
+    fn a_tilted_part_is_as_tall_as_its_highest_corner() {
+        let on_its_side = Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::new(4.0, 1.0, 2.0));
+        assert!((part_top(&on_its_side).y - 2.0).abs() < 1e-5);
+        let flat = Transform::from_xyz(1.0, 1.0, 1.0).with_scale(Vec3::new(4.0, -1.0, 2.0));
+        assert!((part_top(&flat) - Vec3::new(1.0, 1.5, 1.0)).length() < 1e-5, "a mirrored size is still a size");
+    }
 }

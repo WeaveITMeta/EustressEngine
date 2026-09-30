@@ -137,7 +137,12 @@ impl Plugin for AvatarControlPlugin {
             )
             // Follow runs after locomotion has moved the body, so the camera
             // never trails by a frame.
-            .add_systems(PostUpdate, camera_follow.before(TransformSystems::Propagate))
+            // After a seat has carried its rider, so the camera never trails a
+            // moving vehicle by a frame.
+            .add_systems(
+                PostUpdate,
+                camera_follow.after(AvatarSystems::Ride).before(TransformSystems::Propagate),
+            )
             // Head hiding must land AFTER the clips write bone scale, or
             // `animate_targets` overwrites it the same frame.
             .add_systems(PostUpdate, hide_head_in_first_person.in_set(AvatarSystems::PostAnim));
@@ -197,11 +202,13 @@ fn spawn_camera_for_new_avatars(
 fn sample_movement_input(
     keys: Res<ButtonInput<KeyCode>>,
     enabled: Res<AvatarInputEnabled>,
+    // A GUI TextBox holding the keyboard takes the keys, WASD and Space too.
+    typing: Option<Res<crate::play_session::GuiKeyboardFocus>>,
     cameras: Query<&AvatarCamera>,
     mut q: Query<(&mut AvatarIntent, &AvatarBody), (With<LocalAvatar>, With<SpawnedByAvatarRuntime>)>,
 ) {
     for (mut intent, body) in q.iter_mut() {
-        if body.control != AvatarControl::LocalPlayer || !enabled.0 {
+        if body.control != AvatarControl::LocalPlayer || !enabled.0 || typing.as_deref().is_some_and(|t| t.0) {
             intent.direction = Vec3::ZERO;
             intent.sprint = false;
             intent.crouch = false;
@@ -261,8 +268,10 @@ fn camera_look(
     // single leaked camera disabled looking entirely with nothing in the log
     // to say why. Driving all of them keeps the control alive while the count
     // is reported once.
+    // None is normal: a Space that loads no character, or the frames before
+    // the avatar arrives. Two or more is a leak.
     let n = cameras.iter().count();
-    if n != 1 && !*warned {
+    if n > 1 && !*warned {
         *warned = true;
         warn!("avatar: expected 1 AvatarCamera, found {n} — orbit will drive all of them");
     }
@@ -524,12 +533,22 @@ fn hide_head_in_first_person(
 pub(crate) fn face_movement_direction(
     time: Res<Time>,
     mut q: Query<
-        (&mut Transform, &AvatarIntent, Option<&super::climb::AvatarClimb>, Option<&AvatarScriptControl>),
+        (
+            &mut Transform,
+            &AvatarIntent,
+            Option<&super::climb::AvatarClimb>,
+            Option<&AvatarScriptControl>,
+            Has<super::seat::AvatarSeated>,
+        ),
         With<SpawnedByAvatarRuntime>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (mut tf, intent, climb, script) in q.iter_mut() {
+    for (mut tf, intent, climb, script, seated) in q.iter_mut() {
+        // A rider faces where its seat faces.
+        if seated {
+            continue;
+        }
         // A climbing avatar's facing is owned by the ledge, not by input.
         // This runs in PostAnim, strictly AFTER `drive_climb`'s face-the-wall
         // slerp in Update, so without this guard any held direction during a

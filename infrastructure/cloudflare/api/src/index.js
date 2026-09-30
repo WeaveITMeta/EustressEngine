@@ -40,11 +40,15 @@ import { treasuryCall, treasuryView, splitSale, dripFor } from './treasury.mjs';
 // Durable Object classes are exported from the Worker's main module.
 export { Wallet, CommerceHub } from './commerce.mjs';
 export { Treasury } from './treasury.mjs';
+export { LiveHost } from './live.mjs';
+import { handleLive } from './live.mjs';
 import {
   handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
+  handleNotificationRoute, authorStatusOf,
   POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION,
 } from './moderation.mjs';
 import { handleWorldRoute, WORLD_FORMAT } from './world.mjs';
+import { handleIdentityRoute } from './identity.mjs';
 // The Guardian Policy and the moderation playbook, as shipped. Generated from
 // the docs by `npm run sync-policy`; the moderation tests fail when the copy
 // drifts from docs/, and /health reports whether the shipped policy still
@@ -702,14 +706,6 @@ export default {
       }
       if (at.getUTCHours() !== 0) return;
 
-      let models = null;
-      // Model catalog refresh. It shares only the schedule with the ledger,
-      // so it runs on its own try/catch. It keeps its own detailed record in
-      // MODELS:run:{date}; this is the summary line so
-      // /api/admin/cron-health shows the whole night at a glance.
-      try { models = await runModelDiscovery(env); }
-      catch (e) { failed.push(`models: ${e.message}`); console.error('model discovery failed:', e); }
-
       // Moderation sweep: resume cases a dropped waitUntil left mid-pipeline
       // and classify a bounded slice of listings that predate the gate.
       let moderation = null;
@@ -728,9 +724,6 @@ export default {
         settlement_started: !!settlement?.started,
         settlement_queued: !!settlement?.queued,
         settlement_phase: settlement?.settlement?.phase ?? null,
-        models_applied: models?.applied ?? false,
-        models_version: models?.version ?? models?.kept_version ?? null,
-        models_changes: models?.changes ?? [],
         moderation_resumed: moderation?.resumed ?? 0,
         moderation_backfilled: moderation?.backfilled ?? 0,
       }), { expirationTtl: 86400 * 365 });
@@ -922,18 +915,6 @@ export default {
       if (url.pathname === '/api/admin/cron-health' && request.method === 'GET')
         return handleCronHealth(request, env, cors);
 
-      // Model catalog — the Workshop model picker's list, recompiled daily.
-      // The read is public: it is public model names at public list prices,
-      // and gating it would only push a signed-out engine onto its seed.
-      if (url.pathname === '/api/models/catalog' && request.method === 'GET')
-        return handleModelCatalog(request, env, cors);
-      if (url.pathname === '/api/admin/models' && request.method === 'GET')
-        return handleAdminModelRuns(request, env, cors);
-      if (url.pathname === '/api/admin/models/refresh' && request.method === 'POST')
-        return handleAdminModelRefresh(request, env, cors);
-      if (url.pathname === '/api/admin/models/rollback' && request.method === 'POST')
-        return handleAdminModelRollback(request, env, cors);
-
       // Node heartbeat
       if (url.pathname === '/api/node/heartbeat' && request.method === 'POST')
         return handleNodeHeartbeat(request, env, cors);
@@ -946,6 +927,13 @@ export default {
       // would otherwise be swallowed by the `/api/simulations/{id}` catch-all.
       if (url.pathname.startsWith('/api/simulations/') || url.pathname.startsWith('/api/admin/moderation/')) {
         const handled = await handleModerationRoute(request, url, env, ctx, await moderationDeps(cors));
+        if (handled) return handled;
+      }
+
+      // The author's notification feed (review decisions), its read marks,
+      // email preferences, and the one-click unsubscribe landing.
+      if (url.pathname === '/api/notifications' || url.pathname.startsWith('/api/notifications/')) {
+        const handled = await handleNotificationRoute(request, url, env, { verifyAuth, json, cors });
         if (handled) return handled;
       }
 
@@ -984,6 +972,10 @@ export default {
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
+      // Live hosts: Studio's heartbeat while it hosts a simulation, and the
+      // listing's Live indicator and join link. See src/live.mjs.
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
+        return handleLive(request, env, cors, url.pathname.split('/')[3], { verifyAuth, requireAdmin, json, isListable });
       // Website manifest upload. Its own object and its own route, so a publish
       // can never overwrite the listing record the marketplace reads.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
@@ -1021,6 +1013,13 @@ export default {
           verifyAuth, json, isListable, resolveAttribution,
         });
         if (commerce) return commerce;
+      }
+
+      // Identity tickets: a joining Player proves its account to a host
+      // without handing over its session. See src/identity.mjs.
+      if (url.pathname.startsWith('/api/identity/')) {
+        const identity = await handleIdentityRoute(request, url, env, cors, { verifyAuth, json });
+        if (identity) return identity;
       }
 
       // Marketplace (stub — not yet implemented)
@@ -3661,6 +3660,16 @@ async function handleStripeWebhook(request, env) {
     return new Response('Invalid JSON', { status: 400 });
   }
 
+  // An event moves money only in the mode this deployment's key is in. A
+  // Worker holding a live key acknowledges and ignores test-mode events (from
+  // a test-mode endpoint pointed at this URL, or a test event sent from the
+  // dashboard), and a test deployment ignores live ones.
+  const stripeKey = env.STRIPE_SECRET_KEY || '';
+  const keyLive = /^(sk|rk)_live_/.test(stripeKey) ? true : /^(sk|rk)_test_/.test(stripeKey) ? false : null;
+  if (keyLive !== null && typeof event.livemode === 'boolean' && event.livemode !== keyLive) {
+    return new Response(`OK: ${event.livemode ? 'live' : 'test'}-mode event ignored`, { status: 200 });
+  }
+
   const type = event.type;
   if (type === 'checkout.session.completed' || type === 'checkout.session.async_payment_succeeded') {
     const session = event.data.object;
@@ -4622,13 +4631,14 @@ async function handleUserProjects(request, url, env, cors) {
           name: sim.name || 'Untitled',
           description: sim.description || null,
           thumbnail_url: liveThumbnailUrl(sim),
-          // 'published' means listed in the gallery. Anything else names the
-          // moderation state the author is waiting on (pending, classifying,
-          // held, rejected, changes_requested, quarantined, appealed), or
-          // 'unreviewed' for a listing that predates the gate.
-          status: isListable(sim) ? 'published' : (sim.moderation?.status || 'unreviewed'),
+          // 'published' means listed in the gallery. Anything else is the
+          // author-facing review status (in_review, not_listed,
+          // changes_requested, appeal_in_review, approved_private), or
+          // 'unreviewed' for a listing that predates the gate. Held and
+          // quarantined both read as in_review; see authorView.
+          status: isListable(sim) ? 'published' : authorStatusOf(sim.moderation?.status, sim.is_public !== false),
           moderation: sim.moderation ? {
-            status: sim.moderation.status || null, rating: sim.moderation.rating || null,
+            status: authorStatusOf(sim.moderation.status, sim.is_public !== false), rating: sim.moderation.status === 'approved' ? (sim.moderation.rating || null) : null,
             child_directed: sim.moderation.child_directed === true, featured: sim.moderation.featured === true,
             updated_at: sim.moderation.updated_at || null,
           } : null,
@@ -4668,6 +4678,10 @@ function galleryView(sim) {
     version: sim.version || 1, published_at: sim.published_at, updated_at: sim.updated_at,
     rating: m.rating || null, child_directed: m.child_directed === true, featured: m.featured === true,
     scene_size_bytes: sim.scene_size_bytes || null,
+    // The author shared the source: the gallery offers Edit (open in Studio).
+    is_open_source: sim.open_source === true,
+    // How players get the world: 'echk' chunks, or a 'pak' from before them.
+    format: sim.format || (sim.r2_key ? 'pak' : null),
   };
 }
 
@@ -4723,7 +4737,7 @@ async function handleGetSimulation(request, simId, env, cors) {
   const admin = auth ? await requireAdmin(request, env) : null;
   if (!auth || (auth !== sim.author_id && !admin)) return json({ error: 'Simulation not found' }, 404, cors);
   const rec = await env.SOCIAL.get(`modcase:${simId}`);
-  return json({ ...galleryView(sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec)) : (sim.moderation || null) }, 200, cors);
+  return json({ ...galleryView(sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec), sim) : { status: authorStatusOf(sim.moderation?.status, sim.is_public !== false) } }, 200, cors);
 }
 
 // Play a simulation — returns server connection info
@@ -4740,8 +4754,10 @@ async function handleDownloadPak(request, simId, env, cors) {
   if (!isListable(sim)) {
     const auth = await verifyAuth(request, env);
     const admin = auth ? await requireAdmin(request, env) : null;
+    // One answer for every refusal, quarantined included: a distinct status
+    // would tell a suspected uploader that a legal hold exists.
     if (!canServe(sim, auth, !!admin))
-      return json({ error: 'Simulation not available' }, sim.moderation?.status === 'quarantined' ? 451 : 403, cors);
+      return json({ error: 'Simulation not available' }, 403, cors);
   }
 
   // An .echk listing's r2_key names its manifest, which is not a .pak.
@@ -4796,8 +4812,8 @@ async function handlePlaySimulation(request, simId, env, cors) {
   return json({
     status: 'solo',
     launch: {
-      // Opens the Player where a handler is registered for eustress://play/.
-      link: `eustress://play/${simId}`,
+      // Opens the Player, which registers the eustress-player:// scheme.
+      link: `eustress-player://play/${simId}`,
       command: 'eustress-client',
       args: ['--sim', simId],
       manifest_url: echk ? `${origin}/api/simulations/${simId}/world/manifest` : null,
@@ -5952,556 +5968,6 @@ async function handleCronHealth(request, env, cors) {
   }, 200, cors);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// MODEL CATALOG — the list of models Workshop offers, recompiled daily
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// The engine used to hardcode its model list in a Rust enum, so every frontier
-// release needed a code change, a recompile and a shipped build before anyone
-// could pick it. The catalog moves that list into KV: Grok 4.6 recompiles it
-// once a day from live search, the engine fetches it, and a new model reaches
-// users without a release.
-//
-// Grok is the only researcher here. We hold no Anthropic or OpenAI key, so a
-// discovered id is never confirmed against the provider's own /v1/models — and
-// the daily result applies with no human in the loop. The guardrail is
-// therefore structural rather than an existence check:
-//
-//   1. PROVIDER WHITELIST. An entry whose provider is not one of the three in
-//      `MODEL_PROVIDERS` is dropped. Grok cannot introduce a fourth vendor
-//      into a paid code path by writing one into its JSON.
-//   2. SHAPE AND RANGE. Ids, names, prices, token caps and timeouts each have
-//      to parse and sit inside a sane range. A $4,000/MTok "bargain" or a
-//      600-character display name is a malformed run, not a price cut.
-//   3. FLOOR. Every whitelisted provider keeps at least one model, the catalog
-//      still names a default and an advisor that exist in it, and the list
-//      never shrinks below `MIN_CATALOG_SIZE`. A run that would empty a
-//      provider is rejected whole rather than partially applied.
-//   4. LAST GOOD WINS. Rejection leaves `catalog:current` exactly as it was and
-//      records why in `run:{date}`. A bad night is a no-op, never an outage.
-//
-// The engine carries its own compiled-in copy of this same seed, so a machine
-// that has never reached the network still gets a working picker. The catalog
-// widens the list; it is never the only thing standing between a user and a
-// model.
-//
-// KYC is deliberately NOT a consumer of this catalog. `GROK_MODEL` stays a
-// pinned const: identity adjudication should not change model underneath
-// itself on a cron. The pin is surfaced in the catalog as `pinned_kyc_model`
-// so it reads as a decision rather than a forgotten constant.
-//
-// KV (MODELS namespace):
-//   catalog:current          the live catalog — what the engine reads
-//   catalog:snapshot:{date}  one snapshot per applied run, for rollback
-//   run:{date}               run record: applied/rejected, changes, errors
-
-/// The only vendors a catalog entry may name. This is the whitelist the whole
-/// design rests on — everything downstream (which key is required, which
-/// client speaks the wire format) is keyed off it, so an unknown provider is
-/// not merely unsupported, it is unroutable.
-const MODEL_PROVIDERS = Object.freeze({
-  anthropic: 'Anthropic',
-  xai: 'xAI',
-  openai: 'OpenAI',
-});
-
-/// Bumped when the catalog's SHAPE changes, so an older engine can tell "I do
-/// not understand this document" apart from "this document has new models in
-/// it". Engines refuse a schema they were not built for and fall back to their
-/// compiled-in seed.
-const CATALOG_SCHEMA = 1;
-
-/// Sanity bounds. Deliberately generous — these exist to catch a garbled run,
-/// not to encode a pricing opinion that would reject a genuinely expensive
-/// new flagship.
-const MIN_CATALOG_SIZE = 3;
-const MAX_CATALOG_SIZE = 24;
-const MAX_PRICE_PER_MTOK = 500;
-const MODEL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,63}$/;
-
-/// The starting catalog, and the floor the system falls back to.
-///
-/// Kept byte-for-byte in sync with `WorkshopModel::SEED` in the engine
-/// (crates/engine/src/soul/workshop_model.rs) — the engine ships this exact
-/// list compiled in, so the two must not drift.
-///
-/// Ordered cheapest-first within each provider: the picker renders the array
-/// order, and the cheapest option reading first is the contract.
-const SEED_CATALOG = {
-  schema: CATALOG_SCHEMA,
-  version: 1,
-  updated_at: '2026-09-07T00:00:00Z',
-  source: 'seed',
-  default_model: 'claude-sonnet-5',
-  advisor_model: 'claude-fable-5-1',
-  pinned_kyc_model: GROK_MODEL,
-  // Retired id → the model that replaced it. A user whose settings still hold
-  // a retired id must be UPGRADED, never silently reassigned to the default:
-  // that would move them to another provider, at another price, with no
-  // notice. The engine resolves through this map before it gives up.
-  aliases: {
-    'grok-4.5': 'grok-4.6',
-    'claude-fable-5': 'claude-fable-5-1',
-  },
-  models: [
-    {
-      id: 'claude-sonnet-5',
-      display_name: 'Sonnet 5',
-      provider: 'anthropic',
-      tagline: 'Balanced speed and depth. The everyday driver.',
-      input_price_per_mtok: 3.0,
-      output_price_per_mtok: 15.0,
-      max_tokens: 16384,
-      timeout_secs: 180,
-      vision: true,
-    },
-    {
-      id: 'claude-opus-5',
-      display_name: 'Opus 5',
-      provider: 'anthropic',
-      tagline: 'Deeper reasoning for work that has to be right.',
-      input_price_per_mtok: 5.0,
-      output_price_per_mtok: 25.0,
-      max_tokens: 32000,
-      timeout_secs: 300,
-      vision: true,
-    },
-    {
-      id: 'claude-fable-5-1',
-      display_name: 'Fable 5.1',
-      provider: 'anthropic',
-      tagline: 'Always-on thinking. The advisor on hard calls.',
-      input_price_per_mtok: 10.0,
-      output_price_per_mtok: 50.0,
-      // Fable's thinking is always on and counts toward the same budget, and
-      // a turn can run for minutes — hence the headroom on both numbers.
-      max_tokens: 32000,
-      timeout_secs: 360,
-      vision: true,
-    },
-    {
-      id: 'grok-4.6',
-      display_name: 'Grok 4.6',
-      provider: 'xai',
-      tagline: 'Fast and cheap, with live search built in.',
-      input_price_per_mtok: 2.0,
-      output_price_per_mtok: 6.0,
-      max_tokens: 16384,
-      timeout_secs: 180,
-      vision: true,
-    },
-    {
-      id: 'gpt-6-astra',
-      display_name: 'GPT-6 Astra',
-      provider: 'openai',
-      tagline: 'OpenAI flagship. Long context, agentic reasoning.',
-      input_price_per_mtok: 10.0,
-      output_price_per_mtok: 50.0,
-      max_tokens: 32000,
-      timeout_secs: 300,
-      vision: true,
-    },
-  ],
-};
-
-/// Ask Grok 4.6, with live search on, for the current best model per vendor.
-///
-/// The prompt asks for the FLAGSHIP AND THE WORKHORSE rather than "every model
-/// you can find": a picker with thirty entries is worse than one with six, and
-/// the value of this job is currency, not breadth.
-function buildCatalogPrompt(current) {
-  const vendors = Object.entries(MODEL_PROVIDERS)
-    .map(([id, label]) => `  - ${label} (use provider id "${id}")`)
-    .join('\n');
-
-  return `You are compiling the model picker for a professional 3D engine's built-in AI assistant.
-Today is ${new Date().toISOString().split('T')[0]}. Use live search — your training data is stale by definition here.
-
-Return the CURRENT, GENERALLY AVAILABLE text models from EXACTLY these vendors:
-${vendors}
-
-Per vendor return between 1 and 3 models: the current flagship, the balanced
-workhorse, and (only if it genuinely exists) a fast/cheap tier. Do NOT list
-deprecated models, previews, research previews, dated snapshot aliases, embedding
-models, image models, or audio models. Prefer the stable id a customer would put
-in an API "model" field.
-
-This is the catalog in production right now:
-${JSON.stringify({ models: current.models.map(m => ({ id: m.id, provider: m.provider, display_name: m.display_name, input_price_per_mtok: m.input_price_per_mtok, output_price_per_mtok: m.output_price_per_mtok })) }, null, 2)}
-
-Rules:
-- If a model above is still current, KEEP its id and display_name byte-identical.
-- If a model above has been superseded, list the replacement AND record the old
-  id in "aliases" mapping old id -> new id, so existing users get upgraded.
-- Prices are USD per MILLION tokens, standard tier, no batch or cached discount.
-  If you cannot verify a price, keep the price already in the catalog.
-- "display_name" is what a user sees in a dropdown: short and human, like
-  "Sonnet 5" or "GPT-6 Astra". Never the raw api id. Max 32 characters.
-- "tagline" is one short sentence, max 60 characters, saying what the model is
-  FOR — the tradeoff a user picks it on. No marketing adjectives.
-- "default_model" should be the best all-round value for everyday agentic work.
-- "advisor_model" should be the strongest reasoning model available — it is
-  consulted on hard architecture calls, not used for every turn.
-- "max_tokens" is a per-request output cap: 16384 for standard models, 32000
-  for reasoning models whose thinking shares the budget.
-- "timeout_secs" between 180 and 360, higher for slower reasoning models.
-
-Reply with ONLY a JSON object, no prose and no code fence:
-{
-  "default_model": "<id>",
-  "advisor_model": "<id>",
-  "aliases": { "<retired id>": "<replacement id>" },
-  "models": [
-    {
-      "id": "<api id>",
-      "display_name": "<short label>",
-      "provider": "anthropic|xai|openai",
-      "tagline": "<one short sentence>",
-      "input_price_per_mtok": <number>,
-      "output_price_per_mtok": <number>,
-      "max_tokens": <integer>,
-      "timeout_secs": <integer>,
-      "vision": <boolean>
-    }
-  ]
-}`;
-}
-
-/// Structural validation. Returns `{ ok, catalog, errors, dropped }`.
-///
-/// Every rejection reason is collected rather than thrown on first sight, so a
-/// run record says everything that was wrong with a bad night instead of only
-/// the first thing.
-function validateCatalog(raw, previous) {
-  const errors = [];
-  const dropped = [];
-
-  if (!raw || typeof raw !== 'object') {
-    return { ok: false, errors: ['response was not a JSON object'], dropped };
-  }
-  if (!Array.isArray(raw.models)) {
-    return { ok: false, errors: ['response had no models array'], dropped };
-  }
-  if (raw.models.length > MAX_CATALOG_SIZE) {
-    return { ok: false, errors: [`${raw.models.length} models exceeds the ${MAX_CATALOG_SIZE} cap`], dropped };
-  }
-
-  const seen = new Set();
-  const models = [];
-
-  for (const m of raw.models) {
-    const id = typeof m?.id === 'string' ? m.id.trim() : '';
-    const label = id || '(unnamed entry)';
-
-    if (!MODEL_ID_RE.test(id)) { dropped.push(`${label}: malformed id`); continue; }
-    if (seen.has(id)) { dropped.push(`${label}: duplicate id`); continue; }
-    // THE whitelist check. Everything downstream keys off provider, so an
-    // unrecognised vendor is unroutable, not merely unsupported.
-    if (!Object.hasOwn(MODEL_PROVIDERS, m?.provider)) {
-      dropped.push(`${label}: provider "${m?.provider}" is not whitelisted`);
-      continue;
-    }
-
-    const name = typeof m?.display_name === 'string' ? m.display_name.trim() : '';
-    if (!name || name.length > 32) { dropped.push(`${label}: display_name missing or too long`); continue; }
-
-    const inPrice = Number(m?.input_price_per_mtok);
-    const outPrice = Number(m?.output_price_per_mtok);
-    if (!Number.isFinite(inPrice) || inPrice <= 0 || inPrice > MAX_PRICE_PER_MTOK) {
-      dropped.push(`${label}: input price ${m?.input_price_per_mtok} out of range`);
-      continue;
-    }
-    if (!Number.isFinite(outPrice) || outPrice <= 0 || outPrice > MAX_PRICE_PER_MTOK) {
-      dropped.push(`${label}: output price ${m?.output_price_per_mtok} out of range`);
-      continue;
-    }
-
-    const maxTokens = Math.trunc(Number(m?.max_tokens));
-    const timeout = Math.trunc(Number(m?.timeout_secs));
-    if (!Number.isFinite(maxTokens) || maxTokens < 1024 || maxTokens > 200000) {
-      dropped.push(`${label}: max_tokens ${m?.max_tokens} out of range`);
-      continue;
-    }
-    if (!Number.isFinite(timeout) || timeout < 30 || timeout > 900) {
-      dropped.push(`${label}: timeout_secs ${m?.timeout_secs} out of range`);
-      continue;
-    }
-
-    const tagline = typeof m?.tagline === 'string' ? m.tagline.trim().slice(0, 60) : '';
-
-    seen.add(id);
-    models.push({
-      id,
-      display_name: name,
-      provider: m.provider,
-      tagline,
-      input_price_per_mtok: inPrice,
-      output_price_per_mtok: outPrice,
-      max_tokens: maxTokens,
-      timeout_secs: timeout,
-      vision: m?.vision !== false,
-    });
-  }
-
-  if (models.length < MIN_CATALOG_SIZE) {
-    errors.push(`only ${models.length} valid models survived, need ${MIN_CATALOG_SIZE}`);
-  }
-
-  // A run that loses a whole vendor is far more likely to be a bad search than
-  // a vendor exiting the market, and the cost of being wrong is asymmetric:
-  // every user of that vendor silently loses the model they paid to use.
-  for (const [providerId, label] of Object.entries(MODEL_PROVIDERS)) {
-    if (!models.some((m) => m.provider === providerId)) {
-      errors.push(`no ${label} model survived validation`);
-    }
-  }
-
-  // Keep only aliases that point at a model we actually kept, so the map can
-  // never strand a user on an id that resolves to nothing.
-  const aliases = {};
-  for (const [from, to] of Object.entries({ ...previous.aliases, ...(raw.aliases || {}) })) {
-    if (typeof from === 'string' && typeof to === 'string' && seen.has(to) && !seen.has(from)) {
-      aliases[from] = to;
-    }
-  }
-
-  const defaultModel = seen.has(raw.default_model) ? raw.default_model : previous.default_model;
-  const advisorModel = seen.has(raw.advisor_model) ? raw.advisor_model : previous.advisor_model;
-  if (!seen.has(defaultModel)) errors.push(`default_model "${defaultModel}" is not in the catalog`);
-  if (!seen.has(advisorModel)) errors.push(`advisor_model "${advisorModel}" is not in the catalog`);
-
-  if (errors.length) return { ok: false, errors, dropped };
-
-  // Group by the whitelist's own order, cheapest-first inside each vendor, so
-  // the picker's sections are stable run to run rather than reshuffling
-  // whenever Grok returns the same models in a different order.
-  const providerOrder = Object.keys(MODEL_PROVIDERS);
-  models.sort((a, b) =>
-    providerOrder.indexOf(a.provider) - providerOrder.indexOf(b.provider) ||
-    a.input_price_per_mtok - b.input_price_per_mtok ||
-    a.id.localeCompare(b.id));
-
-  return {
-    ok: true,
-    dropped,
-    errors,
-    catalog: {
-      schema: CATALOG_SCHEMA,
-      version: (previous.version || 0) + 1,
-      updated_at: new Date().toISOString(),
-      source: GROK_MODEL,
-      default_model: defaultModel,
-      advisor_model: advisorModel,
-      pinned_kyc_model: GROK_MODEL,
-      aliases,
-      models,
-    },
-  };
-}
-
-/// Human-readable diff between two catalogs, for the run record.
-function diffCatalogs(before, after) {
-  const beforeById = new Map(before.models.map((m) => [m.id, m]));
-  const afterById = new Map(after.models.map((m) => [m.id, m]));
-  const changes = [];
-
-  for (const [id, m] of afterById) {
-    const prev = beforeById.get(id);
-    if (!prev) { changes.push(`added ${id} (${m.display_name}, ${MODEL_PROVIDERS[m.provider]})`); continue; }
-    if (prev.input_price_per_mtok !== m.input_price_per_mtok || prev.output_price_per_mtok !== m.output_price_per_mtok) {
-      changes.push(`repriced ${id}: $${prev.input_price_per_mtok}/$${prev.output_price_per_mtok} -> $${m.input_price_per_mtok}/$${m.output_price_per_mtok}`);
-    }
-    if (prev.display_name !== m.display_name) changes.push(`renamed ${id}: "${prev.display_name}" -> "${m.display_name}"`);
-  }
-  for (const id of beforeById.keys()) {
-    if (!afterById.has(id)) changes.push(`removed ${id}${after.aliases[id] ? ` (users upgraded to ${after.aliases[id]})` : ''}`);
-  }
-  if (before.default_model !== after.default_model) changes.push(`default: ${before.default_model} -> ${after.default_model}`);
-  if (before.advisor_model !== after.advisor_model) changes.push(`advisor: ${before.advisor_model} -> ${after.advisor_model}`);
-
-  return changes;
-}
-
-/// Read the live catalog, falling back to the seed. Never throws: a Workshop
-/// that cannot read KV must still get a usable list.
-async function readCatalog(env) {
-  try {
-    const stored = await env.MODELS?.get('catalog:current');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      if (parsed?.schema === CATALOG_SCHEMA && Array.isArray(parsed.models) && parsed.models.length) {
-        return parsed;
-      }
-      console.error('model catalog: stored copy unusable, serving seed');
-    }
-  } catch (e) {
-    console.error('model catalog: read failed, serving seed:', e.message);
-  }
-  return SEED_CATALOG;
-}
-
-/// The daily job. Returns the run record; never throws into the cron.
-async function runModelDiscovery(env) {
-  const date = new Date().toISOString().split('T')[0];
-  const previous = await readCatalog(env);
-
-  const record = { ran_at: new Date().toISOString(), applied: false, changes: [], dropped: [], errors: [] };
-
-  if (!env.GROK_API_KEY) {
-    record.errors.push('GROK_API_KEY not configured');
-  } else if (!env.MODELS) {
-    record.errors.push('MODELS KV namespace not bound');
-  } else {
-    try {
-      const resp = await grokFetch({
-        input: [{ role: 'user', content: buildCatalogPrompt(previous) }],
-        // Web search is the entire point: a model released this week is not in
-        // any model's weights, including the weights of the model doing the
-        // searching. This is the server-side tool form — the older
-        // `search_parameters` field was retired on 2026-01-12 and now answers
-        // 410 Gone, which would have made this job fail every night while
-        // looking like a model that simply never found anything new.
-        tools: [{ type: 'web_search' }],
-      }, env.GROK_API_KEY);
-
-      if (!resp.ok) {
-        record.errors.push(`xAI returned ${resp.status}`);
-        console.error('model discovery: xAI error', resp.status, await resp.text());
-      } else {
-        // Strip a ``` fence before looking for the object. The prompt asks
-        // for bare JSON, but a fence is the single most common way a model
-        // ignores that, and a fenced reply is otherwise a perfectly good run
-        // thrown away.
-        const text = extractGrokText(await resp.json()).replace(/```(?:json)?/gi, '');
-        const match = text.match(/\{[\s\S]*\}/);
-        if (!match) {
-          record.errors.push('no JSON object in the response');
-        } else {
-          let parsed = null;
-          try { parsed = JSON.parse(match[0]); }
-          catch (e) { record.errors.push(`response was not valid JSON: ${e.message}`); }
-
-          if (parsed) {
-            const result = validateCatalog(parsed, previous);
-            record.dropped = result.dropped;
-            if (!result.ok) {
-              record.errors.push(...result.errors);
-            } else {
-              record.changes = diffCatalogs(previous, result.catalog);
-              // Write the snapshot BEFORE it goes live, so a catalog that is
-              // serving is always one we can also roll back to.
-              await env.MODELS.put(`catalog:snapshot:${date}`, JSON.stringify(result.catalog), { expirationTtl: 86400 * 365 });
-              await env.MODELS.put('catalog:current', JSON.stringify(result.catalog));
-              record.applied = true;
-              record.version = result.catalog.version;
-              record.model_count = result.catalog.models.length;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      record.errors.push(`discovery threw: ${e.message}`);
-      console.error('model discovery failed:', e);
-    }
-  }
-
-  // A rejected run is the normal safe path, not an incident — but an
-  // unattended job that silently does nothing for a month is, so every run
-  // leaves a record whether it applied or not.
-  if (!record.applied) {
-    record.kept_version = previous.version ?? 0;
-    console.error('model discovery: keeping existing catalog —', record.errors.join('; '));
-  }
-  try { await env.MODELS?.put(`run:${date}`, JSON.stringify(record), { expirationTtl: 86400 * 365 }); }
-  catch (e) { console.error('model discovery: could not record run:', e.message); }
-
-  return record;
-}
-
-/// GET /api/models/catalog — public. The engine reads this on startup.
-///
-/// Unauthenticated on purpose: it is a list of public model names and public
-/// list prices, it carries nothing about the caller, and gating it would mean
-/// a signed-out engine falls back to its compiled-in seed for no benefit.
-async function handleModelCatalog(request, env, cors) {
-  const catalog = await readCatalog(env);
-  return json(catalog, 200, {
-    ...cors,
-    // Refreshed once a day, so an hour of staleness costs nothing and spares
-    // the worker a request per engine launch.
-    'Cache-Control': 'public, max-age=3600',
-  });
-}
-
-/// GET /api/admin/models — run history, so a job that quietly stopped applying
-/// is visible instead of being inferred from the catalog standing still.
-async function handleAdminModelRuns(request, env, cors) {
-  const adminId = await requireAdmin(request, env);
-  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
-
-  const catalog = await readCatalog(env);
-  const list = await env.MODELS?.list({ prefix: 'run:', limit: 30 });
-  const runs = [];
-  for (const k of (list?.keys || [])) {
-    const v = await env.MODELS.get(k.name);
-    if (v) runs.push({ date: k.name.slice('run:'.length), ...JSON.parse(v) });
-  }
-  runs.sort((a, b) => (a.date < b.date ? 1 : -1));
-
-  return json({
-    catalog,
-    runs,
-    last_applied: runs.find((r) => r.applied)?.date || null,
-    providers: MODEL_PROVIDERS,
-  }, 200, cors);
-}
-
-/// POST /api/admin/models/refresh — run discovery now instead of waiting for
-/// midnight. Same code path as the cron, so testing it tests the real job.
-async function handleAdminModelRefresh(request, env, cors) {
-  const adminId = await requireAdmin(request, env);
-  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
-
-  const record = await runModelDiscovery(env);
-  await auditLog(env, 'model_catalog_refresh', adminId, 'catalog:current', {
-    applied: record.applied,
-    changes: record.changes,
-    errors: record.errors,
-  });
-  return json(record, 200, cors);
-}
-
-/// POST /api/admin/models/rollback — restore a dated snapshot.
-///
-/// The daily job applies with no human gate, so the recovery path has to be
-/// one call rather than a hand-written KV write under pressure.
-async function handleAdminModelRollback(request, env, cors) {
-  const adminId = await requireAdmin(request, env);
-  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
-
-  const { date } = await request.json().catch(() => ({}));
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) {
-    return json({ error: 'date must be YYYY-MM-DD' }, 400, cors);
-  }
-
-  const snapshot = await env.MODELS?.get(`catalog:snapshot:${date}`);
-  if (!snapshot) return json({ error: `no snapshot for ${date}` }, 404, cors);
-
-  const parsed = JSON.parse(snapshot);
-  const current = await readCatalog(env);
-  // Roll forward the version rather than back, so "which catalog is newer" is
-  // still answerable by comparing version numbers after a rollback.
-  parsed.version = (current.version || 0) + 1;
-  parsed.updated_at = new Date().toISOString();
-  parsed.source = `rollback:${date}`;
-  await env.MODELS.put('catalog:current', JSON.stringify(parsed));
-
-  await auditLog(env, 'model_catalog_rollback', adminId, `catalog:snapshot:${date}`, {
-    restored_models: parsed.models.map((m) => m.id),
-  });
-  return json({ ok: true, restored_from: date, catalog: parsed }, 200, cors);
-}
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -6571,12 +6037,13 @@ function corsHeaders(request) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Vary': 'Origin',
-    // PUT is listed because four upload routes use it. Their callers today are
-    // ureq/reqwest and send no Origin, so this changed nothing in practice, but
-    // the first browser upload would have failed preflight for no visible
-    // reason. DELETE stays off the list until a route needs it.
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key',
+    // PUT is listed for the upload routes. DELETE is for the website's commerce
+    // views and key list (archive a product, delete a webhook endpoint, revoke
+    // a key). Eustress-Mode is how a signed-in page chooses live commerce data
+    // (src/commerce.mjs); without it in the list every such request fails
+    // preflight.
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key, Eustress-Mode',
     'Access-Control-Max-Age': '86400',
   };
 }

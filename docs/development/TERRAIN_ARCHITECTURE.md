@@ -130,8 +130,9 @@ Space1/
       matmap/                   ← Per-chunk material map (RGBA8, one pixel per height cell)
         x0_z0.png
         ...
-      voxels/                   ← Sparse voxel overlays (only for cave/overhang chunks)
-        x3_z-2.voxel
+      volume/                   ← Sparse volumetric edits (caves, overhangs), one brick each
+        b3_0_-2.vbk
+      water.bin                 ← Water level per raster cell (only when the terrain holds water)
       materials/                ← PBR material definitions
         grass.mat.toml
         rock.mat.toml

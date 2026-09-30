@@ -59,6 +59,109 @@ pub struct SpaceCharacterPolicy {
     pub heights: HashMap<String, f32>,
     /// The movement verbs every avatar starts with.
     pub abilities: AvatarAbilities,
+    /// The pace and jump every avatar starts with.
+    pub movement: SpaceMovement,
+}
+
+/// The movement a Space sets for every character through StarterPlayer
+/// (`CharacterWalkSpeed`, `CharacterJumpHeight`, `CharacterJumpPower` and
+/// `CharacterUseJumpPower`), in metres. `None` leaves the avatar's own
+/// body-derived value, so a Space that sets nothing keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpaceMovement {
+    /// The walking pace, m/s. Running and sprinting keep their ratio to it.
+    pub walk_speed_mps: Option<f32>,
+    /// The height a jump peaks at under the live gravity, metres.
+    pub jump_height_m: Option<f32>,
+    /// The take-off speed, m/s, used instead of the height when
+    /// `use_jump_power` is set.
+    pub jump_power_mps: Option<f32>,
+    pub use_jump_power: bool,
+}
+
+/// The avatar's body-derived running pace over its walking pace
+/// (`eustress_avatar_schema::resolve_motion`: 3.9 and 1.45 m/s, both scaled
+/// by the stride), which a Space's walking pace keeps.
+const RUN_OVER_WALK: f32 = 3.9 / 1.45;
+
+impl SpaceMovement {
+    /// `descriptor` at this Space's pace. StarterPlayer's values replace the
+    /// avatar's own, as they set a Roblox character's Humanoid at spawn.
+    pub fn apply_to(&self, mut descriptor: AvatarDescriptor) -> AvatarDescriptor {
+        let motion = &mut descriptor.motion;
+        if let Some(walk) = self.walk_speed_mps {
+            let ratio = match (motion.walk_speed_mps, motion.run_speed_mps) {
+                (Some(w), Some(r)) if w > 0.0 && r > 0.0 => r / w,
+                _ => RUN_OVER_WALK,
+            };
+            motion.walk_speed_mps = Some(walk);
+            motion.run_speed_mps = Some(walk * ratio);
+        }
+        if self.use_jump_power {
+            if let Some(speed) = self.jump_power_mps {
+                motion.jump_speed_mps = Some(speed);
+            }
+        } else if let Some(height) = self.jump_height_m {
+            motion.jump_apex_m = Some(height);
+        }
+        descriptor
+    }
+}
+
+/// A StarterPlayer property as its reader holds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StarterValue {
+    Number(f64),
+    Bool(bool),
+}
+
+/// Numbers the StarterPlayer template once shipped untagged, in studs, by
+/// property. Native Spaces copied them unchanged, so an untagged value equal
+/// to one reads as unset and the engine's own default applies.
+pub const STARTER_PLAYER_LEGACY_DEFAULTS: [(&str, f64); 7] = [
+    ("CharacterWalkSpeed", 16.0),
+    ("CharacterJumpHeight", 7.2),
+    ("CharacterJumpPower", 50.0),
+    ("NameDisplayDistance", 100.0),
+    ("HealthDisplayDistance", 100.0),
+    ("CameraMaxZoomDistance", 128.0),
+    ("CameraMinZoomDistance", 0.5),
+];
+
+/// A Space's `StarterPlayer/_service.toml`.
+pub fn starter_player_file(space_root: &Path) -> PathBuf {
+    space_root.join("StarterPlayer").join("_service.toml")
+}
+
+/// A StarterPlayer length or speed in metres (per second). `value` is in the
+/// file's `unit`, and a file that declares none reads in the stud. An
+/// untagged value equal to the template's old default for `property` is
+/// unset, as is a negative or non-finite one.
+pub fn starter_player_metres(property: &str, value: f64, unit: Option<&str>) -> Option<f32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if unit.is_none() && STARTER_PLAYER_LEGACY_DEFAULTS.iter().any(|(p, d)| *p == property && *d == value) {
+        return None;
+    }
+    let unit = unit.and_then(crate::units::Unit::from_symbol).unwrap_or(crate::units::Unit::Stud);
+    Some((value * unit.to_meters()) as f32)
+}
+
+/// `ClimbingEnabled` as `_service.toml` names it: `climbing_enabled`.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,12 +232,43 @@ pub fn clip_file(asset: &str, space_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 impl SpaceCharacterPolicy {
-    /// Read `<space>/StarterPlayer/Characters/*.rig.toml`. A file that does
-    /// not parse or validate is skipped and named in the warnings, so one typo
-    /// costs that body option rather than the whole Space.
+    /// Read the Space's `StarterPlayer/_service.toml` (the movement verbs and
+    /// movement every avatar starts with) and its
+    /// `StarterPlayer/Characters/*.rig.toml`. A file that does not parse or
+    /// validate is skipped and named in the warnings, so one typo costs that
+    /// file rather than the whole Space.
     pub fn load(space_root: &Path) -> (Self, Vec<String>) {
         let mut policy = Self { space_root: Some(space_root.to_path_buf()), ..Default::default() };
         let mut warnings = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(starter_player_file(space_root)) {
+            match text.parse::<toml::Table>() {
+                Ok(doc) => {
+                    let unit = doc
+                        .get("metadata")
+                        .and_then(toml::Value::as_table)
+                        .and_then(|m| m.get("unit"))
+                        .and_then(toml::Value::as_str);
+                    // `[properties]`, the top level, or `[service]`: the first
+                    // that holds a key wins.
+                    let tables: Vec<&toml::Table> = [
+                        doc.get("properties").and_then(toml::Value::as_table),
+                        Some(&doc),
+                        doc.get("service").and_then(toml::Value::as_table),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let get = |key: &str| match tables.iter().find_map(|t| t.get(key)) {
+                        Some(toml::Value::Float(f)) => Some(StarterValue::Number(*f)),
+                        Some(toml::Value::Integer(i)) => Some(StarterValue::Number(*i as f64)),
+                        Some(toml::Value::Boolean(b)) => Some(StarterValue::Bool(*b)),
+                        _ => None,
+                    };
+                    warnings.extend(policy.read_starter_player(get, unit));
+                }
+                Err(e) => warnings.push(format!("StarterPlayer/_service.toml: {e}")),
+            }
+        }
         let dir = space_root.join("StarterPlayer").join("Characters");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return (policy, warnings);
@@ -145,7 +279,7 @@ impl SpaceCharacterPolicy {
             let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
             let Some(stem) = name.strip_suffix(".rig.toml") else { continue };
             let Some(option) = option_of(stem) else {
-                warnings.push(format!("{name}: name it Masculine, Feminine, Robot or Default"));
+                warnings.push(format!("StarterPlayer/Characters/{name}: name it Masculine, Feminine, Robot or Default"));
                 continue;
             };
             match read_rig(&path, stem, option.unwrap_or(AvatarIdentity::Male)) {
@@ -160,15 +294,49 @@ impl SpaceCharacterPolicy {
                         None => policy.fallback = Some(rig),
                     }
                 }
-                Err(e) => warnings.push(format!("{name}: {e}")),
+                Err(e) => warnings.push(format!("StarterPlayer/Characters/{name}: {e}")),
             }
         }
         (policy, warnings)
     }
 
-    /// The descriptor with this Space's body for its body option. Unchanged
-    /// when the Space has none, or when the result would not validate.
+    /// Take StarterPlayer's movement verbs and movement from its properties,
+    /// which `get` looks up by their file names (`climbing_enabled`) or their
+    /// Roblox names (`ClimbingEnabled`). `unit` is the file's declared unit,
+    /// `None` when it declares none. Returns what it could not read.
+    pub fn read_starter_player(&mut self, get: impl Fn(&str) -> Option<StarterValue>, unit: Option<&str>) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let unit = match unit {
+            Some(u) if crate::units::Unit::from_symbol(u).is_none() => {
+                warnings.push(format!("StarterPlayer/_service.toml: unknown unit {u:?}; its values read in the stud"));
+                Some("stud")
+            }
+            u => u,
+        };
+        let look = |name: &str| get(&snake_case(name)).or_else(|| get(name));
+        for name in AvatarAbilities::PROPERTIES {
+            if let Some(StarterValue::Bool(on)) = look(name) {
+                self.abilities.set(name, on);
+            }
+        }
+        let metres = |name: &str| match look(name) {
+            Some(StarterValue::Number(v)) => starter_player_metres(name, v, unit),
+            _ => None,
+        };
+        self.movement = SpaceMovement {
+            walk_speed_mps: metres("CharacterWalkSpeed"),
+            jump_height_m: metres("CharacterJumpHeight"),
+            jump_power_mps: metres("CharacterJumpPower"),
+            use_jump_power: look("CharacterUseJumpPower") == Some(StarterValue::Bool(true)),
+        };
+        warnings
+    }
+
+    /// The descriptor at this Space's pace, with this Space's body for its
+    /// body option. The body is unchanged when the Space has none, or when the
+    /// result would not validate.
     pub fn apply(&self, descriptor: AvatarDescriptor) -> AvatarDescriptor {
+        let descriptor = self.movement.apply_to(descriptor);
         let identity = descriptor.resolved_identity();
         let Some(rig) = self.rigs.get(&identity).or(self.fallback.as_ref()) else {
             return descriptor;
@@ -271,6 +439,82 @@ mod tests {
         assert_eq!(rig.animations[1], RigDefinition::builtin(AvatarIdentity::Male).animations[1]);
         assert_eq!(rig.bone_aliases, vec![("Bip01 Pelvis".to_string(), "hips".to_string())]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Space holding only `StarterPlayer/_service.toml` with `text`.
+    fn starter_player_space(tag: &str, text: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("eustress-starter-player-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("StarterPlayer")).unwrap();
+        std::fs::write(starter_player_file(&root), text).unwrap();
+        root
+    }
+
+    fn stud() -> f32 {
+        crate::units::Unit::Stud.to_meters() as f32
+    }
+
+    #[test]
+    fn an_untouched_template_copy_sets_nothing_and_its_switches_still_apply() {
+        let root = starter_player_space(
+            "template",
+            "[properties]\ncharacter_walk_speed = 16.0\ncharacter_jump_height = 7.2\ncharacter_jump_power = 50.0\n\
+             character_use_jump_power = false\nclimbing_enabled = false\n",
+        );
+        let (policy, warnings) = SpaceCharacterPolicy::load(&root);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(policy.movement, SpaceMovement::default(), "the body-derived pace stands");
+        assert_eq!(policy.abilities.get("ClimbingEnabled"), Some(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_space_s_own_values_read_through_its_unit() {
+        // Untagged reads in the stud; a value other than the old default is the Space's own.
+        let root = starter_player_space("untagged", "[properties]\ncharacter_walk_speed = 24.0\n");
+        let walk = SpaceCharacterPolicy::load(&root).0.movement.walk_speed_mps.unwrap();
+        assert!((walk - 24.0 * stud()).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(root);
+
+        // Tagged "stud", even Roblox's default is the place's own choice.
+        let root = starter_player_space(
+            "stud",
+            "[metadata]\nunit = \"stud\"\n[properties]\ncharacter_walk_speed = 16.0\ncharacter_jump_height = 7.2\n",
+        );
+        let movement = SpaceCharacterPolicy::load(&root).0.movement;
+        assert!((movement.walk_speed_mps.unwrap() - 16.0 * stud()).abs() < 1e-5);
+        assert!((movement.jump_height_m.unwrap() - 7.2 * stud()).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(root);
+
+        let root = starter_player_space(
+            "metres",
+            "[metadata]\nunit = \"m\"\n[properties]\ncharacter_walk_speed = 8\ncharacter_jump_power = 12.5\n\
+             character_use_jump_power = true\n",
+        );
+        let movement = SpaceCharacterPolicy::load(&root).0.movement;
+        assert_eq!(movement.walk_speed_mps, Some(8.0));
+        assert_eq!(movement.jump_power_mps, Some(12.5));
+        assert!(movement.use_jump_power);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_space_s_pace_replaces_the_avatars_and_running_keeps_its_ratio() {
+        let movement = SpaceMovement { walk_speed_mps: Some(8.0), jump_height_m: Some(2.0), ..Default::default() };
+        let d = movement.apply_to(AvatarDescriptor::default());
+        assert_eq!(d.motion.walk_speed_mps, Some(8.0));
+        assert!((d.motion.run_speed_mps.unwrap() - 8.0 * RUN_OVER_WALK).abs() < 1e-4);
+        assert_eq!(d.motion.jump_apex_m, Some(2.0));
+
+        // Jump power in force: the height is not the Space's jump.
+        let power = SpaceMovement { jump_height_m: Some(2.0), jump_power_mps: Some(9.0), use_jump_power: true, ..Default::default() };
+        let powered = power.apply_to(AvatarDescriptor::default()).motion;
+        assert_eq!(powered.jump_apex_m, AvatarDescriptor::default().motion.jump_apex_m);
+        assert_eq!(powered.jump_speed_mps, Some(9.0), "the take-off speed, never a height baked from it");
+
+        // A Space with no body of its own still sets the pace.
+        let policy = SpaceCharacterPolicy { movement, ..Default::default() };
+        assert_eq!(policy.apply(AvatarDescriptor::default()).motion.walk_speed_mps, Some(8.0));
     }
 
     #[test]

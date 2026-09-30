@@ -307,7 +307,9 @@ impl ToolRegistry {
         // refused rather than executed: the policy table in
         // `capability::capability_of` is the allowlist, and absence from it
         // means deny.
-        if let Err(denial) = crate::capability::authorize(tool_name, &ctx.permissions) {
+        // The call's class, arguments included: `invoke_action` is judged by
+        // the action it would run, every other tool by its base class.
+        if let Err(denial) = crate::capability::authorize_call(tool_name, &input, &ctx.permissions) {
             return ToolResult {
                 tool_name: tool_name.to_string(),
                 tool_use_id: tool_use_id.to_string(),

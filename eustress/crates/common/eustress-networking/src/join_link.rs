@@ -3,8 +3,11 @@
 //! Everything a player needs to reach a host, as one string:
 //!
 //! ```text
-//! eustress://join/192.168.1.20:7777?key=Qx7…&pin=3f9a…
+//! eustress-player://join/192.168.1.20:7777?key=Qx7…&pin=3f9a…
 //! ```
+//!
+//! `eustress-player://` is the Player's own URL scheme, so a link clicked
+//! anywhere opens the Player; `eustress://` belongs to Studio. Both parse.
 //!
 //! - `host:port` — where the host listens.
 //! - `key` — the session's join secret. The host refuses any session whose
@@ -21,6 +24,9 @@
 
 /// Request path prefix a host serves sessions under.
 pub const JOIN_PATH: &str = "/join/";
+/// Request path prefix of the host's echo probe, which measures what gets
+/// through the path to it (see `native`). It takes the same key as a join.
+pub const PROBE_PATH: &str = "/probe/";
 /// The key a pin-less, key-less loopback join sends.
 pub const OPEN_KEY: &str = "open";
 
@@ -55,7 +61,9 @@ impl JoinLink {
             return Ok(Self { host, port, key, pin: None });
         }
         let rest = s
-            .strip_prefix("eustress://join/")
+            .strip_prefix("eustress-player://join/")
+            .or_else(|| s.strip_prefix("eustress-player://"))
+            .or_else(|| s.strip_prefix("eustress://join/"))
             .or_else(|| s.strip_prefix("eustress://"))
             .unwrap_or(s);
         let (authority, query) = match rest.find('?') {
@@ -84,9 +92,9 @@ impl JoinLink {
         Ok(link)
     }
 
-    /// The canonical `eustress://join/…` form.
+    /// The canonical `eustress-player://join/…` form, which opens the Player.
     pub fn to_link(&self) -> String {
-        let mut s = format!("eustress://join/{}:{}", self.host, self.port);
+        let mut s = format!("eustress-player://join/{}:{}", self.host, self.port);
         let mut sep = '?';
         if let Some(k) = &self.key {
             s.push(sep);
@@ -124,7 +132,16 @@ impl JoinLink {
 
 /// The join key a request path carries, if any.
 pub fn key_from_path(path: &str) -> Option<&str> {
-    let key = path.strip_prefix(JOIN_PATH)?;
+    key_after(JOIN_PATH, path)
+}
+
+/// The key a probe request path carries, if any.
+pub fn probe_key_from_path(path: &str) -> Option<&str> {
+    key_after(PROBE_PATH, path)
+}
+
+fn key_after<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
+    let key = path.strip_prefix(prefix)?;
     let key = key.split(['?', '#', '/']).next().unwrap_or("");
     (!key.is_empty()).then_some(key)
 }
@@ -206,7 +223,11 @@ mod tests {
             key: Some("Qx7_abc-123".into()),
             pin: Some([0xab; 32]),
         };
+        assert!(link.to_link().starts_with("eustress-player://join/192.168.1.20:7777?"));
         assert_eq!(JoinLink::parse(&link.to_link()).unwrap(), link);
+        // Links Studio printed before the Player had its own scheme still parse.
+        let studio = link.to_link().replacen("eustress-player://", "eustress://", 1);
+        assert_eq!(JoinLink::parse(&studio).unwrap(), link);
         assert_eq!(link.webtransport_url(), "https://192.168.1.20:7777/join/Qx7_abc-123");
     }
 
@@ -244,5 +265,8 @@ mod tests {
         assert_eq!(key_from_path("/join/abc123?x=1"), Some("abc123"));
         assert_eq!(key_from_path("/join/"), None);
         assert_eq!(key_from_path("/other"), None);
+        assert_eq!(probe_key_from_path("/probe/abc123"), Some("abc123"));
+        assert_eq!(probe_key_from_path("/join/abc123"), None);
+        assert_eq!(key_from_path("/probe/abc123"), None, "a probe is never a join");
     }
 }

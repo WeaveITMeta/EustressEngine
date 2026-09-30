@@ -113,6 +113,13 @@ pub fn engine_rune_modules() -> Vec<rune::Module> {
         Err(e) => error!("Failed to create eustress::dm Rune module: {}", e),
     }
 
+    // `eustress::terrain`: fill, carve, sculpt, paint and read the Space's
+    // terrain from Play's callbacks.
+    match super::rune_terrain::create_terrain_module() {
+        Ok(module) => modules.push(module),
+        Err(e) => error!("Failed to create eustress::terrain Rune module: {}", e),
+    }
+
     // `eustress::data`: the Data Platform's front door, shared with Luau's
     // DataService.
     #[cfg(feature = "data")]
@@ -286,7 +293,8 @@ pub fn drain_script_errors_to_output(
     // `execute_rune` and iterate the script until it compiles clean —
     // the feedback loop the user asked for in 2026-04-22.
     let rune_batch = std::mem::take(&mut runtime.last_errors);
-    for (script_name, err) in &rune_batch {
+    for error in &rune_batch {
+        let (script_name, err) = (&error.script, error.text());
         // Each line of `err` is one pre-formatted
         // `script:line:col: error: msg` diagnostic from
         // `format_compile_diagnostics`. Publish them line-by-line
@@ -307,17 +315,34 @@ pub fn drain_script_errors_to_output(
         }
     }
     if let Some(ref mut out) = output {
-        for (script_name, err) in rune_batch {
-            // Split multi-line errors so each line is one OutputConsole
-            // entry — otherwise the Slint TextInput shows `\n`-joined
-            // text on a single row and the timestamp/level badges only
-            // annotate the first line.
-            for line in err.lines() {
-                if line.trim().is_empty() { continue; }
-                out.push_with_source(
+        for error in rune_batch {
+            let file = error.file.as_deref().unwrap_or("");
+            if error.stack.is_empty() {
+                // A compile error: `message` holds one formatted
+                // `script:line:col: error: msg` diagnostic per line, so each
+                // becomes its own row.
+                for line in error.message.lines() {
+                    if line.trim().is_empty() { continue; }
+                    out.push_script(
+                        crate::ui::slint_ui::LogLevel::Error,
+                        "rune",
+                        format!("[{}] {}", error.script, line),
+                        &error.script,
+                        file,
+                        error.line.unwrap_or(0),
+                        Vec::new(),
+                    );
+                }
+            } else {
+                // A runtime error: one row, its frames as the row's stack.
+                out.push_script(
                     crate::ui::slint_ui::LogLevel::Error,
-                    format!("[{}] {}", script_name, line),
                     "rune",
+                    format!("[{}] {}", error.script, error.message),
+                    &error.script,
+                    file,
+                    error.line.unwrap_or(0),
+                    error.stack,
                 );
             }
         }
@@ -330,10 +355,14 @@ pub fn drain_script_errors_to_output(
                 .line
                 .map(|l| format!(":{}", l))
                 .unwrap_or_default();
-            out.push_with_source(
+            out.push_script(
                 crate::ui::slint_ui::LogLevel::Error,
-                format!("[{}{}] {}", event.script_name, line_suffix, event.error),
                 "luau",
+                format!("[{}{}] {}", event.script_name, line_suffix, event.error),
+                &event.script_name,
+                "",
+                event.line.unwrap_or(0),
+                Vec::new(),
             );
         }
     }
@@ -389,10 +418,11 @@ pub fn compile_scripts_on_play(
                 true
             }
         })
-        .map(|(entity, name, data, _loaded)| ScriptSource {
+        .map(|(entity, name, data, loaded)| ScriptSource {
             entity_index: entity.index().index(),
             name: name.as_str().to_string(),
             source: data.source.clone(),
+            file: loaded.map(|l| l.path.display().to_string()),
         })
         .collect();
 
@@ -435,8 +465,8 @@ pub fn compile_scripts_on_play(
         );
 
         if !runtime.last_errors.is_empty() {
-            for (name, err) in &runtime.last_errors {
-                error!("❌ Script '{}' compile error: {}", name, err);
+            for e in &runtime.last_errors {
+                error!("❌ Script '{}' compile error: {}", e.script, e.text());
             }
         }
     }
@@ -522,15 +552,30 @@ pub fn cleanup_script_bindings() {
 pub fn drain_script_logs_to_output(
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
 ) {
-    let logs = eustress_common::gui::drain_script_logs();
-    if logs.is_empty() { return; }
     let Some(ref mut out) = output else { return; };
-    for entry in logs {
-        match entry.level {
-            eustress_common::gui::ScriptLogLevel::Info => out.info(entry.message),
-            eustress_common::gui::ScriptLogLevel::Warn => out.warn(entry.message),
-            eustress_common::gui::ScriptLogLevel::Error => out.error(entry.message),
-        }
+    forward_script_logs(out);
+}
+
+/// Move every pending Rune `log_*` line into the Output panel, tagged "rune"
+/// so the panel's Rune filter shows it, with the script, file, line and
+/// stack the runtime recorded for it.
+pub fn forward_script_logs(out: &mut crate::ui::slint_ui::OutputConsole) {
+    use crate::ui::slint_ui::LogLevel;
+    for entry in eustress_common::gui::drain_script_logs() {
+        let level = match entry.level {
+            eustress_common::gui::ScriptLogLevel::Info => LogLevel::Info,
+            eustress_common::gui::ScriptLogLevel::Warn => LogLevel::Warn,
+            eustress_common::gui::ScriptLogLevel::Error => LogLevel::Error,
+        };
+        out.push_script(
+            level,
+            "rune",
+            entry.message,
+            entry.script.as_deref().unwrap_or(""),
+            entry.file.as_deref().unwrap_or(""),
+            entry.line.unwrap_or(0),
+            entry.stack,
+        );
     }
 }
 
@@ -555,3 +600,50 @@ pub fn validate_rune_script(source: &str) -> Result<(), Vec<String>> {
 pub fn update_world_state(_world: &World) {}
 pub fn update_input_state(_input: &ButtonInput<KeyCode>) {}
 pub fn update_mouse_raycast(_ray: Option<Ray3d>) {}
+
+/// A Space's Rune scripts compiled headless, against the modules Play
+/// installs: `EUSTRESS_RUNE_CHECK=<file or folder> cargo test -p
+/// eustress-engine --lib space_rune_scripts_compile`. Rune's diagnostics name
+/// each script and line; without the variable there is nothing to check.
+#[cfg(all(test, feature = "realism-scripting"))]
+mod space_script_check {
+    fn rune_files(at: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if at.is_dir() {
+            let Ok(entries) = std::fs::read_dir(at) else { return };
+            for entry in entries.flatten() {
+                rune_files(&entry.path(), out);
+            }
+        } else if at.extension().is_some_and(|e| e == "rune") {
+            out.push(at.to_path_buf());
+        }
+    }
+
+    #[test]
+    fn space_rune_scripts_compile() {
+        let Some(root) = std::env::var_os("EUSTRESS_RUNE_CHECK") else { return };
+        let mut files = Vec::new();
+        rune_files(std::path::Path::new(&root), &mut files);
+        assert!(!files.is_empty(), "no .rune file under {root:?}");
+        let mut context = rune::Context::with_default_modules().expect("default modules");
+        for module in super::engine_rune_modules() {
+            context.install(module).expect("engine module installs");
+        }
+        let mut failures = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("script reads");
+            let mut sources = rune::Sources::new();
+            sources
+                .insert(rune::Source::new(file.display().to_string(), text).expect("source"))
+                .expect("insert");
+            let mut diagnostics = rune::Diagnostics::new();
+            let built = rune::prepare(&mut sources).with_context(&context).with_diagnostics(&mut diagnostics).build();
+            if built.is_err() || diagnostics.has_error() {
+                let mut buf = rune::termcolor::Buffer::no_color();
+                let _ = diagnostics.emit(&mut buf, &sources);
+                failures.push(String::from_utf8_lossy(buf.as_slice()).to_string());
+            }
+        }
+        assert!(failures.is_empty(), "{} of {} Rune scripts fail to compile:\n{}", failures.len(), files.len(), failures.join("\n"));
+        println!("{} Rune scripts compile", files.len());
+    }
+}

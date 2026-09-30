@@ -1,6 +1,6 @@
 //! Rocket propulsion — Tsiolkovsky, specific impulse, de Laval nozzle.
 
-const G0: f32 = 9.80665;
+const G0: f32 = crate::units::STANDARD_GRAVITY_F32;
 
 /// Tsiolkovsky rocket equation: delta-v = ve * ln(mi / mf).
 pub fn tsiolkovsky_delta_v(exhaust_velocity: f32, mass_initial: f32, mass_final: f32) -> f32 {

@@ -382,6 +382,12 @@ pub struct MotionOverrides {
     pub run_speed_mps: Option<f32>,
     pub sprint_multiplier: Option<f32>,
     pub jump_apex_m: Option<f32>,
+    /// Take-off speed of a jump, m/s: Roblox's JumpPower under UseJumpPower.
+    /// When set, a jump launches at this speed; when unset, at the speed that
+    /// peaks at `jump_apex_m` under the Space's gravity. Serialized only when
+    /// set, since the avatar API accepts only the motion keys it knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jump_speed_mps: Option<f32>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -542,6 +548,12 @@ impl AvatarDescriptor {
                 }
                 None => h.u8(0),
             }
+        }
+        // Hashed only when set, so a descriptor without a launch speed hashes
+        // by its other fields alone.
+        if let Some(v) = self.motion.jump_speed_mps {
+            h.u8(1);
+            h.f32(v);
         }
         h.finish()
     }

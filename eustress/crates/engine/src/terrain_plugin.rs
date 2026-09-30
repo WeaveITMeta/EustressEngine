@@ -1,25 +1,32 @@
 //! # Terrain Plugin for Engine Studio
 //!
-//! Engine-side terrain editing with brush tools, heightmap import/export,
-//! and integration with the Explorer/Properties panels.
+//! Engine-side terrain: the streaming chain, materials, layers, scatter and
+//! water from the shared terrain plugins, the disk and voxel loaders, and the
+//! terrain tools (see `docs/design/TERRAIN_TOOLS_UX.md`).
 //!
-//! Note: UI is now handled by Slint - see ui/slint/terrain_editor.slint
+//! The terrain tools are a Studio tool like Move: `StudioState::current_tool`
+//! is `Tool::Terrain` while they are on, and [`sync_terrain_mode_to_tool`]
+//! keeps the shared `TerrainMode` in step, so the brush systems run exactly
+//! then. The brush itself (hover, stroke, dabs) lives in
+//! `eustress_common::terrain::editor`; this plugin feeds it the Studio's
+//! chrome veto, answers the terrain hotkeys ([`handle_terrain_actions`]), the
+//! `B` size gesture ([`terrain_brush_gesture`]) and `Esc`, and pushes each
+//! finished stroke onto the undo stack. The cursor is drawn by
+//! `terrain_cursor`.
 
-use bevy::prelude::*;
 use bevy::ecs::schedule::common_conditions::resource_equals;
-use eustress_common::terrain::{
-    TerrainConfig, TerrainData, TerrainMode, TerrainBrush, BrushMode,
-    spawn_terrain, TerrainRoot, Chunk,
-    AdvancedBrushState,
-    TerrainPaintGate,
-    TerrainDirtyChunks,
-    TerrainEditRecorder,
-    TerrainVolume,
-    CsgShape,
-};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use eustress_common::classes::Terrain;
-use std::path::PathBuf;
+use eustress_common::terrain::{
+    spawn_terrain, surface_data, Chunk, TerrainBaked, TerrainBrush, TerrainBrushHover, TerrainConfig,
+    TerrainData, TerrainDirtyChunks, TerrainEditRecorder, TerrainMode, TerrainPaintGate, TerrainRoot,
+    TerrainStroke, TerrainTool, TerrainVolume, PaintMode,
+};
+
+use crate::keybindings::Action;
+use crate::ui::{SetTerrainBrushEvent, ToggleTerrainEditEvent};
 
 // ============================================================================
 // Plugin
@@ -33,6 +40,8 @@ impl Plugin for EngineTerrainPlugin {
         app
             .init_resource::<TerrainMode>()
             .init_resource::<TerrainBrush>()
+            .init_resource::<TerrainBrushHover>()
+            .init_resource::<TerrainStroke>()
             .init_resource::<eustress_common::terrain::TerrainGenerationQueue>()
             .register_type::<TerrainConfig>()
             .register_type::<TerrainData>()
@@ -55,41 +64,65 @@ impl Plugin for EngineTerrainPlugin {
             .add_systems(Update, eustress_common::terrain::apply_terrain_dirty_chunks
                 .after(eustress_common::terrain::chunk_cull_system)
                 .after(eustress_common::terrain::terrain_paint_system))
-            .init_resource::<TerrainEditorState>()
-            .init_resource::<TerrainSelection>()
             // Brush strokes record the raster tiles they touch here;
             // `commit_terrain_stroke` pushes each finished stroke onto the
             // unified `UndoStack`, so Ctrl+Z undoes terrain like any other
             // edit.
             .init_resource::<TerrainEditRecorder>()
-            .init_resource::<AdvancedBrushState>()
-            .init_resource::<BrushPreviewState>()
-            // The brush veto + the brush itself. These used to be left to
-            // `common::terrain::TerrainPlugin`, which the Studio engine has
-            // never added (only the Client does) — so every Terrain-ribbon
-            // brush set a mode that nothing consumed and the ground never
-            // moved. Registered here, next to the systems that drive them.
+            // The chrome veto the hover and the stroke read.
             .init_resource::<TerrainPaintGate>()
+            // The messages the terrain hotkeys read and write. The UI's
+            // `SpawnEventsPlugin` and the keybindings register them too;
+            // registering is idempotent, and a system whose message is not
+            // registered fails validation and never runs.
+            .add_message::<crate::ui::MenuActionEvent>()
+            .add_message::<SetTerrainBrushEvent>()
+            .add_message::<ToggleTerrainEditEvent>()
+            // Ungated: a Terrain instance added outside the terrain editor
+            // must be seen then, not on the editor's first frame, where its
+            // `Added` filter would take every Terrain the Space loaded with
+            // for a new one. After the streaming chain, which the voxel
+            // loader runs ahead of, so a root it spawned this frame is
+            // already there and is never doubled.
+            .add_systems(
+                Update,
+                sync_terrain_class_to_system.after(eustress_common::terrain::process_terrain_generation_queue),
+            )
+            // Ungated: the tool follows `current_tool` in and out, and the
+            // hotkeys include `T`, which enters the tools from anywhere.
             .add_systems(Update, (
-                sync_terrain_class_to_system,
-                handle_editor_shortcuts,
-                update_selection_gizmos,
-                // Chained so the veto is fresh for BOTH consumers this frame:
-                // an unordered tuple would leave the preview circle drawing
-                // (and the brush deciding) off last frame's cursor position.
+                sync_terrain_mode_to_tool,
+                handle_terrain_actions,
+                leave_terrain_tools_on_escape,
+            ).chain().before(sync_terrain_paint_gate))
+            .add_systems(Update, (
+                terrain_brush_gesture,
+                // Chained so the veto and the hover are fresh for the stroke
+                // this frame: the brush dabs where the cursor shows it.
                 (
                     sync_terrain_paint_gate,
-                    (
-                        update_brush_preview,
-                        eustress_common::terrain::terrain_paint_system,
-                    ),
+                    eustress_common::terrain::update_brush_hover,
+                    eustress_common::terrain::terrain_paint_system,
                 )
                     .chain(),
             ).run_if(resource_equals(TerrainMode::Editor)))
-            // Ungated: leaving the terrain editor mid-stroke has to close the
+            // Ungated: leaving the terrain tools mid-stroke has to close the
             // stroke too, and the brush above no longer runs then.
             .add_systems(Update, commit_terrain_stroke
-                .after(eustress_common::terrain::terrain_paint_system));
+                .after(eustress_common::terrain::terrain_paint_system))
+            // Save writes only what changed since the disk last matched
+            // memory; a terrain read from disk matches it as it arrives.
+            .init_resource::<crate::ui::file_event_handler::TerrainSaveBaseline>()
+            .add_systems(Update, crate::ui::file_event_handler::baseline_disk_terrain);
+
+        // The brush cursor, grid, contours, plane and readout, the tool
+        // bar, ribbon and readout surfaces in Slint, and the Sea Level tool.
+        app.add_plugins((
+            crate::terrain_cursor::TerrainCursorPlugin,
+            crate::terrain_tools_ui::TerrainToolsUiPlugin,
+            crate::terrain_sea_level::TerrainSeaLevelPlugin,
+            crate::terrain_region::TerrainRegionPlugin,
+        ));
 
         // Material slot table + texture arrays, and the textured terrain
         // material that draws them: the other half of the shared plugin this
@@ -149,195 +182,328 @@ impl Plugin for EngineTerrainPlugin {
 }
 
 // ============================================================================
-// Resources
-// ============================================================================
-
-/// Editor state for terrain tools
-#[derive(Resource)]
-#[allow(dead_code)]
-pub struct TerrainEditorState {
-    pub pending_import: Option<PathBuf>,
-    pub last_export_path: Option<PathBuf>,
-    pub show_advanced: bool,
-    pub show_advanced_brushes: bool,
-    pub is_editing: bool,
-    pub last_mesh_regen: std::time::Instant,
-    pub pending_regen_chunks: Vec<Entity>,
-    pub mesh_regen_interval: f32,
-    pub last_brush_apply: std::time::Instant,
-    pub brush_apply_interval: f32,
-}
-
-impl Default for TerrainEditorState {
-    fn default() -> Self {
-        Self {
-            pending_import: None,
-            last_export_path: None,
-            show_advanced: false,
-            show_advanced_brushes: false,
-            is_editing: false,
-            last_mesh_regen: std::time::Instant::now(),
-            pending_regen_chunks: Vec::new(),
-            mesh_regen_interval: 0.1,
-            last_brush_apply: std::time::Instant::now(),
-            brush_apply_interval: 0.016,
-        }
-    }
-}
-
-/// Selection state for Explorer integration
-#[derive(Resource, Default)]
-pub struct TerrainSelection {
-    pub selected_chunk: Option<Entity>,
-    pub hovered_chunk: Option<Entity>,
-}
-
-/// Brush preview state — tracks where the brush circle should render
-#[derive(Resource, Default)]
-pub struct BrushPreviewState {
-    /// World-space position of the brush center (terrain hit point)
-    pub position: Option<Vec3>,
-    /// Whether the brush is actively painting (LMB held)
-    pub is_painting: bool,
-}
-
-// ============================================================================
 // Systems
 // ============================================================================
 
-/// Sync Terrain class component to terrain system
+/// Give a Terrain class instance added to a loaded Space some ground.
 ///
-/// Do-not-fight guard: when the live Space has an on-disk terrain
-/// (`Workspace/Terrain/_terrain.toml` — worldgen export or heightmap
-/// import), an `Added<Terrain>` class instance re-spawns the DISK terrain
-/// instead of clobbering it with procedural noise. Migrated Spaces are the
-/// voxel loader's domain, so they keep the procedural fallback here.
+/// A Terrain instance that arrives with its Space (while the Space loads, or
+/// before the disk and voxel terrain loaders have decided for it) is the
+/// Space's own: those loaders give it its ground, so it changes nothing here.
+/// One added later, to a Space without terrain, spawns the Space's on-disk
+/// terrain when `Workspace/Terrain/_terrain.toml` exists, else procedural
+/// ground from the instance's settings. Existing ground is never replaced,
+/// and a converted Space is left alone while the voxel loader is still
+/// building its imported terrain. The system runs every frame, in and out of
+/// the terrain editor, so its `Added` filter only ever sees instances added
+/// since it last ran.
+#[allow(clippy::too_many_arguments)]
 fn sync_terrain_class_to_system(
     mut commands: Commands,
-    query: Query<(Entity, &Terrain), Added<Terrain>>,
-    existing_terrain: Query<Entity, With<TerrainRoot>>,
+    query: Query<&Terrain, Added<Terrain>>,
+    existing_terrain: Query<(), With<TerrainRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    load_in_progress: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    disk_latch: Option<Res<crate::terrain_disk_load::TerrainDiskLoadLatch>>,
+    #[cfg(feature = "world-db")] voxel_latch: Option<Res<crate::terrain_voxel_load::VoxelTerrainLoadLatch>>,
+    #[cfg(feature = "world-db")] voxel_build: Option<Res<crate::terrain_voxel_load::VoxelTerrainBuild>>,
 ) {
-    for (_entity, terrain_class) in query.iter() {
-        for existing in existing_terrain.iter() {
-            commands.entity(existing).despawn();
-        }
-
-        // Prefer the Space's on-disk terrain over procedural regeneration.
-        let disk = space_root.as_ref().and_then(|sr| {
-            if crate::space::space_ops::space_is_migrated(&sr.0) {
-                return None;
-            }
-            let terrain_dir = sr.0.join("Workspace").join("Terrain");
-            if !terrain_dir.join("_terrain.toml").exists() {
-                return None;
-            }
-            crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir).ok()
-        });
-
-        let from_disk = disk.is_some();
-        let terrain_entity = match disk {
-            Some(terrain) => terrain.spawn(&mut commands, &mut meshes, &mut materials),
-            None => spawn_terrain(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                terrain_class.to_config(),
-                TerrainData::procedural(),
-            ),
-        };
-        if from_disk {
-            commands
-                .entity(terrain_entity)
-                .insert(crate::terrain_disk_load::DiskSourcedTerrain);
-            info!("🏔️ Engine terrain spawned from Terrain class (hydrated from Workspace/Terrain)");
-        } else {
-            info!("🏔️ Engine terrain spawned from Terrain class");
-        }
-    }
-}
-
-/// Handle keyboard shortcuts for terrain editing
-fn handle_editor_shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut mode: ResMut<TerrainMode>,
-    mut brush: ResMut<TerrainBrush>,
-    terrain_query: Query<Entity, With<TerrainRoot>>,
-) {
-    if terrain_query.is_empty() {
+    let Some(terrain_class) = query.iter().next() else {
+        return;
+    };
+    let Some(space_root) = space_root else {
+        return;
+    };
+    let loading = load_in_progress.as_deref().is_some_and(|load| load.active);
+    let disk_decided = disk_latch
+        .as_deref()
+        .is_some_and(|latch| latch.0.as_deref() == Some(space_root.0.as_path()));
+    if loading || !disk_decided || !existing_terrain.is_empty() {
         return;
     }
+    let migrated = crate::space::space_ops::space_is_migrated(&space_root.0);
+    #[cfg(feature = "world-db")]
+    {
+        let voxel_decided = voxel_latch
+            .as_deref()
+            .is_some_and(|latch| latch.0.as_deref() == Some(space_root.0.as_path()));
+        let building = voxel_build
+            .as_deref()
+            .is_some_and(crate::terrain_voxel_load::VoxelTerrainBuild::is_running);
+        // The Spaces whose imported terrain the voxel loader builds: a
+        // converted one, or one holding the importer's chunk files and no
+        // disk terrain (a re-import), as the Player decides.
+        let terrain_dir = space_root.0.join("Workspace").join("Terrain");
+        let voxel_terrain = migrated
+            || (!terrain_dir.join("_terrain.toml").exists()
+                && eustress_common::terrain::voxel_import::has_voxel_chunk_files(&terrain_dir));
+        if voxel_terrain && (!voxel_decided || building) {
+            return;
+        }
+    }
 
-    // Brush shortcuts only apply while the terrain editor is active. Without
-    // this guard, 1-5 would mutate brush state (and fight shortcuts like
-    // camera-ortho on Digit5) even though the user never opened the editor.
-    let editor_active = matches!(*mode, TerrainMode::Editor);
-    if editor_active {
-        if keys.just_pressed(KeyCode::Digit1) {
-            brush.mode = BrushMode::Raise;
-            info!("🖌️ Brush: Raise");
-        }
-        if keys.just_pressed(KeyCode::Digit2) {
-            brush.mode = BrushMode::Lower;
-            info!("🖌️ Brush: Lower");
-        }
-        if keys.just_pressed(KeyCode::Digit3) {
-            brush.mode = BrushMode::Smooth;
-            info!("🖌️ Brush: Smooth");
-        }
-        if keys.just_pressed(KeyCode::Digit4) {
-            brush.mode = BrushMode::Flatten;
-            info!("🖌️ Brush: Flatten");
-        }
-        if keys.just_pressed(KeyCode::Digit5) {
-            brush.mode = BrushMode::PaintTexture;
-            info!("🖌️ Brush: Paint Texture");
-        }
-    }
-    
-    if keys.just_pressed(KeyCode::KeyT) {
-        *mode = match *mode {
-            TerrainMode::Render => {
-                info!("🎨 Terrain Editor: ENABLED");
-                TerrainMode::Editor
-            }
-            TerrainMode::Editor => {
-                info!("🎨 Terrain Editor: DISABLED");
-                TerrainMode::Render
-            }
-        };
-    }
-    
-    if keys.just_pressed(KeyCode::BracketLeft) {
-        brush.radius = (brush.radius - 2.0).max(1.0);
-        info!("🖌️ Brush size: {:.1}", brush.radius);
-    }
-    if keys.just_pressed(KeyCode::BracketRight) {
-        brush.radius = (brush.radius + 2.0).min(50.0);
-        info!("🖌️ Brush size: {:.1}", brush.radius);
+    // Prefer the Space's on-disk terrain over procedural ground. A converted
+    // Space's disk terrain is the voxel loader's to read.
+    let terrain_dir = space_root.0.join("Workspace").join("Terrain");
+    let disk = (!migrated && terrain_dir.join("_terrain.toml").exists())
+        .then(|| crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir).ok())
+        .flatten();
+
+    let from_disk = disk.is_some();
+    let terrain_entity = match disk {
+        Some(terrain) => terrain.spawn(&mut commands, &mut meshes, &mut materials),
+        None => spawn_terrain(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            terrain_class.to_config(),
+            TerrainData::procedural(),
+        ),
+    };
+    if from_disk {
+        commands
+            .entity(terrain_entity)
+            .insert(crate::terrain_disk_load::DiskSourcedTerrain);
+        info!("🏔️ Engine terrain spawned from Terrain class (hydrated from Workspace/Terrain)");
+    } else {
+        info!("🏔️ Engine terrain spawned from Terrain class");
     }
 }
 
-/// Update selection gizmos for terrain chunks
-fn update_selection_gizmos(
-    selection: Res<TerrainSelection>,
-    mut gizmos: Gizmos,
-    chunk_query: Query<(&Chunk, &GlobalTransform)>,
-    config_query: Query<&TerrainConfig, With<TerrainRoot>>,
+/// Keep the shared `TerrainMode` in step with the Studio's current tool: the
+/// brush systems run exactly while `Tool::Terrain` is current. The tools are
+/// left for Select when a Play session starts (the mouse belongs to the game)
+/// or the terrain goes away (nothing to sculpt).
+fn sync_terrain_mode_to_tool(
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    terrain: Query<(), With<TerrainRoot>>,
+    mut mode: ResMut<TerrainMode>,
 ) {
-    let Ok(config) = config_query.single() else { return };
-    
-    if let Some(selected) = selection.selected_chunk {
-        if let Ok((_chunk, transform)) = chunk_query.get(selected) {
-            let pos = transform.translation();
-            let size = config.chunk_size;
-            gizmos.cube(
-                Transform::from_translation(pos + Vec3::Y * 0.5)
-                    .with_scale(Vec3::new(size, 1.0, size)),
-                bevy::color::Color::srgba(0.0, 1.0, 0.0, 0.5),
-            );
+    let Some(mut studio_state) = studio_state else { return };
+    let editing = crate::play_mode::editor_input_enabled(play_state);
+    if studio_state.current_tool == crate::ui::Tool::Terrain && (!editing || terrain.is_empty()) {
+        studio_state.current_tool = crate::ui::Tool::Select;
+    }
+    let want =
+        if studio_state.current_tool == crate::ui::Tool::Terrain { TerrainMode::Editor } else { TerrainMode::Render };
+    if *mode != want {
+        *mode = want;
+    }
+}
+
+/// Grid steps the locked plane moves per `PageUp`/`PageDown`, and per the
+/// `Shift` versions.
+const PLANE_STEPS_FAST: f32 = 10.0;
+
+/// Answer the terrain hotkeys (design section 6), which the keybinding table
+/// sends as menu actions: `T` enters or leaves the tools from anywhere; the
+/// rest arrive only while the tools are current (their context). Tool
+/// choices go through [`SetTerrainBrushEvent`], so a key and a button take
+/// the same path.
+#[allow(clippy::too_many_arguments)]
+fn handle_terrain_actions(
+    mut menu: MessageReader<crate::ui::MenuActionEvent>,
+    mut brush: ResMut<TerrainBrush>,
+    hover: Res<TerrainBrushHover>,
+    terrain: Query<(&TerrainConfig, &TerrainData, Option<&TerrainBaked>), With<TerrainRoot>>,
+    mut tool_events: MessageWriter<SetTerrainBrushEvent>,
+    mut toggle_events: MessageWriter<ToggleTerrainEditEvent>,
+    mut last_plane: Local<Option<f32>>,
+    (mut sea_level, mut region): (
+        Option<ResMut<crate::terrain_sea_level::SeaLevelTool>>,
+        Option<ResMut<crate::terrain_region::RegionTool>>,
+    ),
+) {
+    for event in menu.read() {
+        let tool = match event.action {
+            Action::TerrainDraw => Some(TerrainTool::Draw),
+            Action::TerrainSculpt => Some(TerrainTool::Sculpt),
+            Action::TerrainSmooth => Some(TerrainTool::Smooth),
+            Action::TerrainFlatten => Some(TerrainTool::Flatten),
+            Action::TerrainPaint => Some(TerrainTool::Paint),
+            Action::TerrainSeaLevel => Some(TerrainTool::SeaLevel),
+            Action::TerrainRegion => Some(TerrainTool::Region),
+            _ => None,
+        };
+        if let Some(tool) = tool {
+            tool_events.write(SetTerrainBrushEvent { tool, mode: None });
+            continue;
+        }
+        let surface_y = hover.surface.map(|p| p.y);
+        match event.action {
+            Action::TerrainTools => {
+                toggle_events.write(ToggleTerrainEditEvent);
+            }
+            Action::TerrainSizeDown => brush.step_size(false),
+            Action::TerrainSizeUp => brush.step_size(true),
+            Action::TerrainStrengthDown => brush.step_strength(false),
+            Action::TerrainStrengthUp => brush.step_strength(true),
+            Action::TerrainPivotPrev => brush.pivot = brush.pivot.prev(),
+            Action::TerrainPivotNext => brush.pivot = brush.pivot.next(),
+            Action::TerrainPlaneLock => {
+                if let Some(y) = brush.plane_lock.take() {
+                    *last_plane = Some(y);
+                } else {
+                    // At the ground under the cursor, never at the world
+                    // origin: off the terrain, the last plane, else the
+                    // height the brush last stood at.
+                    let y = surface_y.or(*last_plane).or(hover.target.map(|p| p.y)).unwrap_or(0.0);
+                    brush.plane_lock = Some(y);
+                }
+            }
+            Action::TerrainPlanePick => {
+                if let Some(y) = surface_y {
+                    brush.plane_lock = Some(y);
+                }
+            }
+            Action::TerrainPlaneUp
+            | Action::TerrainPlaneDown
+            | Action::TerrainPlaneUpFast
+            | Action::TerrainPlaneDownFast => {
+                let steps = match event.action {
+                    Action::TerrainPlaneUp => 1.0,
+                    Action::TerrainPlaneDown => -1.0,
+                    Action::TerrainPlaneUpFast => PLANE_STEPS_FAST,
+                    _ => -PLANE_STEPS_FAST,
+                };
+                let step = brush.snap_step.max(0.01);
+                // Sea Level moves its water level, Region a Transform's
+                // target; the brushes, their plane.
+                if brush.tool == TerrainTool::SeaLevel {
+                    if let Some(sea_level) = sea_level.as_deref_mut() {
+                        sea_level.nudge_level(steps * step);
+                    }
+                } else if brush.tool == TerrainTool::Region {
+                    if let Some(region) = region.as_deref_mut() {
+                        region.nudge_target(steps * step);
+                    }
+                } else if let Some(y) = brush.plane_lock {
+                    brush.plane_lock = Some(y + steps * step);
+                }
+            }
+            Action::TerrainSnap => brush.snap = !brush.snap,
+            Action::TerrainSnapStep => brush.next_snap_step(),
+            Action::TerrainContours => brush.contours = !brush.contours,
+            Action::TerrainMirror | Action::TerrainMirrorAxis => {
+                let was_off = brush.mirror == eustress_common::terrain::MirrorAxes::Off;
+                if event.action == Action::TerrainMirror {
+                    brush.toggle_mirror();
+                } else {
+                    brush.next_mirror_axes();
+                }
+                // Turning mirror on puts its planes through the point under
+                // the cursor.
+                if was_off {
+                    if let Some(at) = hover.surface.or(hover.target) {
+                        brush.mirror_origin = at.xz();
+                    }
+                }
+            }
+            Action::TerrainSampleMaterial => {
+                let (Some(hit), Ok((config, data, baked))) = (hover.surface, terrain.single()) else { continue };
+                let Some(sample) =
+                    eustress_common::terrain::material_at_world(config, surface_data(data, baked), hit.x, hit.z)
+                else {
+                    continue;
+                };
+                if brush.tool == TerrainTool::Paint && brush.paint_mode == PaintMode::Replace {
+                    brush.source_material = sample.primary;
+                } else {
+                    brush.paint_material = sample.primary;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `Esc` leaves the terrain tools for Select (design section 4.1), unless a
+/// text field has the keyboard. With Sea Level's rectangle drawn, it clears
+/// the rectangle first; with Region's box, it cancels a paste or a transform,
+/// then drops the box.
+fn leave_terrain_tools_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    brush: Res<TerrainBrush>,
+    sea_level: Option<ResMut<crate::terrain_sea_level::SeaLevelTool>>,
+    region: Option<ResMut<crate::terrain_region::RegionTool>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    if ui_focus.as_deref().is_some_and(|focus| focus.text_input_focused)
+        || crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let Some(mut studio_state) = studio_state else { return };
+    if studio_state.current_tool != crate::ui::Tool::Terrain {
+        return;
+    }
+    if let Some(mut sea_level) = sea_level {
+        if brush.tool == TerrainTool::SeaLevel && (sea_level.rect.is_some() || sea_level.dragging()) {
+            sea_level.clear();
+            return;
+        }
+    }
+    if let Some(mut region) = region {
+        if brush.tool == TerrainTool::Region && region.has_open_state() {
+            region.escape();
+            return;
+        }
+    }
+    studio_state.current_tool = crate::ui::Tool::Select;
+}
+
+/// Size change per wheel notch with `B` held (a factor).
+const GESTURE_SIZE_PER_NOTCH: f32 = 1.1;
+/// Size change per pixel of horizontal drag with `B` and the left button held.
+const GESTURE_SIZE_PER_PIXEL: f32 = 1.005;
+/// Strength change per wheel notch with `Shift+B` held.
+const GESTURE_STRENGTH_PER_NOTCH: f32 = 0.02;
+/// Strength change per pixel of drag with `Shift+B` held.
+const GESTURE_STRENGTH_PER_PIXEL: f32 = 0.002;
+
+/// Roblox's brush gestures (design section 6): holding `B`, the wheel or a
+/// left-button drag sizes the brush; with `Ctrl` it sets Draw's height; with
+/// `Shift`, the strength. The camera ignores the wheel while `B` is held
+/// (`camera_controller`), and the paint gate keeps a `B` drag from stroking.
+fn terrain_brush_gesture(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut motion: MessageReader<MouseMotion>,
+    mut brush: ResMut<TerrainBrush>,
+) {
+    let notches: f32 = wheel
+        .read()
+        .map(|event| if event.unit == MouseScrollUnit::Line { event.y } else { event.y / 100.0 })
+        .sum();
+    let dx: f32 = motion.read().map(|event| event.delta.x).sum();
+    if !keys.pressed(KeyCode::KeyB) {
+        return;
+    }
+    let drag = if buttons.pressed(MouseButton::Left) { dx } else { 0.0 };
+    if notches == 0.0 && drag == 0.0 {
+        return;
+    }
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if shift {
+        let strength = brush.strength() + notches * GESTURE_STRENGTH_PER_NOTCH + drag * GESTURE_STRENGTH_PER_PIXEL;
+        brush.set_strength(strength);
+    } else {
+        let factor = GESTURE_SIZE_PER_NOTCH.powf(notches) * GESTURE_SIZE_PER_PIXEL.powf(drag);
+        if ctrl {
+            let height = brush.draw_height() * factor;
+            brush.set_draw_height(height);
+        } else {
+            let size = brush.size() * factor;
+            brush.set_size(size);
         }
     }
 }
@@ -348,9 +514,10 @@ fn update_selection_gizmos(
 /// ribbon button or a docked panel carves the ground underneath it. Same
 /// two conditions every other engine tool checks (see `decal_place_tool`):
 /// the pointer must be inside the viewport rectangle, and no Slint panel or
-/// text field may own it.
+/// text field may own it. `B` held is the size gesture's, not a stroke's.
 fn sync_terrain_paint_gate(
     mut gate: ResMut<TerrainPaintGate>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
@@ -372,180 +539,15 @@ fn sync_terrain_paint_gate(
         })
         .unwrap_or(false);
 
-    let allowed = !over_chrome && in_viewport;
+    let allowed = !over_chrome && in_viewport && !keys.pressed(KeyCode::KeyB);
     if gate.allowed != allowed {
         gate.allowed = allowed;
     }
 }
 
-/// Draw the brush preview gizmo at the cursor's terrain hit: a circle on the
-/// surface for the heightfield brushes, or for the 3D brushes the sphere,
-/// box or cylinder the next dab will add, carve or smooth.
-fn update_brush_preview(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    terrain_query: Query<
-        (&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&eustress_common::terrain::TerrainBaked>),
-        With<TerrainRoot>,
-    >,
-    brush: Res<TerrainBrush>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    gate: Res<TerrainPaintGate>,
-    mut preview: ResMut<BrushPreviewState>,
-    mut gizmos: Gizmos,
-) {
-    let Ok(window) = windows.single() else { return };
-    // `order == 0` (the engine-wide "camera the user looks through"
-    // convention), NOT `single()`: the Studio runs the scene camera, the
-    // Slint chrome overlay and the AI camera at once, so `single()` always
-    // errored here and the preview circle never drew.
-    let Some((camera, camera_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) else {
-        return;
-    };
-    let Ok((config, data, volume, baked)) = terrain_query.single() else { return };
-    // The ground the user sees, layer bake included.
-    let data = eustress_common::terrain::surface_data(data, baked);
-
-    // Nothing to preview while the pointer is over editor chrome — and the
-    // brush would not paint there either.
-    if !gate.allowed {
-        preview.position = None;
-        preview.is_painting = false;
-        return;
-    }
-
-    let Some(cursor_pos) = window.cursor_position() else {
-        preview.position = None;
-        preview.is_painting = false;
-        return;
-    };
-
-    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else {
-        preview.position = None;
-        return;
-    };
-
-    // Raymarch the REAL terrain, the same call `terrain_paint_system` uses to
-    // pick its hit point (the whole field, caves included, once the terrain
-    // has volumetric edits). The old flat Y=0 plane test put the circle
-    // somewhere the brush was not going to act on any sculpted ground.
-    let Some(hit) = eustress_common::terrain::height_query::raycast_terrain_surface(
-        config, data, volume, ray, 2000.0, 2.0,
-    ) else {
-        preview.position = None;
-        return;
-    };
-
-    preview.position = Some(hit);
-    preview.is_painting = buttons.pressed(MouseButton::Left);
-
-    // Draw brush circle on terrain surface
-    let radius = brush.radius;
-    let color = if preview.is_painting {
-        // Active painting: bright mode-specific color
-        match brush.mode {
-            BrushMode::Raise => bevy::color::Color::srgba(0.2, 1.0, 0.2, 0.9),
-            BrushMode::Lower => bevy::color::Color::srgba(1.0, 0.2, 0.2, 0.9),
-            BrushMode::Smooth => bevy::color::Color::srgba(0.2, 0.6, 1.0, 0.9),
-            BrushMode::Flatten => bevy::color::Color::srgba(1.0, 1.0, 0.2, 0.9),
-            BrushMode::PaintTexture => bevy::color::Color::srgba(1.0, 0.5, 0.0, 0.9),
-            BrushMode::VoxelAdd => bevy::color::Color::srgba(0.3, 1.0, 0.6, 0.9),
-            BrushMode::VoxelRemove => bevy::color::Color::srgba(1.0, 0.35, 0.35, 0.9),
-            BrushMode::VoxelSmooth => bevy::color::Color::srgba(0.4, 0.8, 1.0, 0.9),
-            _ => bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.9),
-        }
-    } else {
-        // Hovering: semi-transparent white
-        bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.5)
-    };
-
-    // A 3D brush acts on the volume around the hit, not on a patch of ground
-    // under it, so it previews the solid it will change instead of a circle.
-    // The shape comes from the same `voxel_shape` the paint system dabs with.
-    if brush.mode.is_volumetric() {
-        draw_voxel_brush_preview(&mut gizmos, brush.voxel_shape(hit), color);
-        return;
-    }
-
-    // Outer brush circle
-    gizmos.circle(
-        Isometry3d::new(
-            hit + Vec3::Y * 0.05, // Slight Y offset to avoid z-fighting
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        ),
-        radius,
-        color,
-    );
-
-    // Inner falloff circle (shows where full-strength brush starts fading)
-    if brush.falloff > 0.01 {
-        let inner_radius = radius * (1.0 - brush.falloff);
-        if inner_radius > 0.1 {
-            let inner_color = bevy::color::Color::srgba(
-                color.to_srgba().red,
-                color.to_srgba().green,
-                color.to_srgba().blue,
-                0.25,
-            );
-            gizmos.circle(
-                Isometry3d::new(
-                    hit + Vec3::Y * 0.05,
-                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                ),
-                inner_radius,
-                inner_color,
-            );
-        }
-    }
-
-    // Crosshair at center
-    let cross_size = radius * 0.1;
-    let cross_color = bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.3);
-    gizmos.line(
-        hit + Vec3::new(-cross_size, 0.05, 0.0),
-        hit + Vec3::new(cross_size, 0.05, 0.0),
-        cross_color,
-    );
-    gizmos.line(
-        hit + Vec3::new(0.0, 0.05, -cross_size),
-        hit + Vec3::new(0.0, 0.05, cross_size),
-        cross_color,
-    );
-}
-
-/// Wireframe of the region one 3D brush dab covers, centred on the terrain
-/// hit, with a small cross at the centre so the dab point reads even when the
-/// shape is much larger than the view.
-fn draw_voxel_brush_preview(gizmos: &mut Gizmos, shape: CsgShape, color: bevy::color::Color) {
-    let center = match shape {
-        CsgShape::Sphere { center, radius } => {
-            gizmos.sphere(Isometry3d::new(center, Quat::IDENTITY), radius, color);
-            center
-        }
-        CsgShape::AxisBox { center, half_extents } => {
-            gizmos.cube(Transform::from_translation(center).with_scale(half_extents * 2.0), color);
-            center
-        }
-        CsgShape::Cylinder { center, radius, half_height } => {
-            gizmos.primitive_3d(
-                &bevy::math::primitives::Cylinder { radius, half_height },
-                Isometry3d::new(center, Quat::IDENTITY),
-                color,
-            );
-            center
-        }
-    };
-    let (lo, hi) = shape.bounds();
-    let cross = ((hi - lo).max_element() * 0.05).max(0.05);
-    let cross_color = bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.4);
-    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
-        gizmos.line(center - axis * cross, center + axis * cross, cross_color);
-    }
-}
-
 /// Close the brush stroke [`TerrainEditRecorder`] holds and push it onto the
 /// unified undo stack as one entry, once the left button is up or the
-/// terrain editor was left mid-stroke. The recorder drops tiles and volume
+/// terrain tools were left mid-stroke. The recorder drops tiles and volume
 /// bricks the stroke did not change, and a stroke that changed nothing
 /// pushes nothing.
 fn commit_terrain_stroke(
@@ -579,6 +581,7 @@ fn commit_terrain_stroke(
                 root: root.to_bits(),
                 tiles: edit.tiles,
                 bricks: edit.bricks,
+                water: edit.water,
             },
         );
     }

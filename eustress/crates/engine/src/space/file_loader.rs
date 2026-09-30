@@ -403,12 +403,10 @@ pub(crate) fn parse_instance_text(text: &str) -> ParsedInstance {
     let class_name = meta
         .and_then(|m| m.get("class_name").or_else(|| m.get("ClassName")))
         .and_then(|cn| cn.as_str())
-        .map(|cn| {
-            // Legacy shim: "Script" used to mean the Rune script class
-            // before the Soul/Luau split.
-            let cn_resolved = if cn == "Script" { "SoulScript" } else { cn };
-            ClassName::from_str(cn_resolved).unwrap_or(ClassName::Folder)
-        })
+        // One resolution, shared with `streams_from_db`, so the loader and the
+        // bake classify a raw name (the legacy "Script", an unknown class)
+        // identically.
+        .map(super::representation::class_from_toml)
         .unwrap_or(ClassName::Folder);
     let uuid = meta
         .and_then(|m| m.get("uuid").or_else(|| m.get("Uuid")))
@@ -1374,12 +1372,27 @@ pub fn spawn_file_entry(
                 // Stage timers: this is the ~4 ms/entity path that has been
                 // undiagnosed since August. See `toml_spawn_cost`.
                 let t_read = std::time::Instant::now();
-                let parsed = src_read_string(source, space_path, &file_meta.path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|c| super::instance_loader::load_instance_definition_from_str(&c));
+                let content = src_read_string(source, space_path, &file_meta.path).map_err(|e| e.to_string());
+                let parsed = content
+                    .as_deref()
+                    .map_err(String::clone)
+                    .and_then(super::instance_loader::load_instance_definition_from_str);
                 toml_spawn_cost::add(&toml_spawn_cost::READ_PARSE_NS, t_read.elapsed());
-                match parsed {
-                    Ok(instance) => {
+                match (flat_unknown_class(content.as_deref(), &parsed), parsed) {
+                    // A class the engine does not know loads as the inert
+                    // Folder its folder form gets: no InstanceFile and no
+                    // BasePart, so no writer can save the file back as a Part.
+                    (Some(raw), _) => {
+                        let e = spawn_flat_unknown_class(commands, file_meta, content.as_deref().ok(), &raw);
+                        registry.register(file_meta.path.clone(), e, file_meta.clone());
+                        e
+                    }
+                    (None, Ok(mut instance)) => {
+                        // A file that names no class takes the class its
+                        // extension names: a class-less `.model.toml` is a Model.
+                        if let Ok(text) = content.as_deref() {
+                            apply_flat_extension_class(&file_meta.path, text, &mut instance);
+                        }
                         let t_spawn = std::time::Instant::now();
                         let e = super::instance_loader::spawn_instance(
                             commands,
@@ -1405,7 +1418,7 @@ pub fn spawn_file_entry(
                         toml_spawn_cost::COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         e
                     }
-                    Err(err) => {
+                    (None, Err(err)) => {
                         error!("Failed to load instance file {:?}: {}", file_meta.path, err);
                         return None;
                     }
@@ -1743,6 +1756,294 @@ pub fn spawn_file_entry(
     Some(entity)
 }
 
+/// A script folder whose `[script]` says `enabled = false`: in Roblox, a
+/// disabled template another script clones and enables at runtime. Play
+/// (`play_datamodel::seed`) gives it `Disabled`, so it does not start where
+/// it sits.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct ScriptDisabled;
+
+/// A file's tags and attributes as components, by the rules a Player's
+/// reader shares (`eustress_common::datamodel::record`).
+fn record_tags_and_attributes(
+    doc: &toml::Value,
+) -> (eustress_common::attributes::Tags, eustress_common::attributes::Attributes) {
+    use eustress_common::datamodel::record;
+    let mut attributes = eustress_common::attributes::Attributes::new();
+    for (key, value) in record::record_attribute_values(doc) {
+        attributes.set(&key, value);
+    }
+    (eustress_common::attributes::Tags(record::record_tags(doc)), attributes)
+}
+
+/// The open Space's pose rule, set when it loads (`load_space_files_system`).
+/// A plain flag, because the spawn functions run without the `World`.
+static PARENT_POSE_RULE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_transform_rule(rule: eustress_common::datamodel::record::TransformRule) {
+    PARENT_POSE_RULE.store(
+        matches!(rule, eustress_common::datamodel::record::TransformRule::ParentPose),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The open Space's pose rule.
+pub(crate) fn transform_rule() -> eustress_common::datamodel::record::TransformRule {
+    if PARENT_POSE_RULE.load(std::sync::atomic::Ordering::Relaxed) {
+        eustress_common::datamodel::record::TransformRule::ParentPose
+    } else {
+        eustress_common::datamodel::record::TransformRule::Legacy
+    }
+}
+
+/// The class a flat instance file names when the engine does not know it
+/// (`record::is_known_class`); such a file loads as the inert Folder. A file
+/// with no class_name reads as a Part, and one whose typed read failed is
+/// judged by its raw `[metadata] class_name`.
+pub(crate) fn flat_unknown_class(
+    content: Result<&str, &String>,
+    parsed: &Result<super::instance_loader::InstanceDefinition, String>,
+) -> Option<String> {
+    let raw = match parsed {
+        Ok(instance) => instance.metadata.class_name.clone(),
+        Err(_) => {
+            let doc = content.ok()?.parse::<toml::Value>().ok()?;
+            eustress_common::datamodel::record::raw_class_name(&doc)?.to_string()
+        }
+    };
+    (!eustress_common::datamodel::record::is_known_class(&raw)).then_some(raw)
+}
+
+/// A flat instance file's name up to its first dot (`gizmo.v2.instance.toml`
+/// is `gizmo`), as `spawn_instance` and the Player's reader name one.
+pub(crate) fn flat_stem(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.split('.').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A flat instance file of a class the engine does not know
+/// ([`flat_unknown_class`]), loaded as the inert Folder its folder form gets:
+/// no InstanceFile and no BasePart, so no writer can save the file back as a
+/// Part. Space open and the file watcher both load one here. Named like
+/// Studio's flat parts and the Player's reader: `[metadata] name`, else the
+/// file name up to its first dot, first letter capitalised. The caller
+/// parents and registers it.
+pub(crate) fn spawn_flat_unknown_class(
+    commands: &mut Commands,
+    file_meta: &FileMetadata,
+    content: Option<&str>,
+    raw: &str,
+) -> Entity {
+    use eustress_common::classes::ClassName;
+    eustress_common::datamodel::record::warn_unknown_class(raw, ClassName::Folder);
+    let doc = content.and_then(|c| c.parse::<toml::Value>().ok());
+    let uuid = doc
+        .as_ref()
+        .and_then(|d| d.get("metadata").or_else(|| d.get("Metadata")))
+        .and_then(|m| m.get("uuid").or_else(|| m.get("Uuid")))
+        .and_then(|u| u.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let named = FileMetadata { name: flat_stem(&file_meta.path), ..file_meta.clone() };
+    let e = spawn_general_entity(commands, &named, doc.as_ref(), ClassName::Folder, uuid);
+    commands.entity(e).insert(LoadedFromFile {
+        path: file_meta.path.clone(),
+        file_type: file_meta.file_type,
+        service: file_meta.service.clone(),
+    });
+    e
+}
+
+/// A flat instance file that names no class takes the class its extension
+/// names (`record::flat_extension_class`), as a Player's reader resolves it.
+/// The typed definition reads a class-less file as a Part, and a writer then
+/// saved the file back as one. Space open and the file watcher both call this.
+pub(crate) fn apply_flat_extension_class(
+    path: &Path,
+    content: &str,
+    instance: &mut super::instance_loader::InstanceDefinition,
+) {
+    use eustress_common::datamodel::record;
+    let class = record::flat_extension_class(&path.to_string_lossy());
+    if class == eustress_common::classes::ClassName::Part {
+        return;
+    }
+    let names_one = content
+        .parse::<toml::Value>()
+        .ok()
+        .is_some_and(|doc| record::raw_class_name(&doc).is_some());
+    if !names_one {
+        instance.metadata.class_name = class.as_str().to_string();
+    }
+}
+
+/// The arm of `spawn_directory_entry` a folder-form `_instance.toml` loads
+/// through, by its class. One table, read by Space open and by the file
+/// watcher, so a folder that appears while Studio runs loads the way it would
+/// at the next open. The watcher routes `General` through
+/// `spawn_general_entity` as Space open does; the other arms keep their own
+/// runtime paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FolderLoad {
+    /// The fullscreen UI root.
+    ScreenGui,
+    /// A Frame or a ScrollingFrame.
+    GuiContainer,
+    /// A 3D quad host with its own render pipeline.
+    BillboardGui,
+    /// An Image or a Video.
+    Media,
+    /// A Rune script folder, a full leaf.
+    SoulScript,
+    /// Every BasePart class (`record::loads_as_part`).
+    Part,
+    /// Particle simulations, their species and the terrain layer classes.
+    ParticleOrTerrain,
+    /// A leaf UI class in folder form.
+    GuiLeaf,
+    /// Atmosphere, Sky, Clouds, the post effects and the DirectionalLight.
+    Environment,
+    /// A PointLight, SpotLight or SurfaceLight.
+    Light,
+    /// Every class with no loader of its own: a Folder, a Model, a Tool, a
+    /// Luau script folder, an Attachment, and a class that is unknown or
+    /// missing (both parse as Folder).
+    General,
+}
+
+/// The arm a class loads through, in the order `spawn_directory_entry` tries
+/// them, so a class two arms could claim goes to the earlier one.
+pub(crate) fn folder_load(class_name: eustress_common::classes::ClassName) -> FolderLoad {
+    use eustress_common::classes::ClassName as C;
+    match class_name {
+        C::ScreenGui => FolderLoad::ScreenGui,
+        C::Frame | C::ScrollingFrame => FolderLoad::GuiContainer,
+        C::BillboardGui => FolderLoad::BillboardGui,
+        C::Image | C::Video => FolderLoad::Media,
+        C::SoulScript => FolderLoad::SoulScript,
+        c if eustress_common::datamodel::record::loads_as_part(c) => FolderLoad::Part,
+        C::ParticleSimulation
+        | C::ParticleSpecies
+        | C::TerrainSpline
+        | C::TerrainSplinePoint
+        | C::TerrainStamp
+        | C::TerrainFlattenPad
+        | C::TerrainNoise
+        | C::TerrainMaterialFill
+        | C::TerrainScatter
+        | C::TerrainWaterBody => FolderLoad::ParticleOrTerrain,
+        C::TextLabel
+        | C::TextButton
+        | C::TextBox
+        | C::ImageLabel
+        | C::ImageButton
+        | C::ViewportFrame => FolderLoad::GuiLeaf,
+        C::Atmosphere
+        | C::Sky
+        | C::Clouds
+        | C::BloomEffect
+        | C::SunRaysEffect
+        | C::DirectionalLight => FolderLoad::Environment,
+        C::PointLight | C::SpotLight | C::SurfaceLight => FolderLoad::Light,
+        _ => FolderLoad::General,
+    }
+}
+
+/// The entity Studio builds for a directory whose class has no loader of its
+/// own (a Folder, a Model, a Tool, a Luau script folder, an Attachment, ...),
+/// by the rules a Player's reader shares (`eustress_common::datamodel::
+/// record`): the file's `[metadata] name`, else the folder's name
+/// capitalised; its pose by the open Space's rule (`folder_pose`: under the
+/// legacy rule an Attachment or a Bone keeps the identity); its tags and attributes; a
+/// Model's stored pivot; and the marker of a script that starts disabled.
+/// The caller parents it.
+pub(crate) fn spawn_general_entity(
+    commands: &mut Commands,
+    dir_meta: &FileMetadata,
+    doc: Option<&toml::Value>,
+    class_name: eustress_common::classes::ClassName,
+    uuid: String,
+) -> Entity {
+    use eustress_common::datamodel::record;
+    let name = doc
+        .and_then(record::record_name)
+        .map(str::to_string)
+        .unwrap_or_else(|| record::folder_display_name(&dir_meta.name));
+    let pose = doc
+        .map(|d| transform_rule().folder_pose(class_name, d))
+        .unwrap_or_default();
+    let (tags, attributes) = doc.map(record_tags_and_attributes).unwrap_or_default();
+    // An Attachment's component from its file (its part-local CFrame, axes and
+    // visibility), by the builder a Player's reader shares.
+    let attachment = doc
+        .filter(|_| class_name == eustress_common::classes::ClassName::Attachment)
+        .map(|d| record::record_attachment(d, &name));
+    let mut entity = commands.spawn((
+        pose,
+        Visibility::default(),
+        eustress_common::classes::Instance {
+            name: name.clone(),
+            class_name,
+            archivable: true,
+            id: 0,
+            ai: false,
+            // Carry the UUID so a constraint loaded here can be resolved
+            // by identity, and so attachments loaded here are findable
+            // as constraint joint endpoints.
+            uuid,
+        },
+        LoadedFromFile {
+            path: dir_meta.path.clone(),
+            file_type: FileType::Directory,
+            service: dir_meta.service.clone(),
+        },
+        Name::new(name),
+        tags,
+        attributes,
+    ));
+    if record::has_model_pivot(class_name) {
+        entity.insert(eustress_common::classes::Model {
+            world_pivot: doc.and_then(record::record_model_pivot).unwrap_or(Transform::IDENTITY),
+            ..Default::default()
+        });
+    }
+    if doc.is_some_and(|d| record::script_starts_disabled(class_name, d)) {
+        entity.insert(ScriptDisabled);
+    }
+    // An Animation's id (`[properties] animation_id`, the AnimationId as
+    // Roblox has it), which an Animator loads and Play carries into the tree.
+    if class_name == eustress_common::classes::ClassName::Animation {
+        entity.insert(eustress_common::classes::Animation {
+            animation_id: doc.and_then(record::record_animation_id).unwrap_or_default(),
+        });
+    }
+    // A class's own settings from its file's class section (a
+    // KeyframeSequence's `[keyframe_sequence]`), by the conversion a Player's
+    // reader shares; the seed carries them into the tree.
+    if let Some(doc) = doc {
+        let props = record::record_class_props(&record::tree_class(class_name, false), doc);
+        if !props.is_empty() {
+            entity.insert(record::RecordClassProps(props));
+        }
+    }
+    if let Some(attachment) = attachment {
+        entity.insert(attachment);
+    }
+    // A DataMesh's component (SpecialMesh, BlockMesh, CylinderMesh, FileMesh)
+    // from its `[mesh]`, by the builder a Player's reader shares.
+    if let Some(doc) = doc {
+        record::insert_data_mesh(&mut entity, class_name, record::data_mesh_section(doc));
+    }
+    // A Sound's component from its `[sound]`, by the reader a Player's shares.
+    if class_name == eustress_common::classes::ClassName::Sound {
+        entity.insert(doc.map(eustress_common::services::sound::sound_from_document).unwrap_or_default());
+    }
+    entity.id()
+}
+
 /// Spawn a Directory entry as a Folder entity (or Service entity if it contains _service.toml),
 /// then spawn all its children parented to that entity. Recurses for nested subdirectories.
 pub fn spawn_directory_entry(
@@ -1971,11 +2272,23 @@ pub fn spawn_directory_entry(
         // they must consult the SAME function. Kept as separate predicates
         // they drift, and the drift is silent — a mismatch either spawns the
         // entity twice or loses it entirely.
-        if super::representation::streams_from_db(
-            &format!("{:?}", class_name),
-            has_children,
-            has_custom_mesh,
-        ) {
+        //
+        // And only when a core actually exists. The bake runs once per
+        // version, so an eligible part added after it (a paste, a TOML an
+        // agent wrote, a delete undone) has no core, and skipping it here
+        // lost it from every streaming open.
+        let has_core = parsed
+            .as_ref()
+            .map(|p| super::active_db::has_instance_core_for(&p.uuid))
+            .unwrap_or(false);
+        if has_core
+            && super::representation::streams_from_db(
+                &format!("{:?}", class_name),
+                has_children,
+                has_custom_mesh,
+                &instance_toml_rel,
+            )
+        {
             return; // residency streams this bare part from the DB
         }
     }
@@ -1992,13 +2305,16 @@ pub fn spawn_directory_entry(
     toml_spawn_cost::add(&toml_spawn_cost::READ_PARSE_NS, t_pre.elapsed());
     let t_spawn = std::time::Instant::now();
 
-    // Spawn the Folder / ScreenGui / Frame / Model entity
-    let is_screen_gui = matches!(class_name, eustress_common::classes::ClassName::ScreenGui);
-    let is_gui_container = matches!(class_name,
-        eustress_common::classes::ClassName::Frame
-        | eustress_common::classes::ClassName::ScrollingFrame
-    );
+    // Spawn the Folder / ScreenGui / Frame / Model entity. `folder_load` is
+    // the one table of which arm below takes a class; the file watcher reads
+    // it too, so a folder that appears while Studio runs loads as it does here.
+    let folder_arm = folder_load(class_name);
+    let is_screen_gui = folder_arm == FolderLoad::ScreenGui;
+    let is_gui_container = folder_arm == FolderLoad::GuiContainer;
 
+    // Set by the branches that fill the entity's tags and attributes
+    // themselves; every other branch gets them from its file after the match.
+    let mut tags_and_attributes_filled = false;
     let folder_entity = if is_screen_gui {
         // ScreenGui: fullscreen UI root — read enabled/visible from _instance.toml
         let instance_toml = dir_meta.path.join("_instance.toml");
@@ -2097,7 +2413,7 @@ pub fn spawn_directory_entry(
             // No bevy_ui Node — rendered via GuiElementDisplay (PERF, see above).
             gui_display,
         )).id()
-    } else if matches!(class_name, eustress_common::classes::ClassName::BillboardGui) {
+    } else if folder_arm == FolderLoad::BillboardGui {
         // BillboardGui — 3D billboard entity (quad facing camera).
         //
         // Roblox parity: every `BillboardGui` instance property is
@@ -2241,7 +2557,7 @@ pub fn spawn_directory_entry(
             commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
         }
         entity
-    } else if matches!(class_name, eustress_common::classes::ClassName::Image | eustress_common::classes::ClassName::Video) {
+    } else if folder_arm == FolderLoad::Media {
         // Image / Video — imported media class. Loads the asset_path
         // referenced by `[asset].path` in _instance.toml, which lives
         // under the Universe-level `assets/` folder. The entity is a
@@ -2449,15 +2765,17 @@ pub fn spawn_directory_entry(
         }
 
         entity
-    } else if matches!(class_name, eustress_common::classes::ClassName::SoulScript) {
+    } else if folder_arm == FolderLoad::SoulScript {
         // Script folder — find the .rune/.luau/.soul source file inside and load it.
         let instance_toml = dir_meta.path.join("_instance.toml");
         // Read the "source" field from _instance.toml to find the script filename,
         // or scan the folder for the first .rune/.luau/.soul file.
-        let source_file = take_instance_value(&parsed, source, space_path, &instance_toml)
+        let script_doc = take_instance_value(&parsed, source, space_path, &instance_toml);
+        let source_file = script_doc
+            .as_ref()
             .and_then(|v| {
                 use eustress_common::class_schema::get_section_insensitive as get_ci;
-                get_ci(&v, "script")
+                get_ci(v, "script")
                     .and_then(|s| get_ci(s, "source"))
                     .and_then(|s| s.as_str())
                     // `source = ""` (what the class-schema self-heal writes)
@@ -2497,11 +2815,29 @@ pub fn spawn_directory_entry(
 
         if let Some(ref src_path) = source_file {
             if let Ok(script_src) = src_read_string(source, space_path, src_path) {
-                let script_name = dir_meta.name.clone();
+                // The file's `[metadata] name` when it gives one, as for every
+                // entity made from an `_instance.toml`.
+                let script_name = script_doc
+                    .as_ref()
+                    .and_then(eustress_common::datamodel::record::record_name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| dir_meta.name.clone());
                 // A folder holding a `.luau` source is a Luau script, exactly
                 // like a bare `.luau` file.
                 let is_luau = matches!(src_path.extension().and_then(|x| x.to_str()), Some("luau") | Some("lua"));
-                commands.spawn((
+                // The script's own properties in the tree (`ScriptOrigin`), by
+                // its tree class, as a Player's reader reads them.
+                let tree_class = if is_luau {
+                    let file = src_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    eustress_common::datamodel::record::luau_script_class(file, &dir_meta.service)
+                } else {
+                    "SoulScript"
+                };
+                let class_props = script_doc
+                    .as_ref()
+                    .map(|doc| eustress_common::datamodel::record::record_class_props(tree_class, doc))
+                    .unwrap_or_default();
+                let mut spawned = commands.spawn((
                     eustress_common::classes::Instance {
                         name: script_name.clone(),
                         class_name: eustress_common::classes::ClassName::SoulScript,
@@ -2534,44 +2870,37 @@ pub fn spawn_directory_entry(
                         service: dir_meta.service.clone(),
                     },
                     Name::new(script_name),
-                )).id()
+                ));
+                if !class_props.is_empty() {
+                    spawned.insert(eustress_common::datamodel::record::RecordClassProps(class_props));
+                }
+                spawned.id()
             } else {
                 warn!("Failed to read script source {:?}", src_path);
-                commands.spawn((
-                    eustress_common::classes::Instance {
-                        name: dir_meta.name.clone(),
-                        class_name: eustress_common::classes::ClassName::Folder,
-                        archivable: true, id: 0, ai: false, uuid: String::new(),
-                    },
-                    LoadedFromFile {
-                        path: dir_meta.path.clone(),
-                        file_type: FileType::Directory,
-                        service: dir_meta.service.clone(),
-                    },
-                    Name::new(dir_meta.name.clone()),
-                    Transform::default(),
-                    Visibility::default(),
-                )).id()
+                tags_and_attributes_filled = true;
+                spawn_general_entity(
+                    commands,
+                    dir_meta,
+                    script_doc.as_ref(),
+                    eustress_common::classes::ClassName::Folder,
+                    instance_uuid.clone(),
+                )
             }
         } else {
             warn!("Script folder {:?} has no source file", dir_meta.path);
-            commands.spawn((
-                eustress_common::classes::Instance {
-                    name: dir_meta.name.clone(),
-                    class_name: eustress_common::classes::ClassName::Folder,
-                    archivable: true, id: 0, ai: false, uuid: String::new(),
-                },
-                LoadedFromFile {
-                    path: dir_meta.path.clone(),
-                    file_type: FileType::Directory,
-                    service: dir_meta.service.clone(),
-                },
-                Name::new(dir_meta.name.clone()),
-                Transform::default(),
-                Visibility::default(),
-            )).id()
+            tags_and_attributes_filled = true;
+            spawn_general_entity(
+                commands,
+                dir_meta,
+                script_doc.as_ref(),
+                eustress_common::classes::ClassName::Folder,
+                instance_uuid.clone(),
+            )
         }
-    } else if matches!(class_name, eustress_common::classes::ClassName::Part) {
+    } else if folder_arm == FolderLoad::Part {
+        // Every BasePart class loads here: a union, a seat and a spawn
+        // location are parts with a mesh and a collider, like a Part.
+        tags_and_attributes_filled = true; // spawn_instance fills them
         // Part folder — load via spawn_instance (same path as flat .glb.toml files).
         // The _instance.toml inside contains the full InstanceDefinition with mesh, transform, etc.
         // Realism sections (`[material]` / `[thermodynamic]` / `[electrochemical]`)
@@ -2619,18 +2948,8 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
-    } else if matches!(class_name,
-        eustress_common::classes::ClassName::ParticleSimulation
-        | eustress_common::classes::ClassName::ParticleSpecies
-        | eustress_common::classes::ClassName::TerrainSpline
-        | eustress_common::classes::ClassName::TerrainSplinePoint
-        | eustress_common::classes::ClassName::TerrainStamp
-        | eustress_common::classes::ClassName::TerrainFlattenPad
-        | eustress_common::classes::ClassName::TerrainNoise
-        | eustress_common::classes::ClassName::TerrainMaterialFill
-        | eustress_common::classes::ClassName::TerrainScatter
-        | eustress_common::classes::ClassName::TerrainWaterBody
-    ) {
+    } else if folder_arm == FolderLoad::ParticleOrTerrain {
+        tags_and_attributes_filled = true; // spawn_instance fills them
         // Particle simulations and their species, and the terrain layer
         // classes: the same definition + spawn as the Insert path (class
         // component, InstanceFile, pose), plus LoadedFromFile so inserting
@@ -2675,14 +2994,7 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
-    } else if matches!(class_name,
-        eustress_common::classes::ClassName::TextLabel
-        | eustress_common::classes::ClassName::TextButton
-        | eustress_common::classes::ClassName::TextBox
-        | eustress_common::classes::ClassName::ImageLabel
-        | eustress_common::classes::ClassName::ImageButton
-        | eustress_common::classes::ClassName::ViewportFrame,
-    ) {
+    } else if folder_arm == FolderLoad::GuiLeaf {
         // Leaf UI class in folder form — new Insert-menu convention
         // writes `Name/_instance.toml` with `class_name = "TextLabel"`
         // (etc.) instead of the legacy flat `Name.textlabel.toml`.
@@ -2715,12 +3027,7 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
-    } else if matches!(class_name,
-        eustress_common::classes::ClassName::Atmosphere
-        | eustress_common::classes::ClassName::Sky
-        | eustress_common::classes::ClassName::Clouds
-        | eustress_common::classes::ClassName::DirectionalLight,
-    ) {
+    } else if folder_arm == FolderLoad::Environment {
         // Environment folder — hydrate the AUTHORED Atmosphere / Sky / Clouds /
         // DirectionalLight component from the importer-written [section] so the
         // scene renders with the imported values (not clear_day defaults). We
@@ -2728,52 +3035,14 @@ pub fn spawn_directory_entry(
         // entities`' `Without<Sky>`/`Without<EustressAtmosphere>` filters skip
         // these entities (no double-hydrate). `sync_atmosphere_to_rendering`
         // and `manage_cloud_particles` fire on the Changed<> insert.
-        use eustress_common::classes::{
-            Atmosphere, Sky, SkyboxTextures, Clouds, EustressDirectionalLight,
-        };
+        use eustress_common::classes::{Sky, EustressDirectionalLight};
+        use eustress_common::plugins::celestial_sections;
         use crate::plugins::lighting_plugin::LightingServiceOwner;
-        use eustress_common::services::lighting::{AtmosphereRenderingMode, EustressAtmosphere};
+        use eustress_common::services::lighting::EustressAtmosphere;
 
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
             take_instance_value(&parsed, source, space_path, &instance_toml);
-
-        // u8 0-255 RGB array (÷255) → [f32;4] alpha 1.0; try int THEN float.
-        let rgba4 = |sec: Option<&toml::Value>, key: &str, fallback: [f32; 4]| -> [f32; 4] {
-            let Some(arr) = sec.and_then(|s| s.get(key)).and_then(|v| v.as_array()) else {
-                return fallback;
-            };
-            if arr.len() != 3 && arr.len() != 4 {
-                return fallback;
-            }
-            let ch = |i: usize, def: f32| -> f32 {
-                arr.get(i)
-                    .and_then(|v| v.as_integer().map(|n| n as f32 / 255.0).or_else(|| v.as_float().map(|f| f as f32)))
-                    .unwrap_or(def)
-            };
-            [ch(0, fallback[0]), ch(1, fallback[1]), ch(2, fallback[2]),
-             if arr.len() == 4 { ch(3, fallback[3]) } else { fallback[3] }]
-        };
-        let f32_at = |sec: Option<&toml::Value>, key: &str| -> Option<f32> {
-            sec.and_then(|s| s.get(key))
-                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
-                .map(|f| f as f32)
-        };
-        let bool_at = |sec: Option<&toml::Value>, key: &str| -> Option<bool> {
-            sec.and_then(|s| s.get(key)).and_then(|v| v.as_bool())
-        };
-        let str_at = |sec: Option<&toml::Value>, key: &str| -> Option<String> {
-            sec.and_then(|s| s.get(key)).and_then(|v| v.as_str()).map(|s| s.to_string())
-        };
-        let vec3_at = |sec: Option<&toml::Value>, key: &str| -> Option<[f32; 3]> {
-            let arr = sec.and_then(|s| s.get(key)).and_then(|v| v.as_array())?;
-            let ch = |i: usize| -> Option<f32> {
-                arr.get(i)
-                    .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
-                    .map(|f| f as f32)
-            };
-            Some([ch(0)?, ch(1)?, ch(2)?])
-        };
 
         // Position (lights/sky/atmosphere are positionless, but keep transform).
         let position = toml_value
@@ -2814,68 +3083,15 @@ pub fn spawn_directory_entry(
 
         match class_name {
             eustress_common::classes::ClassName::Atmosphere => {
-                let sec = toml_value.as_ref().and_then(|v| v.get("atmosphere"));
-                let d = Atmosphere::default();
-                let atmo = Atmosphere {
-                    density: f32_at(sec, "density").unwrap_or(d.density),
-                    offset: f32_at(sec, "offset").unwrap_or(d.offset),
-                    color: rgba4(sec, "color", d.color),
-                    // Importer writes `decay_color`; older files may use `decay`.
-                    decay: if sec.and_then(|s| s.get("decay_color")).is_some() {
-                        rgba4(sec, "decay_color", d.decay)
-                    } else {
-                        rgba4(sec, "decay", d.decay)
-                    },
-                    glare: f32_at(sec, "glare").unwrap_or(d.glare),
-                    haze: f32_at(sec, "haze").unwrap_or(d.haze),
-                };
-
-                // The scattering model. Previously this was always
-                // `EustressAtmosphere::default()`, so the authored Rayleigh/Mie
-                // coefficients, planet radius, atmosphere thickness and
-                // rendering mode never left the file. Nothing noticed, because
-                // nothing downstream read them either.
-                let ed = EustressAtmosphere::default();
-                let eustress_atmo = EustressAtmosphere {
-                    // Mirror the artistic properties so a direct
-                    // EustressAtmosphere read sees the same values as Atmosphere.
-                    density: atmo.density,
-                    offset: atmo.offset,
-                    color: atmo.color,
-                    decay: atmo.decay,
-                    glare: atmo.glare,
-                    haze: atmo.haze,
-                    rendering_mode: match str_at(sec, "rendering_mode")
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .as_str()
-                    {
-                        "raymarched" | "raymarch" => AtmosphereRenderingMode::Raymarched,
-                        _ => ed.rendering_mode,
-                    },
-                    sky_max_samples: sec
-                        .and_then(|s| s.get("sky_max_samples"))
-                        .and_then(|v| v.as_integer())
-                        .map(|n| n.clamp(8, 128) as u32)
-                        .unwrap_or(ed.sky_max_samples),
-                    planet_radius: f32_at(sec, "planet_radius").unwrap_or(ed.planet_radius),
-                    atmosphere_height: f32_at(sec, "atmosphere_height")
-                        .unwrap_or(ed.atmosphere_height),
-                    rayleigh_coefficient: vec3_at(sec, "rayleigh_coefficient")
-                        .unwrap_or(ed.rayleigh_coefficient),
-                    mie_coefficient: f32_at(sec, "mie_coefficient")
-                        .unwrap_or(ed.mie_coefficient),
-                    mie_direction: f32_at(sec, "mie_direction")
-                        .or_else(|| f32_at(sec, "mie_directional_factor"))
-                        .unwrap_or(ed.mie_direction),
-                    environment_map_enabled: bool_at(sec, "environment_map_enabled")
-                        .unwrap_or(ed.environment_map_enabled),
-                    environment_intensity: f32_at(sec, "environment_intensity")
-                        .unwrap_or(ed.environment_intensity),
-                    atmosphere_environment_light: bool_at(sec, "atmosphere_environment_light")
-                        .unwrap_or(ed.atmosphere_environment_light),
-                };
-
+                // The whole model from `[atmosphere]`, with the Explorer
+                // class's six artistic fields mirrored from it. One reader
+                // (`celestial_sections`) for this path, the flat-file path,
+                // live reloads and the Properties panel.
+                let section = toml_value
+                    .as_ref()
+                    .and_then(|v| celestial_sections::section_of(v, class_name));
+                let (atmo, eustress_atmo) =
+                    celestial_sections::atmosphere_from_section(section, &EustressAtmosphere::default());
                 commands.entity(spawned).insert((
                     atmo,
                     eustress_atmo,
@@ -2883,168 +3099,65 @@ pub fn spawn_directory_entry(
                 ));
             }
             eustress_common::classes::ClassName::Sky => {
-                let sec = toml_value.as_ref().and_then(|v| v.get("sky"));
-                let d = Sky::default();
-                let sky = Sky {
-                    skybox_textures: SkyboxTextures {
-                        back: str_at(sec, "skybox_back").unwrap_or_default(),
-                        front: str_at(sec, "skybox_front").unwrap_or_default(),
-                        left: str_at(sec, "skybox_left").unwrap_or_default(),
-                        right: str_at(sec, "skybox_right").unwrap_or_default(),
-                        up: str_at(sec, "skybox_top").unwrap_or_default(),
-                        down: str_at(sec, "skybox_bottom").unwrap_or_default(),
-                    },
-                    star_count: sec
-                        .and_then(|s| s.get("star_count"))
-                        .and_then(|v| v.as_integer())
-                        .map(|n| n.max(0) as u32)
-                        .unwrap_or(d.star_count),
-                    celestial_bodies_shown: bool_at(sec, "celestial_bodies_shown")
-                        .unwrap_or(d.celestial_bodies_shown),
-                };
+                let section = toml_value
+                    .as_ref()
+                    .and_then(|v| celestial_sections::section_of(v, class_name));
+                let sky = celestial_sections::sky_from_section(section, Sky::default());
                 commands.entity(spawned).insert((sky, LightingServiceOwner));
             }
             eustress_common::classes::ClassName::Clouds => {
-                let sec = toml_value.as_ref().and_then(|v| v.get("clouds"));
-                let d = Clouds::default();
-                let clouds = Clouds {
-                    enabled: bool_at(sec, "enabled").unwrap_or(d.enabled),
-                    density: f32_at(sec, "density").unwrap_or(d.density),
-                    // Importer writes `cover` → engine `coverage`.
-                    coverage: f32_at(sec, "cover").unwrap_or(d.coverage),
-                    color: rgba4(sec, "color", d.color),
-                    ..d
-                };
+                // One parser for the load and for live reloads, which is
+                // what `reload_lighting_fx` uses when the file changes.
+                let clouds = crate::plugins::lighting_plugin::clouds_from_toml(toml_value.as_ref());
                 commands.entity(spawned).insert((clouds, LightingServiceOwner));
             }
+            eustress_common::classes::ClassName::BloomEffect => {
+                let bloom = crate::plugins::lighting_plugin::bloom_from_toml(toml_value.as_ref());
+                commands.entity(spawned).insert((bloom, LightingServiceOwner));
+            }
+            eustress_common::classes::ClassName::SunRaysEffect => {
+                let rays = crate::plugins::lighting_plugin::sun_rays_from_toml(toml_value.as_ref());
+                commands.entity(spawned).insert((rays, LightingServiceOwner));
+            }
             _ => {
-                // DirectionalLight
-                let sec = toml_value.as_ref().and_then(|v| v.get("light"));
-                let color = rgba4(sec, "color", [1.0, 1.0, 1.0, 1.0]);
-                let brightness = f32_at(sec, "brightness").unwrap_or(1.0);
-                let shadows = bool_at(sec, "shadows").unwrap_or(true);
-                let mut edl = EustressDirectionalLight::default();
-                edl.brightness = brightness;
-                edl.color = Color::srgb(color[0], color[1], color[2]);
-                edl.shadows = shadows;
-                commands.entity(spawned).insert((
-                    DirectionalLight {
-                        color: Color::srgb(color[0], color[1], color[2]),
-                        illuminance: brightness * 10_000.0,
-                        shadow_maps_enabled: shadows,
-                        shadow_depth_bias: edl.shadow_depth_bias,
-                        shadow_normal_bias: edl.shadow_normal_bias,
-                        ..default()
-                    },
-                    edl,
-                    LightingServiceOwner,
-                ));
+                // DirectionalLight: the authoring component (brightness,
+                // colour, shadows, enabled, biases; either key case) and its
+                // aim, the transform's rotation. `light_classes` builds the
+                // Bevy light, without a sun disc.
+                let edl: EustressDirectionalLight = toml_value
+                    .as_ref()
+                    .map(|doc| eustress_common::plugins::light_classes::LightSection::from_document(doc).directional())
+                    .unwrap_or_default();
+                let pose = toml_value
+                    .as_ref()
+                    .map(eustress_common::plugins::light_classes::light_transform_from_document)
+                    .unwrap_or_default();
+                commands.entity(spawned).insert((edl, pose, LightingServiceOwner));
             }
         }
         spawned
-    } else if matches!(class_name,
-        eustress_common::classes::ClassName::PointLight
-        | eustress_common::classes::ClassName::SpotLight
-        | eustress_common::classes::ClassName::SurfaceLight,
-    ) {
-        // Light folder — make imported / template lights actually emit.
+    } else if folder_arm == FolderLoad::Light {
+        // Light folder — build the authoring component; its Bevy light is
+        // `light_classes`' to build (display-referred brightness, face-aimed
+        // emitter), as for every other spawn path.
         //
-        // The `_instance.toml` carries a `[Light]` section (from the class
-        // template, possibly hand-edited) plus, for Roblox imports,
-        // `[properties.extras]` `light_*` keys written by
-        // `roblox-import::property_map`. We build the Eustress light
-        // component from the template/section defaults, then let the
-        // importer's `light_*` extras override (the extras are the *actual*
-        // imported values; the template only seeds sane defaults).
-        //
-        // Brightness is already in lumens on disk — `property_map` applied
-        // the ×800 Roblox→lumens scale before writing `light_brightness`,
-        // and the `[Light]` template section is authored in lumens too.
+        // The `_instance.toml` carries a `[light]` section (from the class
+        // template, the importer, or the Properties panel). Imports made
+        // before that section existed carry `[properties.extras]` `light_*`
+        // keys instead, their brightness in the importer's old ×800 lumens;
+        // `LightSection::from_document` reads both, and the class-schema heal
+        // folds the old keys into `[light]` the next time the file is healed.
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
             take_instance_value(&parsed, source, space_path, &instance_toml);
+        let empty_doc = toml::Value::Table(toml::value::Table::new());
+        let doc = toml_value.as_ref().unwrap_or(&empty_doc);
+        let section = eustress_common::plugins::light_classes::LightSection::from_document(doc);
 
-        // `[light]` / `[Light]` section (case-insensitive).
-        let light_section = toml_value
-            .as_ref()
-            .and_then(|v| v.get("light").or_else(|| v.get("Light")));
-        // `[properties.extras]` — importer's `light_*` overrides.
-        let extras = toml_value
-            .as_ref()
-            .and_then(|v| v.get("properties"))
-            .and_then(|p| p.get("extras"));
-
-        // Field readers: prefer the extras `light_*` value (real import
-        // data), then the `[Light]` section, else `None` (component default
-        // stands). Section keys are PascalCase in class templates and
-        // lowercase in Eustress-authored lights (`enabled` below reads both),
-        // and numbers may be written as integers. Reading only PascalCase
-        // floats dropped a hand-written `shadows = false`, so every such
-        // lamp cast six-face cube shadows at the default 60 m range.
-        let sec_get =
-            |key: &str| light_section.and_then(|l| l.get(key).or_else(|| l.get(key.to_ascii_lowercase().as_str())));
-        let as_f32 = |v: &toml::Value| -> Option<f32> {
-            v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).map(|f| f as f32)
-        };
-        let read_f32 = |sec_key: &str, extra_key: &str| -> Option<f32> {
-            extras
-                .and_then(|e| e.get(extra_key))
-                .and_then(as_f32)
-                .or_else(|| sec_get(sec_key).and_then(as_f32))
-        };
-        let read_bool = |sec_key: &str, extra_key: &str| -> Option<bool> {
-            extras
-                .and_then(|e| e.get(extra_key))
-                .and_then(|v| v.as_bool())
-                .or_else(|| sec_get(sec_key).and_then(|v| v.as_bool()))
-        };
-        // Roblox `Light.Enabled`: the importer's `light_enabled` first (the
-        // real imported value), then the section's `Enabled` / `enabled`
-        // (templates and Eustress-authored lights write it lowercase). Missing
-        // everywhere = the class default, on. It used to be read nowhere, so
-        // a light switched off in the source place shone, and cast shadows.
-        let read_enabled = || -> Option<bool> {
-            extras
-                .and_then(|e| e.get("light_enabled"))
-                .and_then(|v| v.as_bool())
-                .or_else(|| {
-                    light_section
-                        .and_then(|l| l.get("Enabled").or_else(|| l.get("enabled")))
-                        .and_then(|v| v.as_bool())
-                })
-        };
-        // Color: extras `light_color` = [r,g,b] floats (0..1); section
-        // `Color` / `color` = the same, or 0..255 channels.
-        let read_color = || -> Option<Color> {
-            let arr = extras
-                .and_then(|e| e.get("light_color"))
-                .and_then(|v| v.as_array())
-                .or_else(|| sec_get("Color").and_then(|v| v.as_array()))?;
-            let r = as_f32(arr.first()?)?;
-            let g = as_f32(arr.get(1)?)?;
-            let b = as_f32(arr.get(2)?)?;
-            let scale = if r > 1.0 || g > 1.0 || b > 1.0 { 1.0 / 255.0 } else { 1.0 };
-            Some(Color::srgb(r * scale, g * scale, b * scale))
-        };
-
-        // Transform position from `[transform]` (lights are point sources;
-        // rotation only matters for SpotLight, handled by the spawner's
-        // default-forward emission — Roblox spotlights orient via the part
-        // they parent, which our ChildOf link preserves).
-        let position = toml_value
-            .as_ref()
-            .and_then(|v| v.get("transform"))
-            .and_then(|t| t.get("position"))
-            .and_then(|p| p.as_array())
-            .and_then(|arr| {
-                Some(Vec3::new(
-                    arr.first()?.as_float()? as f32,
-                    arr.get(1)?.as_float()? as f32,
-                    arr.get(2)?.as_float()? as f32,
-                ))
-            })
-            .unwrap_or(Vec3::ZERO);
-        let transform = Transform::from_translation(position);
+        // The full authored pose: a SpotLight's aim is its rotation. Relative
+        // to the parent folder (the part a Roblox light lives in), which the
+        // ChildOf link below applies; the part's face is `light_classes`'.
+        let transform = eustress_common::plugins::light_classes::light_transform_from_document(doc);
 
         // Carry the UUID: the binary-ECS boot-load skips a stored core whose
         // entity is already live, and it recognises one by this identity.
@@ -3061,43 +3174,31 @@ pub fn spawn_directory_entry(
 
         let spawned = match class_name {
             eustress_common::classes::ClassName::PointLight => {
-                let mut light = eustress_common::classes::EustressPointLight::default();
-                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
-                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
-                if let Some(rad) = read_f32("Radius", "light_radius") { light.radius = rad; }
-                if let Some(c) = read_color() { light.color = c; }
-                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
-                if let Some(e) = read_enabled() { light.enabled = e; }
-                crate::spawn::spawn_point_light(commands, instance, light, transform)
+                crate::spawn::spawn_point_light(commands, instance, section.point(), transform)
             }
             eustress_common::classes::ClassName::SpotLight => {
-                let mut light = eustress_common::classes::EustressSpotLight::default();
-                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
-                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
-                if let Some(a) = read_f32("Angle", "light_angle") { light.angle = a; }
-                if let Some(c) = read_color() { light.color = c; }
-                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
-                if let Some(e) = read_enabled() { light.enabled = e; }
-                crate::spawn::spawn_spot_light(commands, instance, light, transform)
+                crate::spawn::spawn_spot_light(commands, instance, section.spot(), transform)
             }
             _ => {
-                // SurfaceLight
-                let mut light = eustress_common::classes::SurfaceLight::default();
-                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
-                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
-                if let Some(c) = read_color() { light.color = c; }
-                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
-                if let Some(e) = read_enabled() { light.enabled = e; }
-                // Pass the AUTHORED transform so the surface lights from where it
-                // was placed (not the origin); light_sync keeps its PointLight
-                // intensity/color synced from `brightness`.
-                crate::spawn::spawn_surface_light(commands, instance, light, transform)
+                // SurfaceLight: the authored transform (not the origin); the
+                // emitter sits on the parent part's face.
+                crate::spawn::spawn_surface_light(commands, instance, section.surface(), transform)
             }
         };
 
         // Make the light Properties-panel + Explorer manageable, matching
         // the sibling arms: `InstanceFile` (canonical on-disk marker the
-        // panel keys its rich-class editor off) + `LoadedFromFile`.
+        // panel keys its rich-class editor off) + `LoadedFromFile`. The
+        // file's unit goes with it: the pose writer converts back to it, and
+        // an import's `unit = "ft"` read as metres drifted a moved light
+        // 3.28x on every save.
+        let measure_unit = doc
+            .get("metadata")
+            .and_then(|m| m.get("unit"))
+            .and_then(|u| u.as_str())
+            .and_then(eustress_common::units::Unit::from_symbol)
+            .map(eustress_common::units::MeasureUnit)
+            .unwrap_or_default();
         commands.entity(spawned).insert((
             super::instance_loader::InstanceFile {
                 toml_path: instance_toml,
@@ -3109,39 +3210,26 @@ pub fn spawn_directory_entry(
                 file_type: FileType::Directory,
                 service: dir_meta.service.clone(),
             },
+            measure_unit,
         ));
         spawned
     } else {
-        // Regular Folder / Model — 3D entity
-        let display_name = {
-            let mut chars = dir_meta.name.chars();
-            match chars.next() {
-                None => dir_meta.name.clone(),
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        };
-        commands.spawn((
-            eustress_common::classes::Instance {
-                name: display_name.clone(),
-                class_name,
-                archivable: true,
-                id: 0,
-                ai: false,
-                // Carry the UUID so a constraint loaded here can be resolved
-                // by identity, and so attachments loaded here are findable
-                // as constraint joint endpoints.
-                uuid: instance_uuid.clone(),
-            },
-            LoadedFromFile {
-                path: dir_meta.path.clone(),
-                file_type: FileType::Directory,
-                service: dir_meta.service.clone(),
-            },
-            Name::new(display_name),
-            Transform::default(),
-            Visibility::default(),
-        )).id()
+        // Every class with no loader of its own: a Folder, a Model, a Tool, a
+        // Luau script folder, an Attachment and the rest.
+        tags_and_attributes_filled = true;
+        let doc = parsed.as_ref().and_then(|p| p.value.as_ref());
+        spawn_general_entity(commands, dir_meta, doc, class_name, instance_uuid.clone())
     };
+
+    // Every entity made from an `_instance.toml` carries that file's tags and
+    // attributes, by the rules a Player's reader shares. `spawn_instance` and
+    // `spawn_general_entity` fill their own; every other branch gets them
+    // here, so the first tag or attribute edit keeps the file's others.
+    if !tags_and_attributes_filled {
+        if let Some(doc) = parsed.as_ref().and_then(|p| p.value.as_ref()) {
+            commands.entity(folder_entity).insert(record_tags_and_attributes(doc));
+        }
+    }
 
     // PERF: non-GUI directories inside StarterGui used to be swapped from
     // Transform+Visibility to a hidden `Node` so they wouldn't be "stray
@@ -3194,7 +3282,7 @@ pub fn spawn_directory_entry(
     // via MindSpace and absolutely must reload across sessions. Without
     // this descent, MindSpace-created billboards survived only one
     // session — the TOML on disk was correct but the loader never saw it.
-    let part_subfolders_only = matches!(class_name, eustress_common::classes::ClassName::Part);
+    let part_subfolders_only = eustress_common::datamodel::record::loads_as_part(class_name);
 
     // Spawn all children parented to this folder, frame-budgeted.
     for (idx, child) in dir_meta.children.iter().enumerate() {
@@ -3676,49 +3764,7 @@ pub struct DeferredServiceLoader {
     pub generation: u64,
 }
 
-/// Gate that suppresses `write_instance_changes_system` while the
-/// loader is materialising entities from disk. Without it, downstream
-/// systems that fire on first-load (mesh-handle resolve →
-/// `update_base_part_size_from_mesh`, class-default backfill, material
-/// registry resolve) mark `BasePart` as `Changed`, which the writer
-/// then persists straight back to disk — at 50k entities that costs
-/// ~53 s of background TOML writes for zero useful work.
-///
-/// Lifecycle:
-/// - `load_space_files_system` (Startup) sets `active = true`.
-/// - `apply_space_rescan` (Update) sets `active = true` on every rescan.
-/// - `open_space` (in `space_ops`) sets `active = true` on Space switch.
-/// - `tick_load_in_progress` (Update, runs after `load_deferred_services`)
-///   increments `frames_since_quiescent` each frame the deferred queue is
-///   empty and `priority_done`. Once the count reaches
-///   `QUIESCENT_THRESHOLD`, `active` flips to false and live writes
-///   resume.
-#[derive(Resource, Debug, Default)]
-pub struct LoadInProgress {
-    pub active: bool,
-    pub frames_since_quiescent: u32,
-    /// When the deferred queue was last seen empty with priority done.
-    pub quiescent_since: Option<std::time::Instant>,
-}
-
-impl LoadInProgress {
-    /// The deferred queue must stay empty for BOTH of these before the load
-    /// is declared settled: enough frames to absorb the async mesh-handle
-    /// resolution + BasePart-size sync that runs after the last spawn, and
-    /// enough wall time that the frame count means the same at any frame
-    /// rate. The old 60-frame rule was sized for 16 ms frames; at the 300 ms
-    /// frames of a large load it was an 18 s wait with write-back gated.
-    pub const QUIESCENT_FRAMES: u32 = 3;
-    pub const QUIESCENT_TIME: std::time::Duration = std::time::Duration::from_secs(1);
-
-    /// Mark loading as active. Called by the load entry-points so the
-    /// quiescent counter restarts whenever a fresh load begins.
-    pub fn begin(&mut self) {
-        self.active = true;
-        self.frames_since_quiescent = 0;
-        self.quiescent_since = None;
-    }
-}
+pub use eustress_common::space_load::LoadInProgress;
 
 /// Update system: advances the quiescent counter when the deferred
 /// queue is empty + priority_done, and flips `active` off once the
@@ -3764,6 +3810,7 @@ pub fn tick_load_in_progress(
             toml_spawn_cost::log_summary_and_reset();
             dir_markers::clear();
             clear_read_cache();
+            super::active_db::forget_core_ids();
             info!(
                 "🟢 Load settled — TOML write-back enabled after {} quiescent frames",
                 load.frames_since_quiescent
@@ -3920,6 +3967,29 @@ pub fn load_space_files_system(
     // Gate TOML write-back until the load settles (see LoadInProgress
     // docstring for the failure mode this prevents).
     load_in_progress.begin();
+
+    // A Space written under the legacy pose rule moves to ParentPose before
+    // its rule is read (`rule_migration`). One read from its database moved
+    // in the open worker, before anything read the tree.
+    if !source.is_fjall() {
+        super::rule_migration::migrate_logged(space_path, None);
+    }
+
+    // The Space's pose rule, from its space.toml (`[space] transform_rule`):
+    // under `ParentPose` a child's `[transform]` is relative to its parent's
+    // pose and parts hang their placed children from a pose anchor; a Space
+    // without the key keeps the legacy composition.
+    let rule = eustress_common::datamodel::record::TransformRule::of_space(
+        std::fs::read_to_string(space_path.join("space.toml"))
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+            .as_ref(),
+    );
+    set_transform_rule(rule);
+    commands.insert_resource(super::pose_anchor::ParentPoseRule(matches!(
+        rule,
+        eustress_common::datamodel::record::TransformRule::ParentPose
+    )));
 
     // Ensure the Space has all required service folders and lighting TOMLs.
     // This covers the initial-startup path where SpaceRoot is inserted
@@ -4421,6 +4491,10 @@ pub struct SpaceFileLoaderPlugin;
 
 impl Plugin for SpaceFileLoaderPlugin {
     fn build(&self, app: &mut App) {
+        // Pose anchors: under the `ParentPose` rule a part's placed children
+        // hang from an unscaled child, so the part's size never scales them.
+        app.add_plugins(super::pose_anchor::PoseAnchorPlugin);
+
         // Note: The "space://" asset source is registered in main.rs BEFORE DefaultPlugins
         // This must happen before AssetPlugin is initialized, so we can't do it here.
 
@@ -4523,7 +4597,8 @@ impl Plugin for SpaceFileLoaderPlugin {
                 super::file_watcher::process_file_changes,
                 super::instance_loader::ensure_tags_and_attributes_components,
                 super::instance_loader::ensure_measure_unit,
-                hide_storage_service_content,
+                hide_storage_service_content
+                    .run_if(eustress_common::utils::maybe_added::<LoadedFromFile>),
                 // Live: edited Workspace `render_distance` service
                 // property → part VisibilityRange. Changed-gated.
                 super::instance_loader::sync_workspace_render_distance,
@@ -4547,6 +4622,19 @@ impl Plugin for SpaceFileLoaderPlugin {
                 // removes the component.
                 eustress_common::class_schema::dispatch_pending_extras,
             ));
+
+        // A save writes only the parts changed since the last one
+        // (`space_ops::save_space`); this keeps the list.
+        app.init_resource::<super::space_ops::SaveDirty>()
+            // Edits reach disk as they settle (`persist_edits`), outside Play:
+            // nothing Play moves is an edit, and Stop restores it.
+            .add_systems(
+                Last,
+                (super::space_ops::track_save_dirty, super::space_ops::persist_edits)
+                    .chain()
+                    .run_if(super::world_db_plugin::outside_play_session),
+            )
+            .add_systems(Last, super::space_ops::persist_edits_on_exit.after(super::space_ops::persist_edits));
 
         // Legacy TOML write-back — only when the `toml` feature is on.
         // Default build (ECS+DB authoritative, 2026-05-15 pivot) does
@@ -4597,4 +4685,138 @@ fn build_imported_media_quad() -> Mesh {
     );
     mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
     mesh
+}
+
+
+/// A flat instance file of a class the engine does not know (build 7's
+/// data-safety item A).
+#[cfg(test)]
+mod flat_unknown_class_tests {
+    use super::*;
+
+    fn classify(text: &str) -> Option<String> {
+        let content: Result<String, String> = Ok(text.to_string());
+        let parsed = super::super::instance_loader::load_instance_definition_from_str(text);
+        flat_unknown_class(content.as_deref(), &parsed)
+    }
+
+    #[test]
+    fn an_unknown_class_is_found_and_a_known_or_missing_one_is_not() {
+        assert_eq!(classify("[metadata]\nclass_name = \"ReactorCore\"\n").as_deref(), Some("ReactorCore"));
+        assert_eq!(classify("[metadata]\nclass_name = \"Part\"\n"), None);
+        assert_eq!(classify("[metadata]\nclass_name = \"Folder\"\n"), None);
+        assert_eq!(classify("[metadata]\nname = \"NoClass\"\n"), None, "no class_name reads as a Part");
+        let unreadable: Result<String, String> = Ok("[metadata]\nclass_name = \"ReactorCore\"\n".to_string());
+        assert_eq!(
+            flat_unknown_class(unreadable.as_deref(), &Err("typed read failed".to_string())).as_deref(),
+            Some("ReactorCore"),
+            "judged by its raw class_name"
+        );
+    }
+
+    /// What such a file becomes: a Folder holding no InstanceFile and no
+    /// BasePart, so no writer reaches its file.
+    #[test]
+    fn it_loads_as_a_folder_no_writer_holds() {
+        use bevy::ecs::world::CommandQueue;
+        let doc: toml::Value = "[metadata]\nclass_name = \"ReactorCore\"\nname = \"Core\"\n\n[attributes]\nHeat = 5\n"
+            .parse()
+            .unwrap();
+        let meta = FileMetadata {
+            path: PathBuf::from("Workspace/Core.instance.toml"),
+            file_type: FileType::Toml,
+            service: "Workspace".to_string(),
+            name: "Core".to_string(),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            children: Vec::new(),
+        };
+        let mut world = World::new();
+        let mut queue = CommandQueue::default();
+        let entity = {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_general_entity(&mut commands, &meta, Some(&doc), eustress_common::classes::ClassName::Folder, String::new())
+        };
+        queue.apply(&mut world);
+        let instance = world.get::<eustress_common::classes::Instance>(entity).expect("an Instance");
+        assert_eq!(instance.class_name, eustress_common::classes::ClassName::Folder);
+        assert_eq!(instance.name, "Core");
+        assert!(world.get::<super::super::instance_loader::InstanceFile>(entity).is_none());
+        assert!(world.get::<eustress_common::classes::BasePart>(entity).is_none());
+
+        // With no [metadata] name: the file name up to its first dot.
+        let path = PathBuf::from("Workspace/gizmo.v2.instance.toml");
+        assert_eq!(flat_stem(&path), "gizmo");
+        let unnamed: toml::Value = "[metadata]\nclass_name = \"ReactorCore\"\n".parse().unwrap();
+        let named = FileMetadata { name: flat_stem(&path), path, ..meta.clone() };
+        let entity = {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_general_entity(&mut commands, &named, Some(&unnamed), eustress_common::classes::ClassName::Folder, String::new())
+        };
+        queue.apply(&mut world);
+        assert_eq!(world.get::<eustress_common::classes::Instance>(entity).unwrap().name, "Gizmo");
+    }
+}
+
+
+/// The dispatch table Space open and the file watcher share, and the flat
+/// extension rule.
+#[cfg(test)]
+mod folder_load_tests {
+    use super::*;
+    use eustress_common::classes::ClassName as C;
+
+    #[test]
+    fn each_arm_claims_its_classes() {
+        for (class, arm) in [
+            (C::ScreenGui, FolderLoad::ScreenGui),
+            (C::Frame, FolderLoad::GuiContainer),
+            (C::ScrollingFrame, FolderLoad::GuiContainer),
+            (C::BillboardGui, FolderLoad::BillboardGui),
+            (C::Image, FolderLoad::Media),
+            (C::Video, FolderLoad::Media),
+            (C::SoulScript, FolderLoad::SoulScript),
+            (C::Part, FolderLoad::Part),
+            (C::ParticleSimulation, FolderLoad::ParticleOrTerrain),
+            (C::TerrainWaterBody, FolderLoad::ParticleOrTerrain),
+            (C::TextLabel, FolderLoad::GuiLeaf),
+            (C::ViewportFrame, FolderLoad::GuiLeaf),
+            (C::Sky, FolderLoad::Environment),
+            (C::DirectionalLight, FolderLoad::Environment),
+            (C::PointLight, FolderLoad::Light),
+            (C::SurfaceLight, FolderLoad::Light),
+        ] {
+            assert_eq!(folder_load(class), arm, "{class:?}");
+        }
+    }
+
+    /// What the file watcher hands to `spawn_general_entity`, as Space open does.
+    #[test]
+    fn classes_with_no_loader_of_their_own_are_general() {
+        for class in [C::Folder, C::Model, C::Tool, C::Attachment, C::LuauScript] {
+            assert_eq!(folder_load(class), FolderLoad::General, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn a_class_less_model_file_is_a_model() {
+        let text = "[metadata]\nname = \"Rig\"\n";
+        let mut def = super::super::instance_loader::load_instance_definition_from_str(text).expect("parses");
+        assert_eq!(def.metadata.class_name, "Part", "the typed read's default");
+        apply_flat_extension_class(Path::new("Workspace/Rig.model.toml"), text, &mut def);
+        assert_eq!(def.metadata.class_name, "Model");
+    }
+
+    #[test]
+    fn a_named_class_and_the_other_extensions_are_left_alone() {
+        for (file, text, class) in [
+            ("Workspace/Rig.model.toml", "[metadata]\nclass_name = \"Part\"\n", "Part"),
+            ("Workspace/Box.part.toml", "[metadata]\nname = \"Box\"\n", "Part"),
+            ("Workspace/Box.instance.toml", "[metadata]\nname = \"Box\"\n", "Part"),
+        ] {
+            let mut def = super::super::instance_loader::load_instance_definition_from_str(text).expect("parses");
+            apply_flat_extension_class(Path::new(file), text, &mut def);
+            assert_eq!(def.metadata.class_name, class, "{file}");
+        }
+    }
 }

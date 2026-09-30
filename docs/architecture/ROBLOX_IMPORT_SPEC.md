@@ -339,6 +339,23 @@ service must land in the matching Eustress service folder**, not in a
 single dumping ground. This is what makes the import look right in
 Explorer.
 
+The service's own properties are written too (`service_props.rs`): the
+engine's template for that service (`common/assets/service_templates/`) with
+the place's values laid over `[properties]`. Covered: Lighting (clock time,
+ambient and outdoor ambient, colour shift, brightness, shadow softness and
+`GlobalShadows`, exposure, latitude, technology, fog colour and distances),
+Workspace (gravity, fallen-parts height, wind, streaming, signal behaviour),
+Players (auto-loading, respawn time, player counts), StarterPlayer (character
+and camera defaults, written to `StarterPlayer/_service.toml` while its script
+folders land at the top level), SoundService (reverb, distance, Doppler and
+rolloff scales) and MaterialService (`Use2022Materials`, and each
+`<Material>Name` override as a `material_overrides` table). Values keep the
+template's units, which are Roblox's, except Lighting's fog distances: the
+engine hands those to Bevy's distance fog in meters. Fog is enabled only when
+the place pulled `FogEnd` in from Roblox's 100,000-stud "off" distance. Any
+other authored property is reported as unmapped and kept under
+`[properties.extras]`.
+
 ### Service router table
 
 The disk layout under `<space_root>/` is confirmed by inspection of
@@ -733,8 +750,11 @@ For each `UnionOperation` / `NegateOperation` / `IntersectOperation`
 instance with a mesh in any of the three places above:
 
 1. Decode the CSGMDL blob (`csg::decode_mesh_data`). Versions 2, 4 and 5
-   are read; 4 is obfuscated, 5 is plaintext with a checksum fallback. A
-   vertex is 84 bytes: position, normal, RGBA, normal id, UV, tangent.
+   are read; 4 is obfuscated, 5 is plaintext with a checksum fallback, and 2
+   comes both ways: plaintext inline, XOR-obfuscated in the
+   `PartOperationAsset` Roblox serves for a cloud union. Its vertex-stride
+   magic (84) tells which. A vertex is 84 bytes: position, normal, RGBA,
+   normal id, UV, tangent.
 2. Write a `.glb` (glTF binary, one primitive, indexed triangles; POSITION,
    NORMAL, TEXCOORD_0, COLOR_0) **unit-normalised**: centred on its bounding
    box and scaled to span `[-0.5, 0.5]`. The engine multiplies every part
@@ -981,7 +1001,7 @@ materialised as instances. They become routing decisions per §5.
 | `Vector3`                   | `PropertyValue::Vector3 (Vec3)`     | Direct; lengths follow §10.2.                                                    |
 | `Vector3int16`              | `PropertyValue::Vector3`            | Cast i16 → f32.                                                                  |
 | `CFrame`                    | `PropertyValue::Transform`          | §10.1. A joint's `C0`/`C1` keep both parts: `[constraint].c0` (meters) and `c0_rotation` (quaternion). |
-| `OptionalCFrame`            | `PropertyValue::Transform` or absent| `None` → property omitted (template default used).                               |
+| `OptionalCFrame`            | `PropertyValue::Transform` or absent| `None` → property omitted (template default used). A Model's `WorldPivotData` is `[model].world_pivot` (position in meters). |
 | `Color3`                    | `PropertyValue::Color3`             | f32 [0..1].                                                                      |
 | `Color3uint8`               | `PropertyValue::Color3`             | u8/255 → f32.                                                                    |
 | `BrickColor`                | `PropertyValue::Color3`             | Static 128-entry palette lookup (rbx_dom_weak ships this).                       |
@@ -997,14 +1017,14 @@ materialised as instances. They become routing decisions per §5.
 | `NumberSequence`            | `PropertyValue::NumberSequence`     | Round-tripped as `[[keypoints]]` array. Promoted from extras for Wave 2.         |
 | `ColorSequence`             | `PropertyValue::ColorSequence`      | Same.                                                                            |
 | `NumberRange`               | `PropertyValue::NumberRange`        | `[f32; 2]` array. Promoted.                                                      |
-| `PhysicalProperties`        | inline fields in `[properties.physics]` | `density`, `friction`, `elasticity`, `friction_weight`, `elasticity_weight`. |
+| `PhysicalProperties`        | inline fields in `[properties.physics]` | Every part: a Custom value as authored, a Default one as its material's Roblox default (Creator Hub table; Wood 0.35, Plastic 0.7). `density` in kg/m³ (Roblox's g/cm³ × 1000) with `density_unit = "kg/m3"`; friction as `friction_static`/`friction_kinetic`, elasticity as `restitution`, plus both weights. An untagged density is kg/m³, except beside Roblox's weights (an older import), where it is g/cm³. |
 | `Ray`                       | `[f32; 6]` array in `extras`        | Rare; sufficient for round-trip.                                                 |
 | `Region3` / `Region3int16`  | `[f32; 6]` array in `extras`        | Rare; sufficient for round-trip.                                                 |
 | `Faces` / `Axes`            | bitset string in `extras`           | Same.                                                                            |
 | `MaterialColors`            | `[material_colors]` table on Terrain instance | §6.4.                                                                  |
 | `Font`                      | `PropertyValue::Font` (family + weight + style) | Promoted from extras when the GUI dispatcher consumes it.            |
-| `Tags`                      | `[metadata.tags]` array              | Direct; Eustress already has a tags subsystem.                                   |
-| `Attributes`                | `[properties.attributes]` table      | Direct; the recent (2026-05-25) Properties-panel work supports this.              |
+| `Tags`                      | root `tags` array                    | Where `InstanceDefinition` and the tree reader read them.                        |
+| `Attributes`                | root `[attributes]` table            | In the reader's forms: scalars, `Vector2` and `Vector3` bare; `Color3`, `BrickColor` and `CFrame` as the tagged tables a folded value object uses; `UDim`, `UDim2`, `NumberRange`, `Rect`, the sequences, `Font` and `EnumItem` tagged by type name. A string arrives as bytes and is written as text; bytes that are not UTF-8 are `{ Bytes = "<hex>" }`. An `EnumItem` carries its type, item name and value. |
 | `Ref` (Instance reference)  | `Uuid` (via §12) in `extras`         | Resolved by referent → uuid lookup. Unresolved refs logged.                      |
 | `UniqueId`                  | preserved in `[metadata.roblox_unique_id]` | For cross-import correlation.                                              |
 | `SecurityCapabilities`      | dropped with `SecurityCapDiscarded` warning | Roblox-internal access control with no Eustress cognate.                    |
@@ -1041,14 +1061,60 @@ implementation; `CFrameValue` attributes go through it too. The tests use an
 asymmetric rotation (+90° about Y must give `qy = +0.7071`), since identity
 cannot tell a matrix from its transpose.
 
+**Poses in a tree.** Roblox gives a part's `CFrame` in world space and an
+`Attachment`'s or a `Bone`'s relative to its part. An imported Space's
+`space.toml` sets `[space] transform_rule = "parent_pose"`, and under that
+rule each file's `[transform]` is its pose relative to its parent's pose
+(position and rotation), never its parent's size. The importer writes each
+node relative to the pose the loader composes for its parent, a cylinder's
+axis turn included (`roblox-import/src/pose.rs`), so a part nested in a part
+lands where Roblox had it. A node whose parents hold no pose, such as a part
+in a `Folder` or a `Model`, is written in world space. The key goes into
+`space.toml` before the first instance file, so a Space holding
+parent-relative files carries the key even when its import stops partway.
+
+Studio draws the rule with a hidden anchor: a sized part's placed children
+(parts, `Attachment`s, `Bone`s, `Model`s, `Folder`s, `Tool`s, `Accessory`s)
+hang from one unscaled child entity whose scale is the inverse of the part's
+size (`engine/src/space/pose_anchor.rs`). Resizing a part moves nothing that
+hangs from it, and a child reparented onto a part keeps its place in the
+world. The anchor is not an instance: the Explorer, the Play tree and Select
+Children list its children as the part's.
+
+With `EUSTRESS_MIGRATE_POSE=1` set, a Space written before the rule moves to
+it the first time it opens (`engine/src/space/rule_migration.rs`, planned by
+`eustress_common::pose_migration`). Each file whose placement would change is
+copied to `.eustress/transform_migration/<time>/` and rewritten, in its own
+unit, so that it stays where it was drawn, a nested part at the size it was
+drawn; a part the importer wrote that nothing has saved since goes where
+Roblox had it. `migration.log` beside the copies lists every file. The key
+goes into `space.toml` last, so a move that stops partway is put back from its
+copies and done again on the next open. Without the switch such a Space
+opens under the legacy rule and nothing on disk changes.
+
+**Cylinders and balls.** Roblox runs a `Shape = Cylinder` part along its X
+axis and the engine's cylinder stands on Y, so the importer gives such a part
+a quarter turn about Z (`CYLINDER_AXIS_CORRECTION`) and turns its size with
+it: the file's size is Roblox's `(Size.Y, Size.X, Size.Z)`, and the part fills
+exactly Roblox's box, the file's X along Roblox's -Y, its Y along Roblox's X
+and its Z along Roblox's Z. Roblox draws and collides a cylinder at the
+smaller of `Size.Y` and `Size.Z` across, and a ball at the smallest of its
+three sides, while the engine's fill their size, so those round sides take
+that smallest value, with a report note when one changes by more than 1%. A
+part with a DataMesh child keeps its whole box, which the child's look is
+scaled by. A part a SpecialMesh FileMesh draws keeps Roblox's pose and size,
+since it no longer draws as a cylinder. A script that reads a cylinder part's
+`Size` or `CFrame` sees the turned values.
+
 ### 10.2 Units
 
-Roblox studs are feet. Every imported instance carries
-`metadata.unit = "ft"`, and the loader converts the transform block from it:
-`position`, `scale` (the part's `Size`) and `mesh_offset`. Nothing else in
-the file is converted at load; class sections are read as engine-native
-meters. The importer therefore writes every other world-space length in
-meters (studs × 0.3048):
+A Roblox stud is the Eustress stud, 0.28 m (`units::Unit::Stud`). Every
+imported instance carries `metadata.unit = "stud"` and keeps Roblox's
+numbers, and the loader converts the transform block from it: `position`,
+`scale` (the part's `Size`) and `mesh_offset`. A part 4 studs long is 4 studs
+in Studio's stud display and 1.12 m. Nothing else in the file is converted at
+load; class sections are read as engine-native meters. The importer
+therefore writes every other world-space length in meters (studs × 0.28):
 
 - `Texture` `StudsPerTileU/V`, `OffsetStudsU/V`
 - light `Range`
@@ -1059,11 +1125,17 @@ meters (studs × 0.3048):
 - constraint `Thickness`, lengths and limits, prismatic `Velocity`, and a
   joint's `C0`/`C1` offset
 - `Camera` near and far planes
+- a `Model`'s `WorldPivot` position (`[model].world_pivot`)
 
-Gameplay values the engine keeps in Roblox's own units are written as
-authored: `Humanoid` `WalkSpeed`, `JumpPower`, `JumpHeight`, `HipHeight`
-(the engine's Humanoid documents them in studs), and `VehicleSeat`
-`MaxSpeed`, `Torque`, `TurnSpeed`.
+Gameplay values are written as authored: `Humanoid` `WalkSpeed`,
+`JumpPower`, `JumpHeight`, `HipHeight` (the engine's Humanoid documents them in
+studs), and `VehicleSeat` `MaxSpeed`, `Torque`, `TurnSpeed`. `MaxSpeed` is a
+speed in the file's length unit, studs per second, turned into metres per
+second when the seat loads (`record_class_props`). `Torque` and `TurnSpeed`
+are read as written.
+
+A Space imported before the importer used the Eustress stud says
+`unit = "ft"` and keeps loading in feet, at the size it was imported.
 
 ### 10.3 Value objects
 
@@ -1071,9 +1143,71 @@ A `*Value` child folds into its parent as a typed attribute named after it
 (`value_objects.rs`, Contract A), and scripts reading `.Value` on it are
 rewritten to `GetAttribute`. `IntConstrainedValue` and
 `DoubleConstrainedValue` fold to their number (read from the lowercase
-`value` property they serialise); their `MinValue`/`MaxValue` range is not
-kept. `RayValue` cannot be an attribute and is dropped with an
-approximation.
+`value` property they serialise), and their range folds beside it as
+`<Name>_MinValue` and `<Name>_MaxValue`, typed as the value, with Roblox's
+defaults for a bound the file leaves out (0 to 10, or 0 to 1). Scripts'
+`.MinValue` and `.MaxValue` on them read and write those attributes, and
+`.ConstrainedValue` reads the value: a car's nitro capacity,
+`Handling.Nitro.NitroAmount.MaxValue`, is
+`Handling.Nitro:GetAttribute("NitroAmount_MaxValue")`. `RayValue` cannot
+be an attribute and is dropped with an approximation.
+
+A value object with children of its own (a car's `Handling.Torque` holding
+`Location` and `Suspension` values) still folds its value into its parent,
+and also stays in the tree as a `Folder`, so its children fold into its own
+attributes: `Handling.Torque.Value` reads `Handling:GetAttribute("Torque")`
+and `Handling.Torque.Location.Value` reads
+`Handling.Torque:GetAttribute("Location")`.
+
+`GuiMain`, the legacy name of `ScreenGui`, imports as a `ScreenGui`.
+
+### 10.4 Animations
+
+An `Animation`'s `AnimationId` is kept as written, in `[properties]
+animation_id`: a Roblox id finds its clip at run time through the Space's
+id map, `assets/roblox_ids.toml`.
+
+A `KeyframeSequence` is one clip record, the one
+`docs/design/ANIMATION_SYSTEM.md` describes (`animation.rs`). Its `Loop`,
+`Priority` and `AuthoredHipHeight` go to `[keyframe_sequence]`, and each
+`Keyframe` is one `[[keyframes]]` entry: its `Pose` tree flattened into
+`[keyframes.poses.<joint>]` tables that name the pose above them, its
+`NumberPose`s under `[keyframes.numbers]` and its `KeyframeMarker`s under
+`[[keyframes.markers]]`. A pose holds only what differs from Roblox's
+defaults: `cframe` (the `CFrame` in Roblox's order, position and then the
+rotation matrix by rows, in studs under the record's `unit = "stud"`),
+`easing`, `direction`, and `weight`, where 0 marks a pose that only holds
+the hierarchy together. A pose drives the joint between its parent pose's
+part and its own, so a top-level pose drives nothing: it is left out, and its
+children still name it as their parent. Enums are written by name. A
+keyframe holds one pose
+per joint name; where two poses share a name, the one that keys the joint
+is kept and the report says so. The sequences Roblox's Animation Editor
+saves under `ServerStorage/RBX_ANIMSAVES` import the same way.
+
+After the walk, every Roblox id the place plays is fetched: each
+`AnimationId`, and each id in a string literal of a script that works with
+animations (Roblox's `Animate` script keeps its default clips that way). A
+fetched model holding a `KeyframeSequence` becomes
+`assets/animations/rbx-<id>.anim.toml`, named for its id in
+`assets/roblox_ids.toml`. A literal that turns out to be an image or a sound
+is left alone. The report counts `animation_sequences` and
+`animation_clips`, and lists every id with no clip under
+`animation_ids_missing`, with where the place names it and why. Most Roblox
+animations need a credential to fetch (§11).
+
+### 10.5 The Sun and the Moon
+
+The Sky under Lighting sizes the Space's Sun and Moon, which own their
+discs: `SunAngularSize` goes to `Lighting/Sun.instance.toml`
+`[star] angular_size` and `MoonAngularSize` to `Lighting/Moon.instance.toml`
+`[moon] angular_size`, each made from the engine's lighting template when the
+Space has none. Each is scaled from Roblox's default to the engine's default
+drawn size: sun = 8 × SunAngularSize / 21, moon = 2 × MoonAngularSize / 11,
+within 0.05 to 20 degrees. (The light itself rises and sets as the physical
+disc; only the drawn disc takes this size.) A place at Roblox's defaults lands exactly on the
+engine's; one that doubled its sun gets a sun twice the engine's. A place
+with no Sky leaves the Sun and the Moon at their defaults.
 
 ---
 
@@ -1123,17 +1257,29 @@ mirror, a local file cache, or a CDN proxy. When set, the resolver:
    | `VideoFrame` | `Video`, `VideoContent` | `[video].source` |
    | `Sky` | `SkyboxFt/Bk/Lf/Rt/Up/Dn` | `[sky].skybox_front/back/left/right/top/bottom` |
 
-   A fetched file with no engine slot (a MeshPart's texture, a Trail's
-   texture) is kept as `space://…` in `[properties.extras]`; an asset that
-   was not fetched keeps its Roblox URI there, and its section key stays
-   empty. Media never goes to `[asset]`: the engine's `[asset]` table
-   requires `mesh`, and one holding only a path fails to deserialize.
+   A fetched file with no engine slot (a Trail's texture) is kept as
+   `space://…` in `[properties.extras]`; an asset that was not fetched keeps
+   its Roblox URI there, and its section key stays empty. Media never goes
+   to `[asset]`: the engine's `[asset]` table requires `mesh`, and one
+   holding only a path fails to deserialize.
+4. A textured mesh (a MeshPart's `TextureID`/`TextureContent`, or a folded
+   SpecialMesh's `TextureId`) is baked into a copy of the mesh with the
+   texture as its glTF material, `assets/meshes/rbx-<mesh>-tex-<texture>-<look>.glb`,
+   and the part gets `[properties] respect_gltf_materials = true` so the
+   engine draws that material (`texture_bake.rs`). A MeshPart shows its
+   `Color` through transparent texels, so the texture is composited over the
+   part colour; a SpecialMesh's texture is multiplied by `VertexColor` and
+   keeps its alpha. Roughness and metalness come from the part's material
+   preset. `<look>` hashes those inputs, so parts that look alike share one
+   file. Only PNG and JPEG embed in glTF; any other texture keeps the plain
+   mesh and an asset warning.
 
 Current files spell most media properties as `Content`: `MeshContent`,
 `TextureContent`, `ImageContent`, `AudioContent` and so on, alongside the
 legacy `ContentId` names. Both are recognised.
 
-**Roblox `.mesh` versions.** 1.00 and 1.01 (ASCII; 1.01 halves positions),
+**Roblox `.mesh` versions.** 1.00 and 1.01 (ASCII; 1.00 stores positions at
+twice their size and is halved, 1.01 is not; legacy normals are normalised),
 2.00, 3.00 and 3.01 (binary with a LOD table), 4.00, 4.01 and 5.00 (a fixed
 header with LOD, bone, subset and FACS counts, 40-byte vertices, and an
 8-byte skinning envelope per vertex when skinned), and 6.00 and 7.00 (typed
@@ -1162,6 +1308,25 @@ and use; if not, emit warning.
 perspective — the integrator decides whether to follow it.
 
 ---
+
+### 11.1 Re-importing a Space that is being rebuilt
+
+`rbx_import --clean` moves the old Space to `Spaces/.trash` and imports the
+place fresh. Two things a rebuild keeps of its own come back from the
+trashed copy (`carry_over.rs`): every folder named `Rebuild` directly under
+a top-level folder (`Workspace/Rebuild`, `ServerScriptService/Rebuild`, ...),
+copied whole, and `.eustress/rebuild_patches.toml`, the rebuild's edits to
+imported instances, replayed onto the fresh files:
+
+```toml
+[[patch]]
+path = "Workspace/Cars/Sedan"   # the instance folder, Space-relative
+key = "attributes.MaxSpeed"     # a dotted key into its _instance.toml
+value = 120                     # or `remove = true`
+```
+
+A patch whose instance no longer exists goes to
+`.eustress/rebuild_patches_orphaned.toml`, and the importer prints the counts.
 
 ## 12. Idempotency + deterministic UUIDs
 

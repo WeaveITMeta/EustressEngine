@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { Theme } from "theme.slint";
-import { LineEdit } from "std-widgets.slint";
+import { KitField } from "dialog_kit.slint";
 
 // One assigned tag on the selected entity.
 //
@@ -46,8 +46,8 @@ component AssignedChip inherits Rectangle {
     callback remove();
     callback rename-requested();        // double-click → open the rename modal
 
-    height: 22px;
-    border-radius: 11px;
+    height: 20px;
+    border-radius: 10px;
     background: body-ta.has-hover ? chip-color.with-alpha(0.34) : chip-color.with-alpha(0.20);
     border-width: 1px;
     border-color: chip-color.with-alpha(0.65);
@@ -63,15 +63,18 @@ component AssignedChip inherits Rectangle {
 
     HorizontalLayout {
         padding-left: 8px;
-        padding-right: 4px;
+        padding-right: 2px;
         spacing: 5px;
 
         // Color dot
-        Rectangle {
-            width: 8px; height: 8px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: root.chip-color;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.chip-color;
+            }
         }
 
         // Name — static; clicks fall through to body-ta.
@@ -91,20 +94,19 @@ component AssignedChip inherits Rectangle {
             vertical-alignment: center;
         }
 
-        // × remove button — always-visible glyph (U+00D7, renders in the UI
-        // font, unlike U+2715). Gray by default, bright red on hover.
+        // Remove button: grey, red on hover (removing is destructive).
         Rectangle {
-            width: 18px; height: 18px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: x-ta.has-hover ? #5d1515 : #00000000;  // theme-exempt: dark-red delete-hover fill + transparent rest, no matching token
-            Text {
-                text: "×";
-                color: x-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                font-size: 15px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            width: 16px;
+            border-radius: 8px;
+            background: x-ta.has-hover ? Theme.error-surface-hover : transparent;
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 8px;
+                height: 8px;
+                source: @image-url("../../assets/icons/ui/close.svg");
+                image-fit: contain;
+                colorize: x-ta.has-hover ? Theme.text-error : Theme.text-secondary;
             }
             x-ta := TouchArea {
                 mouse-cursor: pointer;
@@ -123,7 +125,7 @@ component AvailableChip inherits Rectangle {
 
     height: 20px;
     border-radius: 10px;
-    background: add-ta.has-hover ? chip-color.with-alpha(0.20) : #00000000;  // theme-exempt: transparent (no fill)
+    background: add-ta.has-hover ? chip-color.with-alpha(0.20) : transparent;
     border-width: 1px;
     border-color: add-ta.has-hover ? chip-color.with-alpha(0.6) : Theme.border-color;
 
@@ -143,11 +145,14 @@ component AvailableChip inherits Rectangle {
             font-weight: 700;
             vertical-alignment: center;
         }
-        Rectangle {
-            width: 6px; height: 6px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 3px;
-            background: root.chip-color;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.chip-color;
+            }
         }
         Text {
             text: root.name;
@@ -183,14 +188,16 @@ export component TagsEditor inherits Rectangle {
     callback rename-requested(string);     // double-click chip → open rename modal
     callback input-focus-changed(bool);
 
-    background: #00000000;  // theme-exempt: transparent (no fill)
+    background: transparent;
 
+    // Inset to the Properties panel's label column (its row padding plus
+    // the help gutter), so the tags start where property labels do.
     VerticalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        padding-top: 6px;
-        padding-bottom: 8px;
-        spacing: 6px;
+        padding-left: 22px;
+        padding-right: 8px;
+        padding-top: 5px;
+        padding-bottom: 7px;
+        spacing: 5px;
 
         // ── Assigned chips — up to FOUR rows of HorizontalLayouts ──
         // Rust pre-splits the chips into rows so HorizontalLayout handles
@@ -241,24 +248,22 @@ export component TagsEditor inherits Rectangle {
         }
 
         if root.tags.length == 0: Text {
-            text: "No tags yet — add one below, or click an available tag.";
+            text: "No tags yet. Type one below, or click an available tag.";
             color: Theme.text-disabled;
             font-size: 10px;
             wrap: word-wrap;
         }
 
-        // ── Add input — matches the panel's standard input row styling ──
+        // ── Add input, the panel's standard 20px field ──
         Rectangle {
-            height: 24px;
-            background: Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: add-input.has-focus ? Theme.accent-blue : Theme.input-border;
-            add-input := LineEdit {
+            height: 20px;
+            min-width: 40px;
+            add-input := KitField {
                 x: 0px;
                 y: 0px;
                 width: 100%;
                 height: 100%;
+                font-size: 11px;
                 placeholder-text: "Add a tag and press Enter";
                 text <=> root.input-text;
                 changed has-focus => { root.input-focus-changed(self.has-focus); }

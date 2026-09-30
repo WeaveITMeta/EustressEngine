@@ -1,10 +1,19 @@
 // ============================================================================
-// Eustress Engine - Publish Dialog (Two-Panel Layout)
-// Universe/Space publishing with hierarchy tree
+// Eustress Studio: Publish dialog (two panels)
+// Universe and Space publishing, with the file tree that will upload.
+//
+// Shape (DRAFTING_UX.md Law 1): DialogScrim > DialogCard, the file tree on
+// the left, SettingsGroup cards on the right, a DialogFooter with Publish
+// rightmost. Esc closes.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, TextEdit, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
+import { LineEdit, TextEdit, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import {
+    DialogScrim, DialogCard, DialogFooter, KitDivider, KitButton, KitSwitch,
+    SettingsGroup, SettingRow, KitNotice, KitSectionLabel,
+} from "dialog_kit.slint";
+import { ListingStatusRow, ListingReason } from "listing_status.slint";
 
 // Tree node for hierarchy panel
 export struct PublishTreeNode {
@@ -16,29 +25,6 @@ export struct PublishTreeNode {
     icon-hint: string, // "universe", "space", "service", "file", "excluded"
 }
 
-component PubSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
-
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-    }
-
-    Text {
-        x: 10px;
-        text: root.title;
-        color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
-    }
-}
-
 // Tree item row in the hierarchy panel
 component TreeRow inherits Rectangle {
     in property <string> name: "";
@@ -48,58 +34,72 @@ component TreeRow inherits Rectangle {
     in property <int> file-count: 0;
     in property <string> icon-hint: "file";
 
-    height: 22px;
-    background: root.is-primary ? rgba(74, 124, 201, 0.06) : transparent;
+    property <bool> excluded: root.icon-hint == "excluded";
+
+    height: 24px;
+    border-radius: Theme.radius-sm;
+    background: root.is-primary ? Theme.accent-cyan.with-alpha(0.08) : transparent;
 
     HorizontalLayout {
-        padding-left: 8px + root.depth * 12px;
-        spacing: 4px;
+        padding-left: 8px + root.depth * 14px;
+        padding-right: 6px;
+        spacing: 6px;
 
-        // Folder/file icon
-        Text {
-            width: 14px;
-            text: root.is-folder ? (root.icon-hint == "universe" ? "◆" : root.icon-hint == "space" ? "◇" : "▸") : "·";
-            color: root.icon-hint == "excluded" ? Theme.text-disabled :
-                   root.is-primary ? Theme.accent-blue : Theme.text-disabled;
-            font-size: root.is-folder ? 9px : 7px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 13px;
+                height: 13px;
+                image-fit: contain;
+                source: !root.is-folder ? @image-url("../../assets/icons/ui/document.svg")
+                    : root.icon-hint == "universe" ? @image-url("../../assets/icons/ui/globe.svg")
+                    : root.icon-hint == "space" ? @image-url("../../assets/icons/ui/layers.svg")
+                    : root.icon-hint == "service" ? @image-url("../../assets/icons/ui/gears.svg")
+                    : @image-url("../../assets/icons/ui/folder-open.svg");
+                colorize: root.excluded ? Theme.text-disabled
+                    : root.is-primary ? Theme.accent-cyan
+                    : Theme.text-secondary;
+            }
         }
 
-        // Name
         Text {
+            horizontal-stretch: 1;
             text: root.name;
-            color: root.icon-hint == "excluded" ? Theme.text-disabled :
-                   root.is-primary ? Theme.text-primary : Theme.text-secondary;
-            font-size: 10.5px;
+            color: root.excluded ? Theme.text-disabled
+                : root.is-primary ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
             font-weight: root.is-primary ? 600 : 400;
             vertical-alignment: center;
             overflow: elide;
-            horizontal-stretch: 1;
         }
 
-        // File count badge
+        // File count
         if root.is-folder && root.file-count > 0: Text {
             text: root.file-count;
             color: Theme.text-disabled;
-            font-size: 9px;
+            font-size: Theme.font-xs;
             vertical-alignment: center;
         }
 
         // Primary badge
-        if root.is-primary: Rectangle {
-            width: 42px;
-            height: 14px;
-            border-radius: 3px;
-            background: rgba(74, 124, 201, 0.15);
+        if root.is-primary: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: badge-text.preferred-width + 12px;
+                height: 16px;
+                border-radius: Theme.radius-sm;
+                background: Theme.accent-cyan.with-alpha(0.14);
+                border-width: 1px;
+                border-color: Theme.accent-cyan.with-alpha(0.4);
 
-            Text {
-                text: "primary";
-                color: Theme.accent-blue;
-                font-size: 8px;
-                font-weight: 600;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                badge-text := Text {
+                    text: "Primary";
+                    color: Theme.accent-cyan;
+                    font-size: 9px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }
@@ -125,376 +125,238 @@ export component PublishDialog inherits Rectangle {
     callback on-publish(string, string, string, bool, bool, bool, bool);
     callback on-close();
 
+    // Where the Universe stands in the gallery's review (listing_status.slint).
+    in property <string> listing-status: "";
+    in property <string> listing-headline: "";
+    in property <string> listing-rating: "";
+    in property <string> listing-updated: "";
+    in property <[ListingReason]> listing-reasons: [];
+    in property <string> listing-suggested-edit: "";
+    in property <bool> listing-can-appeal: false;
+    in property <bool> listing-appeal-busy: false;
+    in property <string> listing-appeal-error: "";
+    callback on-listing-appeal(string);
+    callback on-listing-open-review();
+
+    property <bool> can-publish: !root.is-publishing && root.experience-name != "";
+
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
+    background: transparent;
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 780px;
-        height: min(parent.height - 60px, 560px);
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 32px;
-        drop-shadow-color: Theme.shadow-color;
+        keys := FocusScope {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(780px, parent.width - 48px);
+            height: min(parent.height - 60px, 560px);
 
-        TouchArea { scroll-event(event) => { return accept; } }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // ── Title bar ──
-            Rectangle {
-                height: 42px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: root.publish-mode == "space" ?
-                        (root.is-update ? "Update Space" : "Publish Space") :
-                        (root.is-update ? "Update Universe" : "Publish Universe");
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.on-close();
+                    return accept;
                 }
-
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? Theme.accent-red.with-alpha(0.2) : transparent;
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
-                    }
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.accent-red : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
+                reject
             }
 
-            // ── Two-panel content ──
-            HorizontalLayout {
-                vertical-stretch: 1;
-                spacing: 0px;
+            DialogCard {
+                width: 100%;
+                height: 100%;
+                icon: @image-url("../../assets/icons/ui/rocket.svg");
+                title: root.publish-mode == "space"
+                    ? (root.is-update ? "Update Space" : "Publish Space")
+                    : (root.is-update ? "Update Universe" : "Publish Universe");
+                subtitle: "Target: " + root.publish-target + "  ·  " + root.sync-status;
+                close => { root.on-close(); }
 
-                // ── LEFT: Hierarchy Tree ──
-                Rectangle {
-                    width: 260px;
-                    background: Theme.background-primary;
-                    border-radius: 0px;
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    padding: 0;
+                    spacing: 0;
 
-                    VerticalLayout {
-                        padding: 0px;
-                        spacing: 0px;
+                    // ── Left: the files that upload ──
+                    Rectangle {
+                        width: 260px;
+                        background: Theme.background-primary.with-alpha(0.35);
 
-                        // Tree header
-                        Rectangle {
-                            height: 30px;
-                            background: rgba(255, 255, 255, 0.02);
-                            border-width: 0px;
-
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 6px;
-                                alignment: start;
-
-                                Text {
-                                    text: "FILES";
-                                    color: Theme.text-disabled;
-                                    font-size: 9px;
-                                    font-weight: 700;
-                                    letter-spacing: 0.8px;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
-                        }
-
-                        // Tree scroll area
-                        ScrollView {
-                            vertical-stretch: 1;
-
-                            VerticalLayout {
-                                padding: 4px;
-                                spacing: 0px;
-
-                                for node[idx] in root.tree-nodes: TreeRow {
-                                    name: node.name;
-                                    depth: node.depth;
-                                    is-folder: node.is-folder;
-                                    is-primary: node.is-primary;
-                                    file-count: node.file-count;
-                                    icon-hint: node.icon-hint;
-                                }
-                            }
-                        }
-
-                        // Size estimate footer
-                        Rectangle {
-                            height: 28px;
-                            background: rgba(255, 255, 255, 0.02);
-
-                            Rectangle { y: 0px; width: 100%; height: 1px; background: Theme.border-color; }
+                        VerticalLayout {
+                            padding: 0;
+                            spacing: 0;
 
                             HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-
-                                Text {
-                                    text: root.pak-size-estimate != "" ? "Estimated upload: " + root.pak-size-estimate : "Only changed chunks upload; hidden folders stay local";
-                                    color: Theme.text-disabled;
-                                    font-size: 9px;
-                                    vertical-alignment: center;
-                                }
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                padding-top: 12px;
+                                padding-bottom: 8px;
+                                KitSectionLabel { text: "FILES"; }
                             }
-                        }
-                    }
-                }
 
-                // Divider
-                Rectangle { width: 1px; background: Theme.border-color; }
+                            ScrollView {
+                                vertical-stretch: 1;
 
-                // ── RIGHT: Publish Form ──
-                ScrollView {
-                    horizontal-stretch: 1;
+                                VerticalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    padding-bottom: 6px;
+                                    spacing: 1px;
+                                    alignment: start;
 
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-                        width: 480px;
-
-                        PubSection { title: "DETAILS"; }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                // Centre the 22px child in the 28px row. A HorizontalLayout does
-                                // NOT centre a fixed-height child: lower_layout pins it at
-                                // y = padding.top and leaves its height alone, so with no vertical
-                                // padding it sat flush against the top with 6px of dead space below.
-                                padding-top: 3px;
-                                padding-bottom: 3px;
-                                spacing: 8px;
-                                Text {
-                                    width: 110px;
-                                    text: "Simulation Name";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 22px;
-                                    background: Theme.input-background;
-                                    border-radius: 3px;
-                                    border-width: 1px;
-                                    border-color: Theme.input-border;
-                                    LineEdit {
-                                        width: 100%; height: 100%;
-                                        text <=> root.experience-name;
+                                    for node[idx] in root.tree-nodes: TreeRow {
+                                        name: node.name;
+                                        depth: node.depth;
+                                        is-folder: node.is-folder;
+                                        is-primary: node.is-primary;
+                                        file-count: node.file-count;
+                                        icon-hint: node.icon-hint;
                                     }
                                 }
                             }
-                        }
 
-                        Rectangle { height: 4px; }
-
-                        Text {
-                            text: "Description";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                        }
-                        Rectangle {
-                            height: 80px;
-                            background: Theme.input-background;
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: Theme.input-border;
-                            TextEdit {
-                                width: parent.width; height: parent.height;
-                                text <=> root.description;
-                            }
-                        }
-
-                        Rectangle { height: 4px; }
-
-                        Rectangle {
-                            height: 28px;
+                            KitDivider { }
                             HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 110px;
-                                    text: "Genre";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                ComboBox {
-                                    horizontal-stretch: 1;
-                                    model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
-                                    current-value <=> root.genre;
-                                }
-                            }
-                        }
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
 
-                        Rectangle { height: 12px; }
-                        PubSection { title: "VISIBILITY"; }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                CheckBox { text: "Public"; checked <=> root.is-public; }
                                 Text {
-                                    text: root.is-public ? "Anyone can play" : "Only you can access";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
+                                    text: root.pak-size-estimate != ""
+                                        ? "Estimated upload: " + root.pak-size-estimate
+                                        : "Only changed chunks upload; hidden folders stay local";
+                                    color: Theme.text-disabled;
+                                    font-size: Theme.font-xs;
+                                    wrap: word-wrap;
                                     vertical-alignment: center;
                                 }
                             }
                         }
+                    }
 
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                CheckBox { text: "Share Source"; checked <=> root.open_source; }
-                                Text {
-                                    text: "Allow source access and reuse";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
+                    Rectangle { width: 1px; background: Theme.ribbon-separator; }
+
+                    // ── Right: the form ──
+                    ScrollView {
+                        horizontal-stretch: 1;
+
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 16px;
+                            alignment: start;
+
+                            SettingsGroup {
+                                title: "LISTING";
+                                HorizontalLayout {
+                                    padding: 12px;
+                                    ListingStatusRow {
+                                        status: root.listing-status;
+                                        headline: root.listing-headline;
+                                        rating: root.listing-rating;
+                                        updated: root.listing-updated;
+                                        reasons: root.listing-reasons;
+                                        suggested-edit: root.listing-suggested-edit;
+                                        can-appeal: root.listing-can-appeal;
+                                        appeal-busy: root.listing-appeal-busy;
+                                        appeal-error: root.listing-appeal-error;
+                                        appeal(text) => { root.on-listing-appeal(text); }
+                                        open-review => { root.on-listing-open-review(); }
+                                    }
                                 }
                             }
-                        }
 
-                        Rectangle { height: 8px; }
+                            SettingsGroup {
+                                title: "DETAILS";
 
-                        // Target info
-                        Text {
-                            text: "Target: " + root.publish-target + " • Sync: " + root.sync-status;
-                            color: Theme.text-disabled;
-                            font-size: 9.5px;
-                        }
+                                SettingRow {
+                                    label: "Name";
+                                    description: "Shown on the gallery page.";
+                                    divider: false;
+                                    LineEdit {
+                                        width: 260px;
+                                        placeholder-text: "Simulation name";
+                                        text <=> root.experience-name;
+                                    }
+                                }
 
-                        // Error
-                        if root.error-message != "": Rectangle {
-                            height: 28px;
-                            background: Theme.accent-red.with-alpha(0.12);
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: Theme.accent-red.with-alpha(0.28);
-                            Text {
-                                x: 10px;
+                                KitDivider { }
+                                VerticalLayout {
+                                    padding-top: 9px;
+                                    padding-bottom: 10px;
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: "Description";
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                    }
+                                    TextEdit {
+                                        height: 80px;
+                                        text <=> root.description;
+                                    }
+                                }
+
+                                SettingRow {
+                                    label: "Genre";
+                                    ComboBox {
+                                        width: 200px;
+                                        model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
+                                        current-value <=> root.genre;
+                                    }
+                                }
+                            }
+
+                            SettingsGroup {
+                                title: "VISIBILITY";
+
+                                SettingRow {
+                                    label: "Public";
+                                    description: root.is-public ? "Anyone can play" : "Only you can access";
+                                    divider: false;
+                                    KitSwitch { checked <=> root.is-public; }
+                                }
+                                SettingRow {
+                                    label: "Share source";
+                                    description: "Allow source access and reuse";
+                                    KitSwitch { checked <=> root.open_source; }
+                                }
+                            }
+
+                            if root.error-message != "": KitNotice {
+                                kind: "error";
                                 text: root.error-message;
-                                color: Theme.text-error;
-                                font-size: 10px;
-                                vertical-alignment: center;
                             }
                         }
                     }
                 }
-            }
 
-            // ── Footer ──
-            Rectangle { height: 1px; background: Theme.border-color; }
-            Rectangle {
-                height: 48px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    spacing: 10px;
-                    alignment: center;
-                    // Centre the 30px buttons in the 48px footer. A HorizontalLayout
-                    // does NOT centre a fixed-height child: lower_layout pins it at
-                    // y = padding.top and leaves its height alone, so with no vertical
-                    // padding the row sat flush against the top with 18px of dead space
-                    // beneath it. That is the uneven gap in the Publish dialog.
-                    padding-top: 9px;
-                    padding-bottom: 9px;
-
-                    Rectangle {
-                        width: 80px; height: 30px;
-                        border-radius: 5px;
-                        background: cancel-btn.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-                        cancel-btn := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-                        Text {
-                            text: "Cancel";
-                            color: Theme.text-primary;
-                            font-size: 11.5px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                // ── Footer ──
+                DialogFooter {
+                    KitButton {
+                        text: "Cancel";
+                        clicked => { root.on-close(); }
                     }
-
-                    Rectangle {
-                        width: 120px; height: 30px;
-                        border-radius: 5px;
-                        background: root.is-publishing || root.experience-name == "" ?
-                            Theme.button-background :
-                            (pub-btn.has-hover ? Theme.accent-green.with-alpha(0.28) : Theme.accent-green.with-alpha(0.15));
-                        border-width: 1px;
-                        border-color: root.is-publishing || root.experience-name == "" ?
-                            Theme.border-color :
-                            (pub-btn.has-hover ? Theme.accent-green : Theme.accent-green.with-alpha(0.5));
-
-                        pub-btn := TouchArea {
-                            mouse-cursor: root.is-publishing || root.experience-name == "" ? default : pointer;
-                            enabled: !root.is-publishing && root.experience-name != "";
-                            clicked => {
-                                root.on-publish(
-                                    root.experience-name,
-                                    root.description,
-                                    root.genre,
-                                    root.is-public,
-                                    root.open_source,
-                                    false,
-                                    root.publish-mode == "space",
-                                );
-                            }
-                        }
-
-                        Text {
-                            text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
-                            color: root.is-publishing || root.experience-name == "" ?
-                                Theme.text-secondary :
-                                (pub-btn.has-hover ? Theme.accent-green-bright : Theme.accent-green);
-                            font-size: 11.5px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                    KitButton {
+                        text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
+                        kind: "primary";
+                        has-icon: true;
+                        icon: @image-url("../../assets/icons/ui/rocket.svg");
+                        enabled: root.can-publish;
+                        clicked => {
+                            root.on-publish(
+                                root.experience-name,
+                                root.description,
+                                root.genre,
+                                root.is-public,
+                                root.open_source,
+                                // The stored value from the Space's publish manifest
+                                // (Rust loads it into studio-editable): republishing
+                                // keeps it instead of resetting it to false.
+                                root.studio-editable,
+                                root.publish-mode == "space",
+                            );
                         }
                     }
                 }

@@ -212,6 +212,7 @@ Available now; none needs the LLC.
 | **W04** · Live-site check after each deploy | Launch checklist (BLOCKERS) | Confirm the download page shows the version, SHA-256, and system requirements; the privacy note is live; no page says "open source"; `security.txt` is served. Report what is there | Read only |
 | **W05** · Posts and outreach | Launch checklist; `G0.08`; `G0.09` | Post the announcement thread on X as @Simbuilder, the channel posts for `G0.09`, and the outreach messages for `G0.08`, each only with text and recipients you approved | Nothing goes out unapproved |
 | **W06** · Crash reporting | Launch checklist (SHOULD decision) | Only if you choose it: create the Sentry project and put the DSN in the vault | Your decision first |
+| **W07** · Tunnel for live play | `docs/launch/GOAL_LIVE_GALLERY_PLAY.md`, milestone M2 | Follow steps 2 to 6 of `infrastructure/cloudflare/tunnel/README.md` in the Cloudflare dashboard: the Zero Trust organization, the enrollment rule for invited players, the `eustress-play` tunnel with a private route to the workstation, and the split-tunnel change. Put the tunnel's connector token in the vault. Then install the Cloudflare One client on your own machine, enroll it, and run `udp-probe.ps1` against the workstation | Account changes only after your go. The founder installs `cloudflared` on the workstation with the token from the vault |
 
 Claude drafts every piece of text W05 posts, and fixes whatever W03 and W04 find.
 

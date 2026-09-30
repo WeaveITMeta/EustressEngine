@@ -9,12 +9,16 @@
 // 5. Server List Component
 // =============================================================================
 
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use wasm_bindgen::prelude::*;
 use web_sys::window;
-use crate::components::{CentralNav, Footer};
+use crate::components::{use_player_release, CentralNav, Footer, PassStore};
+use crate::api::live::{get_live_host, LiveHost};
+use crate::api::releases::{DesktopPlatform, ReleaseState};
+use crate::api::{ApiClient, ApiError};
 use crate::state::{AppState, AuthState};
 use crate::api::friends::{
     FriendPrivateServer, FriendInServer, get_friend_private_servers, get_friends_in_experience,
@@ -246,6 +250,9 @@ struct ApiSimulation {
     max_players: u32,
     #[serde(default)]
     version: u32,
+    /// The author shared the source, so the page offers Edit in Studio.
+    #[serde(default)]
+    is_open_source: bool,
 }
 
 impl From<ApiSimulation> for Experience {
@@ -854,14 +861,15 @@ impl Platform {
         }
     }
     
-    fn download_url(&self) -> &'static str {
+    /// The Player build that fits this visitor, if there is one. The Player
+    /// ships for Windows, macOS and Linux; everyone else is sent to the
+    /// Player page, which says what is available.
+    fn desktop(&self) -> Option<DesktopPlatform> {
         match self {
-            Platform::Windows => "https://downloads.eustress.dev/player/windows/EustressPlayer-Setup.exe",
-            Platform::MacOS => "https://downloads.eustress.dev/player/mac/EustressPlayer.dmg",
-            Platform::Linux => "https://downloads.eustress.dev/player/linux/EustressPlayer.AppImage",
-            Platform::Android => "https://downloads.eustress.dev/player/android/EustressPlayer.apk",
-            Platform::IOS => "https://eustress.dev/download",
-            Platform::Unknown => "https://downloads.eustress.dev/",
+            Platform::Windows => Some(DesktopPlatform::Windows),
+            Platform::MacOS => Some(DesktopPlatform::MacOS),
+            Platform::Linux => Some(DesktopPlatform::Linux),
+            Platform::Android | Platform::IOS | Platform::Unknown => None,
         }
     }
     
@@ -888,8 +896,10 @@ fn PlayModal(
 ) -> impl IntoView {
     let platform = Platform::detect();
     let platform_name = platform.display_name().to_string();
-    let download_url = platform.download_url().to_string();
+    let desktop = platform.desktop();
     let icon_path = platform.icon_path().to_string();
+    // The Player's release manifest, looked up when the dialog opens.
+    let release = use_player_release();
     let exp_id = experience_id.clone();
     
     let on_close_bg = on_close.clone();
@@ -898,7 +908,7 @@ fn PlayModal(
     // Try to launch via protocol
     let try_launch = move |_| {
         if let Some(win) = window() {
-            let launch_url = format!("eustress://play/{}", exp_id);
+            let launch_url = format!("eustress-player://play/{}", exp_id);
             let _ = win.location().set_href(&launch_url);
         }
     };
@@ -919,11 +929,34 @@ fn PlayModal(
                         "To play this experience, you need to install Eustress Player."
                     </p>
                     
+                    // A direct download when the release has a build for this
+                    // visitor's platform; the Player page otherwise, including
+                    // before the first release.
                     <div class="play-actions">
-                        <a href=download_url.clone() class="btn-download-player">
-                            <img src=icon_path alt="Platform" />
-                            "Download for " {platform_name}
-                        </a>
+                        {move || {
+                            let direct = match (desktop, release.get()) {
+                                (Some(p), ReleaseState::Released(manifest)) => {
+                                    manifest.player_download(p).map(|download| download.url)
+                                }
+                                _ => None,
+                            };
+                            match direct {
+                                Some(url) => view! {
+                                    <a href=url class="btn-download-player">
+                                        <img src=icon_path.clone() alt="" />
+                                        "Download for " {platform_name.clone()}
+                                    </a>
+                                }
+                                .into_any(),
+                                None => view! {
+                                    <a href="/downloads/player" class="btn-download-player">
+                                        <img src="/assets/icons/download.svg" alt="" />
+                                        "Get Eustress Player"
+                                    </a>
+                                }
+                                .into_any(),
+                            }
+                        }}
                     </div>
                     
                     <div class="play-alternative">
@@ -936,33 +969,227 @@ fn PlayModal(
                     <div class="play-info">
                         <h3>"Other Platforms"</h3>
                         <div class="platform-links">
-                            <a href="https://downloads.eustress.dev/player/windows/EustressPlayer-Setup.exe" class="platform-link">
-                                <img src="/assets/icons/windows.svg" alt="Windows" />
-                                "Windows"
-                            </a>
-                            <a href="https://downloads.eustress.dev/player/mac/EustressPlayer.dmg" class="platform-link">
-                                <img src="/assets/icons/macos.svg" alt="macOS" />
-                                "macOS"
-                            </a>
-                            <a href="https://downloads.eustress.dev/player/linux/EustressPlayer.AppImage" class="platform-link">
-                                <img src="/assets/icons/linux.svg" alt="Linux" />
-                                "Linux"
-                            </a>
-                            <a href="https://downloads.eustress.dev/player/redox/EustressPlayer" class="platform-link">
-                                <img src="/assets/icons/redox.svg" alt="Redox" />
-                                "Redox"
-                            </a>
-                            <a href="https://downloads.eustress.dev/player/android/EustressPlayer.apk" class="platform-link">
-                                <img src="/assets/icons/android.svg" alt="Android" />
-                                "Android"
-                            </a>
-                            <a href="https://eustress.dev/download" class="platform-link">
-                                <img src="/assets/icons/ios.svg" alt="iOS" />
-                                "iOS"
+                            <a href="/downloads/player" class="platform-link">
+                                <img src="/assets/icons/download.svg" alt="" />
+                                "Every platform and the system requirements"
                             </a>
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Live Host
+// -----------------------------------------------------------------------------
+
+/// How often a visible listing asks whether it is hosted. A host beats every
+/// 30 s, so the badge follows a change within about one beat, and the link
+/// Play hands over is at most this old.
+const LIVE_POLL_MS: f64 = 30_000.0;
+
+/// An answer older than this is dropped rather than shown. The Worker reads a
+/// host as Offline 90 s after its last beat, so past this the host may be gone
+/// and its link dead.
+const LIVE_ANSWER_MAX_AGE_MS: f64 = 90_000.0;
+
+/// How often the poll wakes. A tab in the background asks nothing, and asks
+/// again within this long of being shown.
+const LIVE_TICK_MS: u32 = 5_000;
+
+/// What the listing knows about its host.
+#[derive(Clone, Debug, PartialEq)]
+enum LiveState {
+    /// No answer yet, or none recent: no badge, and Play offers the download.
+    Unknown,
+    Offline,
+    Live { link: String, players: u32, max_players: u32 },
+}
+
+impl From<LiveHost> for LiveState {
+    fn from(host: LiveHost) -> Self {
+        if !host.live {
+            return LiveState::Offline;
+        }
+        match host.join_link() {
+            Some(link) => LiveState::Live {
+                link: link.to_string(),
+                players: host.players,
+                max_players: host.max_players,
+            },
+            // Live, but with a link this page will not open: say nothing.
+            None => LiveState::Unknown,
+        }
+    }
+}
+
+/// True while the tab is in the background.
+fn page_hidden() -> bool {
+    window().and_then(|w| w.document()).is_some_and(|d| d.hidden())
+}
+
+/// Keep `live` current for simulation `id` until the page is left or shows
+/// another simulation. Each start takes a new `run` number from `runs`, so an
+/// older loop sees the change and stops; leaving the page disposes `runs`,
+/// which stops the last one.
+async fn watch_live_host(
+    api_url: String,
+    id: String,
+    live: RwSignal<LiveState>,
+    runs: StoredValue<u64>,
+    run: u64,
+) {
+    let client = ApiClient::new(&api_url);
+    let current = move || runs.try_get_value() == Some(run);
+    let mut last_asked: Option<f64> = None;
+    let mut last_answer: Option<f64> = None;
+    let mut was_hidden = false;
+    loop {
+        let hidden = page_hidden();
+        let due = !hidden
+            && (was_hidden
+                || last_asked.map_or(true, |at| js_sys::Date::now() - at >= LIVE_POLL_MS));
+        if due {
+            last_asked = Some(js_sys::Date::now());
+            let answer = get_live_host(&client, &id).await;
+            if !current() {
+                return;
+            }
+            match answer {
+                Ok(host) => {
+                    last_answer = Some(js_sys::Date::now());
+                    live.set(LiveState::from(host));
+                }
+                // This API has no live registry (it predates it, or runs
+                // without the binding), or the listing is gone. Asking again
+                // changes neither.
+                Err(ApiError::NotFound) | Err(ApiError::Server { status: 503, .. }) => {
+                    live.set(LiveState::Unknown);
+                    return;
+                }
+                // A dropped request or a busy Worker: keep the last answer
+                // while it is recent, and ask again next round.
+                Err(_) => {}
+            }
+        }
+        if last_answer.is_some_and(|at| js_sys::Date::now() - at > LIVE_ANSWER_MAX_AGE_MS) {
+            last_answer = None;
+            live.set(LiveState::Unknown);
+        }
+        was_hidden = hidden;
+        TimeoutFuture::new(LIVE_TICK_MS).await;
+        if !current() {
+            return;
+        }
+    }
+}
+
+fn player_line(players: u32, max_players: u32) -> String {
+    let noun = if max_players == 1 { "player" } else { "players" };
+    format!("{} of {} {}", players, max_players, noun)
+}
+
+/// Live or Offline under the title, once the registry has answered.
+#[component]
+fn LiveBadge(live: RwSignal<LiveState>) -> impl IntoView {
+    move || match live.get() {
+        LiveState::Unknown => None,
+        LiveState::Offline => Some(
+            view! {
+                <p class="listing-live">
+                    <span class="live-indicator listing-offline">"OFFLINE"</span>
+                    <span class="listing-live-note">"Not hosted right now"</span>
+                </p>
+            }
+            .into_any(),
+        ),
+        LiveState::Live { players, max_players, .. } => Some(
+            view! {
+                <p class="listing-live">
+                    <span class="live-indicator">
+                        <span class="live-dot"></span>
+                        "LIVE"
+                    </span>
+                    <span class="listing-live-note">{player_line(players, max_players)}</span>
+                </p>
+            }
+            .into_any(),
+        ),
+    }
+}
+
+/// What Play did with a live host's link.
+#[derive(Clone, Debug, PartialEq)]
+enum PlayHandoff {
+    /// The link went to the Player. The panel stays up in case nothing opened.
+    Opening,
+    /// The Mac Player cannot take a link from the browser yet.
+    MacNotYet,
+}
+
+/// Give a join link to the Player. Call it only from a click: browsers open
+/// another app's link only in answer to one.
+fn open_player(link: &str) {
+    if let Some(win) = window() {
+        let _ = win.location().set_href(link);
+    }
+}
+
+#[component]
+fn LiveHandoff(
+    handoff: PlayHandoff,
+    live: RwSignal<LiveState>,
+    on_close: impl Fn() + 'static + Clone,
+) -> impl IntoView {
+    let on_close_bg = on_close.clone();
+    let on_close_btn = on_close.clone();
+    let body = match handoff {
+        PlayHandoff::Opening => view! {
+            <div class="play-icon">
+                <img src="/assets/icons/play.svg" alt="" />
+            </div>
+            <h2>"Opening Eustress Player..."</h2>
+            <p class="play-subtitle">"If your browser asks, allow it to open Eustress Player."</p>
+            <div class="play-alternative">
+                <p>
+                    "Not opening? "
+                    <a href="/downloads/player" class="live-handoff-download">"Download the Player"</a>
+                </p>
+                // The newest link, in case the host restarted since Play.
+                <Show when=move || matches!(live.get(), LiveState::Live { .. })>
+                    <button
+                        class="btn-retry"
+                        on:click=move |_| {
+                            if let LiveState::Live { link, .. } = live.get_untracked() {
+                                open_player(&link);
+                            }
+                        }
+                    >
+                        "Try Again"
+                    </button>
+                </Show>
+            </div>
+        }
+        .into_any(),
+        PlayHandoff::MacNotYet => view! {
+            <div class="play-icon">
+                <img src="/assets/icons/macos.svg" alt="" />
+            </div>
+            <h2>"Joining from the Gallery is Windows and Linux only for now"</h2>
+            <p class="play-subtitle">"The Mac version of Eustress Player can't open a Gallery link yet."</p>
+        }
+        .into_any(),
+    };
+
+    view! {
+        <div class="modal-overlay play-modal-overlay" on:click=move |_| on_close_bg()>
+            <div class="play-modal" role="dialog" aria-modal="true" on:click=|e| e.stop_propagation()>
+                <button class="modal-close" aria-label="Close" on:click=move |_| on_close_btn()>
+                    "×"
+                </button>
+                <div class="play-modal-content">{body}</div>
             </div>
         </div>
     }
@@ -980,15 +1207,36 @@ pub fn ExperienceDetailPage() -> impl IntoView {
     let experience_id = move || params.read().get("id").unwrap_or_default();
     let show_play_modal = RwSignal::new(false);
 
+    // Whether someone hosts this simulation right now, kept current while the
+    // page is open, and what Play last did with the host's link.
+    let live = RwSignal::new(LiveState::Unknown);
+    let play_handoff = RwSignal::new(None::<PlayHandoff>);
+    {
+        let api_url = app_state.api_url.clone();
+        let runs = StoredValue::new(0u64);
+        // An Effect, so the poll runs only in the browser, and starts over if
+        // the route's id changes.
+        Effect::new(move |_| {
+            let id = experience_id();
+            let run = runs.get_value() + 1;
+            runs.set_value(run);
+            live.set(LiveState::Unknown);
+            play_handoff.set(None);
+            spawn_local(watch_live_host(api_url.clone(), id, live, runs, run));
+        });
+    }
+
     // Try fetching from API — stores result in a signal
     let api_experience = RwSignal::new(None::<Experience>);
     let api_loaded = RwSignal::new(false);
+    let open_source = RwSignal::new(false);
     {
         let api_url = app_state.api_url.clone();
         let id = experience_id();
         spawn_local(async move {
             let client = crate::api::ApiClient::new(&api_url);
             if let Ok(sim) = client.get::<ApiSimulation>(&format!("/api/simulations/{}", id)).await {
+                open_source.set(sim.is_open_source);
                 api_experience.set(Some(Experience::from(sim)));
             }
             api_loaded.set(true);
@@ -1055,10 +1303,17 @@ pub fn ExperienceDetailPage() -> impl IntoView {
                                             "by "
                                             <a href=creator_href class="creator-link">{creator_name}</a>
                                         </p>
-                                        
+                                        <LiveBadge live=live />
+
                                         <div class="detail-stats">
                                             <div class="stat-box">
-                                                <span class="stat-value">{player_count}</span>
+                                                // A live host counts its players exactly.
+                                                <span class="stat-value">
+                                                    {move || match live.get() {
+                                                        LiveState::Live { players, .. } => format_player_count(players),
+                                                        _ => player_count.clone(),
+                                                    }}
+                                                </span>
                                                 <span class="stat-label">"Playing"</span>
                                             </div>
                                             <div class="stat-box">
@@ -1135,9 +1390,20 @@ pub fn ExperienceDetailPage() -> impl IntoView {
                                     </div>
                                 </div>
                                 
-                                // Play Button
+                                // Play Button. With a live host, its link goes to the
+                                // Player from this click; otherwise the download dialog.
                                 <div class="detail-actions">
-                                    <button class="btn-play" on:click=move |_| show_play_modal.set(true)>
+                                    <button class="btn-play" on:click=move |_| match live.get_untracked() {
+                                        LiveState::Live { link, .. } => match Platform::detect() {
+                                            Platform::MacOS => play_handoff.set(Some(PlayHandoff::MacNotYet)),
+                                            Platform::Android | Platform::IOS => show_play_modal.set(true),
+                                            Platform::Windows | Platform::Linux | Platform::Unknown => {
+                                                open_player(&link);
+                                                play_handoff.set(Some(PlayHandoff::Opening));
+                                            }
+                                        },
+                                        LiveState::Offline | LiveState::Unknown => show_play_modal.set(true),
+                                    }>
                                         <img src="/assets/icons/play.svg" alt="Play" />
                                         "Play Now"
                                     </button>
@@ -1148,8 +1414,23 @@ pub fn ExperienceDetailPage() -> impl IntoView {
                                         <img src="/assets/icons/copy.svg" alt="Share" />
                                         "Share"
                                     </button>
+                                    // Only on a listing whose author shared the source:
+                                    // Studio downloads it and opens a copy.
+                                    {move || open_source.get().then(|| view! {
+                                        <a
+                                            href=format!("eustress://edit/{}", experience_id())
+                                            class="btn-share"
+                                            title="Open a copy of this simulation in Eustress Studio"
+                                        >
+                                            <img src="/assets/icons/edit.svg" alt="Edit" />
+                                            "Edit in Studio"
+                                        </a>
+                                    })}
                                 </div>
-                                
+
+                                // Passes the simulation sells: bought once, kept every session.
+                                <PassStore sim_id=experience_id() />
+
                                 // Servers Section
                                 <div class="detail-servers">
                                     // Friend Servers
@@ -1187,14 +1468,32 @@ pub fn ExperienceDetailPage() -> impl IntoView {
                                 
                                 // Play Modal
                                 <Show when=move || show_play_modal.get()>
-                                    <PlayModal 
+                                    <PlayModal
                                         experience_id=exp_id_for_modal.clone()
                                         on_close=move || show_play_modal.set(false)
                                     />
                                 </Show>
+
+                                // What Play did with a live host's link
+                                {move || play_handoff.get().map(|handoff| view! {
+                                    <LiveHandoff
+                                        handoff=handoff
+                                        live=live
+                                        on_close=move || play_handoff.set(None)
+                                    />
+                                })}
                             </div>
                         }.into_any()
                     }
+                    // Still asking the API: no heading yet, so the tab keeps the
+                    // site title until the listing's own name arrives.
+                    None if !api_loaded.get() => view! {
+                        <div class="experience-detail-container loading-state" aria-busy="true">
+                            <div class="spinner"></div>
+                            <p class="loading-message">"Loading simulation..."</p>
+                        </div>
+                    }
+                    .into_any(),
                     None => {
                         view! {
                             <div class="experience-not-found">

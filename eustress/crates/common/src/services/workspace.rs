@@ -16,14 +16,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
-// World Scale Constants (Unit Conversions Only)
+// Units
 // ============================================================================
-
-/// Legacy constant - Eustress uses meters natively (1 unit = 1 meter)
-pub const STUD_TO_METERS: f32 = 1.0;
-
-/// Legacy constant - Eustress uses meters natively
-pub const METERS_TO_STUDS: f32 = 1.0;
 
 /// The unit `Workspace.gravity` is authored/stored in.
 ///
@@ -34,6 +28,69 @@ pub const METERS_TO_STUDS: f32 = 1.0;
 /// converting through [`crate::units`]; change it here and every gravity-sync
 /// path converts correctly.
 pub const GRAVITY_AUTHORED_UNIT: crate::units::Unit = crate::units::ENGINE_NATIVE_UNIT;
+
+/// The Workspace's default gravity, m/s²: standard gravity, straight down.
+pub const DEFAULT_GRAVITY: Vec3 = Vec3::new(0.0, -crate::units::STANDARD_GRAVITY_F32, 0.0);
+
+/// The gravity to simulate with, m/s²: the Workspace's, which Avian's
+/// `Gravity` follows, or [`DEFAULT_GRAVITY`] in a host with no Workspace.
+///
+/// For code that moves things without Avian (realism particles, buoyancy),
+/// so they fall and float under the same gravity as the parts around them,
+/// including when a script or tool changes it mid-game.
+pub fn live_gravity(workspace: Option<&Workspace>) -> Vec3 {
+    workspace.map_or(DEFAULT_GRAVITY, |ws| ws.gravity)
+}
+
+/// A Workspace service file's `gravity` key, as written.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AuthoredGravity {
+    /// A vector in m/s², the key's format: `gravity = [0.0, -9.80665, 0.0]`.
+    Vector([f64; 3]),
+    /// A stud-era value: a bare number, or a vector of one of
+    /// [`LEGACY_STUD_GRAVITIES`]. Its magnitude, in studs/s².
+    Legacy(f64),
+}
+
+/// The gravities stud-era files wrote, studs/s²: Roblox's 196.2 and the
+/// studs-native build's 196.8. Files carry them as bare numbers and as
+/// vectors (`[0.0, -196.2, 0.0]`); no gravity written in m/s² is near them.
+pub const LEGACY_STUD_GRAVITIES: [f64; 2] = [196.2, 196.8];
+
+impl AuthoredGravity {
+    /// Read a vector-valued `gravity`: m/s² as written, unless its magnitude
+    /// is one of [`LEGACY_STUD_GRAVITIES`].
+    pub fn from_vector(v: [f64; 3]) -> Self {
+        let magnitude = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if LEGACY_STUD_GRAVITIES.iter().any(|g| (magnitude - g).abs() < 0.01) {
+            AuthoredGravity::Legacy(magnitude)
+        } else {
+            AuthoredGravity::Vector(v)
+        }
+    }
+}
+
+/// The gravity a Space runs at, m/s², from its Workspace service file.
+///
+/// A vector is taken as written. A stud-era value ([`AuthoredGravity::Legacy`])
+/// is read by where it came from. In a Roblox import it is Roblox's gravity in
+/// studs/s², scaled by the stud that import's lengths use
+/// (`roblox_import_stud`), so falls match the imported geometry. In any other
+/// Space nothing ever read the value, so the Space runs at standard gravity,
+/// as it always has. No key, or a value that is not finite, is standard
+/// gravity too. Studio and the Player both apply a Space's gravity through
+/// this, so the two agree.
+pub fn authored_gravity(key: Option<AuthoredGravity>, roblox_import_stud: Option<crate::units::Unit>) -> Vec3 {
+    let gravity = match key {
+        Some(AuthoredGravity::Vector([x, y, z])) => Vec3::new(x as f32, y as f32, z as f32),
+        Some(AuthoredGravity::Legacy(studs)) => match roblox_import_stud {
+            Some(stud) => Vec3::new(0.0, -((studs * stud.to_meters()) as f32), 0.0),
+            None => DEFAULT_GRAVITY,
+        },
+        None => DEFAULT_GRAVITY,
+    };
+    if gravity.is_finite() { gravity } else { DEFAULT_GRAVITY }
+}
 
 // ============================================================================
 // Workspace Resource
@@ -63,9 +120,10 @@ pub struct Workspace {
     /// Note: This is the base gravity at sea level (Y=0). Use altitude_gravity() for altitude-adjusted values.
     ///
     /// NOTE: `scene::WorkspaceSettings.gravity` is a DIFFERENT field, authored in
-    /// studs (default 196.8). Convert it through [`crate::units`] before assigning
-    /// it here: [`sync_workspace_gravity_to_avian`] converts from meters and will
-    /// pass a studs value straight through as a 20x error.
+    /// legacy studs (`units::Unit::LegacyStud`, default 196.8). Convert it through
+    /// [`crate::units`] before assigning it here: [`sync_workspace_gravity_to_avian`]
+    /// converts from meters and would pass a studs value straight through as a
+    /// 20x error.
     pub gravity: Vec3,
     
     /// Maximum allowed entity speed in m/s (anti-exploit)
@@ -118,8 +176,8 @@ pub struct Workspace {
 impl Default for Workspace {
     fn default() -> Self {
         Self {
-            // Physics: Exact SI standard gravity 9.80665 m/s² (Space Grade Ready)
-            gravity: Vec3::new(0.0, -9.80665, 0.0),
+            // Physics: exact standard gravity, 9.80665 m/s² (Space Grade Ready)
+            gravity: DEFAULT_GRAVITY,
             max_entity_speed: 100.0,        // m/s (very fast)
             teleport_threshold: 50.0,       // m/tick (flags large jumps)
             max_acceleration: 50.0,         // m/s²
@@ -219,11 +277,6 @@ impl Workspace {
         delta.length() > self.teleport_threshold
     }
     
-    /// Get gravity in meters/s² (for physics engines using SI units)
-    pub fn gravity_meters(&self) -> Vec3 {
-        self.gravity * STUD_TO_METERS
-    }
-    
     /// Get world extent (half-size) for spatial hashing
     pub fn world_extent(&self) -> f32 {
         let size = self.world_bounds_max - self.world_bounds_min;
@@ -301,3 +354,58 @@ pub struct StarterGui;
 #[derive(Component, Reflect, Default)]
 #[reflect(Component)]
 pub struct StarterPlayer;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::Unit;
+
+    #[test]
+    fn a_vector_is_taken_as_written() {
+        let moon = authored_gravity(Some(AuthoredGravity::Vector([0.0, -1.62, 0.0])), None);
+        assert_eq!(moon, Vec3::new(0.0, -1.62, 0.0));
+        // The Space's own gravity wins over the import rule.
+        let written = authored_gravity(Some(AuthoredGravity::Vector([0.0, -54.936, 0.0])), Some(Unit::Foot));
+        assert_eq!(written, Vec3::new(0.0, -54.936, 0.0));
+    }
+
+    /// Every native Space holds the old template's 196.2, which nothing read:
+    /// it keeps running at standard gravity.
+    #[test]
+    fn a_native_spaces_old_number_is_standard_gravity() {
+        assert_eq!(authored_gravity(Some(AuthoredGravity::Legacy(196.2)), None), DEFAULT_GRAVITY);
+        assert_eq!(authored_gravity(None, None), DEFAULT_GRAVITY);
+    }
+
+    /// An older Roblox import holds Roblox's gravity in studs/s², read in the
+    /// stud its lengths use: feet for every import made so far.
+    #[test]
+    fn an_old_roblox_import_falls_like_roblox_at_its_scale() {
+        let feet = authored_gravity(Some(AuthoredGravity::Legacy(196.2)), Some(Unit::Foot));
+        assert!((feet.y + 196.2 * 0.3048).abs() < 1e-3, "{feet:?}");
+        let studs = authored_gravity(Some(AuthoredGravity::Legacy(196.2)), Some(Unit::Stud));
+        assert!((studs.y + 196.2 * 0.28).abs() < 1e-3, "{studs:?}");
+    }
+
+    /// Sixteen Tucson Spaces and two more hold the stud-era default as a
+    /// vector, `[0.0, -196.2, 0.0]`: read as the stud-era value it is, never
+    /// as 196.2 m/s².
+    #[test]
+    fn a_stud_era_vector_is_legacy() {
+        let tucson = AuthoredGravity::from_vector([0.0, -196.2, 0.0]);
+        assert_eq!(tucson, AuthoredGravity::Legacy(196.2));
+        assert_eq!(authored_gravity(Some(tucson), None), DEFAULT_GRAVITY);
+        assert_eq!(AuthoredGravity::from_vector([0.0, -196.8, 0.0]), AuthoredGravity::Legacy(196.8));
+        let imported = authored_gravity(Some(AuthoredGravity::from_vector([0.0, -196.2, 0.0])), Some(Unit::Foot));
+        assert!((imported.y + 196.2 * 0.3048).abs() < 1e-3, "{imported:?}");
+        // Metric vectors, Roblox's at 0.28 m studs included, are as written.
+        assert_eq!(AuthoredGravity::from_vector([0.0, -54.936, 0.0]), AuthoredGravity::Vector([0.0, -54.936, 0.0]));
+        assert_eq!(AuthoredGravity::from_vector([0.0, 0.0, 0.0]), AuthoredGravity::Vector([0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_value_that_is_not_finite_is_standard_gravity() {
+        assert_eq!(authored_gravity(Some(AuthoredGravity::Vector([0.0, f64::NAN, 0.0])), None), DEFAULT_GRAVITY);
+        assert_eq!(authored_gravity(Some(AuthoredGravity::Legacy(f64::INFINITY)), Some(Unit::Foot)), DEFAULT_GRAVITY);
+    }
+}

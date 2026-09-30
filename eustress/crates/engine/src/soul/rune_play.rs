@@ -37,9 +37,10 @@
 //!
 //! Native Rune functions have no `&mut World`, so they QUEUE: created
 //! instances land in the `InstanceRegistry`, `Instance:Destroy()` in
-//! `PENDING_DESTROY`, `Instance:Set()` in `PENDING_PROPERTY_WRITES`, and
-//! `set_sim_value` in `SIM_VALUE_WRITES`. This module drains all four after the
-//! callbacks return, in the same frame.
+//! `PENDING_DESTROY`, `Instance:Set()` in `PENDING_PROPERTY_WRITES`,
+//! `set_sim_value` in `SIM_VALUE_WRITES`, and `eustress::terrain` edits in
+//! `rune_terrain`'s queue. This module drains them all after the callbacks
+//! return, in the same frame.
 //!
 //! Instances created during Play are spawned ECS-ONLY — no `_instance.toml` is
 //! written. Play-mode state is reverted on Stop, so persisting it would leave
@@ -61,6 +62,8 @@ use crate::space::SpaceRoot;
 use crate::soul::rune_ecs_module::{
     self, InstanceSnapshotEntry, RuneHierarchySnapshot, RuneTagSnapshot,
 };
+#[cfg(feature = "realism-scripting")]
+use crate::soul::rune_terrain::{self, ScriptTerrain};
 
 // ============================================================================
 // Resources
@@ -262,6 +265,9 @@ fn install_bridges(
     }
     rune_ecs_module::seed_instance_snapshot_shared(&bridges.hierarchy);
     rune_ecs_module::seed_existing_tags_shared(&bridges.tags);
+    // Purchase prompts count only from a Play frame, never from the editor's
+    // analyzer running `on_update` on its own.
+    rune_ecs_module::set_rune_play_frame(true);
 
     if let Some(bindings) = ecs_bindings {
         rune_ecs_module::set_ecs_bindings(bindings.clone());
@@ -320,6 +326,8 @@ fn clear_bridges() {
     rune_ecs_module::clear_ecs_bindings();
     rune_ecs_module::clear_physics_state();
     eustress_common::events::clear_event_bus_for_rune();
+    rune_terrain::clear_terrain_bridge();
+    rune_ecs_module::set_rune_play_frame(false);
 }
 
 // ============================================================================
@@ -343,6 +351,7 @@ pub fn drive_rune_frame(
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut physics: ResMut<crate::soul::physics_bridge::RunePhysicsBridge>,
+    terrain: ScriptTerrain,
 ) {
     if runtime.compiled.is_empty() {
         // No scripts — make sure last frame's assertions don't linger and keep
@@ -374,9 +383,18 @@ pub fn drive_rune_frame(
     crate::spatial_query_bridge::reset_raycast_slots();
 
     // ── 2. Lifecycle callbacks ───────────────────────────────────────────
-    call_script_init(&mut runtime);
-    call_script_ready(&mut runtime);
-    call_script_update(&mut runtime, time.delta_secs() as f64);
+    // The terrain view borrows the root's components, so rather than being
+    // installed with the bridges above it is scoped to the callbacks.
+    // `eustress::terrain` reads it and takes edits only while it is in place.
+    let terrain_view = terrain.view();
+    rune_terrain::with_terrain_view(terrain_view.as_ref(), || {
+        call_script_init(&mut runtime);
+        call_script_ready(&mut runtime);
+        call_script_update(&mut runtime, time.delta_secs() as f64);
+    });
+    // Purchases to grant go to the script defining `process_receipt`, while
+    // the bridges are still installed.
+    rune_ecs_module::process_rune_receipts(&mut runtime);
 
     // ── 3. Drain queued effects ──────────────────────────────────────────
     // Physics: impulses and velocity sets go to the systems that apply them,
@@ -479,6 +497,16 @@ pub fn drive_rune_frame(
                     }
                 }
             }
+        });
+    }
+
+    // `eustress::terrain` edits, in call order, as one batch of scripted
+    // edits: no undo entry, and Stop restores the terrain Play snapshotted
+    // before the first.
+    let terrain_edits = rune_terrain::drain_pending_terrain();
+    if !terrain_edits.is_empty() {
+        commands.queue(move |world: &mut World| {
+            rune_terrain::apply_script_edits(world, terrain_edits);
         });
     }
 

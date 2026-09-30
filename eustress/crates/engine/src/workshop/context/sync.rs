@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-const API_URL: &str = "https://api.eustress.dev";
+use eustress_common::api_base::api_base;
 
 /// Sync state for background operations.
 pub enum SyncState {
@@ -34,7 +34,7 @@ pub enum SyncDirection {
 /// Download context from Cloudflare KV (background thread).
 /// Returns the context document JSON on success.
 pub fn download_context(auth_token: &str, project_id: &str) -> SyncTask {
-    let url = format!("{}/api/workshop/context?project_id={}", API_URL, project_id);
+    let url = format!("{}/api/workshop/context?project_id={}", api_base(), project_id);
     let token = auth_token.to_string();
     let result = Arc::new(Mutex::new(None));
     let result_clone = result.clone();
@@ -69,7 +69,7 @@ pub fn upload_context(
     project_id: &str,
     memories: &[super::MemoryEntry],
 ) -> SyncTask {
-    let url = format!("{}/api/workshop/context", API_URL);
+    let url = format!("{}/api/workshop/context", api_base());
     let token = auth_token.to_string();
     let body = serde_json::json!({
         "project_id": project_id,
@@ -108,7 +108,7 @@ pub fn upload_single_memory(
     value: &str,
     category: &str,
 ) {
-    let url = format!("{}/api/workshop/context/memory", API_URL);
+    let url = format!("{}/api/workshop/context/memory", api_base());
     let token = auth_token.to_string();
     let body = serde_json::json!({
         "project_id": project_id,

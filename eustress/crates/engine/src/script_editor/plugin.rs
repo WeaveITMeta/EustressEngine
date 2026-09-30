@@ -16,6 +16,8 @@
 //! — the fresh task's output supersedes it).
 
 use super::analyzer::{self, AnalysisResult, Diagnostic};
+use super::language::{Analysis, LanguageRegistry, LanguageService};
+use std::sync::Arc;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 use std::collections::HashMap;
@@ -40,10 +42,17 @@ pub struct ScriptAnalysis {
     /// Most recent completed analysis. Starts empty; filled on first tick
     /// after the editor receives any content.
     pub result: AnalysisResult,
+    /// The service's full output that `result` is derived from, including
+    /// its own index for hover and go to definition.
+    pub analysis: Option<Analysis>,
+    /// The service analyzing the active file.
+    pub service: Option<Arc<dyn LanguageService>>,
     /// Monotonic counter, incremented on every new result. UI consumers
     /// compare against their last seen generation to decide whether to
     /// rebuild models.
     pub generation: u64,
+    /// `StudioState::script_content_revision` last acted on.
+    seen_revision: u64,
 
     // ── debounce state ────────────────────────────────────────────────
     /// Wall-clock time of the most recent source change.
@@ -52,7 +61,7 @@ pub struct ScriptAnalysis {
     /// only the latest content is analyzed.
     pending_source: Option<String>,
     /// The currently-running analyzer task, if any. We poll this each tick.
-    in_flight: Option<Task<AnalysisResult>>,
+    in_flight: Option<Task<Analysis>>,
 }
 
 impl ScriptAnalysis {
@@ -60,9 +69,10 @@ impl ScriptAnalysis {
     /// layer whenever `script_editor_content` changes. Debounce is handled
     /// internally — the actual task kickoff happens after `DEBOUNCE_MS`
     /// milliseconds with no further edits.
-    pub fn submit(&mut self, source: String) {
+    pub fn submit(&mut self, source: String, service: Arc<dyn LanguageService>) {
         self.pending_source = Some(source);
         self.pending_change = Some(Instant::now());
+        self.service = Some(service);
     }
 
     /// Current diagnostic count, for status-bar / badge rendering.
@@ -127,12 +137,13 @@ fn kick_off_analysis(mut analysis: ResMut<ScriptAnalysis>) {
         return;
     }
 
+    let Some(service) = analysis.service.clone() else { return };
     let source = analysis.pending_source.take().unwrap_or_default();
     analysis.pending_change = None;
     analysis.source = source.clone();
 
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        analyzer::analyze(&source)
+        service.analyze(&source)
     });
     analysis.in_flight = Some(task);
 }
@@ -152,7 +163,11 @@ fn poll_analysis(
     if let Some(path) = &analysis.active_path.clone() {
         update_space_diag_from_editor(&mut space_diag, path, result.diagnostics.clone());
     }
-    analysis.result = result;
+    analysis.result = AnalysisResult {
+        diagnostics: result.diagnostics.clone(),
+        symbols: index_symbols(&result.symbols),
+    };
+    analysis.analysis = Some(result);
     analysis.generation = analysis.generation.wrapping_add(1);
     analysis.in_flight = None;
 }
@@ -161,6 +176,7 @@ fn poll_analysis(
 /// current Space's `SoulService/` folder when the Space root changes.
 fn kick_off_space_scan(
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    languages: Option<Res<ScriptLanguages>>,
     mut space_diag: ResMut<SpaceDiagnostics>,
 ) {
     let Some(space_root) = space_root else { return };
@@ -175,8 +191,9 @@ fn kick_off_space_scan(
     }
     space_diag.scanned_root = Some(current_root.clone());
 
+    let registry = languages.map(|l| l.0.clone()).unwrap_or_default();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        scan_space_scripts(&current_root)
+        scan_space_scripts(&current_root, &registry)
     });
     space_diag.in_flight = Some(task);
 }
@@ -205,19 +222,25 @@ pub fn update_space_diag_from_editor(
 }
 
 /// Walk `<space_root>/SoulService/` (and fall back to the whole Space root)
-/// for every `.rune` and `.luau` file and run the analyzer on each.
-fn scan_space_scripts(space_root: &std::path::Path) -> HashMap<String, Vec<Diagnostic>> {
+/// and run each file's language service over it: Rune files through the
+/// Rune service, Luau files through the Luau service. A file no service
+/// handles is skipped.
+fn scan_space_scripts(
+    space_root: &std::path::Path,
+    registry: &LanguageRegistry,
+) -> HashMap<String, Vec<Diagnostic>> {
     let soul_dir = space_root.join("SoulService");
     let scan_root = if soul_dir.is_dir() { soul_dir } else { space_root.to_path_buf() };
 
     let mut results = HashMap::new();
-    walk_for_scripts(&scan_root, 0, &mut results);
+    walk_for_scripts(&scan_root, 0, registry, &mut results);
     results
 }
 
 fn walk_for_scripts(
     dir: &std::path::Path,
     depth: usize,
+    registry: &LanguageRegistry,
     out: &mut HashMap<String, Vec<Diagnostic>>,
 ) {
     if depth > 12 { return; }
@@ -234,15 +257,17 @@ fn walk_for_scripts(
         }
         let path = entry.path();
         if ft.is_dir() {
-            walk_for_scripts(&path, depth + 1, out);
+            walk_for_scripts(&path, depth + 1, registry, out);
         } else if ft.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext == "rune" || ext == "luau" {
-                if let Ok(source) = std::fs::read_to_string(&path) {
-                    let result = analyzer::analyze(&source);
-                    if !result.diagnostics.is_empty() {
-                        out.insert(path.display().to_string(), result.diagnostics);
-                    }
+            let Some(service) = registry.for_path(&path) else { continue };
+            // A file over 1 MB is data, not a script.
+            if entry.metadata().map_or(true, |m| m.len() > 1_000_000) {
+                continue;
+            }
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                let diagnostics = service.analyze(&source).diagnostics;
+                if !diagnostics.is_empty() {
+                    out.insert(path.display().to_string(), diagnostics);
                 }
             }
         }
@@ -255,9 +280,25 @@ fn walk_for_scripts(
 
 pub struct ScriptAnalysisPlugin;
 
+/// The language services the editor shell hands source files to, one per
+/// language. The shell asks `for_path(source)` and never branches on the
+/// language itself.
+#[derive(Resource, Clone)]
+pub struct ScriptLanguages(pub super::language::LanguageRegistry);
+
+impl Default for ScriptLanguages {
+    fn default() -> Self {
+        let mut registry = super::language::LanguageRegistry::default();
+        registry.register(std::sync::Arc::new(super::rune_service::RuneService));
+        registry.register(std::sync::Arc::new(super::luau_service::LuauService));
+        Self(registry)
+    }
+}
+
 impl Plugin for ScriptAnalysisPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScriptAnalysis>()
+           .init_resource::<ScriptLanguages>()
            .init_resource::<SpaceDiagnostics>()
            .add_systems(Update, (
                submit_active_script,
@@ -269,39 +310,59 @@ impl Plugin for ScriptAnalysisPlugin {
     }
 }
 
-/// Read the active editor tab's code content and hand it to the analyzer.
-/// Only fires on `script_content_dirty` to avoid re-submitting the same
-/// source every frame. Summary (markdown) tabs are ignored — there's no
-/// Rune to parse.
+/// Hand the active Code view's text to the service for its source file.
+/// Runs once per applied edit (`script_content_revision`); the highlighter
+/// owns `script_content_dirty`. `script_source_path` is set only for a Code
+/// view, so Summary and Markdown views, and files no service handles, are
+/// not submitted.
 fn submit_active_script(
-    state: Option<ResMut<crate::ui::StudioState>>,
+    state: Option<Res<crate::ui::StudioState>>,
     tab_manager: Option<Res<crate::ui::center_tabs::CenterTabManager>>,
+    languages: Option<Res<ScriptLanguages>>,
     mut analysis: ResMut<ScriptAnalysis>,
 ) {
-    let Some(mut state) = state else { return };
-    if !state.script_content_dirty { return }
+    let Some(state) = state else { return };
+    if state.script_content_revision == analysis.seen_revision { return }
+    analysis.seen_revision = state.script_content_revision;
 
-    // Determine whether the active tab is a Rune code view. Summary markdown
-    // is ignored; the analyzer would emit noise on markdown prose.
-    let is_code = tab_manager
-        .as_deref()
+    // The tab's own path keys the Problems panel's jump routing.
+    let path = tab_manager.as_deref()
         .and_then(|mgr| mgr.tabs.get(mgr.active_tab))
-        .map(|tab| matches!(
-            tab.tab_type,
-            crate::ui::center_tabs::CenterTabType::SoulScript {
-                mode: crate::ui::center_tabs::SoulScriptMode::Code
-            } | crate::ui::center_tabs::CenterTabType::CodeEditor { .. }
-        ))
-        .unwrap_or(false);
+        .and_then(|t| t.file_path.as_ref())
+        .map(|p| p.display().to_string());
+    let service = state
+        .script_source_path
+        .as_deref()
+        .and_then(|source| languages.as_ref().and_then(|l| l.0.for_path(source)));
 
-    if is_code {
-        analysis.submit(state.script_editor_content.clone());
+    if let Some(service) = service {
+        analysis.submit(state.script_editor_content.clone(), service);
         // Track which file the analyzer is operating on — Problems panel
         // uses this for "jump to line" routing.
-        analysis.active_path = tab_manager.as_deref()
-            .and_then(|mgr| mgr.tabs.get(mgr.active_tab))
-            .and_then(|t| t.file_path.as_ref())
-            .map(|p| p.display().to_string());
+        analysis.active_path = path;
+    } else if !analysis.result.diagnostics.is_empty()
+        || analysis.pending_source.is_some()
+        || analysis.in_flight.is_some()
+    {
+        // No service for this view: drop the previous file's results so
+        // they never draw on this text.
+        analysis.pending_source = None;
+        analysis.pending_change = None;
+        analysis.in_flight = None;
+        analysis.result = analyzer::AnalysisResult::default();
+        analysis.analysis = None;
+        analysis.service = None;
+        analysis.generation = analysis.generation.wrapping_add(1);
+        analysis.active_path = path;
     }
-    state.script_content_dirty = false;
+}
+
+/// A symbol index over a service's symbols, for the consumers that look
+/// definitions up by name.
+fn index_symbols(symbols: &[analyzer::Symbol]) -> analyzer::SymbolIndex {
+    let mut index = analyzer::SymbolIndex::default();
+    for symbol in symbols {
+        index.by_name.entry(symbol.name.clone()).or_default().push(symbol.clone());
+    }
+    index
 }

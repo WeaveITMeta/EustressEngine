@@ -1,11 +1,17 @@
-# Sky — Skybox and celestial body display
-# Bevy: Skybox / EnvironmentMapLight
+# Sky: the stars and an optional authored cubemap (child of the Lighting service)
+# Bevy: the star field behind the atmosphere, or a Skybox; read by
+# common/src/plugins/celestial_sections.rs
+#
+# celestial_bodies_shown: draw the sun's disc, the moon and the stars.
+# star_count:             stars in the sky; 5,000 is a clear rural sky.
+# skybox_*:               six cubemap faces. All six set replaces the
+#                         atmosphere's sky with this cubemap.
+#
+# The sun's and moon's sizes are the Sun's and the Moon's own properties.
 
 [sky]
 celestial_bodies_shown = true
-star_count = 3000
-sun_angular_size = 21.0
-moon_angular_size = 11.0
+star_count = 5000
 skybox_front = ""
 skybox_back = ""
 skybox_left = ""

@@ -35,8 +35,6 @@ pub struct SphConfig {
     pub viscosity: f32,
     /// Surface tension coefficient
     pub surface_tension: f32,
-    /// Gravity vector
-    pub gravity: Vec3,
     /// Enable viscosity
     pub viscosity_enabled: bool,
     /// Enable surface tension
@@ -51,7 +49,6 @@ impl Default for SphConfig {
             gas_constant: 2000.0,
             viscosity: constants::WATER_VISCOSITY * 1000.0, // Scaled for stability
             surface_tension: constants::WATER_SURFACE_TENSION,
-            gravity: Vec3::new(0.0, -9.81, 0.0),
             viscosity_enabled: true,
             surface_tension_enabled: true,
         }
@@ -331,7 +328,8 @@ pub fn update_sph_density(
 ///
 /// The kernel sums give force densities (N/m^3); each is converted to a
 /// force on the particle's parcel (x m / rho). Gravity is applied once, by
-/// `particles::systems::apply_particle_forces`, for every particle kind.
+/// `particles::systems::apply_particle_forces`, for every particle kind, from
+/// the Workspace gravity.
 pub fn update_sph_forces(
     mut query: Query<(Entity, &Transform, &Particle, &FluidProperties, &mut KineticState)>,
     spatial_hash: Res<SpatialHash>,

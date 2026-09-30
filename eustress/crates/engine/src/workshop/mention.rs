@@ -525,8 +525,18 @@ pub fn update_mention_index_live(
         (Entity, &Instance, Option<&crate::space::service_loader::ServiceComponent>),
         (Changed<Instance>, Without<SkipMentionIndex>),
     >,
+    // The same filter with no data, for the quiet-frame test below.
+    probe: Query<(), (Changed<Instance>, Without<SkipMentionIndex>)>,
     mut removed: RemovedComponents<Instance>,
 ) {
+    // A quiet frame has nothing to index or drop. `Changed<Instance>` checks
+    // a tick on every instance, so even an empty answer is a full walk;
+    // `probe_any` spreads it over the compute pool, and the detail walk
+    // below runs only when something changed.
+    if removed.is_empty() && !eustress_common::utils::probe_any(&probe) {
+        return;
+    }
+
     // We need the current Space's folder name to compute the canonical path.
     let space_name = match space_root.as_deref() {
         Some(sr) => sr.0.file_name()

@@ -514,13 +514,14 @@ impl ToolHandler for CreateScriptTool {
             }
             None => match run_context {
                 "Client" => {
-                    // New Spaces keep StarterPlayerScripts at the top level;
-                    // older ones nest it inside StarterPlayer.
-                    let nested = ctx.space_root.join("StarterPlayer").join("StarterPlayerScripts");
-                    if !ctx.space_root.join("StarterPlayerScripts").is_dir() && nested.is_dir() {
-                        nested
+                    // Some Spaces have a top-level StarterPlayerScripts
+                    // service; the others hold it as a folder inside
+                    // StarterPlayer, and Play runs client scripts from both.
+                    let top = ctx.space_root.join("StarterPlayerScripts");
+                    if top.is_dir() {
+                        top
                     } else {
-                        ctx.space_root.join("StarterPlayerScripts")
+                        ctx.space_root.join("StarterPlayer").join("StarterPlayerScripts")
                     }
                 }
                 "Module" => ctx.space_root.join("ReplicatedStorage"),
@@ -1256,10 +1257,8 @@ target/\n";
 /// `common/assets/service_templates/`), `space.toml`, `simulation.toml`,
 /// `.gitignore`, a Baseplate + WelcomeCube Part (via the canonical
 /// `instance_create::create_instance` pipeline — same one `CreateScriptTool`
-/// and `create_entity` use), and Lighting children (Atmosphere/Moon/Sky/Sun,
-/// also via `create_instance` — classes without an authored `class_schema`
-/// template synthesize a minimal generic instance, which is the same
-/// intentional fallback `create_instance` already uses everywhere else).
+/// and `create_entity` use), and Lighting children (Atmosphere/Clouds/Moon/
+/// Sky/Sun, also via `create_instance`, each from its class_schema template).
 ///
 /// Returns the new Space's root path on success.
 fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &str) -> Result<std::path::PathBuf, String> {
@@ -1351,16 +1350,22 @@ fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &s
         },
     ).map_err(|e| format!("create WelcomeCube: {}", e))?;
 
-    // Lighting children — Atmosphere/Moon/Sky have authored class_schema
-    // templates; Sun does not, so create_instance synthesizes a minimal
-    // generic instance for it (the same fallback the pipeline already
-    // uses for any class without a template).
+    // Lighting children, each from its class_schema template, as Studio's
+    // scaffold writes them. The Sun is class Star (its [star] section), named
+    // Sun. Clouds is the fair-weather layer: with no Clouds object a Space
+    // has no clouds (Roblox's rule).
     let lighting_dir = space_root.join("Lighting");
-    for class in ["Atmosphere", "Moon", "Sky", "Sun"] {
+    for (class, name) in [
+        ("Atmosphere", "Atmosphere"),
+        ("Clouds", "Clouds"),
+        ("Moon", "Moon"),
+        ("Sky", "Sky"),
+        ("Star", "Sun"),
+    ] {
         eustress_common::instance_create::create_instance(
-            &lighting_dir, class, Some(class),
+            &lighting_dir, class, Some(name),
             eustress_common::instance_create::InstanceOverrides::default(),
-        ).map_err(|e| format!("create Lighting/{}: {}", class, e))?;
+        ).map_err(|e| format!("create Lighting/{}: {}", name, e))?;
     }
 
     tracing::info!("new_space: scaffolded '{}' at {:?}", space_name, space_root);

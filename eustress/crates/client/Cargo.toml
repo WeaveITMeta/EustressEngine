@@ -13,6 +13,9 @@ path = "src/main.rs"
 eustress-common = { path = "../common", features = ["gui", "realism-scripting", "luau", "physics", "realism", "avatar-profile"] }
 # Multiplayer: joining a Studio host over WebTransport (`--connect`).
 eustress-networking = { path = "../common/eustress-networking" }
+# The Play runtime Studio shares: the draw step, HUD, billboards, sounds,
+# particles and camera a joined world is shown with.
+eustress-play-runtime = { path = "../play-runtime" }
 # The .echk chunk container: hosted and published worlds both arrive in it.
 eustress-echk = { path = "../echk" }
 # Reading a downloaded world's SpawnLocation.
@@ -87,6 +90,8 @@ tokio = { version = "1.38", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 serde_json = { workspace = true }
 dirs = { workspace = true }
+# The confirm dialog before a purchase in a host's session.
+rfd = { workspace = true }
 sha2 = "0.10"
 # Simulations published before .echk are one .pak: tar + zstd of the
 # Universe folder. The Player still opens them.

@@ -287,36 +287,58 @@ fn spawn_ron_entity(
             ));
             info!("  📁 Container: {}", entity.name);
         }
+        // Lights spawn as their class component; the shared
+        // `light_classes` plugin builds the Bevy light exactly as Studio does
+        // (this used a fixed ×1000 lumens, fifty times dimmer than Studio).
         EntityClass::PointLight(light) => {
-            let color = Color::srgb(light.color[0], light.color[1], light.color[2]);
             commands.spawn((
-                PointLight {
-                    color,
-                    intensity: light.brightness * 1000.0,
-                    range: light.range,
-                    shadow_maps_enabled: light.shadows,
-                    ..default()
-                },
                 transform,
+                Visibility::default(),
+                eustress_common::classes::EustressPointLight {
+                    brightness: light.brightness,
+                    color: Color::srgb(light.color[0], light.color[1], light.color[2]),
+                    range: light.range,
+                    shadows: light.shadows,
+                    enabled: light.enabled,
+                    ..Default::default()
+                },
                 Name::new(entity.name.clone()),
             ));
             info!("  💡 PointLight: {}", entity.name);
         }
         EntityClass::SpotLight(light) => {
-            let color = Color::srgb(light.color[0], light.color[1], light.color[2]);
             commands.spawn((
-                SpotLight {
-                    color,
-                    intensity: light.brightness * 1000.0,
-                    range: light.range,
-                    outer_angle: light.angle.to_radians(),
-                    inner_angle: (light.angle * 0.8).to_radians(),
-                    ..default()
-                },
                 transform,
+                Visibility::default(),
+                eustress_common::classes::EustressSpotLight {
+                    brightness: light.brightness,
+                    color: Color::srgb(light.color[0], light.color[1], light.color[2]),
+                    range: light.range,
+                    angle: light.angle,
+                    shadows: light.shadows,
+                    enabled: light.enabled,
+                    ..Default::default()
+                },
                 Name::new(entity.name.clone()),
             ));
             info!("  🔦 SpotLight: {}", entity.name);
+        }
+        EntityClass::SurfaceLight(light) => {
+            commands.spawn((
+                transform,
+                Visibility::default(),
+                eustress_common::classes::SurfaceLight {
+                    brightness: light.brightness,
+                    color: Color::srgb(light.color[0], light.color[1], light.color[2]),
+                    range: light.range,
+                    face: eustress_common::plugins::light_classes::normalize_face(&light.face).to_string(),
+                    shadows: light.shadows,
+                    enabled: light.enabled,
+                    ..Default::default()
+                },
+                Name::new(entity.name.clone()),
+            ));
+            info!("  💡 SurfaceLight: {}", entity.name);
         }
         EntityClass::NPC(_) => {
             let mesh = meshes.add(Cylinder::new(0.5, 2.0));
@@ -519,19 +541,26 @@ fn spawn_json_point_light(
     let shadows = entity.properties.get("Shadows")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    
+
+    let enabled = entity.properties.get("Enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // The class component; `light_classes` builds the Bevy light as Studio does.
     commands.spawn((
-        PointLight {
-            color,
-            intensity: brightness * 1000.0,
-            range,
-            shadow_maps_enabled: shadows,
-            ..default()
-        },
         transform,
+        Visibility::default(),
+        eustress_common::classes::EustressPointLight {
+            brightness,
+            color,
+            range,
+            shadows,
+            enabled,
+            ..Default::default()
+        },
         Name::new(name.to_string()),
     ));
-    
+
     info!("  💡 PointLight: {} brightness={}", name, brightness);
 }
 
@@ -552,8 +581,8 @@ fn spawn_json_spot_light(
     
     let angle = entity.properties.get("Angle")
         .and_then(|v| v.as_f64())
-        .unwrap_or(45.0) as f32;
-    
+        .unwrap_or(eustress_common::classes::DEFAULT_LIGHT_ANGLE as f64) as f32;
+
     let color = entity.properties.get("Color")
         .and_then(|v| v.as_array())
         .map(|arr| Color::srgb(
@@ -562,19 +591,38 @@ fn spawn_json_spot_light(
             arr.get(2).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
         ))
         .unwrap_or(Color::WHITE);
-    
+
+    let shadows = entity.properties.get("Shadows")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let enabled = entity.properties.get("Enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let face = entity.properties.get("Face")
+        .and_then(|v| v.as_str())
+        .map(eustress_common::plugins::light_classes::normalize_face)
+        .unwrap_or("Front")
+        .to_string();
+
+    // The class component; `light_classes` builds the Bevy light (a cone
+    // out of `face`, Angle as the full apex angle) as Studio does.
     commands.spawn((
-        SpotLight {
-            color,
-            intensity: brightness * 1000.0,
-            range,
-            outer_angle: angle.to_radians(),
-            inner_angle: (angle * 0.8).to_radians(),
-            ..default()
-        },
         transform,
+        Visibility::default(),
+        eustress_common::classes::EustressSpotLight {
+            brightness,
+            color,
+            range,
+            angle,
+            shadows,
+            enabled,
+            face,
+            texture: None,
+        },
         Name::new(name.to_string()),
     ));
-    
+
     info!("  🔦 SpotLight: {} brightness={}", name, brightness);
 }

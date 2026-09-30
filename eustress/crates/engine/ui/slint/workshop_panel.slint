@@ -129,6 +129,7 @@ export struct WorkshopModelEntry {
     price: string,          // "$3 / $15 per Mtok", already formatted
     section-start: bool,    // first row of its provider group: draw the header
     key-missing: bool,      // selectable, but its BYOK key is not set yet
+    is-new: bool,           // listed by its provider for your key, not yet in Eustress's table
 }
 
 // ============================================================================
@@ -1021,7 +1022,8 @@ export component WorkshopPanel inherits Rectangle {
     // the .slint previews on its own and a catalog fetch that never lands
     // still shows a full picker.
     in property <[WorkshopModelEntry]> available-models: [
-        { name: "Sonnet 5", provider: "Anthropic", tagline: "Balanced speed and depth. The everyday driver.", price: "$3 / $15 per Mtok", section-start: true, key-missing: false },
+        { name: "Sonnet 5", provider: "Anthropic", tagline: "Balanced speed and depth. The everyday driver.", price: "$2 / $10 per Mtok", section-start: true, key-missing: false },
+        { name: "Opus 5.5", provider: "Anthropic", tagline: "The newest Opus. Deep reasoning at a lower price.", price: "$4 / $20 per Mtok", section-start: false, key-missing: false },
         { name: "Opus 5", provider: "Anthropic", tagline: "Deeper reasoning for work that has to be right.", price: "$5 / $25 per Mtok", section-start: false, key-missing: false },
         { name: "Fable 5.1", provider: "Anthropic", tagline: "Always-on thinking. The advisor on hard calls.", price: "$10 / $50 per Mtok", section-start: false, key-missing: false },
         { name: "Grok 4.6", provider: "xAI", tagline: "Fast and cheap, with live search built in.", price: "$2 / $6 per Mtok", section-start: true, key-missing: false },
@@ -2330,6 +2332,30 @@ export component WorkshopPanel inherits Rectangle {
                                                         color: #f0a022;
                                                         font-size: 9px;
                                                         vertical-alignment: center;
+                                                    }
+
+                                                    // Listed by its provider for
+                                                    // your key and newer than
+                                                    // anything in Eustress's own
+                                                    // table. Its provider is the
+                                                    // only thing vouching for
+                                                    // it, which this says.
+                                                    if m.is-new: Rectangle {
+                                                        width: new-tag.preferred-width + 8px;
+                                                        height: 13px;
+                                                        border-radius: 3px;
+                                                        background: Theme.accent-eustress.with-alpha(0.18);
+
+                                                        new-tag := Text {
+                                                            width: parent.width;
+                                                            height: parent.height;
+                                                            text: "NEW";
+                                                            color: Theme.accent-eustress;
+                                                            font-size: 8px;
+                                                            font-weight: 700;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
                                                     }
 
                                                     Rectangle { horizontal-stretch: 1; }

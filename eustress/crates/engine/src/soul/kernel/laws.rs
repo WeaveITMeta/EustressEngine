@@ -67,7 +67,8 @@ pub struct EntrypointContract {
 
 impl EntrypointContract {
     /// The per-frame play context: lifecycle hooks.
-    /// `on_init()`, `on_update(dt)`, `on_ready()`, `on_exit()`.
+    /// `on_init()`, `on_update(dt)`, `on_ready()`, `on_exit()`, and
+    /// `process_receipt(receipt)`, which grants what a player bought.
     pub fn play_lifecycle() -> Self {
         Self {
             allowed: vec![
@@ -75,6 +76,7 @@ impl EntrypointContract {
                 ("on_update".into(), 1),
                 ("on_ready".into(), 0),
                 ("on_exit".into(), 0),
+                ("process_receipt".into(), 1),
             ],
             require_at_least_one: true,
         }
@@ -99,6 +101,7 @@ impl EntrypointContract {
                 ("on_update".into(), 1),
                 ("on_ready".into(), 0),
                 ("on_exit".into(), 0),
+                ("process_receipt".into(), 1),
                 ("main".into(), 0),
             ],
             require_at_least_one: true,

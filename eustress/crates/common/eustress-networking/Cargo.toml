@@ -22,7 +22,10 @@ license = "PolyForm-Shield-1.0.0"
 # the desktop Player and a future browser Player alike.
 
 [dependencies]
-bevy = { workspace = true, features = ["serialize"] }
+# The input lane samples the keyboard, the mouse and gamepads (session.rs
+# send_local_input): each is a bevy_input feature, declared here so the crate
+# builds in any graph, not only where another crate happens to turn them on.
+bevy = { workspace = true, features = ["serialize", "keyboard", "mouse", "gamepad"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,8 +48,9 @@ eustress-common = { path = "..", default-features = false, features = ["physics"
 # ── Native transport ────────────────────────────────────────────────────────
 # Same quinn 0.11 / rustls 0.23 on ring / rcgen 0.13 stack the engine already
 # links, so nothing compiles twice. `dangerous-configuration` exists for one
-# case only: joining a host on loopback without a certificate pin.
-wtransport = { version = "0.6.1", default-features = false, features = ["self-signed", "ring", "dangerous-configuration"], optional = true }
+# case only: joining a host on loopback without a certificate pin. `quinn`
+# exposes the QUIC transport settings, for the packet size cap in `native`.
+wtransport = { version = "0.6.1", default-features = false, features = ["self-signed", "ring", "dangerous-configuration", "quinn"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"], optional = true }
 
 [features]

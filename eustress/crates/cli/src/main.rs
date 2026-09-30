@@ -42,7 +42,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use eustress_common::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
+use eustress_common::sim_record::{EpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 use eustress_common::sim_stream::{SimQuery, SimStreamConfig, SimStreamReader};
 
 
@@ -455,7 +455,7 @@ enum SimCommands {
         #[arg(long)]
         json: bool,
     },
-    Arc {
+    Episodes {
         #[arg(long)]
         task: Option<String>,
         #[arg(long, default_value = "20")]
@@ -463,7 +463,7 @@ enum SimCommands {
         #[arg(long)]
         json: bool,
     },
-    ArcBest {
+    BestEpisode {
         #[arg(long)]
         task: String,
         #[arg(long)]
@@ -1632,11 +1632,11 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
             }
         }
 
-        SimCommands::Arc { task, limit, json } => {
+        SimCommands::Episodes { task, limit, json } => {
             let query = SimQuery { limit, ..Default::default() };
-            let records = reader.replay_arc_episodes(&query).await;
+            let records = reader.replay_episodes(&query).await;
 
-            let records: Vec<&ArcEpisodeRecord> = records.iter()
+            let records: Vec<&EpisodeRecord> = records.iter()
                 .filter(|r| {
                     task.as_deref().map_or(true, |f| {
                         r.task_id.to_lowercase().contains(&f.to_lowercase())
@@ -1649,7 +1649,7 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
                 return Ok(());
             }
 
-            println!("{}", format!("ARC-AGI-3 episodes — {} found", records.len()).bold());
+            println!("{}", format!("Episodes — {} found", records.len()).bold());
             println!("{}", "─".repeat(80).dimmed());
             for r in &records {
                 println!(
@@ -1663,18 +1663,18 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
                 );
             }
             if records.is_empty() {
-                println!("  {}", "(no ARC episode records yet)".dimmed());
+                println!("  {}", "(no episode records yet)".dimmed());
             }
         }
 
-        SimCommands::ArcBest { task, json } => {
-            match reader.best_arc_episode(&task).await {
+        SimCommands::BestEpisode { task, json } => {
+            match reader.best_episode(&task).await {
                 Some(r) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
                         return Ok(());
                     }
-                    println!("{}", format!("Best ARC episode — task: {}", task).bold());
+                    println!("{}", format!("Best episode — task: {}", task).bold());
                     println!("{}", "─".repeat(60).dimmed());
                     println!("  episode_id     : {:032x}", r.episode_id);
                     println!("  task_id        : {}", r.task_id.cyan());
@@ -1691,7 +1691,7 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
                         println!("    {}", "... (truncated)".dimmed());
                     }
                 }
-                None => println!("{}", format!("(no ARC episodes recorded for task '{task}')").dimmed()),
+                None => println!("{}", format!("(no episodes recorded for task '{task}')").dimmed()),
             }
         }
     }
