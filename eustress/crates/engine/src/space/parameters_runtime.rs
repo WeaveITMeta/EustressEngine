@@ -467,7 +467,8 @@ fn read_field(frame: &Fetched, w: &Wanted) -> Result<ParameterValue, String> {
             (s.trim().parse::<f64>().ok(), s.clone())
         }
     };
-    let mismatch = || format!("`{}` holds \"{text}\", which is not a {}", w.field, w.type_name);
+    // The error names the field and the type, never the source's data.
+    let mismatch = || format!("the latest value of `{}` is not a {}", w.field, w.type_name);
     Ok(match w.type_name.as_str() {
         "Float" => ParameterValue::Float(number.ok_or_else(mismatch)?),
         "Int" => {

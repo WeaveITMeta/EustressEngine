@@ -22461,26 +22461,25 @@ fn connector_entity(row: i32, res: &mut DrainResources) -> Option<Entity> {
     entity
 }
 
-/// Test one Connector the way the data crate would reach it. Blocking; runs
-/// on its own thread. Relative file endpoints resolve against the Space.
+/// Test one Connector the way the data crate reaches it, through the same
+/// rules every reader uses (`connector_config`: a file endpoint stays inside
+/// the Space). Blocking; runs on its own thread. A person's Test reads a
+/// switched-off Connector too.
 fn probe_data_source(dir: &std::path::Path, space_root: &std::path::Path) -> (bool, String) {
     #[cfg(feature = "data")]
     {
-        let Some((_, mut attrs)) = connector_attributes(&dir.join("_instance.toml")) else {
+        let Some((_, attrs)) = connector_attributes(&dir.join("_instance.toml")) else {
             return (false, "the Connector's _instance.toml could not be read".to_string());
         };
-        if let Some(endpoint) = attrs.get_mut("endpoint") {
-            let path = std::path::Path::new(endpoint.as_str());
-            if !endpoint.contains("://") && path.is_relative() && !endpoint.is_empty() {
-                *endpoint = space_root.join(path).to_string_lossy().to_string();
-            }
-        }
+        let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let how = eustress_data::source::connector::ConnectorRead {
+            space_root,
+            statement: None,
+            require_enabled: false,
+        };
         let started = std::time::Instant::now();
-        let result = eustress_data::source::materialize::config_from_attributes(&attrs)
-            .and_then(|config| {
-                eustress_data::source::validate_config(&config)?;
-                eustress_data::source::open(config)
-            })
+        let result = eustress_data::source::connector::connector_config(&name, attrs, &how)
+            .and_then(eustress_data::source::open)
             .and_then(|source| source.test_connection());
         let ms = started.elapsed().as_millis();
         match result {
