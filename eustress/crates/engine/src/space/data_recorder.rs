@@ -87,8 +87,75 @@ impl Plugin for DataRecorderPlugin {
                 frame: 0,
             })
             .insert_resource(DataRecording::default())
-            .add_systems(Update, (drain_and_flush_recorder, record_sampler));
+            .add_systems(
+                Update,
+                (forget_recording_on_space_change, drain_and_flush_recorder, record_sampler).chain(),
+            )
+            .add_systems(OnEnter(PlayModeState::Editing), flush_recorder_on_stop);
     }
+}
+
+/// Move queued samples into their per-series buffers.
+fn drain_queue(state: &mut RecorderState) {
+    let drained: Vec<SensorSample> = state.rx.try_iter().collect();
+    let cap = state.cap;
+    for s in drained {
+        state
+            .buffers
+            .entry(s.series.clone())
+            .or_insert_with(|| RecorderBuffer::new(s.series.clone(), cap))
+            .push(s.ts, s.seq, s.value);
+    }
+}
+
+/// Stop: write everything the run recorded now, into the Space it was
+/// recorded in, rather than at the next cadence tick, by when the Space may
+/// have changed.
+fn flush_recorder_on_stop(mut state: ResMut<RecorderState>, db: Res<WorldDbHandle>) {
+    drain_queue(&mut state);
+    let Some(db) = db.0.clone() else {
+        return;
+    };
+    for buf in state.buffers.values_mut() {
+        if !buf.is_empty() {
+            if let Err(e) = buf.flush(db.as_ref()) {
+                warn!(target: "eustress_engine::data", "recorder flush at Stop failed: {e}");
+            }
+        }
+    }
+}
+
+/// A Space switch: the outgoing Space's database is already closed, so samples
+/// still waiting cannot reach it, and they must never land in the incoming
+/// Space's `timeseries`. Drop them (Stop writes everything first, so this only
+/// happens when a switch comes before the next flush), and disarm Record: its
+/// target was an entity of the outgoing Space.
+fn forget_recording_on_space_change(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut rec: ResMut<DataRecording>,
+    mut state: ResMut<RecorderState>,
+) {
+    let Some(space_root) = space_root else {
+        return;
+    };
+    if !space_root.is_changed() {
+        return;
+    }
+    let queued = state.rx.try_iter().count();
+    let buffered: usize = state.buffers.values().map(|b| b.len()).sum();
+    state.buffers.clear();
+    state.frame = 0;
+    if queued + buffered > 0 {
+        warn!(
+            target: "eustress_engine::data",
+            "recorder: {} samples from the previous Space were not saved; it closed before the next flush",
+            queued + buffered
+        );
+    }
+    if rec.active || rec.target.is_some() {
+        info!(target: "eustress_engine::data", "recorder: Record disarmed by the Space switch");
+    }
+    *rec = DataRecording::default();
 }
 
 /// Producer A — sample the armed target Part's `Transform` each Play frame and
@@ -100,6 +167,8 @@ fn record_sampler(
     time: Res<Time>,
     sender: Res<SensorRecorderSender>,
     transforms: Query<&Transform>,
+    alive: Query<Entity>,
+    instances: Query<&eustress_common::classes::Instance>,
 ) {
     if !rec.active {
         return;
@@ -112,11 +181,23 @@ fn record_sampler(
         return;
     };
     let Ok(tf) = transforms.get(target) else {
+        // The target is gone (deleted, or Stop restored a different entity):
+        // disarm rather than keep "recording" nothing.
+        if !alive.contains(target) {
+            warn!(target: "eustress_engine::data", "recorder: the recorded part no longer exists; Record disarmed");
+            rec.active = false;
+            rec.target = None;
+        }
         return;
     };
     let ts = time.elapsed().as_millis() as u64;
     let seq = rec.seq;
-    let base = format!("record.e{}", target.index());
+    // Series are keyed by the instance's stable UUID, so runs recorded before
+    // and after a reload land in the same series; an entity index changes.
+    let base = match instances.get(target).map(|i| i.uuid.as_str()) {
+        Ok(uuid) if !uuid.is_empty() => format!("record.{uuid}"),
+        _ => format!("record.e{}", target.index()),
+    };
     sender.record(format!("{base}.x"), ts, seq, tf.translation.x as f64);
     sender.record(format!("{base}.y"), ts, seq, tf.translation.y as f64);
     sender.record(format!("{base}.z"), ts, seq, tf.translation.z as f64);
@@ -131,16 +212,7 @@ fn drain_and_flush_recorder(
     db: Res<WorldDbHandle>,
     load: Option<Res<LoadInProgress>>,
 ) {
-    // Collect first so the `rx` borrow ends before we touch `buffers`.
-    let drained: Vec<SensorSample> = state.rx.try_iter().collect();
-    let cap = state.cap;
-    for s in drained {
-        state
-            .buffers
-            .entry(s.series.clone())
-            .or_insert_with(|| RecorderBuffer::new(s.series.clone(), cap))
-            .push(s.ts, s.seq, s.value);
-    }
+    drain_queue(&mut state);
 
     // Never persist during cold-load + the quiescence window.
     if load.map(|l| l.active).unwrap_or(false) {
