@@ -140,18 +140,20 @@ impl DataSource for RestSource {
         let mut probe = self.request()?;
         probe.method = HttpMethod::Head;
         probe.body = None;
+        // The query can hold a key; the person sees the address without it.
+        let shown = super::http::redact_query(&probe.url);
         match self.transport.send(&probe) {
-            Err(e) => Ok(ConnectionStatus::failed(format!("{} unreachable: {e}", probe.url))),
+            Err(e) => Ok(ConnectionStatus::failed(format!("{} unreachable: {e}", shown))),
             Ok(r) if is_success(r.status) => {
-                Ok(ConnectionStatus::ok(format!("HTTP {} from {}", r.status, probe.url)))
+                Ok(ConnectionStatus::ok(format!("HTTP {} from {}", r.status, shown)))
             }
             // A host that answers "I do not do HEAD" has still answered, which
             // is the whole question a liveness probe asks.
             Ok(r) if matches!(r.status, 405 | 501) => Ok(ConnectionStatus::ok(format!(
                 "reachable — {} declines HEAD (HTTP {})",
-                probe.url, r.status
+                shown, r.status
             ))),
-            Ok(r) => Ok(ConnectionStatus::failed(format!("HTTP {} from {}", r.status, probe.url))),
+            Ok(r) => Ok(ConnectionStatus::failed(format!("HTTP {} from {}", r.status, shown))),
         }
     }
 
@@ -263,7 +265,7 @@ pub(super) fn require_success(
             "{} {} {} returned HTTP {}{because}",
             kind.as_str(),
             req.method,
-            req.url,
+            super::http::redact_query(&req.url),
             resp.status
         ),
     )))
@@ -571,6 +573,22 @@ mod tests {
             Arc::new(CannedTransport(HttpResponse { status, body: body.into() })),
         )
         .expect("valid rest config")
+    }
+
+    #[test]
+    fn a_failed_status_never_prints_the_query() {
+        let cfg = rest("https://api.example.com/rows?api_key=SECRET_Q&x=1");
+        for status in [401, 403, 405, 429] {
+            let probe = canned(cfg.clone(), status, "").test_connection().unwrap();
+            assert!(!probe.detail.contains("SECRET_Q"), "{}", probe.detail);
+            assert!(probe.detail.contains("api.example.com/rows"), "{}", probe.detail);
+            if status == 405 {
+                continue;
+            }
+            let e = canned(cfg.clone(), status, "denied").fetch().unwrap_err().to_string();
+            assert!(!e.contains("SECRET_Q"), "{e}");
+            assert!(e.contains(&format!("HTTP {status}")) && e.contains("api.example.com/rows"), "{e}");
+        }
     }
 
     // ── happy path ───────────────────────────────────────────────────────────

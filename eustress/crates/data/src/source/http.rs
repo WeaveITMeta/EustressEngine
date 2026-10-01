@@ -246,7 +246,17 @@ impl Default for UreqTransport {
 impl HttpTransport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
         use std::io::Read;
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
+        // No redirects: ureq would carry every header but Authorization to
+        // whatever address a server names, and a provider's key header
+        // (`apikey`, `x-api-key`) goes only to the address it was approved
+        // for. A 3xx comes back as a response, so the person sees where the
+        // source moved. No proxy from the environment either: a variable set
+        // by anything on the machine would otherwise see every request.
+        let agent = ureq::AgentBuilder::new()
+            .timeout(self.timeout)
+            .redirects(0)
+            .try_proxy_from_env(false)
+            .build();
         let mut r = agent.request(req.method.as_str(), &req.url);
         for (k, v) in &req.headers {
             r = r.set(k, v);
@@ -272,28 +282,55 @@ impl HttpTransport for UreqTransport {
             Err(ureq::Error::Status(status, resp)) => {
                 Ok(HttpResponse { status, body: read_body(resp) })
             }
-            Err(ureq::Error::Transport(t)) => Err(DataError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                // The URL is config, never a secret; the auth header is not in
-                // the transport error.
-                // The path is config; the query can hold a pre-signed credential.
-                format!("{} {} failed: {t}", req.method, redact_query(&req.url)),
-            ))),
+            Err(ureq::Error::Transport(t)) => {
+                // Never the transport error's own text: it begins with the
+                // request's full URL, query and all, and the query can hold a
+                // pre-signed credential. Its kind, message and cause say what
+                // went wrong.
+                let mut why = t.kind().to_string();
+                let cause = std::error::Error::source(&t).map(|s| s.to_string());
+                for part in t.message().map(str::to_string).into_iter().chain(cause) {
+                    why.push_str(": ");
+                    why.push_str(&part);
+                }
+                Err(DataError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("{} {} failed: {}", req.method, redact_query(&req.url), redact_urls(&why)),
+                )))
+            }
         }
     }
 }
 
-/// A URL with its query string redacted.
+/// A URL with its query string, fragment and any `user:password@` redacted.
 ///
 /// Azure and S3 pre-signed URLs carry the credential IN THE QUERY (`?sig=…`,
-/// `?X-Amz-Signature=…`), so printing a URL verbatim leaks exactly what
-/// redacting headers was meant to prevent. The path is kept because it is the
-/// useful part of a diagnostic.
+/// `?X-Amz-Signature=…`), an OAuth-style URL can carry a token in its
+/// fragment, and a password can sit before the host, so printing a URL
+/// verbatim leaks exactly what redacting headers was meant to prevent. The
+/// scheme, host and path are kept because they are the useful part of a
+/// diagnostic.
 pub fn redact_query(url: &str) -> String {
-    match url.split_once('?') {
-        Some((base, _)) => format!("{base}?<redacted>"),
+    let mut out = match url.find(['?', '#']) {
+        Some(i) => format!("{}<redacted>", &url[..=i]),
         None => url.to_string(),
+    };
+    if let Some(start) = out.find("://").map(|i| i + 3) {
+        let end = out[start..].find(['/', '?', '#']).map_or(out.len(), |i| start + i);
+        if let Some(at) = out[start..end].rfind('@') {
+            out.replace_range(start..start + at, "<redacted>");
+        }
     }
+    out
+}
+
+/// `text` with every URL in it passed through [`redact_query`].
+#[cfg(feature = "http")]
+fn redact_urls(text: &str) -> String {
+    text.split(' ')
+        .map(|word| if word.contains("://") { redact_query(word) } else { word.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A short, single-line excerpt of a response body, for error messages.
@@ -357,6 +394,58 @@ mod tests {
         assert!(!rendered.contains("SUPERSECRET"), "credential leaked: {rendered}");
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("b.csv"), "the path stays, it is the useful part");
+    }
+
+    #[test]
+    fn redact_query_hides_a_fragment_and_a_password() {
+        assert_eq!(redact_query("https://h.test/cb#access_token=T0K3N"), "https://h.test/cb#<redacted>");
+        assert_eq!(
+            redact_query("https://user:hunter2@h.test/a?sig=abc"),
+            "https://<redacted>@h.test/a?<redacted>"
+        );
+        // An `@` in the path is not a password.
+        assert_eq!(redact_query("https://h.test/users/@me"), "https://h.test/users/@me");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_transport_error_never_carries_the_query_or_a_password() {
+        // Nothing listens on port 1, so the connection fails.
+        let transport = UreqTransport { timeout: std::time::Duration::from_secs(5) };
+        let err = transport
+            .send(&HttpRequest::get("http://reader:PASSWORD_X@127.0.0.1:1/rows?sig=SECRET_X&key=K3Y_X#frag_X"))
+            .unwrap_err()
+            .to_string();
+        for secret in ["PASSWORD_X", "SECRET_X", "K3Y_X", "frag_X"] {
+            assert!(!err.contains(secret), "{secret} leaked: {err}");
+        }
+        assert!(err.contains("127.0.0.1:1/rows"), "the address is still named: {err}");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_redirect_is_returned_not_followed() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let to = elsewhere.local_addr().unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let serve = std::thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let reply = format!("HTTP/1.1 302 Found\r\nLocation: http://{to}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            s.write_all(reply.as_bytes()).unwrap();
+        });
+        let transport = UreqTransport { timeout: std::time::Duration::from_secs(5) };
+        let resp = transport
+            .send(&HttpRequest::get(format!("http://{at}/rows")).with_header("apikey", "SECRET_KEY"))
+            .unwrap();
+        serve.join().unwrap();
+        assert_eq!(resp.status, 302);
+        assert!(elsewhere.accept().is_err(), "the key header must not follow a redirect to another address");
     }
 
     #[test]

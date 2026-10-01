@@ -224,7 +224,144 @@ pub trait DataSource: Send + Sync {
 /// Build the provider a config names. Construction validates what each
 /// provider needs; the network is touched only when the caller probes
 /// ([`DataSource::test_connection`]) or fetches.
+///
+/// A provider with a secret comes back wrapped so that no text it returns (an
+/// error, a Test result) carries the secret ([`scrub_secret`]), whichever path
+/// produced the text. A secret shorter than [`MIN_SECRET_CHARS`] is refused
+/// here, before anything is sent, because it could not be scrubbed.
 pub fn open(config: SourceConfig) -> Result<Box<dyn DataSource>> {
+    let Some(var) = config.secret_ref.clone() else {
+        return provider(config);
+    };
+    if config.resolve_secret().is_some_and(|s| s.chars().count() < MIN_SECRET_CHARS) {
+        return Err(DataError::Schema(format!(
+            "the secret in `{var}` is shorter than {MIN_SECRET_CHARS} characters, so it is not sent: a value \
+             that short cannot be kept out of error messages"
+        )));
+    }
+    let inner = provider(config.clone())?;
+    Ok(Box::new(Scrubbed { inner, config }))
+}
+
+/// The shortest secret Eustress sends. Scrubbing a shorter value out of text
+/// would mangle ordinary words, so [`open`] refuses it instead.
+pub const MIN_SECRET_CHARS: usize = 8;
+
+/// `text` with `secret`, and the forms a server that echoes it is likely to
+/// use (percent-encoded, base64, base64url), replaced by `<redacted>`. A
+/// secret shorter than [`MIN_SECRET_CHARS`] leaves the text as it is.
+pub fn scrub_secret(text: &str, secret: &str) -> String {
+    if secret.chars().count() < MIN_SECRET_CHARS {
+        return text.to_string();
+    }
+    const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let upper = percent_encoded(secret, true);
+    let mut forms = vec![
+        secret.to_string(),
+        percent_encoded(secret, false),
+        upper.replace("%20", "+"),
+        upper,
+        base64(secret.as_bytes(), STANDARD, true),
+        base64(secret.as_bytes(), STANDARD, false),
+        base64(secret.as_bytes(), URL_SAFE, true),
+        base64(secret.as_bytes(), URL_SAFE, false),
+    ];
+    // Longest first, so a form that contains another is replaced whole.
+    forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
+    forms.dedup();
+    let mut out = text.to_string();
+    for form in forms {
+        out = out.replace(&form, "<redacted>");
+    }
+    out
+}
+
+/// RFC 3986 percent-encoding, unreserved characters kept.
+fn percent_encoded(text: &str, upper: bool) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else if upper {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push_str(&format!("%{b:02x}"));
+        }
+    }
+    out
+}
+
+fn base64(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.len();
+        let v = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for i in 0..4 {
+            if i <= n {
+                out.push(alphabet[((v >> (18 - 6 * i)) & 63) as usize] as char);
+            } else if pad {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A provider whose every outgoing text has its secret scrubbed. The secret is
+/// read again from the environment when a text is scrubbed, never kept.
+struct Scrubbed {
+    inner: Box<dyn DataSource>,
+    config: SourceConfig,
+}
+
+impl Scrubbed {
+    fn scrub(&self, text: &str) -> String {
+        match self.config.resolve_secret() {
+            Some(secret) => scrub_secret(text, &secret),
+            None => text.to_string(),
+        }
+    }
+
+    fn scrub_error(&self, e: DataError) -> DataError {
+        match e {
+            DataError::Io(io) => {
+                let text = io.to_string();
+                let clean = self.scrub(&text);
+                if clean == text {
+                    DataError::Io(io)
+                } else {
+                    DataError::Io(std::io::Error::new(io.kind(), clean))
+                }
+            }
+            DataError::Parquet(m) => DataError::Parquet(self.scrub(&m)),
+            DataError::Arrow(m) => DataError::Arrow(self.scrub(&m)),
+            DataError::Schema(m) => DataError::Schema(self.scrub(&m)),
+        }
+    }
+}
+
+impl DataSource for Scrubbed {
+    fn kind(&self) -> SourceKind {
+        self.inner.kind()
+    }
+
+    fn test_connection(&self) -> Result<ConnectionStatus> {
+        match self.inner.test_connection() {
+            Ok(status) => Ok(ConnectionStatus { detail: self.scrub(&status.detail), ..status }),
+            Err(e) => Err(self.scrub_error(e)),
+        }
+    }
+
+    fn fetch(&self) -> Result<Frame> {
+        self.inner.fetch().map_err(|e| self.scrub_error(e))
+    }
+}
+
+/// The provider a config names, as built (see [`open`]).
+fn provider(config: SourceConfig) -> Result<Box<dyn DataSource>> {
     Ok(match config.kind {
         SourceKind::Csv => Box::new(csv::CsvSource::new(config)),
         SourceKind::Postgres => Box::new(postgres::PostgresSource::new(config)?),
@@ -400,6 +537,74 @@ mod tests {
 
     fn cfg(kind: SourceKind, endpoint: &str) -> SourceConfig {
         SourceConfig::new(kind, endpoint)
+    }
+
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (raw, padded) in [("Man", "TWFu"), ("Ma", "TWE="), ("M", "TQ=="), ("foobar", "Zm9vYmFy"), ("fooba", "Zm9vYmE=")] {
+            assert_eq!(base64(raw.as_bytes(), STANDARD, true), padded);
+            assert_eq!(base64(raw.as_bytes(), STANDARD, false), padded.trim_end_matches('='));
+        }
+    }
+
+    #[test]
+    fn scrub_secret_removes_the_value_and_its_encodings() {
+        let secret = "s3cr3t/Key+v@l?ue";
+        let echoes = [
+            secret.to_string(),
+            "s3cr3t%2FKey%2Bv%40l%3Fue".to_string(),
+            "s3cr3t%2fKey%2bv%40l%3fue".to_string(),
+            "czNjcjN0L0tleSt2QGw/dWU=".to_string(),
+            "czNjcjN0L0tleSt2QGw_dWU".to_string(),
+        ];
+        for echo in echoes {
+            let text = format!("HTTP 401: invalid key '{echo}' for this project");
+            let clean = scrub_secret(&text, secret);
+            assert_eq!(clean, "HTTP 401: invalid key '<redacted>' for this project", "{echo}");
+        }
+        assert_eq!(scrub_secret("ordinary words", secret), "ordinary words");
+        // A short value is never scrubbed (it would mangle text); open refuses it.
+        assert_eq!(scrub_secret("the token is abc", "abc"), "the token is abc");
+    }
+
+    /// A provider that echoes its secret everywhere it can.
+    struct Echo(String);
+
+    impl DataSource for Echo {
+        fn kind(&self) -> SourceKind {
+            SourceKind::Rest
+        }
+        fn test_connection(&self) -> Result<ConnectionStatus> {
+            Ok(ConnectionStatus::failed(format!("HTTP 401: key {} rejected", self.0)))
+        }
+        fn fetch(&self) -> Result<Frame> {
+            Err(DataError::Io(std::io::Error::other(format!("GET failed: key={}", self.0))))
+        }
+    }
+
+    #[test]
+    fn no_text_leaving_a_provider_carries_its_secret() {
+        let var = "EUSTRESS_TEST_SCRUB_SECRET";
+        std::env::set_var(var, "Sup3rSecretValue");
+        let config = cfg(SourceKind::Rest, "https://api.example.com/x").with_secret_ref(var);
+        let source = Scrubbed { inner: Box::new(Echo("Sup3rSecretValue".into())), config };
+        let status = source.test_connection().unwrap();
+        assert_eq!(status.detail, "HTTP 401: key <redacted> rejected");
+        assert!(!status.reachable);
+        let e = source.fetch().unwrap_err().to_string();
+        assert!(!e.contains("Sup3rSecretValue") && e.contains("key=<redacted>"), "{e}");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn a_secret_too_short_to_scrub_is_never_sent() {
+        let var = "EUSTRESS_TEST_SHORT_SECRET";
+        std::env::set_var(var, "abc1234");
+        let config = cfg(SourceKind::Rest, "https://api.example.com/x").with_secret_ref(var);
+        let e = open(config).err().expect("a 7-character secret is refused").to_string();
+        assert!(e.contains("shorter than 8 characters") && e.contains(var), "{e}");
+        std::env::remove_var(var);
     }
 
     #[test]

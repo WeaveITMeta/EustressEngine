@@ -256,6 +256,10 @@ fn is_success(response: &HttpResponse) -> bool {
 /// (`{"code": …, "message": …, "details": …, "hint": …}`), falling back to the
 /// raw body so nothing is ever swallowed.
 fn error_detail(body: &str) -> String {
+    full_error_detail(body).chars().take(200).collect()
+}
+
+fn full_error_detail(body: &str) -> String {
     let trimmed = body.trim();
     if let Ok(payload) = parse_json(trimmed) {
         let message = payload.get("message").and_then(serde_json::Value::as_str).unwrap_or("");

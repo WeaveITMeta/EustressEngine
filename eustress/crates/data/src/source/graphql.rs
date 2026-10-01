@@ -151,16 +151,18 @@ impl DataSource for GraphQlSource {
 
     fn test_connection(&self) -> Result<ConnectionStatus> {
         let probe = self.request_for(PROBE_QUERY)?;
+        // The query can hold a key; the person sees the address without it.
+        let shown = super::http::redact_query(&probe.url);
         let resp = match self.transport.send(&probe) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(ConnectionStatus::failed(format!("{} unreachable: {e}", probe.url)))
+                return Ok(ConnectionStatus::failed(format!("{} unreachable: {e}", shown)))
             }
         };
         if !(200..300).contains(&resp.status) {
             return Ok(ConnectionStatus::failed(format!(
                 "HTTP {} from {}",
-                resp.status, probe.url
+                resp.status, shown
             )));
         }
         // A GraphQL server answers `{__typename}` with the query root's type
@@ -172,7 +174,7 @@ impl DataSource for GraphQlSource {
             }
             Ok(_) | Err(_) => Ok(ConnectionStatus::failed(format!(
                 "{} answered HTTP {} but not with a GraphQL envelope",
-                probe.url, resp.status
+                shown, resp.status
             ))),
         }
     }
@@ -258,6 +260,20 @@ mod tests {
             Arc::new(CannedTransport(HttpResponse { status, body: body.into() })),
         )
         .expect("valid graphql config")
+    }
+
+    #[test]
+    fn a_failed_status_never_prints_the_query() {
+        let cfg = gql("https://api.example.com/graphql?token=SECRET_Q");
+        for status in [401, 403, 429] {
+            let probe = canned(cfg.clone(), status, "").test_connection().unwrap();
+            assert!(!probe.detail.contains("SECRET_Q"), "{}", probe.detail);
+            let e = canned(cfg.clone(), status, "denied").fetch().unwrap_err().to_string();
+            assert!(!e.contains("SECRET_Q"), "{e}");
+            assert!(e.contains(&format!("HTTP {status}")) && e.contains("api.example.com/graphql"), "{e}");
+        }
+        let probe = canned(cfg, 200, "not json").test_connection().unwrap();
+        assert!(!probe.detail.contains("SECRET_Q"), "{}", probe.detail);
     }
 
     // ── happy path ───────────────────────────────────────────────────────────

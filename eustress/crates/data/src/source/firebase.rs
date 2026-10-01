@@ -348,6 +348,10 @@ fn next_page_token(payload: &Value) -> Option<String> {
 /// (`{"error": {"message": …, "status": …}}`), falling back to the raw body so
 /// nothing is ever swallowed.
 fn error_detail(body: &str) -> String {
+    full_error_detail(body).chars().take(200).collect()
+}
+
+fn full_error_detail(body: &str) -> String {
     let trimmed = body.trim();
     if let Ok(payload) = parse_json(trimmed) {
         if let Some(error) = payload.get("error") {

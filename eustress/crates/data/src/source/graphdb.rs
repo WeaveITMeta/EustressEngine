@@ -115,7 +115,7 @@ fn check_errors(root: &Value) -> Result<()> {
 /// reason.
 fn check_status(resp: &HttpResponse) -> Result<()> {
     if !(200..300).contains(&resp.status) {
-        let detail = resp.text().chars().take(300).collect::<String>();
+        let detail = resp.text().chars().take(200).collect::<String>();
         return Err(DataError::Schema(format!(
             "graph endpoint returned HTTP {}: {}",
             resp.status, detail
