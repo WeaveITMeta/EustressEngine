@@ -239,7 +239,8 @@ pub fn open(config: SourceConfig) -> Result<Box<dyn DataSource>> {
              that short cannot be kept out of error messages"
         )));
     }
-    let inner = provider(config.clone())?;
+    // A construction error is scrubbed too, whatever a provider puts in it.
+    let inner = provider(config.clone()).map_err(|e| scrub_error(&config, e))?;
     Ok(Box::new(Scrubbed { inner, config }))
 }
 
@@ -248,8 +249,9 @@ pub fn open(config: SourceConfig) -> Result<Box<dyn DataSource>> {
 pub const MIN_SECRET_CHARS: usize = 8;
 
 /// `text` with `secret`, and the forms a server that echoes it is likely to
-/// use (percent-encoded, base64, base64url), replaced by `<redacted>`. A
-/// secret shorter than [`MIN_SECRET_CHARS`] leaves the text as it is.
+/// use (percent-encoded, base64, base64url, escaped inside a JSON string),
+/// replaced by `<redacted>`. A secret shorter than [`MIN_SECRET_CHARS`] leaves
+/// the text as it is.
 pub fn scrub_secret(text: &str, secret: &str) -> String {
     if secret.chars().count() < MIN_SECRET_CHARS {
         return text.to_string();
@@ -266,6 +268,10 @@ pub fn scrub_secret(text: &str, secret: &str) -> String {
         base64(secret.as_bytes(), STANDARD, false),
         base64(secret.as_bytes(), URL_SAFE, true),
         base64(secret.as_bytes(), URL_SAFE, false),
+        json_escaped(secret, false, false),
+        json_escaped(secret, true, false),
+        json_escaped(secret, false, true),
+        json_escaped(secret, true, true),
     ];
     // Longest first, so a form that contains another is replaced whole.
     forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
@@ -287,6 +293,33 @@ fn percent_encoded(text: &str, upper: bool) -> String {
             out.push_str(&format!("%{b:02X}"));
         } else {
             out.push_str(&format!("%{b:02x}"));
+        }
+    }
+    out
+}
+
+/// `text` as it appears inside a JSON string: quote, backslash and control
+/// characters escaped, and optionally `/` (`\/`) and every non-ASCII
+/// character (`\uXXXX`), as some servers write them.
+fn json_escaped(text: &str, slash: bool, ascii: bool) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '/' if slash => out.push_str("\\/"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c < ' ' || (ascii && !c.is_ascii()) => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => out.push(c),
         }
     }
     out
@@ -326,20 +359,29 @@ impl Scrubbed {
     }
 
     fn scrub_error(&self, e: DataError) -> DataError {
-        match e {
-            DataError::Io(io) => {
-                let text = io.to_string();
-                let clean = self.scrub(&text);
-                if clean == text {
-                    DataError::Io(io)
-                } else {
-                    DataError::Io(std::io::Error::new(io.kind(), clean))
-                }
+        scrub_error(&self.config, e)
+    }
+}
+
+/// `e` with `config`'s secret scrubbed out of its text (see [`scrub_secret`]).
+fn scrub_error(config: &SourceConfig, e: DataError) -> DataError {
+    let scrub = |text: &str| match config.resolve_secret() {
+        Some(secret) => scrub_secret(text, &secret),
+        None => text.to_string(),
+    };
+    match e {
+        DataError::Io(io) => {
+            let text = io.to_string();
+            let clean = scrub(&text);
+            if clean == text {
+                DataError::Io(io)
+            } else {
+                DataError::Io(std::io::Error::new(io.kind(), clean))
             }
-            DataError::Parquet(m) => DataError::Parquet(self.scrub(&m)),
-            DataError::Arrow(m) => DataError::Arrow(self.scrub(&m)),
-            DataError::Schema(m) => DataError::Schema(self.scrub(&m)),
         }
+        DataError::Parquet(m) => DataError::Parquet(scrub(&m)),
+        DataError::Arrow(m) => DataError::Arrow(scrub(&m)),
+        DataError::Schema(m) => DataError::Schema(scrub(&m)),
     }
 }
 
@@ -566,6 +608,31 @@ mod tests {
         assert_eq!(scrub_secret("ordinary words", secret), "ordinary words");
         // A short value is never scrubbed (it would mangle text); open refuses it.
         assert_eq!(scrub_secret("the token is abc", "abc"), "the token is abc");
+    }
+
+    #[test]
+    fn scrub_secret_removes_the_json_escaped_value() {
+        let secret = r#"pa"ss\word/Key"#;
+        for body in [r#"{"error":"bad key pa\"ss\\word/Key"}"#, r#"{"error":"bad key pa\"ss\\word\/Key"}"#] {
+            assert_eq!(scrub_secret(body, secret), r#"{"error":"bad key <redacted>"}"#, "{body}");
+        }
+        let accented = "cl\u{e9}-secr\u{e8}te-42";
+        let body = r#"{"key":"clé-secrète-42"}"#;
+        assert_eq!(scrub_secret(body, accented), r#"{"key":"<redacted>"}"#);
+    }
+
+    #[test]
+    fn a_construction_error_cannot_carry_the_secret() {
+        // A provider that quotes its endpoint in a construction error, with
+        // the secret's value inside the endpoint.
+        let var = "EUSTRESS_TEST_BUILD_SECRET";
+        std::env::set_var(var, "Sup3rSecretBucket");
+        let config = cfg(SourceKind::S3, "gs://Sup3rSecretBucket/a.csv")
+            .with_option("region", "us-east-1")
+            .with_secret_ref(var);
+        let e = open(config).err().expect("a gs:// endpoint is refused").to_string();
+        assert!(!e.contains("Sup3rSecretBucket") && e.contains("<redacted>"), "{e}");
+        std::env::remove_var(var);
     }
 
     /// A provider that echoes its secret everywhere it can.
