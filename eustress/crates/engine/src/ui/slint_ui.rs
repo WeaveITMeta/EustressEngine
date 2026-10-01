@@ -1865,6 +1865,13 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<DataGridFedFor>()
             .add_systems(Update, sync_data_chart_to_slint.after(SlintSystems::Drain))
             .init_resource::<DataChartFedFor>()
+            // A Space switch empties both, before either feeds again.
+            .add_systems(
+                Update,
+                forget_data_views_on_space_change
+                    .before(sync_data_grid_to_selection)
+                    .before(sync_data_chart_to_slint),
+            )
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -21363,11 +21370,44 @@ fn sync_plugin_tabs_to_slint(
     ctx.window.set_plugin_buttons(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(buttons))));
 }
 
-/// Tracks which Dataset entity the Data Grid was last built for, so the CSV is
-/// only re-read when the selected Dataset actually changes. Non-Dataset
-/// selections are ignored — the grid keeps showing the last Dataset.
+/// The Dataset the Data Grid was last built for and the stamp of the CSV it
+/// read, so the CSV is read again when either changes: another Dataset is
+/// selected, or a data run rewrote the file. Non-Dataset selections are
+/// ignored, and the grid keeps showing the last Dataset.
 #[derive(Resource, Default)]
-struct DataGridFedFor(Option<Entity>);
+struct DataGridFedFor(Option<(Entity, Option<CsvStamp>)>);
+
+/// A Dataset's CSV as last read: its path, modified time and length.
+#[derive(Clone, PartialEq, Debug)]
+struct CsvStamp {
+    path: std::path::PathBuf,
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// The CSV a Dataset reads from: the first `.csv` beside its `_instance.toml`
+/// (the same file the `data:stats`/`fit`/… ops use). `dataset_file` is the
+/// Dataset's `LoadedFromFile` path, a folder or the file inside it.
+#[cfg_attr(not(feature = "data"), allow(dead_code))]
+fn dataset_csv(dataset_file: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = if dataset_file.is_dir() { dataset_file } else { dataset_file.parent()? };
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|x| x.ok())
+        .map(|x| x.path())
+        .find(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("csv")))
+}
+
+#[cfg_attr(not(feature = "data"), allow(dead_code))]
+fn csv_stamp(path: &std::path::Path) -> Option<CsvStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(CsvStamp { path: path.to_path_buf(), modified: meta.modified().ok(), len: meta.len() })
+}
+
+/// How often, in frames, a Dataset that stays selected is checked for a
+/// rewritten CSV (about four times a second).
+#[cfg_attr(not(feature = "data"), allow(dead_code))]
+const DATA_VIEW_RECHECK_FRAMES: u32 = 15;
 
 /// Feed the Data Grid bottom-panel tab from the selected Dataset's CSV.
 /// Generic over columns — the grid reflects whatever Dataset is selected in
@@ -21381,6 +21421,7 @@ fn sync_data_grid_to_selection(
     loaded: Query<&crate::space::LoadedFromFile>,
     instances: Query<&eustress_common::classes::Instance>,
     mut fed: ResMut<DataGridFedFor>,
+    mut recheck: Local<u32>,
 ) {
     use eustress_common::classes::ClassName;
 
@@ -21397,25 +21438,23 @@ fn sync_data_grid_to_selection(
         instances.get(e).map(|i| i.class_name == ClassName::Dataset).unwrap_or(false)
     });
     let Some(entity) = dataset else { return };
-    if fed.0 == Some(entity) {
-        return; // same Dataset already shown — no re-read
+    // The same Dataset: look again every few frames for a rewritten CSV.
+    let same = fed.0.as_ref().is_some_and(|(e, _)| *e == entity);
+    if same {
+        *recheck = recheck.wrapping_add(1);
+        if *recheck % DATA_VIEW_RECHECK_FRAMES != 0 {
+            return;
+        }
     }
-    fed.0 = Some(entity);
-
-    // First .csv beside the Dataset's _instance.toml.
-    let frame = loaded.get(entity).ok().and_then(|lff| {
-        let path = lff.path.clone();
-        let dir = if path.is_dir() { path } else { path.parent()?.to_path_buf() };
-        let csv = std::fs::read_dir(&dir).ok()?
-            .filter_map(|x| x.ok())
-            .map(|x| x.path())
-            .find(|p| {
-                p.extension().and_then(|x| x.to_str())
-                    .map(|x| x.eq_ignore_ascii_case("csv")).unwrap_or(false)
-            })?;
-        std::fs::File::open(&csv).ok()
-            .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
-    });
+    let csv = loaded.get(entity).ok().and_then(|lff| dataset_csv(&lff.path));
+    let stamp = csv.as_deref().and_then(csv_stamp);
+    if same && fed.0.as_ref().is_some_and(|(_, s)| *s == stamp) {
+        return;
+    }
+    fed.0 = Some((entity, stamp));
+    let frame = csv
+        .and_then(|csv| std::fs::File::open(csv).ok())
+        .and_then(|f| eustress_data::import::frame_from_csv(f).ok());
 
     let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
     let window = &ctx.window;
@@ -21447,7 +21486,9 @@ fn sync_data_grid_to_selection(
             info!("Data Grid: showing {n} of {total} rows for Dataset '{name}'");
             window.set_datagrid_columns(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(headers))));
             window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows))));
-            window.set_datagrid_name(slint::SharedString::from(name));
+            // The grid previews the first MAX_ROWS rows; say so when it stops short.
+            let title = if total > n { format!("{name} (first {n} of {total} rows)") } else { name };
+            window.set_datagrid_name(slint::SharedString::from(title));
         }
         None => {
             // A Dataset is selected but has no parseable CSV — clear the grid.
@@ -21476,10 +21517,48 @@ fn data_cell_string(data: &eustress_data::ColumnData, r: usize) -> String {
     }
 }
 
+/// A Space switch: the Data Grid and Chart tabs still show the outgoing Space's
+/// Dataset, name included, and their fed-for markers name entities that are
+/// gone, whose ids the incoming Space may reuse (a Dataset there would then
+/// never be read). Empty both views and forget what they were built for.
+fn forget_data_views_on_space_change(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut grid_fed: ResMut<DataGridFedFor>,
+    mut chart_fed: ResMut<DataChartFedFor>,
+) {
+    let Some(space_root) = space_root else { return };
+    if !space_root.is_changed() {
+        return;
+    }
+    grid_fed.0 = None;
+    chart_fed.0 = None;
+    let Some(ctx) = slint_context else { return };
+    let window = &ctx.window;
+    let no_text = || slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+    window.set_datagrid_columns(no_text());
+    window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<DataGridRow>::new()))));
+    window.set_datagrid_name(slint::SharedString::default());
+    window.set_chart_title(slint::SharedString::default());
+    window.set_chart_x_label(slint::SharedString::default());
+    window.set_chart_y_label(slint::SharedString::default());
+    window.set_chart_series_path(slint::SharedString::default());
+    window.set_chart_fit_path(slint::SharedString::default());
+    window.set_chart_fit_label(slint::SharedString::default());
+    window.set_chart_x_ticks(no_text());
+    window.set_chart_y_ticks(no_text());
+    window.set_chart_points(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<ChartPoint>::new()))));
+    window.set_chart_points3(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<ChartPoint3>::new()))));
+    window.set_chart_x3_label(slint::SharedString::default());
+    window.set_chart_y3_label(slint::SharedString::default());
+    window.set_chart_z3_label(slint::SharedString::default());
+    window.set_chart_color3_label(slint::SharedString::default());
+}
+
 /// Tracks the last Dataset fed to the chart, so the CSV is re-read only when the
 /// selected Dataset changes (mirrors `DataGridFedFor`).
 #[derive(Resource, Default)]
-struct DataChartFedFor(Option<(Entity, String)>);
+struct DataChartFedFor(Option<(Entity, String, Option<CsvStamp>)>);
 
 /// Read a numeric cell as f64 (floats direct, ints widened; else None).
 #[cfg(feature = "data")]
@@ -21704,6 +21783,7 @@ fn sync_data_chart_to_slint(
     loaded: Query<&crate::space::LoadedFromFile>,
     instances: Query<&eustress_common::classes::Instance>,
     mut fed: ResMut<DataChartFedFor>,
+    mut recheck: Local<u32>,
 ) {
     use eustress_common::classes::ClassName;
     let Some(ctx) = slint_context else { return };
@@ -21731,24 +21811,23 @@ fn sync_data_chart_to_slint(
     let ov_sig = format!("{}|{}|{}|{}",
         window.get_chart_xmin_in(), window.get_chart_xmax_in(),
         window.get_chart_ymin_in(), window.get_chart_ymax_in());
-    if fed.0.as_ref().map(|(e, s)| *e == entity && s == &ov_sig).unwrap_or(false) {
+    // The same Dataset and axes: look again every few frames for a rewritten CSV.
+    let same = fed.0.as_ref().is_some_and(|(e, s, _)| *e == entity && s == &ov_sig);
+    if same {
+        *recheck = recheck.wrapping_add(1);
+        if *recheck % DATA_VIEW_RECHECK_FRAMES != 0 {
+            return;
+        }
+    }
+    let csv = loaded.get(entity).ok().and_then(|lff| dataset_csv(&lff.path));
+    let stamp = csv.as_deref().and_then(csv_stamp);
+    if same && fed.0.as_ref().is_some_and(|(_, _, s)| *s == stamp) {
         return;
     }
-    fed.0 = Some((entity, ov_sig));
-
-    let frame = loaded.get(entity).ok().and_then(|lff| {
-        let path = lff.path.clone();
-        let dir = if path.is_dir() { path } else { path.parent()?.to_path_buf() };
-        let csv = std::fs::read_dir(&dir).ok()?
-            .filter_map(|x| x.ok())
-            .map(|x| x.path())
-            .find(|p| {
-                p.extension().and_then(|x| x.to_str())
-                    .map(|x| x.eq_ignore_ascii_case("csv")).unwrap_or(false)
-            })?;
-        std::fs::File::open(&csv).ok()
-            .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
-    });
+    fed.0 = Some((entity, ov_sig, stamp));
+    let frame = csv
+        .and_then(|csv| std::fs::File::open(csv).ok())
+        .and_then(|f| eustress_data::import::frame_from_csv(f).ok());
 
     let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
 
