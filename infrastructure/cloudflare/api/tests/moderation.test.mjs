@@ -8,6 +8,7 @@ import {
   handleModerationRoute, isListable, canServe, publicModeration, loadCase,
   DEFAULT_THRESHOLDS, HARD_CATEGORIES, SOFT_CATEGORIES, QUALITY_BANDS, RATINGS,
   MODERATION_TOOLS, AGENT_TOOL_NAMES, POLICY_HASH_ANCHORED, DOSSIER_MAX_BYTES,
+  authorView, authorStatusOf, safeAuthorText, AUTHOR_COPY, handleNotificationRoute, unsubscribeToken,
 } from '../src/moderation.mjs';
 import { render, TARGET } from '../scripts/sync-policy.mjs';
 import { GUARDIAN_POLICY_TEXT, MODERATION_PLAYBOOK_TEXT } from '../src/generated/policy_text.mjs';
@@ -281,10 +282,11 @@ test('the judge prompt keeps one stable cacheable prefix across different publis
   await runModerationCase(first.id, env, d);
   await runModerationCase(second.id, env, d);
   assert.equal(d.calls.judge.length, 2);
-  const [a, b] = d.calls.judge;
-  assert.equal(a.input[0].text, b.input[0].text, 'block 1 must not vary between publishes');
-  assert.ok(a.input[0].text.length > 15000, 'the policy is the bulk of the prefix');
-  assert.notEqual(a.input.at(-1).text, b.input.at(-1).text, 'the per-case block does vary');
+  // The judge sends one user message; its content parts are the blocks.
+  const [a, b] = d.calls.judge.map(call => call.input[0].content);
+  assert.equal(a[0].text, b[0].text, 'block 1 must not vary between publishes');
+  assert.ok(a[0].text.length > 15000, 'the policy is the bulk of the prefix');
+  assert.notEqual(a.at(-1).text, b.at(-1).text, 'the per-case block does vary');
 });
 
 test('a clean publish is approved, listed, and the judge saw the captures', async () => {
@@ -296,14 +298,17 @@ test('a clean publish is approved, listed, and the judge saw the captures', asyn
   assert.equal(rec.decision.rating, 'all_ages');
   assert.equal(rec.judge.captures_used.length, 2);
   assert.equal(d.calls.judge.length, 1);
-  const judgeInput = d.calls.judge[0].input;
-  const images = judgeInput.filter(i => i.type === 'image_url');
+  // One user message whose parts are the policy, the captures, then the case.
+  assert.equal(d.calls.judge[0].input.length, 1);
+  const judgeInput = d.calls.judge[0].input[0].content;
+  const images = judgeInput.filter(i => i.type === 'input_image');
   assert.equal(images.length, 2);
-  assert.equal(images[0].image_url.detail, 'low');
+  assert.equal(images[0].detail, 'low');
+  assert.equal(typeof images[0].image_url, 'string');
   // The policy leads, byte-identical on every call, so a prompt cache can
   // reuse it; per-publish content (images, then the case) follows it.
   assert.match(judgeInput[0].text, /POLICY BEGIN/);
-  assert.equal(judgeInput[1].type, 'image_url');
+  assert.equal(judgeInput[1].type, 'input_image');
   assert.match(judgeInput.at(-1).text, /Case summary/);
   const after = await simOf(env, sim.id);
   assert.equal(isListable(after), true);
@@ -312,7 +317,8 @@ test('a clean publish is approved, listed, and the judge saw the captures', asyn
   assert.ok(env.SOCIAL.m.has(`modq:approved:${sim.id}`));
   assert.ok(env.SOCIAL.m.has(`modroot:user-1:${sim.pak_etag}:${sim.scene_size_bytes}`));
   const pub = publicModeration(rec);
-  assert.equal(pub.status, 'approved');
+  assert.equal(pub.status, 'listed');
+  assert.equal(pub.rating, 'all_ages');
   assert.ok(!('jev' in pub) && !('judge' in pub));
 });
 
@@ -333,7 +339,12 @@ test('a hard category quarantines: nobody downloads, the author is frozen, a per
   assert.equal(canServe(after, 'user-1', false), false, 'the author cannot pull a quarantined .pak');
   assert.equal(canServe(after, 'someone', false), false);
   assert.equal(canServe(after, 'admin', true), true);
-  assert.deepEqual(publicModeration(rec).reasons, [{ code: 'under_legal_review', lane: 'legal' }]);
+  // The author is never told about the hold: it reads as ordinary review.
+  const masked = publicModeration(rec, after);
+  assert.equal(masked.status, 'in_review');
+  assert.deepEqual(masked.reasons, []);
+  assert.equal(masked.can_appeal, false);
+  assert.doesNotMatch(JSON.stringify(masked), /quarantin|legal|csam/i);
 
   const exec = makeToolExecutor(env, d, { actor: 'agent', actorId: 'grok-agent' });
   const refused = await exec('moderation_approve', { sim_id: sim.id, rating: 'all_ages', rationale: 'The agent thinks this is fine actually.' });
@@ -545,7 +556,9 @@ test('submit runs the pipeline under waitUntil and the author can read the outco
   await Promise.all(pending);
   const status = await route(req('GET', `/api/simulations/${sim.id}/moderation`, { token: 'user-1' }), env, d);
   const body = await status.json();
-  assert.equal(body.status, 'rejected');
+  assert.equal(body.status, 'not_listed');
+  assert.equal(body.can_appeal, true);
+  assert.equal(body.reasons[0].category, 'harm_real_world_instructions');
   assert.equal(body.listable, false);
   assert.ok(body.suggested_edit);
   assert.equal(await (await route(req('GET', `/api/simulations/${sim.id}/moderation`, { token: 'stranger' }), env, d)).status, 403);
@@ -602,4 +615,199 @@ test('a private publish is still screened for the legal lane but never listed', 
   assert.equal(isListable(after), false);
   assert.equal(canServe(after, 'user-1', false), true);
   assert.equal(canServe(after, 'other', false), false);
+});
+
+// ── the author's view, the feed and the email ──────────────────────────────
+
+// An inbox and a sender the Worker's EMAIL binding stands in for.
+function mailEnv(extra = {}) {
+  const env = environment({ JWT_SECRET: 'test-secret', ...extra });
+  env.sent = [];
+  env.EMAIL = { send: async m => { env.sent.push(m); } };
+  env.__EmailMessage = class { constructor(from, to, raw) { this.from = from; this.to = to; this.raw = raw; } };
+  env.USERS.m.set('user:user-1', JSON.stringify({ id: 'user-1', username: 'ann', email: 'ann@example.com' }));
+  return env;
+}
+const feedOf = env => [...env.SOCIAL.m.keys()].filter(k => k.startsWith('notif:user-1:')).map(k => JSON.parse(env.SOCIAL.m.get(k)));
+const bodyOf = m => Buffer.from(m.raw.split('Content-Transfer-Encoding: base64\r\n\r\n')[1].split('\r\n--')[0].replace(/\r\n/g, ''), 'base64').toString('utf8');
+const notifRoute = (request, env) => handleNotificationRoute(request, new URL(request.url), env, { verifyAuth: async r => (r.headers.get('Authorization') || '').replace('Bearer ', '') || null, json, cors: {} });
+
+const INTERNAL_KEYS = ['p', 'confidence', 'threshold', 'rationale', 'spatial_evidence', 'jev', 'judge', 'by', 'legal_hold', 'lane', 'code', 'triage', 'agent', 'history', 'human'];
+function keysDeep(v, out = new Set()) {
+  if (Array.isArray(v)) v.forEach(x => keysDeep(x, out));
+  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { out.add(k); keysDeep(x, out); }
+  return out;
+}
+
+test('the author view never carries internal fields, for every internal status', () => {
+  const internals = {
+    reasons: [{ code: 'quality_unmodified_template_or_asset_flip', lane: 'quality', criterion: 3, p: 0.93, confidence: 0.91, action: 'reject' },
+              { code: 'judge_flagged', lane: 'judge', action: 'hold', rationale: 'judge thinks p=0.44' },
+              { code: 'classifier_unavailable', lane: 'system', action: 'hold' }],
+    suggested_edit: 'Arrange the arcade facades yourself.', rating: 'teen_13', lane: 'quality', changes: ['external_links_or_contact'],
+  };
+  for (const status of ['pending', 'classifying', 'approved', 'held', 'rejected', 'changes_requested', 'quarantined', 'appealed']) {
+    const rec = { sim_id: 's', author_id: 'a', status, decision: internals, jev: { answers: { csam_or_minor_sexualization: { p: 0.9 } } }, judge: { rationale: 'x', spatial_evidence: ['y'] },
+      author_notice: { message: 'Remove the Discord link from the lobby sign.', by: 'grok-agent', changes: ['external_links_or_contact'] },
+      legal_hold: status === 'quarantined' ? { category: 'csam_or_minor_sexualization' } : null,
+      appeal: status === 'appealed' ? { status: 'pending', at: 't', text: 'please', rationale: 'internal' } : null, updated_at: 'u', policy_version: '1.2' };
+    const v = authorView(rec, { is_public: true });
+    const keys = keysDeep(v);
+    for (const k of INTERNAL_KEYS) assert.ok(!keys.has(k), `${status}: leaked key ${k}`);
+    const text = JSON.stringify(v);
+    assert.doesNotMatch(text, /0\.9\d|quarantin|legal|csam|judge|classifier|grok|held_by|under_legal_review/i, `${status}: ${text}`);
+    assert.ok(['in_review', 'listed', 'not_listed', 'changes_requested', 'appeal_in_review'].includes(v.status), status);
+  }
+  assert.equal(authorView({ status: 'held' }, {}).status, authorView({ status: 'quarantined' }, {}).status, 'held and quarantined are indistinguishable');
+  assert.equal(authorView({ status: 'held' }, {}).headline, authorView({ status: 'quarantined' }, {}).headline);
+  assert.equal(authorStatusOf('approved', false), 'approved_private');
+});
+
+test('reasons come from the catalogue, and unknown codes fall back to the lane copy', () => {
+  const view = authorView({ status: 'rejected', decision: { reasons: [
+    { code: 'brand_new_internal_code_v9', lane: 'quality', action: 'reject' },
+    { code: 'another_unknown', lane: 'harm', action: 'reject' },
+    { code: 'real_crime_instructions', lane: 'harm', action: 'reject' },
+    { code: 'ignored_escalation', lane: 'harm', action: 'escalate' },
+  ] } }, {});
+  assert.deepEqual(view.reasons.map(r => r.category), ['quality_low_effort', 'harm_policy', 'harm_real_world_instructions']);
+  for (const r of view.reasons) { assert.ok(r.title && r.why && r.what_to_change); assert.equal(r.title, AUTHOR_COPY[r.category].title); }
+  const coppa = authorView({ status: 'changes_requested', decision: { changes: ['external_links_or_contact', 'collects_personal_info', 'Rename the "Kill" button to "Tag"'] } }, {});
+  assert.deepEqual(coppa.reasons.map(r => r.category), ['coppa_links', 'coppa_personal_data', 'requested_change']);
+  assert.equal(coppa.reasons[2].what_to_change, 'Rename the "Kill" button to "Tag"');
+});
+
+test('free text shown to an author drops anything about how the review works', () => {
+  assert.equal(safeAuthorText('Add original lighting to the plaza.'), 'Add original lighting to the plaza.');
+  assert.equal(safeAuthorText('Score = 0.91 on the flip scale; add lighting.'), 'on the flip scale; add lighting.');
+  assert.equal(safeAuthorText('Per policy v1.2 section 5 this fails.'), null);
+  assert.equal(safeAuthorText('The classifier was confident, p=0.93.'), null);
+  assert.equal(safeAuthorText('Below the threshold for quality.'), null);
+  assert.equal(safeAuthorText('A two-lane road and a model train set are fine.'), 'A two-lane road and a model train set are fine.');
+  assert.equal(safeAuthorText('x'.repeat(900)).length, 600);
+  assert.equal(safeAuthorText(42), null);
+});
+
+test('a decision reaches the author exactly once, in the feed and by email', async () => {
+  const env = mailEnv();
+  const sim = await publishedSim(env);
+  const d = deps(env);
+  await runModerationCase(sim.id, env, d);
+  const feed = feedOf(env);
+  assert.equal(feed.length, 1);
+  assert.deepEqual([feed[0].status, feed[0].event, feed[0].read], ['listed', 'decision', false]);
+  assert.equal(env.sent.length, 1);
+  assert.equal(env.sent[0].to, 'ann@example.com');
+  assert.match(env.sent[0].raw, /^Subject: Your Universe "Harbor Town" is live in the Gallery\r$/m);
+  assert.match(env.sent[0].raw, /^List-Unsubscribe: <https:\/\/api\.eustress\.dev\/api\/notifications\/unsubscribe\?u=user-1&t=[0-9a-f]{64}>\r$/m);
+  assert.match(env.sent[0].raw, /^List-Unsubscribe-Post: List-Unsubscribe=One-Click\r$/m);
+  const text = bodyOf(env.sent[0]);
+  assert.match(text, /Age rating: All ages/);
+  assert.doesNotMatch(text, /0\.\d\d|judge|jev|grok|polic|threshold|spatial/i);
+  // A rerun and the sweep reach the same decision: nothing new is sent.
+  await runModerationCase(sim.id, env, d, { trigger: 'rerun' });
+  await runModerationCase(sim.id, env, d, { trigger: 'sweep' });
+  assert.equal(feedOf(env).length, 1);
+  assert.equal(env.sent.length, 1);
+});
+
+test('held and quarantined cases tell the author nothing, by feed or by email', async () => {
+  const env = mailEnv();
+  const held = await publishedSim(env);
+  await runModerationCase(held.id, env, { ...deps(env), fetch: jevFetch(jevAnswers({ doxxing_or_targeted_harassment: 0.5 })) });
+  const q = await publishedSim(env, { id: 'a1b2c3d4-0000-4000-8000-0000000000f1', pak: 'PAK-Q' });
+  await runModerationCase(q.id, env, { ...deps(env), fetch: jevFetch(jevAnswers({ csam_or_minor_sexualization: 0.95 })) });
+  assert.equal((await loadCase(env, q.id)).status, 'quarantined');
+  assert.equal(feedOf(env).length, 0);
+  assert.equal(env.sent.length, 0);
+  const r = await route(req('GET', `/api/simulations/${q.id}/moderation`, { token: 'user-1' }), env, deps(env));
+  const body = await r.json();
+  assert.equal(body.status, 'in_review');
+  assert.doesNotMatch(JSON.stringify(body), /quarantin|legal/i);
+  const appeal = await route(req('POST', `/api/simulations/${q.id}/appeal`, { token: 'user-1', body: JSON.stringify({ text: 'Why is this still in review after a day?' }) }), env, deps(env));
+  assert.equal(appeal.status, 409);
+  const ab = await appeal.json();
+  assert.equal(ab.status, 'in_review');
+  assert.doesNotMatch(JSON.stringify(ab), /quarantin/i);
+});
+
+test('an opted-out author still gets the feed item but no email', async () => {
+  const env = mailEnv();
+  env.USERS.m.set('notify-prefs:user-1', JSON.stringify({ moderation_email: false }));
+  const sim = await publishedSim(env);
+  await runModerationCase(sim.id, env, { ...deps(env), fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.92, real_world_intent: 0.85 })) });
+  assert.equal(feedOf(env)[0].status, 'not_listed');
+  assert.equal(feedOf(env)[0].can_appeal, true);
+  assert.equal(env.sent.length, 0);
+});
+
+test('a new publish of the same listing is announced again; an appeal decision is announced once', async () => {
+  const env = mailEnv();
+  const sim = await publishedSim(env);
+  const reject = { ...deps(env), fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.92, real_world_intent: 0.85 })) };
+  await runModerationCase(sim.id, env, reject);
+  assert.match(env.sent[0].raw, /^Subject: "Harbor Town" was not listed in the Gallery\r$/m);
+  await route(req('POST', `/api/simulations/${sim.id}/appeal`, { token: 'user-1', body: JSON.stringify({ text: 'The chemistry is fictional flavour text with no steps.' }) }), env, { ...deps(env), playbookText: '' });
+  const admin = makeToolExecutor(env, deps(env), { actor: 'admin', actorId: 'admin-1' });
+  const r = await admin('moderation_resolve_appeal', { sim_id: sim.id, decision: 'overturned', rationale: 'Constants named after reagents; no quantities or steps anywhere.', rating: 'teen_13' });
+  assert.equal(r.ok, true);
+  assert.equal(env.sent.length, 2);
+  assert.match(env.sent[1].raw, /^Subject: Appeal accepted: "Harbor Town" is now listed\r$/m);
+  const appealItems = feedOf(env).filter(i => i.event === 'appeal_decided');
+  assert.equal(appealItems.length, 1);
+  assert.equal(appealItems[0].status, 'listed');
+  // A republish is a new decision, and the pipeline says so again.
+  await runModerationCase(sim.id, env, reject, { trigger: 'publish' });
+  assert.equal(env.sent.length, 3);
+});
+
+test('a listing name cannot inject mail headers', async () => {
+  const env = mailEnv();
+  const sim = await publishedSim(env, { name: 'Evil\r\nBcc: victim@example.com\r\nX' });
+  await runModerationCase(sim.id, env, deps(env));
+  const raw = env.sent[0].raw;
+  assert.doesNotMatch(raw, /^Bcc:/m);
+  assert.equal(raw.split('\r\n\r\n')[0].split('\r\n').filter(l => l.startsWith('Subject:')).length, 1);
+});
+
+test('unsubscribe: GET only shows a button, POST with a valid token opts out, a forged token is refused', async () => {
+  const env = mailEnv();
+  const t = await unsubscribeToken(env, 'user-1');
+  const url = `/api/notifications/unsubscribe?u=user-1&t=${t}`;
+  const get = await notifRoute(req('GET', url), env);
+  assert.equal(get.status, 200);
+  assert.match(await get.text(), /<form method="post"/);
+  assert.equal(env.USERS.m.get('notify-prefs:user-1'), undefined, 'a GET (mail scanner) must not unsubscribe');
+  const post = await notifRoute(req('POST', url, { body: 'List-Unsubscribe=One-Click', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }), env);
+  assert.equal(post.status, 200);
+  assert.equal(JSON.parse(env.USERS.m.get('notify-prefs:user-1')).moderation_email, false);
+  const forged = await notifRoute(req('POST', `/api/notifications/unsubscribe?u=user-2&t=${t}`), env);
+  assert.equal(forged.status, 400);
+  assert.equal(env.USERS.m.get('notify-prefs:user-2'), undefined);
+  assert.equal((await notifRoute(req('POST', '/api/notifications/unsubscribe?u=user-1&t=00'), env)).status, 400);
+});
+
+test('the feed is per account, honours since, marks read, and is rate limited', async () => {
+  const env = mailEnv();
+  const put = (user, at, status) => env.SOCIAL.m.set(`notif:${user}:${at}:s`, JSON.stringify({ id: `${at}:s`, status, at, read: false, expires_at: new Date(Date.now() + 86400e3).toISOString() }));
+  put('user-1', '2026-09-26T01:00:00Z', 'not_listed');
+  put('user-1', '2026-09-26T02:00:00Z', 'listed');
+  put('user-2', '2026-09-26T03:00:00Z', 'listed');
+  assert.equal((await notifRoute(req('GET', '/api/notifications'), env)).status, 401);
+  let body = await (await notifRoute(req('GET', '/api/notifications', { token: 'user-1' }), env)).json();
+  assert.deepEqual(body.items.map(i => i.status), ['listed', 'not_listed']);
+  assert.equal(body.unread, 2);
+  body = await (await notifRoute(req('GET', '/api/notifications?since=2026-09-26T01:30:00Z', { token: 'user-1' }), env)).json();
+  assert.deepEqual(body.items.map(i => i.status), ['listed']);
+  const read = await notifRoute(req('POST', '/api/notifications/read', { token: 'user-1', body: JSON.stringify({ ids: ['2026-09-26T02:00:00Z:s', '2026-09-26T03:00:00Z:s'] }) }), env);
+  assert.equal((await read.json()).marked, 1, 'another account cannot mark items it does not own');
+  assert.equal(JSON.parse(env.SOCIAL.m.get('notif:user-2:2026-09-26T03:00:00Z:s')).read, false);
+  let calls = 0;
+  env.NOTIFY_RATE_LIMITER = { limit: async ({ key }) => { calls += 1; assert.equal(key, 'notif:user-1'); return { success: calls <= 1 }; } };
+  assert.equal((await notifRoute(req('GET', '/api/notifications', { token: 'user-1' }), env)).status, 200);
+  const limited = await notifRoute(req('GET', '/api/notifications', { token: 'user-1' }), env);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get('Retry-After'), '60');
+  const prefs = await notifRoute(req('PUT', '/api/notifications/prefs', { token: 'user-9', body: JSON.stringify({ moderation_email: true }) }), { ...env, NOTIFY_RATE_LIMITER: undefined });
+  assert.equal((await prefs.json()).moderation_email, true);
 });

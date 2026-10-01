@@ -36,9 +36,11 @@ fn publish_history_stream(
 ) {
     let (Some(mut undo_stack), Some(queue)) = (undo_stack, queue) else { return };
 
-    // Cheap fast-path — avoid the mut-borrow cost when there's nothing
-    // to publish. `drain_pending_stream` moves out of the Vec in place.
-    let events = undo_stack.drain_pending_stream();
+    // Drained without change detection: the pending stream is not history
+    // the panel shows, and a mutable drain every frame marked the whole stack
+    // changed every frame, so the History panel rebuilt its rows each frame
+    // (dropping clicks on them) and could not tell a real edit from none.
+    let events = undo_stack.bypass_change_detection().drain_pending_stream();
     if events.is_empty() { return; }
 
     for ev in events {

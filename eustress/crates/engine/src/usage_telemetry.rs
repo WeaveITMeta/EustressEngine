@@ -25,7 +25,7 @@
 //! # Upload (aggregates only)
 //! At session end the per-tool **totals** (never the per-click event stream)
 //! are written to an `outbox/` file and posted to
-//! `https://api.eustress.dev/api/telemetry/usage` on a background thread; a
+//! the API's `/api/telemetry/usage` (`eustress_common::api_base`) on a background thread; a
 //! failed or interrupted post is retried at next launch by draining the
 //! outbox. Per-click timing therefore never leaves the machine. Override the
 //! endpoint with `EUSTRESS_TELEMETRY_URL` (e.g. for a local worker dev run).
@@ -593,7 +593,7 @@ fn beacon_panic_probe(mut frames: Local<u32>) {
 /// Ingest endpoint — the production api worker unless overridden for dev.
 fn upload_url() -> String {
     std::env::var("EUSTRESS_TELEMETRY_URL")
-        .unwrap_or_else(|_| "https://api.eustress.dev/api/telemetry/usage".to_string())
+        .unwrap_or_else(|_| eustress_common::api_base::api_url("/api/telemetry/usage"))
 }
 
 impl UsageTelemetry {
@@ -667,7 +667,7 @@ fn session_outbox_name() -> String {
 pub fn post_comment(install_id: String, tool: String, text: String) {
     std::thread::spawn(move || {
         let url = std::env::var("EUSTRESS_TELEMETRY_COMMENT_URL")
-            .unwrap_or_else(|_| "https://api.eustress.dev/api/telemetry/comment".to_string());
+            .unwrap_or_else(|_| eustress_common::api_base::api_url("/api/telemetry/comment"));
         let payload = serde_json::json!({
             "install_id": install_id,
             "tool": tool,

@@ -63,6 +63,83 @@ export struct DiagnosticSpan {
 // select-all / has-focus) so existing callers swap in without changes, and
 // wraps the inner TextInput in our own ContextMenuArea with MenuItem + icon.
 // ─────────────────────────────────────────────────────────────────────────────
+/// A one-line field for the editor's find, replace and go-to-line bars.
+component EditorBarField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    /// Enter, with whether Shift was held.
+    callback accepted(bool);
+    callback escaped();
+
+    height: 24px;
+    background: Theme.input-background;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent-cyan : Theme.input-border;
+    border-radius: 3px;
+    forward-focus: input;
+
+    if root.text == "": Text {
+        x: 6px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.text-disabled;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+    input := TextInput {
+        x: 6px;
+        width: parent.width - 12px;
+        height: parent.height;
+        vertical-alignment: center;
+        single-line: true;
+        text <=> root.text;
+        color: Theme.text-primary;
+        font-size: 12px;
+        edited => { root.edited(self.text); }
+        key-pressed(event) => {
+            if (event.text == Key.Return) {
+                root.accepted(event.modifiers.shift);
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.escaped();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+/// A small text button for the editor's bars.
+component EditorBarButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked();
+
+    width: max(24px, label-text.preferred-width + 12px);
+    height: 24px;
+    border-radius: 3px;
+    background: touch.pressed ? Theme.button-pressed
+        : touch.has-hover ? Theme.button-hover
+        : root.active ? Theme.accent-cyan.with-alpha(0.25)
+        : transparent;
+
+    label-text := Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 component EustressTextEdit inherits Rectangle {
     in-out property <string> text;
     in property <length> font-size: 13px;
@@ -71,6 +148,47 @@ component EustressTextEdit inherits Rectangle {
     in property <bool> read-only: false;
     in property <brush> foreground: Theme.text-primary;
     out property <bool> has-focus: text-input.has-focus;
+
+    /// The selection as UTF-8 byte offsets into `text`, for a host that
+    /// edits the text itself.
+    out property <int> cursor-byte: text-input.cursor-position-byte-offset;
+    out property <int> anchor-byte: text-input.anchor-position-byte-offset;
+
+    /// An edit made by the host: when `external-revision` changes, the text
+    /// becomes `external-text` and the selection `external-anchor` to
+    /// `external-cursor` (left alone when the cursor is negative). One
+    /// handler does both, so the selection always lands in the new text.
+    in property <string> external-text;
+    in property <int> external-revision: 0;
+    in property <int> external-anchor: -1;
+    in property <int> external-cursor: -1;
+    changed external-revision => {
+        root.text = root.external-text;
+        if (root.external-cursor >= 0) {
+            text-input.set-selection-offsets(max(0, root.external-anchor), root.external-cursor);
+        }
+    }
+
+    /// The bracket pair around the caret, as 0-based line and character
+    /// column. A negative line hides the marks.
+    in property <int> bracket-a-line: -1;
+    in property <int> bracket-a-col: 0;
+    in property <int> bracket-b-line: -1;
+    in property <int> bracket-b-col: 0;
+
+    /// The longest line in characters (a tab counts as eight), reported by
+    /// the host. With `no-wrap`, the text input is this wide, so long lines
+    /// scroll sideways instead of running off the edge. Zero leaves the
+    /// width to the text input's own measure.
+    in property <int> max-line-chars: 0;
+
+    // The editor's own caret. The TextInput draws its caret in the text
+    // colour, which is transparent while the coloured overlay is the
+    // visible text, so the editor draws one at the position the TextInput
+    // reports, in the scrolled content's coordinates.
+    property <length> caret-px: root.text-inset-x;
+    property <length> caret-py: root.text-inset-y;
+    property <bool> caret-on: true;
 
     // Syntax-highlight overlay. Per-token positioned Text elements that
     // render INSIDE the Flickable so they scroll atomically with the
@@ -188,6 +306,11 @@ component EustressTextEdit inherits Rectangle {
     out property <int> caret-line: 1;
     out property <int> caret-col: 1;
 
+    /// The first line in view (0-based) and how many lines fit, for a host
+    /// that draws only the visible part of the file.
+    out property <int> first-visible-line: max(0, -flick.viewport-y / root.line-height);
+    out property <int> visible-line-count: flick.height / root.line-height + 2;
+
     /// Fired whenever the caret moves, with 1-based (line, column). The host
     /// uses it to recompute completions against the identifier under the
     /// cursor.
@@ -203,6 +326,14 @@ component EustressTextEdit inherits Rectangle {
     // Go-to-Definition and Find-References don't belong in this menu
     // because they need the caret position, not the mouse position —
     // see F12 / Shift+F12 bindings in the TextInput below.
+    // Blinks the drawn caret while the editor has focus; any caret move
+    // turns it back on.
+    Timer {
+        interval: 530ms;
+        running: text-input.has-focus;
+        triggered => { root.caret-on = !root.caret-on; }
+    }
+
     ContextMenuArea {
         Menu {
             MenuItem {
@@ -240,7 +371,7 @@ component EustressTextEdit inherits Rectangle {
             width: parent.width;
             height: parent.height;
             viewport-width: root.wrap == TextWrap.no-wrap
-                ? max(self.width, text-input.preferred-width)
+                ? max(self.width, text-input.preferred-width, text-input.width)
                 : self.width;
             // Content height drives scroll: prefer the TextInput's reported
             // preferred-height, fall back to a line-count estimate so the
@@ -248,7 +379,40 @@ component EustressTextEdit inherits Rectangle {
             // long. Without the explicit estimate, Slint's TextInput inside a
             // size-clamped Flickable can report a clipped preferred-height
             // and the Flickable then refuses to scroll past the first page.
-            viewport-height: max(self.height, text-input.preferred-height);
+            // Plus the horizontal scrollbar's strip when lines scroll
+            // sideways, so the last line never sits under the bar.
+            viewport-height: max(self.height, text-input.preferred-height
+                + (self.viewport-width > self.width ? 14px : 0px));
+
+            // The caret's line: a faint band while the editor has focus.
+            // Drawn first, so the coloured text and the caret sit above it.
+            if text-input.has-focus && !root.read-only: Rectangle {
+                x: 0px;
+                y: (root.caret-line - 1) * root.line-height + root.text-inset-y;
+                width: flick.viewport-width;
+                height: root.line-height;
+                background: Theme.accent-cyan.with-alpha(0.07);
+            }
+
+            // The bracket pair around the caret: a thin cyan box on each.
+            if root.bracket-a-line >= 0 && root.bracket-b-line >= 0: Rectangle {
+                x: root.bracket-a-col * root.char-advance + root.text-inset-x;
+                y: root.bracket-a-line * root.line-height + root.text-inset-y;
+                width: root.char-advance;
+                height: root.line-height;
+                border-width: 1px;
+                border-color: Theme.accent-cyan.with-alpha(0.7);
+                background: Theme.accent-cyan.with-alpha(0.12);
+            }
+            if root.bracket-a-line >= 0 && root.bracket-b-line >= 0: Rectangle {
+                x: root.bracket-b-col * root.char-advance + root.text-inset-x;
+                y: root.bracket-b-line * root.line-height + root.text-inset-y;
+                width: root.char-advance;
+                height: root.line-height;
+                border-width: 1px;
+                border-color: Theme.accent-cyan.with-alpha(0.7);
+                background: Theme.accent-cyan.with-alpha(0.12);
+            }
 
             // Syntax-highlight overlay — rendered INSIDE the Flickable's
             // viewport as a sibling of the TextInput. Because they share the
@@ -270,7 +434,8 @@ component EustressTextEdit inherits Rectangle {
                     x: span.x * root.char-advance + root.text-inset-x;
                     y: span.line * root.line-height + root.text-inset-y;
                     text: span.text;
-                    color: rgba(span.r, span.g, span.b, 1.0);
+                    // Channels arrive as 0..1; rgb() takes 0..255.
+                    color: rgb(span.r * 255, span.g * 255, span.b * 255);
                     font-size: root.font-size;
                     font-family: root.font-family;
                     font-weight: span.bold ? 700 : 400;
@@ -279,9 +444,23 @@ component EustressTextEdit inherits Rectangle {
                 }
             }
 
+            // The caret (see `caret-px`), drawn only while the overlay is
+            // the visible text; otherwise the TextInput's own caret shows.
+            if root.has-token-spans && text-input.has-focus && root.caret-on: Rectangle {
+                x: root.caret-px;
+                y: root.caret-py;
+                width: 2px;
+                height: root.line-height;
+                background: Theme.text-primary;
+            }
+
             text-input := TextInput {
                 x: 0px; y: 0px;
-                width: parent.width;
+                // As wide as the longest line when lines do not wrap, so the
+                // Flickable scrolls sideways across all of it.
+                width: root.wrap == TextWrap.no-wrap && root.max-line-chars > 0
+                    ? max(flick.width, root.max-line-chars * root.char-advance + 2 * root.text-inset-x + 48px)
+                    : flick.width;
                 // Height MUST match the Flickable's viewport-height, not the
                 // visible viewport. Otherwise the TextInput is clipped to
                 // one page of text and lines beyond that never render.
@@ -301,6 +480,10 @@ component EustressTextEdit inherits Rectangle {
                 // and let the overlay BE the text; the caret, selection
                 // highlight, and all input handling are unaffected.
                 color: root.has-token-spans ? transparent : root.foreground;
+                // Selection in Eustress cyan, translucent: it is painted over
+                // the coloured overlay, which has to stay readable through it.
+                selection-background-color: Theme.accent-cyan.with-alpha(0.30);
+                selection-foreground-color: root.has-token-spans ? transparent : root.foreground;
                 text <=> root.text;
                 read-only <=> root.read-only;
                 page-height: flick.height;
@@ -313,6 +496,26 @@ component EustressTextEdit inherits Rectangle {
                 cursor-position-changed(pos) => {
                     root.caret-line = (pos.y / root.line-height) + 1;
                     root.caret-col = max(1, (pos.x / root.char-advance) + 1);
+                    root.caret-px = pos.x;
+                    root.caret-py = pos.y;
+                    root.caret-on = true;
+                    // Keep the caret in view, sideways and up and down, with a
+                    // margin, never past the content's edges. Skipped until the
+                    // view has a real size, so a first layout cannot scroll it.
+                    if (flick.width > 80px && flick.height > 40px) {
+                        if (pos.x < -flick.viewport-x + 4px) {
+                            flick.viewport-x = min(0px, 24px - pos.x);
+                        } else if (pos.x > -flick.viewport-x + flick.width - 40px) {
+                            flick.viewport-x = max(min(0px, flick.width - flick.viewport-width),
+                                flick.width - 64px - pos.x);
+                        }
+                        if (pos.y < -flick.viewport-y) {
+                            flick.viewport-y = min(0px, -pos.y);
+                        } else if (pos.y + root.line-height > -flick.viewport-y + flick.height - 14px) {
+                            flick.viewport-y = max(min(0px, flick.height - flick.viewport-height),
+                                flick.height - 18px - pos.y - root.line-height);
+                        }
+                    }
                     root.caret-moved(root.caret-line, root.caret-col);
                 }
 
@@ -410,6 +613,65 @@ component EustressTextEdit inherits Rectangle {
                             self.origin
                             - (self.mouse-y - self.pressed-y)
                               * (root.vbar-scroll-range / root.vbar-track-range)));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Horizontal scrollbar ─────────────────────────────────────────────
+    //
+    // The vertical bar's design along the bottom edge, shown when a line is
+    // wider than the view. It stops short of the vertical bar's corner.
+    // `viewport-x` is <= 0 and grows negative rightward.
+    property <length> hbar-scroll-range: max(1px, flick.viewport-width - flick.width);
+    property <length> hbar-thumb-width: max(28px, (self.width - 12px) * (flick.width / flick.viewport-width));
+    property <length> hbar-track-range: max(1px, self.width - 12px - self.hbar-thumb-width);
+
+    if flick.viewport-width > flick.width: Rectangle {
+        x: 0px;
+        y: parent.height - 12px;
+        width: parent.width - 12px;
+        height: 12px;
+        background: transparent;
+
+        htrack-area := TouchArea {
+            clicked => {
+                if (self.mouse-x < hthumb.x) {
+                    flick.viewport-x = min(0px, flick.viewport-x + flick.width);
+                } else if (self.mouse-x > hthumb.x + hthumb.width) {
+                    flick.viewport-x = max(-root.hbar-scroll-range, flick.viewport-x - flick.width);
+                }
+            }
+        }
+
+        hthumb := Rectangle {
+            x: root.hbar-track-range * (-flick.viewport-x / root.hbar-scroll-range);
+            y: 2px;
+            width: root.hbar-thumb-width;
+            height: parent.height - 4px;
+            border-radius: self.height / 2;
+            background: hthumb-area.pressed      ? Theme.text-primary
+                      : hthumb-area.has-hover
+                        || htrack-area.has-hover ? Theme.text-secondary
+                      :                            Theme.text-disabled;
+
+            hthumb-area := TouchArea {
+                // Viewport offset when the drag began, as the vertical bar.
+                property <length> origin;
+
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        self.origin = flick.viewport-x;
+                    }
+                }
+
+                moved => {
+                    if (self.pressed) {
+                        flick.viewport-x = max(-root.hbar-scroll-range, min(0px,
+                            self.origin
+                            - (self.mouse-x - self.pressed-x)
+                              * (root.hbar-scroll-range / root.hbar-track-range)));
                     }
                 }
             }
@@ -515,8 +777,8 @@ export component ScriptEditor inherits Rectangle {
     in property <[CenterTab]> tabs: [];
     in property <int> active-tab: 0;
     in-out property <string> current-content: "";
-    in property <int> cursor-line: 1;
-    in property <int> cursor-column: 1;
+    in-out property <int> cursor-line: 1;
+    in-out property <int> cursor-column: 1;
     in property <bool> show-tab-bar: true;
     // Pre-computed line number string pushed from Rust (e.g. "1\n2\n3\n...N").
     // Kept for backwards compatibility with any other consumers; the gutter
@@ -546,6 +808,22 @@ export component ScriptEditor inherits Rectangle {
     callback on-tab-closed(int);
     callback on-content-changed(string);
     callback on-save();
+    /// An editing key the host applies (editing.rs): the key, then the
+    /// selection's anchor and cursor as byte offsets.
+    callback on-editor-key(string, int, int);
+    callback on-find(string, bool);
+    callback on-find-step(bool);
+    callback on-replace(string);
+    callback on-replace-all(string);
+    callback on-find-close();
+    callback on-go-to-line(int);
+    /// True while either editor view's text field has keyboard focus. The
+    /// host feeds it to the engine keyboard gate so typing stays here.
+    in-out property <bool> editor-has-focus: false;
+    /// The visible lines of whichever view is showing, reported to the host
+    /// so it pushes only the token spans near them.
+    in-out property <int> visible-first-line: 0;
+    in-out property <int> visible-line-count: 80;
     callback on-build();
     callback on-summarize();        // Reverse build: generate summary from code via Claude
     callback on-toggle-mode(int);   // Toggle summary/code for tab at index
@@ -588,6 +866,40 @@ export component ScriptEditor inherits Rectangle {
     /// Completion uses it to land the cursor inside the inserted call's
     /// parentheses.
     in-out property <int> caret-to-offset: -1;
+
+    /// Host edits (see EustressTextEdit.external-revision): the host's text,
+    /// and the selection to set with it.
+    in property <string> pushed-content: "";
+    in property <int> content-revision: 0;
+    in property <int> edit-anchor: -1;
+    in property <int> edit-cursor: -1;
+    in property <int> bracket-a-line: -1;
+    in property <int> bracket-a-col: 0;
+    in property <int> bracket-b-line: -1;
+    in property <int> bracket-b-col: 0;
+
+    // Find and replace, and go to line.
+    in-out property <bool> find-open: false;
+    in-out property <bool> replace-open: false;
+    in-out property <bool> goto-open: false;
+    in-out property <string> find-query: "";
+    in-out property <string> replace-text: "";
+    in-out property <bool> find-match-case: false;
+    in property <string> find-status: "";
+    /// Hover (Ctrl+I): the text, and the 1-based caret line and column it
+    /// belongs to. Empty text hides the popup.
+    in property <string> hover-text: "";
+    in property <int> hover-line: 1;
+    in property <int> hover-col: 1;
+    /// The longest line of the open file, in characters (see
+    /// EustressTextEdit.max-line-chars).
+    in property <int> max-line-chars: 0;
+    in-out property <bool> find-field-focus: false;
+    in-out property <bool> replace-field-focus: false;
+    in-out property <bool> goto-field-focus: false;
+    /// True while a find, replace or go-to-line field has focus; the host's
+    /// keyboard gate treats it like the editor's own focus.
+    out property <bool> bar-has-focus: root.find-field-focus || root.replace-field-focus || root.goto-field-focus;
 
     // Derived: active tab mode ("summary" | "code" | "markdown" | "")
     //
@@ -952,6 +1264,21 @@ export component ScriptEditor inherits Rectangle {
                             root.current-content = text;
                             root.on-content-changed(text);
                         }
+                        key-pressed(event) => {
+                            if (event.modifiers.control && !event.modifiers.shift && event.text == "s") {
+                                root.on-save();
+                                return accept;
+                            }
+                            reject
+                        }
+                        changed has-focus => { root.editor-has-focus = self.has-focus; }
+                        changed first-visible-line => { root.visible-first-line = self.first-visible-line; }
+                        changed visible-line-count => { root.visible-line-count = self.visible-line-count; }
+                        init => {
+                            root.editor-has-focus = self.has-focus;
+                            root.visible-first-line = self.first-visible-line;
+                            root.visible-line-count = self.visible-line-count;
+                        }
                     }
                 }
             }
@@ -994,7 +1321,7 @@ export component ScriptEditor inherits Rectangle {
                                 y: idx * editor-area.line-height + editor-area.text-inset-y;
                                 width: 3px;
                                 height: editor-area.line-height;
-                                background: rgba(hl.r, hl.g, hl.b, 0.55);
+                                background: rgba(hl.r * 255, hl.g * 255, hl.b * 255, 0.55);
                             }
                         }
 
@@ -1101,6 +1428,15 @@ export component ScriptEditor inherits Rectangle {
                     editor-area := EustressTextEdit {
                         x: 0px; y: 0px; width: 100%; height: 100%;
                         text: root.current-content;
+                        external-text: root.pushed-content;
+                        max-line-chars: root.max-line-chars;
+                        external-revision: root.content-revision;
+                        external-anchor: root.edit-anchor;
+                        external-cursor: root.edit-cursor;
+                        bracket-a-line: root.bracket-a-line;
+                        bracket-a-col: root.bracket-a-col;
+                        bracket-b-line: root.bracket-b-line;
+                        bracket-b-col: root.bracket-b-col;
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
@@ -1130,7 +1466,17 @@ export component ScriptEditor inherits Rectangle {
                             root.on-find-references(line, col);
                         }
                         caret-moved(line, col) => {
+                            root.cursor-line = line;
+                            root.cursor-column = col;
                             root.on-caret-moved(line, col);
+                        }
+                        changed has-focus => { root.editor-has-focus = self.has-focus; }
+                        changed first-visible-line => { root.visible-first-line = self.first-visible-line; }
+                        changed visible-line-count => { root.visible-line-count = self.visible-line-count; }
+                        init => {
+                            root.editor-has-focus = self.has-focus;
+                            root.visible-first-line = self.first-visible-line;
+                            root.visible-line-count = self.visible-line-count;
                         }
 
                         // Completion keys. Intercepted ONLY while the popup is
@@ -1138,8 +1484,26 @@ export component ScriptEditor inherits Rectangle {
                         // it did before — Tab still inserts a tab, Enter still
                         // breaks the line.
                         key-pressed(event) => {
+                            if (event.modifiers.control && !event.modifiers.shift && event.text == "s") {
+                                root.on-save();
+                                return accept;
+                            }
                             if (event.text == Key.Space && event.modifiers.control) {
                                 root.on-completion-request();
+                                return accept;
+                            }
+                            if (event.modifiers.control && !event.modifiers.shift && (event.text == "f" || event.text == "F")) {
+                                root.find-open = true;
+                                root.replace-open = false;
+                                return accept;
+                            }
+                            if (event.modifiers.control && (event.text == "h" || event.text == "H")) {
+                                root.find-open = true;
+                                root.replace-open = true;
+                                return accept;
+                            }
+                            if (event.modifiers.control && (event.text == "g" || event.text == "G")) {
+                                root.goto-open = true;
                                 return accept;
                             }
                             if (root.completion-items.length > 0) {
@@ -1167,6 +1531,50 @@ export component ScriptEditor inherits Rectangle {
                                     root.on-completion-dismiss();
                                     return accept;
                                 }
+                            }
+                            // Editing keys the engine applies (editing.rs). It
+                            // returns the new text and selection.
+                            if (event.modifiers.control && !event.modifiers.shift && (event.text == "i" || event.text == "I")) {
+                                root.on-editor-key("hover", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.text == Key.Escape && root.hover-text != "") {
+                                root.on-editor-key("hover-close", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.modifiers.control && !event.modifiers.alt && event.text == "/") {
+                                root.on-editor-key("comment", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.modifiers.control && !event.modifiers.shift && (event.text == "z" || event.text == "Z")) {
+                                root.on-editor-key("undo", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.modifiers.control && (event.text == "y" || event.text == "Y"
+                                    || (event.modifiers.shift && (event.text == "z" || event.text == "Z")))) {
+                                root.on-editor-key("redo", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                                return reject;
+                            }
+                            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) {
+                                root.on-editor-key("outdent", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.text == Key.Tab) {
+                                root.on-editor-key("indent", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.text == Key.Return) {
+                                root.on-editor-key("newline", self.anchor-byte, self.cursor-byte);
+                                return accept;
+                            }
+                            if (event.text == "(" || event.text == "[" || event.text == "{"
+                                    || event.text == ")" || event.text == "]" || event.text == "}"
+                                    || event.text == "\"" || event.text == "'" || event.text == "`") {
+                                root.on-editor-key(event.text, self.anchor-byte, self.cursor-byte);
+                                return accept;
                             }
                             reject
                         }
@@ -1245,6 +1653,169 @@ export component ScriptEditor inherits Rectangle {
                                 font-family: "Consolas";
                                 font-weight: 700;
                                 vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Hover (Ctrl+I), one line below the caret, like the
+                    // completion popup.
+                    if root.hover-text != "": Rectangle {
+                        property <length> caret-x: (root.hover-col - 1) * editor-area.char-advance
+                            + editor-area.text-inset-x + editor-area.scroll-x;
+                        property <length> caret-y: (root.hover-line - 1) * editor-area.line-height
+                            + editor-area.text-inset-y + editor-area.scroll-y;
+                        x: min(max(0px, self.caret-x), max(0px, parent.width - self.width));
+                        y: self.caret-y + editor-area.line-height;
+                        width: min(480px, parent.width - 16px);
+                        height: min(260px, hover-body.preferred-height + 16px);
+                        background: Theme.dialog-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: Theme.shadow-color;
+                        clip: true;
+
+                        hover-body := Text {
+                            x: 8px;
+                            y: 8px;
+                            width: parent.width - 16px;
+                            text: root.hover-text;
+                            wrap: word-wrap;
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                        }
+                    }
+
+                    // Find and replace (Ctrl+F, Ctrl+H), at the editor's top
+                    // right. The engine finds the matches and selects the
+                    // current one; Enter steps forward, Shift+Enter back.
+                    if root.find-open: Rectangle {
+                        x: parent.width - self.width - 20px;
+                        y: 6px;
+                        width: 400px;
+                        height: root.replace-open ? 64px : 36px;
+                        background: Theme.background-secondary;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: Theme.shadow-color;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 4px;
+                            HorizontalLayout {
+                                spacing: 4px;
+                                EditorBarField {
+                                    placeholder: "Find";
+                                    text <=> root.find-query;
+                                    init => {
+                                        self.focus();
+                                        root.on-find(root.find-query, root.find-match-case);
+                                    }
+                                    edited(query) => { root.on-find(query, root.find-match-case); }
+                                    accepted(shift) => { root.on-find-step(!shift); }
+                                    escaped => {
+                                        root.find-open = false;
+                                        root.replace-open = false;
+                                        root.find-field-focus = false;
+                                        root.replace-field-focus = false;
+                                        root.on-find-close();
+                                        editor-area.focus();
+                                    }
+                                    changed has-focus => { root.find-field-focus = self.has-focus; }
+                                }
+                                EditorBarButton {
+                                    label: "Aa";
+                                    active: root.find-match-case;
+                                    clicked => {
+                                        root.find-match-case = !root.find-match-case;
+                                        root.on-find(root.find-query, root.find-match-case);
+                                    }
+                                }
+                                Text {
+                                    min-width: 70px;
+                                    text: root.find-status;
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                EditorBarButton { label: "↑"; clicked => { root.on-find-step(false); } }
+                                EditorBarButton { label: "↓"; clicked => { root.on-find-step(true); } }
+                                EditorBarButton {
+                                    label: "×";
+                                    clicked => {
+                                        root.find-open = false;
+                                        root.replace-open = false;
+                                        root.find-field-focus = false;
+                                        root.replace-field-focus = false;
+                                        root.on-find-close();
+                                        editor-area.focus();
+                                    }
+                                }
+                            }
+                            if root.replace-open: HorizontalLayout {
+                                spacing: 4px;
+                                EditorBarField {
+                                    placeholder: "Replace";
+                                    text <=> root.replace-text;
+                                    accepted(shift) => { root.on-replace(root.replace-text); }
+                                    escaped => {
+                                        root.find-open = false;
+                                        root.replace-open = false;
+                                        root.find-field-focus = false;
+                                        root.replace-field-focus = false;
+                                        root.on-find-close();
+                                        editor-area.focus();
+                                    }
+                                    changed has-focus => { root.replace-field-focus = self.has-focus; }
+                                }
+                                EditorBarButton { label: "Replace"; clicked => { root.on-replace(root.replace-text); } }
+                                EditorBarButton { label: "All"; clicked => { root.on-replace-all(root.replace-text); } }
+                            }
+                        }
+                    }
+
+                    // Go to line (Ctrl+G), at the editor's top centre.
+                    if root.goto-open: Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: 6px;
+                        width: 240px;
+                        height: 36px;
+                        background: Theme.background-secondary;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: Theme.shadow-color;
+
+                        HorizontalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            Text {
+                                text: "Go to line";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            EditorBarField {
+                                placeholder: "Line number";
+                                init => { self.focus(); }
+                                accepted(shift) => {
+                                    if (self.text.is-float()) {
+                                        root.on-go-to-line(max(1, self.text.to-float()));
+                                    }
+                                    root.goto-open = false;
+                                    root.goto-field-focus = false;
+                                    editor-area.focus();
+                                }
+                                escaped => {
+                                    root.goto-open = false;
+                                    root.goto-field-focus = false;
+                                    editor-area.focus();
+                                }
+                                changed has-focus => { root.goto-field-focus = self.has-focus; }
                             }
                         }
                     }

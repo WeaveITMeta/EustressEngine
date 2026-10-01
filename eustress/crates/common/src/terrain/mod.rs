@@ -75,9 +75,10 @@
 //! (`generate_chunk_render_mesh_and_surface` when it spawns the chunk, so
 //! mesh and collider share one march) and `attach_chunk_collider` /
 //! `refresh_chunk_collider`, which choose. The
-//! 3D brush modes (`BrushMode::VoxelAdd`, `VoxelRemove`, `VoxelSmooth`) write
-//! the volume one CSG dab at a time (`apply_voxel_dab`), recording the bricks
-//! each dab can write before it writes, so a stroke undoes exactly.
+//! Draw brush (`BrushMode::VoxelAdd`, `VoxelRemove`) and Smooth's 3D pass
+//! (`VoxelSmooth`) write the volume one CSG dab at a time
+//! (`editor::apply_draw_dab`), recording the bricks each dab can write before
+//! it writes, so a stroke undoes exactly.
 //!
 //! ## Layers
 //! A root's `TerrainData` is its editable base. Non-destructive layers
@@ -119,6 +120,12 @@ pub mod chunk;
 pub mod mesh;
 pub mod lod;
 pub mod editor;
+/// Geometry of what the terrain tools draw at the cursor: the footprint
+/// ring and strength disc, the brush volume's wireframe, the locked plane,
+/// the local grid, contours and mirror planes. Pure functions; the Studio
+/// builds its cursor meshes from them. Referenced via the explicit
+/// `brush_cursor::` path.
+pub mod brush_cursor;
 pub mod material;
 pub mod history;
 pub mod brushes;
@@ -127,7 +134,7 @@ pub mod toml_loader;
 pub mod water;
 pub mod collider;
 pub mod dirty;
-/// Shared world-space height query/write helpers — the single place that
+/// Shared world-space height query/write helpers: the single place that
 /// encodes the `height_cache` normalization + chunk-local index math, so a
 /// third caller (the road tool) doesn't hand-roll it a third time. See its
 /// module docs for the two existing hand-rolled call sites this factors out.
@@ -143,13 +150,22 @@ pub mod road;
 /// built from the stations its corridor was baked along. Added by
 /// `TerrainLayersPlugin`; referenced via the explicit `road_surface::` path.
 pub mod road_surface;
-/// Wave 9.C — imported-terrain voxel decode + multi-span column extractor +
-/// `TerrainData` cache fill. Engine-free (no worlddb dep); the engine-side
-/// loader reads Fjall voxels and calls into this. Referenced via the
+/// Wave 9.C: imported-terrain voxel decode + multi-span column extractor +
+/// `TerrainData` cache fill. Engine-free (no worlddb dep); the
+/// `voxel_import` build calls into this. Referenced via the
 /// explicit `voxel_extract::` path (NOT glob-re-exported) so its names
 /// (`CHUNK_EDGE`, `Span`, …) don't collide with the other terrain modules'.
 pub mod voxel_extract;
-/// Phase B — deterministic multi-agent terrain *generation* (the new
+/// Imported Roblox voxel terrain, engine-free: the load window, the Terrain
+/// instance's properties, the importer's `voxel_chunks` files and the build
+/// from chunk records that Studio's world-database loader and the Player
+/// both run. Referenced via the explicit `voxel_import::` path.
+pub mod voxel_import;
+/// A Space's `Workspace/Terrain` directory (`_terrain.toml`, chunk
+/// heightmaps and material maps, volume bricks) read back into a terrain
+/// ready to spawn. Referenced via the explicit `disk::` path.
+pub mod disk;
+/// Phase B: deterministic multi-agent terrain *generation* (the new
 /// generation mechanic): seam-free base elevation, hydrology, erosion,
 /// climate/biome and material passes producing a `worldgen::GeneratedRegion`
 /// the engine seam lifts into `TerrainData`. Engine-free pure math.
@@ -177,6 +193,11 @@ pub mod texture_arrays;
 /// texture arrays, slot records and material map, shader embedded), and the
 /// systems that keep it current and move chunks onto it and back.
 pub mod surface_material;
+/// The far field: the rest of a streaming terrain beyond its chunks, drawn
+/// on the GPU as a few camera-following grid levels lifted onto the root's
+/// height texture and shaded like the chunks. Added by
+/// `TerrainSurfacePlugin`; referenced via the explicit `far_field::` path.
+pub mod far_field;
 /// Non-destructive terrain layers: their plain-data descriptions, the
 /// engine-free bake over the editable base, and the `TerrainBaked` component
 /// every reader sees through `surface_data`. Names callers need are
@@ -202,6 +223,16 @@ pub mod scatter;
 /// Added by `water::TerrainWaterPlugin`; referenced via the explicit
 /// `water_bodies::` path.
 pub mod water_bodies;
+/// The water a Roblox place's voxel terrain carries: the level over every
+/// raster column that the voxel loader puts on the terrain root, drawn as one
+/// flat surface per level through the lake mesher. Added by
+/// `water::TerrainWaterPlugin`; the component is re-exported below.
+pub mod voxel_water;
+/// Terrain edits as commands (fills, material swaps, voxel writes and reads,
+/// sculpt, paint, clear) in world metres: the one API the MCP tools, the Luau
+/// `workspace.Terrain` methods and the Rune `eustress::terrain` module call.
+/// Referenced via the explicit `api::` path.
+pub mod api;
 
 pub use config::*;
 pub use chunk::*;
@@ -217,15 +248,15 @@ pub use height_query::*;
 pub use collider::*;
 pub use dirty::*;
 pub use volume::{
-    apply_box, apply_cylinder, apply_shape, apply_smooth, apply_sphere, chunk_has_volume,
+    apply_box, apply_cylinder, apply_shape, apply_shape_clipped, apply_smooth, apply_sphere, chunk_has_volume, ClipPlane,
     chunk_volume_y_range, decode_brick, encode_brick, field_gradient, field_normal,
     heightfield_slope_factor, heightfield_term, lattice_cell_size, lattice_surface_height,
     load_volume_bricks, material_at, sample_field, sample_field_lattice, sample_field_parts,
-    save_volume_bricks, CsgOp, CsgShape, FieldSample, FieldTerm, TerrainVolume, VolumeBrick,
+    save_volume_bricks, save_volume_bricks_at, CsgOp, CsgShape, FieldSample, FieldTerm, TerrainVolume, VolumeBrick,
     VolumeCell, VolumeEdit, VolumeSaveReport, BRICK_EDGE,
 };
 pub use marching::{
-    build_volume_chunk_geometry, chunk_collider_cost, chunk_mesh_cost, chunk_spawn_cost,
+    build_volume_chunk_geometry, chunk_collider_cost, chunk_marches, chunk_mesh_cost, chunk_spawn_cost,
     chunk_uses_marching_cubes, generate_chunk_render_mesh, generate_chunk_render_mesh_and_surface,
     volume_chunk_triangles, VolumeChunkGeometry, VOLUMETRIC_CHUNK_COST,
 };
@@ -250,6 +281,7 @@ pub use layer_instances::{
     TerrainSpline, TerrainSplinePoint, TerrainStamp, TerrainWaterBody,
 };
 pub use scatter::{update_terrain_scatter, ScatterBatch, TerrainScatterPlugin};
+pub use voxel_water::TerrainVoxelWater;
 
 use bevy::prelude::*;
 use tracing::info;
@@ -267,6 +299,8 @@ impl Plugin for TerrainPlugin {
             // Resources
             .init_resource::<TerrainMode>()
             .init_resource::<TerrainBrush>()
+            .init_resource::<TerrainBrushHover>()
+            .init_resource::<TerrainStroke>()
             .init_resource::<TerrainGenerationQueue>()
             .init_resource::<LodUpdateState>()  // Throttled LOD updates for performance
             .init_resource::<TerrainDirtyChunks>()
@@ -288,10 +322,11 @@ impl Plugin for TerrainPlugin {
                 chunk_cull_system,
             ).chain())
 
-            // Editor systems (only run in Editor mode)
+            // Editor systems (only run in Editor mode). The hover runs first
+            // so the stroke dabs where this frame's cursor points.
             .add_systems(Update, (
                 toggle_editor_system,
-                terrain_paint_system,
+                (update_brush_hover, terrain_paint_system).chain(),
             ).run_if(resource_equals(TerrainMode::Editor)))
 
             // Ungated: edits also arrive outside Editor mode (undo, layer
@@ -496,12 +531,20 @@ pub fn spawn_terrain_with_volume(
     // Build list of chunks to spawn. A raster small enough to stay resident
     // is queued whole: its chunks carry the colliders bodies rest on, and a
     // headless host (no camera, so no spawn scan) gets them nowhere else.
-    // Anything else queues the middle and leaves the rest to streaming.
-    // Decided before `data` moves into the root below.
+    // Anything else queues only a small seed around the centre, within view
+    // distance, and leaves the rest to streaming: while the queue fills, the
+    // spawn scan brings only the chunks under bodies, so a large queue would
+    // keep chunks from streaming in around the camera for as long as it
+    // takes to drain at two chunks a frame. Decided before `config` and
+    // `data` move into the root below.
+    const STREAMING_SEED_HALF_EXTENT: i32 = 4;
+    let center = config.center_chunk;
     let (half_x, half_z) = if raster_fully_resident(&config, &data) {
         (config.chunks_x as i32, config.chunks_z as i32)
     } else {
-        ((config.chunks_x / 2) as i32, (config.chunks_z / 2) as i32)
+        let reach = ((config.view_distance.max(0.0) / config.chunk_size.max(1e-3)).ceil() as i32).saturating_add(1);
+        let half = |chunks: u32| ((chunks / 2) as i32).min(reach).min(STREAMING_SEED_HALF_EXTENT);
+        (half(config.chunks_x), half(config.chunks_z))
     };
 
     // Spawn terrain root (without chunks - they'll be added async)
@@ -517,14 +560,17 @@ pub fn spawn_terrain_with_volume(
     )).id();
 
     let mut pending_chunks = Vec::new();
-    for cx in -half_x..=half_x {
-        for cz in -half_z..=half_z {
+    for cx in center.x.saturating_sub(half_x)..=center.x.saturating_add(half_x) {
+        for cz in center.y.saturating_sub(half_z)..=center.y.saturating_add(half_z) {
             pending_chunks.push((IVec2::new(cx, cz), terrain_entity));
         }
     }
     // The queue pops from the back, so the fill grows outward from the
     // middle instead of starting in a far corner.
-    pending_chunks.sort_by_key(|(pos, _)| std::cmp::Reverse(pos.x * pos.x + pos.y * pos.y));
+    pending_chunks.sort_by_key(|(pos, _)| {
+        let offset = *pos - center;
+        std::cmp::Reverse(offset.x * offset.x + offset.y * offset.y)
+    });
 
     let total_chunks = pending_chunks.len();
 
@@ -548,12 +594,17 @@ pub fn spawn_terrain_with_volume(
 /// volumetric edits costs the cubes it marches per lattice cell, at least
 /// [`VOLUMETRIC_CHUNK_COST`] (see [`chunk_spawn_cost`]), and the first chunk
 /// of a frame always spawns.
+///
+/// A chunk with nothing to draw ([`chunk_should_spawn`]) is passed over
+/// without spawning, each counting against
+/// [`EMPTY_CHUNK_SCAN_CELLS_PER_FRAME`] instead.
 pub fn process_terrain_generation_queue(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut queue: ResMut<TerrainGenerationQueue>,
     roots: Query<(&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&TerrainBaked>), With<TerrainRoot>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    chunks: Query<&Chunk>,
 ) {
     if queue.pending_chunks.is_empty() {
         return;
@@ -561,6 +612,9 @@ pub fn process_terrain_generation_queue(
     let Some(material) = queue.material.clone() else {
         return;
     };
+    // The spawn pass brings the chunks under bodies ahead of the fill (see
+    // `chunk_spawn_system`); a position it already holds is not spawned twice.
+    let spawned: std::collections::HashSet<IVec2> = chunks.iter().map(|chunk| chunk.position).collect();
     // Pick each chunk's first LOD from the scene camera when there is one,
     // so the LOD system does not have to remesh the whole fill afterwards.
     // Hosts without a camera (headless) measure from the world origin.
@@ -568,7 +622,8 @@ pub fn process_terrain_generation_queue(
 
     let budget = queue.chunks_per_frame.max(1);
     let mut spent = 0;
-    while spent < budget {
+    let mut scanned = 0;
+    while spent < budget && scanned < EMPTY_CHUNK_SCAN_CELLS_PER_FRAME {
         let Some((chunk_pos, terrain_entity)) = queue.pending_chunks.pop() else {
             break;
         };
@@ -579,8 +634,16 @@ pub fn process_terrain_generation_queue(
         let Ok((config, data, volume, baked)) = roots.get(terrain_entity) else {
             continue;
         };
+        if spawned.contains(&chunk_pos) {
+            continue;
+        }
         let volume = volume.unwrap_or(TerrainVolume::empty());
         let data = surface_data(data, baked);
+        // All holes and no bricks: nothing to draw, so no chunk.
+        if !chunk_should_spawn(chunk_pos, config, data, volume) {
+            scanned += empty_chunk_scan_cells(config);
+            continue;
+        }
 
         let lod = config.lod_for_distance(chunk_lod_distance(chunk_pos, config, data, viewer));
         spent += chunk_spawn_cost(chunk_pos, lod, config, data, volume);

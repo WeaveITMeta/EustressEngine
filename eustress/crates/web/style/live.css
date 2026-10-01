@@ -1,0 +1,43 @@
+/* =============================================================================
+   A listing's live host
+   =============================================================================
+   The Live or Offline badge under a simulation's title, and the panel Play
+   shows while it hands the host's join link to the Player. The badge is the
+   Bliss dashboard's .live-indicator and the panel is the listing's Play
+   dialog (.play-modal), both in main.css; this file adjusts them for the
+   listing only.
+   ============================================================================= */
+
+.listing-live {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin: 0 0 var(--space-md);
+}
+
+/* In a section header the indicator follows a title; here it leads the line. */
+.listing-live .live-indicator {
+    margin-left: 0;
+}
+
+.listing-live .listing-offline {
+    background: rgba(128, 144, 160, 0.12);
+    border-color: rgba(128, 144, 160, 0.3);
+    color: var(--color-text-muted);
+}
+
+.listing-live-note {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+}
+
+.live-handoff-download {
+    color: var(--color-accent);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.live-handoff-download:hover {
+    text-decoration: underline;
+}

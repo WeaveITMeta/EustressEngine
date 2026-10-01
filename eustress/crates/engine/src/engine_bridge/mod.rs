@@ -53,6 +53,8 @@ mod port_file;
 mod protocol;
 mod self_test;
 mod server;
+mod snapshots;
+pub(crate) mod terrain;
 mod ui_surface;
 #[cfg(unix)]
 mod unix_socket_file;
@@ -95,7 +97,8 @@ impl Plugin for EngineBridgePlugin {
             .init_resource::<SimStepJob>()
             .add_systems(Startup, setup_engine_bridge)
             // `pump_sim_step` runs after the drain so a step requested this
-            // frame starts advancing this frame rather than next.
+            // frame starts advancing this frame rather than next. A revert is
+            // answered by `space::snapshot::SnapshotPlugin`'s pump.
             .add_systems(
                 Update,
                 (
@@ -651,6 +654,12 @@ fn drain_bridge_requests(world: &mut World) {
             begin_db_export(world, pending);
             continue;
         }
+        // Likewise: a revert reopens the Space, and is answered from
+        // the revert pump in `space::snapshot` once the restore has run.
+        if matches!(pending.request.method, MethodName::SnapshotRevert) {
+            snapshots::begin_snapshot_revert(world, pending);
+            continue;
+        }
 
         let response = match pending.request.method {
             MethodName::Ping => protocol::handlers::ping(&pending.request),
@@ -715,6 +724,15 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::UiClick => ui_surface::ui_click(world, &pending.request),
             MethodName::PublishStatus => ui_surface::publish_status(world, &pending.request),
             MethodName::PublishSubmit => ui_surface::publish_submit(world, &pending.request),
+            MethodName::SnapshotSave => snapshots::snapshot_save(world, &pending.request),
+            MethodName::SnapshotList => snapshots::snapshot_list(world, &pending.request),
+            MethodName::SnapshotDiff => snapshots::snapshot_diff(world, &pending.request),
+            MethodName::SnapshotCancelRevert => snapshots::snapshot_cancel_revert(world, &pending.request),
+            // Deferred above; answered by the revert pump in `space::snapshot`.
+            MethodName::SnapshotRevert => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("snapshot.revert reached the synchronous dispatch path"),
+            ),
             MethodName::DataBind => protocol::handlers::data_bind(world, &pending.request),
             MethodName::DataBindings => protocol::handlers::data_bindings(world, &pending.request),
             MethodName::DataUnbind => protocol::handlers::data_unbind(world, &pending.request),
@@ -724,6 +742,18 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::SimStop => protocol::handlers::sim_command(world, &pending.request, "stop"),
             MethodName::SimSet => protocol::handlers::sim_command(world, &pending.request, "set"),
             MethodName::SimState => protocol::handlers::sim_state(world, &pending.request),
+            MethodName::TerrainStats => terrain::terrain_stats(world, &pending.request),
+            MethodName::TerrainQuery => terrain::terrain_query(world, &pending.request),
+            MethodName::TerrainRaycast => terrain::terrain_raycast(world, &pending.request),
+            MethodName::TerrainReadVoxels => terrain::terrain_read_voxels(world, &pending.request),
+            MethodName::TerrainGenerate => terrain::terrain_generate(world, &pending.request),
+            MethodName::TerrainFlat => terrain::terrain_flat(world, &pending.request),
+            MethodName::TerrainSculpt => terrain::terrain_sculpt(world, &pending.request),
+            MethodName::TerrainPaint => terrain::terrain_paint(world, &pending.request),
+            MethodName::TerrainFill => terrain::terrain_fill(world, &pending.request),
+            MethodName::TerrainReplaceMaterial => terrain::terrain_replace_material(world, &pending.request),
+            MethodName::TerrainLayerCreate => terrain::terrain_layer_create(world, &pending.request),
+            MethodName::TerrainClear => terrain::terrain_clear(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.

@@ -3,13 +3,12 @@
 //! Follows the PointLight worked example with three deltas (per
 //! `LIGHTING_AUDIT.md` §4.3):
 //!
-//! 1. The Bevy backing component is `bevy_pbr::SpotLight` (carries
-//!    `inner_angle` + `outer_angle`).
-//! 2. The Eustress authoring component exposes a single `angle` field
-//!    (the outer cone half-angle in degrees). The spawner synthesizes
-//!    `inner_angle = outer * 0.85` per `spawn.rs::spawn_spot_light`'s
-//!    convention — open question §8 #2 in the audit; we keep the legacy
-//!    convention so this PR is a behavioral no-op for existing SpotLights.
+//! 1. The rendered light is a `bevy_pbr::SpotLight` on an emitter child,
+//!    built by `eustress_common::plugins::light_classes` from the authoring
+//!    component, so this spawner attaches only the authoring component.
+//! 2. The Eustress authoring component exposes `angle` (the cone's full
+//!    apex angle in degrees, as Roblox's Angle) and `face` (the face of the
+//!    parent part the cone shines out of).
 //! 3. The LOD policy table is the same as PointLight (no shadow → drop
 //!    → cull) — see `LIGHTING_AUDIT.md` §4.3 "LOD policy".
 
@@ -60,25 +59,20 @@ impl ClassSpawner for SpotLightSpawner {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
+        let face = props
+            .get_enum("light.face")
+            .or_else(|| props.get_string("light.face"))
+            .map(|f| eustress_common::plugins::light_classes::normalize_face(f).to_string())
+            .unwrap_or(defaults.face.clone());
+
         let transform = props.get_transform("transform").copied().unwrap_or_default();
 
-        // Mirror the legacy `spawn_spot_light` convention:
-        // inner = 0.85 * outer (see spawn.rs:450).
-        let outer_rad = angle_deg.to_radians();
-        let inner_rad = (angle_deg * 0.85).to_radians();
-
+        // The rendered SpotLight (an emitter child) is built from this
+        // authoring component by `light_classes`, like every other spawn path.
         ctx.commands
             .spawn((
-                SpotLight {
-                    color,
-                    intensity: if enabled { brightness } else { 0.0 },
-                    range,
-                    inner_angle: inner_rad,
-                    outer_angle: outer_rad,
-                    shadow_maps_enabled: shadows && enabled,
-                    ..default()
-                },
                 transform,
+                Visibility::default(),
                 Instance {
                     name: name.clone(),
                     class_name: ClassName::SpotLight,
@@ -94,6 +88,7 @@ impl ClassSpawner for SpotLightSpawner {
                     angle: angle_deg,
                     shadows,
                     enabled,
+                    face,
                     texture,
                 },
                 Name::new(name),
@@ -180,27 +175,17 @@ impl ClassSpawner for SpotLightSpawner {
             if let Some(t) = props.get_string("appearance.texture") {
                 e.texture = if t.is_empty() { None } else { Some(t.to_string()) };
             }
-        }
-        if let Some(mut sl) = world.entity_mut(entity).get_mut::<SpotLight>() {
-            if let Some(c) = read_color(props, "light.color") {
-                sl.color = c;
+            if let Some(f) = props.get_enum("light.face").or_else(|| props.get_string("light.face")) {
+                e.face = eustress_common::plugins::light_classes::normalize_face(f).to_string();
             }
-            if let Some(b) = props.get_f32("light.brightness") {
-                sl.intensity = b;
-            }
-            if let Some(r) = props.get_f32("light.range") {
-                sl.range = r;
-            }
-            if let Some(a) = props.get_f32("light.angle") {
-                sl.outer_angle = a.to_radians();
-                sl.inner_angle = (a * 0.85).to_radians();
-            }
-            if let Some(s) = props.get_bool("light.shadows") {
-                sl.shadow_maps_enabled = s;
+            if let Some(en) = props.get_bool("light.enabled") {
+                e.enabled = en;
             }
         }
-        // Every SpotLight prop is a cheap mutation — LIGHTING_AUDIT.md §4.3
-        // does not list any respawn-requiring property.
+        // The rendered SpotLight follows the authoring component through
+        // `light_classes`; nothing here writes it. Every SpotLight prop is a
+        // cheap mutation — LIGHTING_AUDIT.md §4.3 does not list any
+        // respawn-requiring property.
         false
     }
 
@@ -216,11 +201,13 @@ impl ClassSpawner for SpotLightSpawner {
         bag.set("metadata.name", PropertyValue::String(rbx.name().into()));
         bag.set("metadata.archivable", PropertyValue::Bool(true));
         if let Some(b) = rbx.property("Brightness").and_then(|p| p.as_f32()) {
-            // Same Roblox-units → lumens scale as PointLight (B.2).
-            bag.set("light.brightness", PropertyValue::Float(b * 800.0));
+            // Roblox's Brightness is the same dial the authoring component
+            // holds, so it carries over unscaled.
+            bag.set("light.brightness", PropertyValue::Float(b));
         }
         if let Some(r) = rbx.property("Range").and_then(|p| p.as_f32()) {
-            bag.set("light.range", PropertyValue::Float(r));
+            // Studs to metres (1 stud = 1 ft), as the importer converts it.
+            bag.set("light.range", PropertyValue::Float(r * 0.3048));
         }
         if let Some(a) = rbx.property("Angle").and_then(|p| p.as_f32()) {
             bag.set("light.angle", PropertyValue::Float(a));
@@ -364,6 +351,7 @@ mod tests {
                     angle: 60.0,
                     shadows: true,
                     enabled: true,
+                    face: "Front".to_string(),
                     texture: None,
                 },
                 Name::new("Stage"),
@@ -379,22 +367,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_edit_updates_inner_outer_angle_in_lockstep() {
+    fn apply_edit_updates_the_authoring_component() {
         let mut world = World::new();
         let entity = world
-            .spawn((
-                SpotLight::default(),
-                EustressSpotLight::default(),
-                Transform::default(),
-            ))
+            .spawn((EustressSpotLight::default(), Transform::default()))
             .id();
         let mut bag = PropertyBag::new();
-        bag.set("light.angle", PropertyValue::Float(90.0));
+        bag.set("light.angle", PropertyValue::Float(120.0));
+        bag.set("light.face", PropertyValue::Enum("Bottom".into()));
         let respawn = SpotLightSpawner.apply_edit(&mut world, entity, &bag);
         assert!(!respawn);
-        let sl = world.entity(entity).get::<SpotLight>().unwrap();
-        // Within float tolerance.
-        assert!((sl.outer_angle - 90.0_f32.to_radians()).abs() < 1e-5);
-        assert!((sl.inner_angle - (90.0_f32 * 0.85).to_radians()).abs() < 1e-5);
+        let light = world.entity(entity).get::<EustressSpotLight>().unwrap();
+        assert_eq!(light.angle, 120.0);
+        assert_eq!(light.face, "Bottom");
     }
 }

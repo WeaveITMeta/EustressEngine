@@ -438,16 +438,10 @@ impl ClassId {
             ClassName::PVInstance => ClassId::PVInstance,
             ClassName::BasePart => ClassId::BasePart,
             ClassName::Part => ClassId::Part,
-            // ArcReactorCore (parallel nuclear session's custom BasePart
-            // subclass) — mapped to Part for the legacy binary/RON scene tag
-            // until that session assigns a dedicated ClassId. Primary
-            // persistence is the Fjall entities partition + TOML, not this path.
-            ClassName::ArcReactorCore => ClassId::Part,
             ClassName::Model => ClassId::Model,
             // Gaussian-Splatting cloud — mapped to Model for the legacy binary/RON
             // scene tag (no dedicated ClassId; primary persistence is the Fjall
-            // entities partition + the runtime spawn, not this path). Same
-            // fallback rationale as ArcReactorCore above.
+            // entities partition + the runtime spawn, not this path).
             ClassName::GaussianSplats => ClassId::Model,
             ClassName::Folder => ClassId::Folder,
             ClassName::Humanoid => ClassId::Humanoid,
@@ -643,6 +637,7 @@ impl ClassId {
             ClassName::UIDragDetector => ClassId::Instance,
             // Wave 7.C meshes / surfaces / visual adornment
             ClassName::BlockMesh => ClassId::Instance,
+            ClassName::CylinderMesh => ClassId::Instance,
             ClassName::FileMesh => ClassId::Instance,
             ClassName::Texture => ClassId::Instance,
             ClassName::SurfaceAppearance => ClassId::Instance,
@@ -1178,16 +1173,49 @@ pub struct BasePartBinaryData {
     pub flags: u8,  // Bit 0: anchored, Bit 1: can_collide, Bit 2: cast_shadow
 }
 
-/// Compact Light data (PointLight, SpotLight, SurfaceLight, DirectionalLight)
+/// Compact Light data (PointLight, SpotLight, SurfaceLight, DirectionalLight):
+/// the AUTHORING values and the light's own pose. Restore puts the class
+/// component back and `light_classes` rebuilds the Bevy light from it, so
+/// what comes back is what was authored. (This used to hold the Bevy
+/// light's render intensity, which the culler may have zeroed, and restored
+/// it ×1000 with no class component and no position: every Stop after a
+/// deletion brought the lights back at the origin, a thousand times hotter.)
 #[derive(Debug, Clone)]
 pub struct LightBinaryData {
     pub color: Color,
+    /// The brightness dial.
     pub brightness: f32,
+    /// Reach in metres (unused by DirectionalLight).
     pub range: f32,
     pub shadows: bool,
-    pub angle: f32,       // For SpotLight
-    pub direction: Vec3,  // For DirectionalLight/SpotLight
+    /// SpotLight / SurfaceLight cone, full apex angle in degrees.
+    pub angle: f32,
+    /// The light's local pose.
+    pub position: Vec3,
+    pub rotation: Quat,
     pub enabled: bool,
+    /// PointLight sphere radius, metres.
+    pub radius: f32,
+    /// SpotLight / SurfaceLight face, an index into `light_classes::FACES`.
+    pub face: u8,
+}
+
+impl LightBinaryData {
+    fn face_index(face: &str) -> u8 {
+        let face = eustress_common::plugins::light_classes::normalize_face(face);
+        eustress_common::plugins::light_classes::FACES
+            .iter()
+            .position(|f| *f == face)
+            .unwrap_or(2) as u8
+    }
+
+    fn face_label(&self) -> String {
+        eustress_common::plugins::light_classes::FACES
+            .get(self.face as usize)
+            .copied()
+            .unwrap_or("Front")
+            .to_string()
+    }
 }
 
 /// Compact Humanoid data
@@ -1316,17 +1344,18 @@ pub fn save_binary_scene(
         Option<&Transform>,
         Option<&ChildOf>,
         Option<&Children>,
-        Option<&PointLight>,
-        Option<&SpotLight>,
-        Option<&DirectionalLight>,
+        Option<&EustressPointLight>,
+        Option<&EustressSpotLight>,
+        Option<&SurfaceLight>,
+        Option<&EustressDirectionalLight>,
         Option<&Humanoid>,
         Option<&Camera>,
         Option<&Atmosphere>,
         Option<&Sky>,
     )>();
-    
+
     for (_entity, instance, base_part_opt, transform_opt, child_of_opt, children_opt,
-         point_light_opt, spot_light_opt, dir_light_opt, humanoid_opt, camera_opt,
+         point_light_opt, spot_light_opt, surface_light_opt, dir_light_opt, humanoid_opt, camera_opt,
          atmosphere_opt, sky_opt) in query.iter(world) {
         
         let name_idx = string_table.intern(&instance.name);
@@ -1384,45 +1413,58 @@ pub fn save_binary_scene(
             });
         }
         
-        // Add PointLight data
-        if let Some(light) = point_light_opt {
-            entity_data.light_data = Some(LightBinaryData {
-                color: light.color,
-                brightness: light.intensity,
-                range: light.range,
-                shadows: light.shadow_maps_enabled,
-                angle: 0.0,
-                direction: Vec3::ZERO,
+        // Light classes: their authoring component and pose. Every light
+        // class writes a light block (defaults when its component is
+        // missing), because the reader expects one for the class; and only
+        // light classes do, so the sun and moon (whose Bevy lights have no
+        // class component) no longer write a block the reader skips.
+        if matches!(
+            class_id,
+            ClassId::PointLight | ClassId::SpotLight | ClassId::SurfaceLight | ClassId::DirectionalLight
+        ) {
+            let t = transform_opt.copied().unwrap_or_default();
+            let mut data = LightBinaryData {
+                color: Color::WHITE,
+                brightness: 1.0,
+                range: eustress_common::classes::DEFAULT_LIGHT_RANGE,
+                shadows: false,
+                angle: eustress_common::classes::DEFAULT_LIGHT_ANGLE,
+                position: t.translation,
+                rotation: t.rotation,
                 enabled: true,
-            });
-        }
-        
-        // Add SpotLight data
-        if let Some(light) = spot_light_opt {
-            let transform = transform_opt.copied().unwrap_or_default();
-            entity_data.light_data = Some(LightBinaryData {
-                color: light.color,
-                brightness: light.intensity,
-                range: light.range,
-                shadows: light.shadow_maps_enabled,
-                angle: light.outer_angle,
-                direction: transform.forward().as_vec3(),
-                enabled: true,
-            });
-        }
-        
-        // Add DirectionalLight data
-        if let Some(light) = dir_light_opt {
-            let transform = transform_opt.copied().unwrap_or_default();
-            entity_data.light_data = Some(LightBinaryData {
-                color: light.color,
-                brightness: light.illuminance,
-                range: f32::INFINITY,
-                shadows: light.shadow_maps_enabled,
-                angle: 0.0,
-                direction: transform.forward().as_vec3(),
-                enabled: true,
-            });
+                radius: 0.0,
+                face: LightBinaryData::face_index("Front"),
+            };
+            if let Some(l) = point_light_opt {
+                data.color = l.color;
+                data.brightness = l.brightness;
+                data.range = l.range;
+                data.shadows = l.shadows;
+                data.enabled = l.enabled;
+                data.radius = l.radius;
+            } else if let Some(l) = spot_light_opt {
+                data.color = l.color;
+                data.brightness = l.brightness;
+                data.range = l.range;
+                data.shadows = l.shadows;
+                data.enabled = l.enabled;
+                data.angle = l.angle;
+                data.face = LightBinaryData::face_index(&l.face);
+            } else if let Some(l) = surface_light_opt {
+                data.color = l.color;
+                data.brightness = l.brightness;
+                data.range = l.range;
+                data.shadows = l.shadows;
+                data.enabled = l.enabled;
+                data.angle = l.angle;
+                data.face = LightBinaryData::face_index(&l.face);
+            } else if let Some(l) = dir_light_opt {
+                data.color = l.color;
+                data.brightness = l.brightness;
+                data.shadows = l.shadows;
+                data.enabled = l.enabled;
+            }
+            entity_data.light_data = Some(data);
         }
         
         // Add Humanoid data
@@ -1630,8 +1672,11 @@ fn serialize_entity_to_buffer(buffer: &mut Vec<u8>, entity: &BinaryEntityData) -
         cursor.get_mut().extend_from_slice(&light.range.to_le_bytes());
         cursor.get_mut().push(if light.shadows { 1 } else { 0 });
         cursor.get_mut().extend_from_slice(&light.angle.to_le_bytes());
-        write_vec3(&mut cursor, light.direction)?;
+        write_vec3(&mut cursor, light.position)?;
+        write_quat(&mut cursor, light.rotation)?;
         cursor.get_mut().push(if light.enabled { 1 } else { 0 });
+        cursor.get_mut().extend_from_slice(&light.radius.to_le_bytes());
+        cursor.get_mut().push(light.face);
     }
     
     if let Some(ref humanoid) = entity.humanoid_data {
@@ -1846,22 +1891,31 @@ fn deserialize_entity<R: Read>(reader: &mut R, _string_table: &StringTable) -> R
             
             reader.read_exact(&mut buf4)?;
             let angle = f32::from_le_bytes(buf4);
-            
-            // Read direction
-            let direction = read_vec3(reader)?;
-            
+
+            // The light's local pose
+            let position = read_vec3(reader)?;
+            let rotation = read_quat(reader)?;
+
             // Read enabled flag
             reader.read_exact(&mut buf1)?;
             let enabled = buf1[0] != 0;
-            
+
+            reader.read_exact(&mut buf4)?;
+            let radius = f32::from_le_bytes(buf4);
+            reader.read_exact(&mut buf1)?;
+            let face = buf1[0];
+
             entity.light_data = Some(LightBinaryData {
                 color,
                 brightness,
                 range,
                 shadows,
                 angle,
-                direction,
+                position,
+                rotation,
                 enabled,
+                radius,
+                face,
             });
         }
         ClassId::Humanoid => {
@@ -2156,81 +2210,72 @@ pub fn load_binary_scene_to_world(
                             world.spawn((instance, Name::new(name))).id()
                         }
                     }
-                    ClassId::PointLight => {
+                    ClassId::PointLight
+                    | ClassId::SpotLight
+                    | ClassId::SurfaceLight
+                    | ClassId::DirectionalLight => {
+                        // The class component and its pose; `light_classes`
+                        // builds the Bevy light (emitter, lumens, sun-disc
+                        // opt-out) from it on the next Update.
                         if let Some(ref light) = data.light_data {
-                            let point_light = PointLight {
-                                color: light.color,
-                                intensity: light.brightness * 1000.0,
-                                range: light.range,
-                                shadow_maps_enabled: light.shadows,
-                                ..Default::default()
+                            let transform = Transform {
+                                translation: light.position,
+                                rotation: light.rotation,
+                                scale: Vec3::ONE,
                             };
-                            
-                            let transform = Transform::from_translation(light.direction);
-                            
-                            world.spawn((
+                            let mut e = world.spawn((
                                 instance,
-                                point_light,
                                 transform,
-                                GlobalTransform::default(),
                                 Visibility::default(),
-                                InheritedVisibility::default(),
-                                ViewVisibility::default(),
                                 Name::new(name),
-                            )).id()
-                        } else {
-                            world.spawn((instance, Name::new(name))).id()
-                        }
-                    }
-                    ClassId::SpotLight => {
-                        if let Some(ref light) = data.light_data {
-                            let spot_light = SpotLight {
-                                color: light.color,
-                                intensity: light.brightness * 1000.0,
-                                range: light.range,
-                                shadow_maps_enabled: light.shadows,
-                                outer_angle: light.angle,
-                                ..Default::default()
-                            };
-                            
-                            let transform = Transform::from_translation(light.direction);
-                            
-                            world.spawn((
-                                instance,
-                                spot_light,
-                                transform,
-                                GlobalTransform::default(),
-                                Visibility::default(),
-                                InheritedVisibility::default(),
-                                ViewVisibility::default(),
-                                Name::new(name),
-                            )).id()
-                        } else {
-                            world.spawn((instance, Name::new(name))).id()
-                        }
-                    }
-                    ClassId::DirectionalLight => {
-                        if let Some(ref light) = data.light_data {
-                            let dir_light = DirectionalLight {
-                                color: light.color,
-                                illuminance: light.brightness,
-                                shadow_maps_enabled: light.shadows,
-                                ..Default::default()
-                            };
-                            
-                            let transform = Transform::default()
-                                .looking_to(light.direction, Vec3::Y);
-                            
-                            world.spawn((
-                                instance,
-                                dir_light,
-                                transform,
-                                GlobalTransform::default(),
-                                Visibility::default(),
-                                InheritedVisibility::default(),
-                                ViewVisibility::default(),
-                                Name::new(name),
-                            )).id()
+                            ));
+                            match data.class_id {
+                                ClassId::PointLight => {
+                                    e.insert(EustressPointLight {
+                                        brightness: light.brightness,
+                                        color: light.color,
+                                        range: light.range,
+                                        radius: light.radius,
+                                        shadows: light.shadows,
+                                        enabled: light.enabled,
+                                        texture: None,
+                                    });
+                                }
+                                ClassId::SpotLight => {
+                                    e.insert(EustressSpotLight {
+                                        brightness: light.brightness,
+                                        color: light.color,
+                                        range: light.range,
+                                        angle: light.angle,
+                                        shadows: light.shadows,
+                                        enabled: light.enabled,
+                                        face: light.face_label(),
+                                        texture: None,
+                                    });
+                                }
+                                ClassId::SurfaceLight => {
+                                    e.insert(SurfaceLight {
+                                        brightness: light.brightness,
+                                        color: light.color,
+                                        range: light.range,
+                                        face: light.face_label(),
+                                        angle: light.angle,
+                                        shadows: light.shadows,
+                                        enabled: light.enabled,
+                                        texture: None,
+                                    });
+                                }
+                                _ => {
+                                    e.insert(EustressDirectionalLight {
+                                        brightness: light.brightness,
+                                        color: light.color,
+                                        shadows: light.shadows,
+                                        enabled: light.enabled,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                            e.id()
                         } else {
                             world.spawn((instance, Name::new(name))).id()
                         }

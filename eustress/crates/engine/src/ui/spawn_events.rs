@@ -4,7 +4,7 @@ use crate::classes::{Instance, ClassName, BasePart, Part, PartType};
 use crate::ui::BevySelectionManager;
 use crate::camera_controller::EustressCamera;
 use crate::play_mode::{PlayModeState, SpawnedDuringPlayMode};
-use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainMode, TerrainBrush, BrushMode, spawn_terrain, TerrainRoot};
+use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainBrush, TerrainTool, spawn_terrain, TerrainRoot};
 
 /// Event to spawn a new part in the scene
 #[derive(Message)]
@@ -352,7 +352,6 @@ fn build_binary_part_def(
     let c = base.color.to_srgba();
     let now = chrono::Utc::now().to_rfc3339();
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset: Some(AssetReference {
             mesh: mesh.to_string(),
@@ -506,14 +505,17 @@ impl Default for SpawnTerrainEvent {
     }
 }
 
-/// Event to toggle terrain edit mode
+/// Enter the terrain tools with the last tool used, or leave them (back to
+/// Select).
 #[derive(Message)]
 pub struct ToggleTerrainEditEvent;
 
-/// Event to set terrain brush mode
+/// Choose a terrain tool, and optionally its mode (an index into
+/// `TerrainTool::mode_labels`), entering the terrain tools.
 #[derive(Message)]
 pub struct SetTerrainBrushEvent {
-    pub mode: BrushMode,
+    pub tool: TerrainTool,
+    pub mode: Option<usize>,
 }
 
 /// Event to import terrain heightmap from file
@@ -603,59 +605,61 @@ pub fn handle_spawn_terrain_events(
     }
 }
 
-/// System to handle terrain edit toggle
+/// Make the terrain tools the current tool (design section 4.1), or, with no
+/// terrain in the Space, open the Terrain panel's empty state (Flat,
+/// Generate World, Import) instead and say so. Returns whether the tools
+/// are now current.
+fn enter_terrain_tools(
+    studio_state: &mut crate::ui::StudioState,
+    has_terrain: bool,
+    notifications: Option<&mut crate::notifications::NotificationManager>,
+) -> bool {
+    if !has_terrain {
+        studio_state.show_terrain_editor = true;
+        if let Some(notifications) = notifications {
+            notifications.info("Add terrain to sculpt it: Flat, Generate World or Import in the Terrain panel");
+        }
+        return false;
+    }
+    studio_state.current_tool = crate::ui::Tool::Terrain;
+    true
+}
+
+/// Enter the terrain tools with the last tool used, or leave them for the
+/// Select tool. `terrain_plugin` keeps `TerrainMode` in step with the
+/// current tool.
 pub fn handle_toggle_terrain_edit(
     mut toggle_events: MessageReader<ToggleTerrainEditEvent>,
-    mode: Option<ResMut<TerrainMode>>,
-    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    terrain: Query<(), With<TerrainRoot>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
-    let Some(mut mode) = mode else { return };
-    let Some(mut notifications) = notifications else { return };
+    let Some(mut studio_state) = studio_state else { return };
     for _event in toggle_events.read() {
-        *mode = match *mode {
-            TerrainMode::Render => {
-                notifications.info("Terrain Edit Mode: ON");
-                TerrainMode::Editor
-            }
-            TerrainMode::Editor => {
-                notifications.info("Terrain Edit Mode: OFF");
-                TerrainMode::Render
-            }
-        };
+        if studio_state.current_tool == crate::ui::Tool::Terrain {
+            studio_state.current_tool = crate::ui::Tool::Select;
+        } else {
+            enter_terrain_tools(&mut studio_state, !terrain.is_empty(), notifications.as_deref_mut());
+        }
     }
 }
 
-/// System to handle terrain brush mode changes
-/// Auto-enables Editor mode when a brush is selected so toolbar buttons work immediately.
+/// Choose a terrain tool (and its mode when the event names one) and enter
+/// the terrain tools.
 pub fn handle_set_terrain_brush(
     mut brush_events: MessageReader<SetTerrainBrushEvent>,
     brush: Option<ResMut<TerrainBrush>>,
-    mode: Option<ResMut<TerrainMode>>,
-    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    terrain: Query<(), With<TerrainRoot>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
-    let Some(mut brush) = brush else { return };
-    let Some(mut mode) = mode else { return };
-    let Some(mut notifications) = notifications else { return };
+    let (Some(mut brush), Some(mut studio_state)) = (brush, studio_state) else { return };
     for event in brush_events.read() {
-        // Region and Fill have no stroke behaviour — `apply_brush_to_chunk`
-        // matches them and does nothing. Arming one would leave a lit-up
-        // button that never moves the ground, so say so and keep whichever
-        // brush was already armed.
-        if matches!(event.mode, BrushMode::Region | BrushMode::Fill) {
-            notifications.info(format!(
-                "{:?} brush is on the roadmap but not built yet, so the armed brush is unchanged",
-                event.mode
-            ));
-            continue;
+        brush.tool = event.tool;
+        if let Some(mode) = event.mode {
+            brush.set_mode_index(event.tool, mode);
         }
-        brush.mode = event.mode;
-        // Auto-enable edit mode when selecting a brush tool
-        if *mode != TerrainMode::Editor {
-            *mode = TerrainMode::Editor;
-            notifications.info(format!("Terrain Edit Mode: ON, Brush: {}", event.mode.label()));
-        } else {
-            notifications.info(format!("Terrain Brush: {}", event.mode.label()));
-        }
+        enter_terrain_tools(&mut studio_state, !terrain.is_empty(), notifications.as_deref_mut());
     }
 }
 
@@ -744,6 +748,9 @@ pub fn handle_import_terrain(
                 let disk_config = TerrainConfig {
                     chunks_x: n,
                     chunks_z: n,
+                    // The toml records no grid centre, so the chunks go on
+                    // the origin-centred grid Step 6 reloads them onto.
+                    center_chunk: IVec2::ZERO,
                     view_distance: n as f32 * config.chunk_size,
                     height_offset: band_floor,
                     height_scale: band_range,
@@ -752,13 +759,16 @@ pub fn handle_import_terrain(
 
                 // Centre the imported grid the way the importer numbers its
                 // chunks (`cx - full / 2`), so importer chunk 0 lands on
-                // loader chunk `-full / 2`.
+                // loader chunk `-full / 2`, whose tile the copy starts at
+                // (always on the grid, since `n >= full / 2`).
                 let mut disk_data = TerrainData::procedural();
                 disk_data.resize_cache(&disk_config);
                 let padding = disk_config.normalized_height(0.0);
                 disk_data.height_cache.iter_mut().for_each(|h| *h = padding);
-                let off_x = (n - full_x / 2) as usize * res;
-                let off_z = (n - full_z / 2) as usize * res;
+                let first_chunk = IVec2::new(-((full_x / 2) as i32), -((full_z / 2) as i32));
+                let first_tile = disk_config.chunk_grid_index(first_chunk).unwrap_or(UVec2::ZERO);
+                let off_x = first_tile.x as usize * res;
+                let off_z = first_tile.y as usize * res;
                 let (src_w, src_h) = (data.cache_width as usize, data.cache_height as usize);
                 let dst_w = disk_data.cache_width as usize;
                 let dst_h = disk_data.cache_height as usize;
@@ -781,8 +791,14 @@ pub fn handle_import_terrain(
                 // Step 3: Clear the previous terrain's files. Chunk files
                 // beyond the new grid would outlive it, old material maps
                 // (legacy splatmaps included) would paint the new ground on
-                // load, and old volume bricks would carve the old caves
-                // into it.
+                // load, old volume bricks would carve the old caves into
+                // it, and old water would stand over it.
+                let water_file = eustress_common::terrain::voxel_water::water_file_path(&terrain_dir);
+                if let Err(e) = std::fs::remove_file(&water_file) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("Import Heightmap: could not remove stale {:?}: {}", water_file, e);
+                    }
+                }
                 for (dir, extension) in [
                     (chunks_dir.clone(), "r16"),
                     (terrain_dir.join(eustress_common::terrain::toml_loader::MATMAP_DIR), "png"),
@@ -808,10 +824,7 @@ pub fn handle_import_terrain(
 
                 // Step 4: Write every chunk of the grid, the same span
                 // `save_terrain_to_disk` writes on Save.
-                let n_i = n as i32;
-                let positions: Vec<IVec2> = (-n_i..=n_i)
-                    .flat_map(|cz| (-n_i..=n_i).map(move |cx| IVec2::new(cx, cz)))
-                    .collect();
+                let positions: Vec<IVec2> = disk_config.grid_chunks().collect();
                 if let Err(e) = eustress_common::terrain::toml_loader::save_chunks_to_disk(
                     &terrain_dir,
                     &disk_config,

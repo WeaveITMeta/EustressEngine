@@ -21,7 +21,6 @@ use web_sys::MediaStream;
 use crate::capture::{aspect_for, capture_document, overlay_rect, start_camera, stop_camera};
 use crate::components::Footer;
 
-const API: &str = "https://api.eustress.dev";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
@@ -110,7 +109,7 @@ pub fn VerifyPage() -> impl IntoView {
         session.set(s.clone());
 
         spawn_local(async move {
-            match gloo_net::http::Request::get(&format!("{}/api/kyc/handoff/{}", API, s))
+            match gloo_net::http::Request::get(&format!("{}/api/kyc/handoff/{}", crate::state::api_base(), s))
                 .send()
                 .await
             {
@@ -480,7 +479,7 @@ async fn upload_capture(
     form.append_with_str("id_type", id_type).ok();
     form.append_with_str("session_id", session_id).ok();
 
-    let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/upload", API))
+    let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/upload", crate::state::api_base()))
         .body(form)
         .map_err(|_| "Could not prepare the upload.".to_string())?
         .send()
@@ -503,7 +502,7 @@ async fn submit_for_verification(session_id: &str, needs_back: bool) -> Result<S
         "needs_back": needs_back,
     });
 
-    let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/submit", API))
+    let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/submit", crate::state::api_base()))
         .header("Content-Type", "application/json")
         .body(payload.to_string())
         .map_err(|_| "Could not prepare the request.".to_string())?

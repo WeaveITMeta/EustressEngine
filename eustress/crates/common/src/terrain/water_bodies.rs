@@ -134,17 +134,17 @@ pub struct WaterBodyDesc {
 /// times `size - 1`, so a cell's centre is exactly where
 /// `TerrainData::sample_height` reads it unblended.
 #[derive(Clone, Copy, Debug)]
-struct CellGrid {
-    origin: Vec2,
-    step: Vec2,
-    width: usize,
-    height: usize,
+pub(crate) struct CellGrid {
+    pub(crate) origin: Vec2,
+    pub(crate) step: Vec2,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
 }
 
 impl CellGrid {
     /// The grid of `data` over `config`'s chunk grid; `None` without a whole
     /// raster of at least two cells a side.
-    fn of(config: &TerrainConfig, data: &TerrainData) -> Option<Self> {
+    pub(crate) fn of(config: &TerrainConfig, data: &TerrainData) -> Option<Self> {
         let (width, height) = (data.cache_width as usize, data.cache_height as usize);
         if width < 2 || height < 2 || data.height_cache.len() != width * height {
             return None;
@@ -154,12 +154,12 @@ impl CellGrid {
         (step.is_finite() && step.x > 0.0 && step.y > 0.0).then_some(Self { origin: min, step, width, height })
     }
 
-    fn world(&self, x: usize, z: usize) -> Vec2 {
+    pub(crate) fn world(&self, x: usize, z: usize) -> Vec2 {
         self.origin + Vec2::new(x as f32, z as f32) * self.step
     }
 
     /// The cell nearest world `p`, `None` off the raster.
-    fn cell_at(&self, p: Vec2) -> Option<(usize, usize)> {
+    pub(crate) fn cell_at(&self, p: Vec2) -> Option<(usize, usize)> {
         let f = ((p - self.origin) / self.step).round();
         let last = Vec2::new((self.width - 1) as f32, (self.height - 1) as f32);
         (f.x >= 0.0 && f.y >= 0.0 && f.x <= last.x && f.y <= last.y).then(|| (f.x as usize, f.y as usize))
@@ -167,7 +167,7 @@ impl CellGrid {
 
     /// The inclusive cell box `(x0, z0, x1, z1)` whose centres lie in world
     /// box `lo..hi`, `None` when none do.
-    fn cells_in(&self, lo: Vec2, hi: Vec2) -> Option<(usize, usize, usize, usize)> {
+    pub(crate) fn cells_in(&self, lo: Vec2, hi: Vec2) -> Option<(usize, usize, usize, usize)> {
         if !(lo.is_finite() && hi.is_finite()) {
             return None;
         }
@@ -482,6 +482,9 @@ struct BuiltBody {
     /// wet, since only the seed's cell going under water starts a flood.
     reach: (Vec2, Vec2),
     surfaces: Vec<Entity>,
+    /// The flood the surfaces were built from, `None` while the seed is dry:
+    /// what [`WaterBodyState::level_at`] answers from.
+    fill: Option<WaterFill>,
 }
 
 /// Bookkeeping of [`sync_water_bodies`].
@@ -496,6 +499,32 @@ pub struct WaterBodyState {
     terrain: Option<(Entity, TerrainGridKey)>,
     /// `Time<Real>` seconds of the last fill, `None` before the first.
     last_build: Option<f64>,
+    /// Bumped whenever a body's flood changes or a body goes, so readers of
+    /// [`Self::level_at`] (scatter) know to look again.
+    revision: u64,
+}
+
+impl WaterBodyState {
+    /// World Y of the highest lake over world `p`, `None` where no body's
+    /// flood covers the raster cell nearest `p`. `config` and `ground` are
+    /// the terrain the floods were filled over.
+    pub fn level_at(&self, config: &TerrainConfig, ground: &TerrainData, p: Vec2) -> Option<f32> {
+        if self.built.values().all(|body| body.fill.is_none()) {
+            return None;
+        }
+        let (x, z) = CellGrid::of(config, ground)?.cell_at(p)?;
+        self.built
+            .values()
+            .filter_map(|body| body.fill.as_ref())
+            .filter(|fill| fill.is_wet(x as u32, z as u32))
+            .map(|fill| fill.level)
+            .reduce(f32::max)
+    }
+
+    /// Changes whenever [`Self::level_at`] may answer differently.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 fn despawn_surfaces(commands: &mut Commands, surfaces: &[Entity]) {
@@ -522,11 +551,14 @@ pub fn sync_water_bodies(
     materials: Option<ResMut<Assets<WaterSurfaceMaterial>>>,
     mut water: ResMut<WaterSurfaceAssets>,
 ) {
-    let WaterBodyState { built, pending, seen_surface, terrain, last_build } = &mut *state;
+    let WaterBodyState { built, pending, seen_surface, terrain, last_build, revision } = &mut *state;
     let (Some((root, config, base, baked)), Some(mut meshes), Some(mut materials)) =
         (roots.iter().next(), meshes, materials)
     else {
         // No terrain to hold water, or a host that draws nothing.
+        if !built.is_empty() {
+            *revision += 1;
+        }
         for (_, body) in built.drain() {
             despawn_surfaces(&mut commands, &body.surfaces);
         }
@@ -539,6 +571,9 @@ pub fn sync_water_bodies(
     // nothing built fits it, and its own history of marks starts now.
     let key = TerrainGridKey::of(config);
     if *terrain != Some((root, key)) {
+        if !built.is_empty() {
+            *revision += 1;
+        }
         for (_, body) in built.drain() {
             despawn_surfaces(&mut commands, &body.surfaces);
         }
@@ -568,6 +603,7 @@ pub fn sync_water_bodies(
         let keep = current.contains_key(entity);
         if !keep {
             despawn_surfaces(&mut commands, &body.surfaces);
+            *revision += 1;
         }
         keep
     });
@@ -647,7 +683,12 @@ pub fn sync_water_bodies(
         }
         // The old surfaces go in the same command flush the new ones spawn
         // in, so the water never blinks out.
-        if let Some(old) = built.insert(entity, BuiltBody { desc: desc.clone(), reach, surfaces }) {
+        let old = built.insert(entity, BuiltBody { desc: desc.clone(), reach, surfaces, fill });
+        let flooded = &built[&entity].fill;
+        if old.as_ref().map_or(flooded.is_some(), |old| old.fill != *flooded) {
+            *revision += 1;
+        }
+        if let Some(old) = old {
             despawn_surfaces(&mut commands, &old.surfaces);
         }
     }

@@ -36,7 +36,7 @@ impl Default for RunePhysicsBridge {
             state: Arc::default(),
             commands: Vec::new(),
             velocity_commands: Vec::new(),
-            gravity: 9.80665,
+            gravity: eustress_common::units::STANDARD_GRAVITY,
             gravity_write: None,
         }
     }

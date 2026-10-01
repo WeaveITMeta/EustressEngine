@@ -13,7 +13,7 @@
 //!         │   convert + epsilon_snap (jitter-free formatter)
 //!         ▼
 //!   [ Engine-Native ]      ← always meters. 1 unit = 1 meter.
-//!         ▲                  Avian gravity 9.81, BasePart.size in m,
+//!         ▲                  gravity in m/s², BasePart.size in m,
 //!         │                  Transform.translation in m, raycasts in m,
 //!         │                  gizmo math in m, mesh AABBs in m.
 //!         │   convert (authored ↔ meters)
@@ -37,14 +37,14 @@
 //!
 //! ## Stud value
 //!
-//! 1 stud ≡ `9.815 / 196.8` meters ≈ 0.04987 m.
+//! 1 stud ≡ 0.28 meters, Roblox's stud. Symbol `"stud"`.
 //!
-//! This is the historical engine ratio: the studs-native build was
-//! tuned with gravity 196.8 stud/s² to mirror real-world 9.815 m/s².
-//! Inverting gives the exact `studs_per_meter = 196.8 / 9.815 ≈ 20.05094`
-//! factor that Stud↔Meter round-trips preserve. Kept *exact* (not
-//! rounded to 0.05) so Roblox-shape Spaces import without numerical
-//! drift.
+//! Files written before the stud became Roblox's declare `"studs"`,
+//! which reads as [`Unit::LegacyStud`]: `9.815 / 196.8` meters
+//! (≈ 0.04987 m), the ratio the studs-native build was tuned with
+//! (gravity 196.8 stud/s² mirroring 9.815 m/s²). Such a file loads at
+//! exactly the size it always had and is written back in its own
+//! unit; the legacy stud is never offered for picking ([`Unit::PICKABLE`]).
 //!
 //! ## Floating-point hygiene
 //!
@@ -60,8 +60,9 @@
 //!
 //! ## What lives where
 //!
-//! - [`Unit`] — the six-way enum (Meter / Centimeter / Millimeter /
-//!   Foot / Inch / Stud).
+//! - [`Unit`]: the length units (Meter / Centimeter / Millimeter /
+//!   Foot / Inch / Stud, plus LegacyStud for old files), and
+//!   [`Unit::PICKABLE`], the ones a user may choose.
 //! - [`MeasureUnit`] — Bevy `Component` carrying the entity's authored
 //!   unit. Defaults to `Meter` so any spawn path that doesn't think
 //!   about units gets the engine-native treatment for free.
@@ -71,6 +72,8 @@
 //! - [`ENGINE_NATIVE_UNIT`] — `Unit::Meter`. The one constant the rest
 //!   of the engine should reach for when asking "what unit does ECS
 //!   store?"
+//! - [`STANDARD_GRAVITY`]: g₀, 9.80665 m/s². The default gravity, and
+//!   the constant for quantities defined at standard gravity.
 
 use bevy::prelude::{Component, Resource};
 use serde::{Deserialize, Serialize};
@@ -79,14 +82,18 @@ use serde::{Deserialize, Serialize};
 // Unit
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A unit of length. Six variants cover the 99% of authoring cases
-/// (SI cascade + imperial pair + Roblox legacy). Adding a new variant
-/// is a one-row change in `to_meters` + `symbol` + `from_any`.
+/// A unit of length. The SI cascade, the imperial pair and Roblox's
+/// stud cover the authoring cases; [`Unit::PICKABLE`] lists them.
+/// Adding a variant is a row in `to_meters`, `symbol`, `display_name`,
+/// `from_symbol`, `from_any` and `display_grain`.
 ///
-/// `Stud` is preserved so Roblox-shape Spaces can be imported with
-/// their values intact and `unit = "studs"` declared on disk; the
-/// engine then converts on load. There is intentionally no `Yard` or
-/// `Kilometer` — too rare to merit the surface area.
+/// `Stud` lets Roblox-shape Spaces keep their values intact, with
+/// `unit = "stud"` declared on disk; the engine converts on load.
+/// `LegacyStud` only reads (and writes back) files that declare the
+/// older `"studs"`. It stays the LAST variant: the enum serializes by
+/// index in some stores (DisplayUnit settings, worldDB MeasureUnit),
+/// so existing indices must not move. There is intentionally no
+/// `Yard` or `Kilometer`: too rare to merit the surface area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Unit {
     Meter,
@@ -94,7 +101,11 @@ pub enum Unit {
     Millimeter,
     Foot,
     Inch,
+    /// Roblox's stud, 0.28 m. Symbol `"stud"`.
     Stud,
+    /// The stud older files declare, `9.815 / 196.8` m. Symbol
+    /// `"studs"`. Read and written back, never offered.
+    LegacyStud,
 }
 
 impl Default for Unit {
@@ -107,15 +118,21 @@ impl Default for Unit {
 }
 
 impl Unit {
+    /// The units a user may choose: every display and authoring picker
+    /// offers exactly these, in this order. [`Unit::LegacyStud`] is not
+    /// one of them.
+    pub const PICKABLE: &'static [Unit] =
+        &[Unit::Meter, Unit::Centimeter, Unit::Millimeter, Unit::Foot, Unit::Inch, Unit::Stud];
+
     /// Meters per one unit of `self`. The single source of truth for
     /// every numeric conversion in the engine.
     ///
-    /// Exact wherever the unit has an exact SI definition:
+    /// Exact wherever the unit has an exact definition:
     /// - Foot  = 0.3048 m   (by the 1959 International Yard agreement)
     /// - Inch  = 0.0254 m   (foot / 12)
-    /// - Stud  = 9.815 / 196.8 m, derived from the engine's historical
-    ///           gravity tuning — kept exact rather than rounded to
-    ///           0.05 so Roblox-shape imports don't drift.
+    /// - Stud  = 0.28 m     (Roblox's stud)
+    /// - LegacyStud = 9.815 / 196.8 m, kept exact so a file that
+    ///   declares it loads at exactly the size it was written at.
     pub const fn to_meters(self) -> f64 {
         match self {
             Unit::Meter      => 1.0,
@@ -123,8 +140,9 @@ impl Unit {
             Unit::Millimeter => 0.001,
             Unit::Foot       => 0.3048,
             Unit::Inch       => 0.0254,
+            Unit::Stud       => 0.28,
             // Const-evaluated: 9.815 / 196.8 ≈ 0.04987297560975609756...
-            Unit::Stud       => 9.815_f64 / 196.8_f64,
+            Unit::LegacyStud => 9.815_f64 / 196.8_f64,
         }
     }
 
@@ -137,7 +155,8 @@ impl Unit {
             Unit::Millimeter => "mm",
             Unit::Foot       => "ft",
             Unit::Inch       => "in",
-            Unit::Stud       => "studs",
+            Unit::Stud       => "stud",
+            Unit::LegacyStud => "studs",
         }
     }
 
@@ -150,12 +169,15 @@ impl Unit {
             Unit::Foot       => "Feet",
             Unit::Inch       => "Inches",
             Unit::Stud       => "Studs",
+            Unit::LegacyStud => "Studs (legacy)",
         }
     }
 
     /// Strict symbol lookup — only the canonical strings emitted by
     /// [`Unit::symbol`]. Use this for disk parsing where you want
-    /// to fail loudly on unknown values.
+    /// to fail loudly on unknown values. `"studs"` is the legacy stud,
+    /// so a file keeps the size it was written at; a user's choice goes
+    /// through [`Unit::from_any`] or a symbol from [`Unit::PICKABLE`].
     pub fn from_symbol(s: &str) -> Option<Unit> {
         match s {
             "m"     => Some(Unit::Meter),
@@ -163,7 +185,8 @@ impl Unit {
             "mm"    => Some(Unit::Millimeter),
             "ft"    => Some(Unit::Foot),
             "in"    => Some(Unit::Inch),
-            "studs" => Some(Unit::Stud),
+            "stud"  => Some(Unit::Stud),
+            "studs" => Some(Unit::LegacyStud),
             _ => None,
         }
     }
@@ -171,7 +194,8 @@ impl Unit {
     /// Lenient lookup — accepts the canonical symbol AND every
     /// reasonable alternative (full name, singular, plural,
     /// capitalised). Use this for user-typed input (MCP tool args,
-    /// command bar, scripts).
+    /// command bar, scripts). "stud" and "studs" both mean Roblox's
+    /// stud here; nothing a user types names the legacy stud.
     pub fn from_any(s: &str) -> Option<Unit> {
         let s = s.trim().to_ascii_lowercase();
         match s.as_str() {
@@ -195,16 +219,16 @@ impl Unit {
     /// precision.
     pub const fn display_grain(self) -> f64 {
         match self {
-            // 1 mm precision for all the metric / imperial units
-            // (cm.grain = 0.1 cm = 1 mm, etc.). Studs match meters at
-            // 1 mm equivalent — about 0.02 stud — which is fine because
-            // a stud is itself ~5 cm.
+            // 1 mm precision for the metric units (cm.grain = 0.1 cm =
+            // 1 mm, etc.); a thousandth of the unit for feet, inches and
+            // both studs, which is under a millimetre for each.
             Unit::Meter      => 0.001,
             Unit::Centimeter => 0.1,    // = 1 mm
             Unit::Millimeter => 1.0,    // already mm
             Unit::Foot       => 0.001,
             Unit::Inch       => 0.001,
             Unit::Stud       => 0.001,
+            Unit::LegacyStud => 0.001,
         }
     }
 }
@@ -220,6 +244,29 @@ impl Unit {
 /// AABBs, raycast distances, gizmo offsets — all are in this unit.
 /// Other surfaces (disk, Properties panel) convert at their boundary.
 pub const ENGINE_NATIVE_UNIT: Unit = Unit::Meter;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standard gravity
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Standard gravity, g₀, in m/s²: exactly 9.80665 by definition.
+///
+/// Two kinds of code use it, and they must not be confused:
+///
+/// - **Defaults.** A new Space's `Workspace.gravity` and the Avian `Gravity`
+///   inserted at startup start here. Once a Space runs, the live value is
+///   `Workspace.gravity`, which `sync_workspace_gravity_to_avian` copies into
+///   Avian's `Gravity` every frame; scripts and tools change it there.
+/// - **Quantities defined at standard gravity.** A character's authored jump
+///   apex, specific impulse, or the depth-pressure of a formula documented
+///   for Earth. These stay fixed when a Space changes its gravity.
+///
+/// Anything that simulates a falling or floating body reads the live gravity
+/// instead, so it follows a Space set to the Moon.
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
+/// [`STANDARD_GRAVITY`] as `f32`, for Bevy and Avian vectors.
+pub const STANDARD_GRAVITY_F32: f32 = STANDARD_GRAVITY as f32;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MeasureUnit component
@@ -495,11 +542,14 @@ mod tests {
         assert_eq!(velocity_authored_to_engine_vec3_f32(v, ENGINE_NATIVE_UNIT), v);
     }
 
+    /// Every variant, the legacy stud included.
+    const ALL: [Unit; 7] = [Unit::Meter, Unit::Centimeter, Unit::Millimeter,
+                            Unit::Foot, Unit::Inch, Unit::Stud, Unit::LegacyStud];
+
     /// Identity conversion is bit-exact.
     #[test]
     fn identity_is_bit_exact() {
-        for &u in &[Unit::Meter, Unit::Centimeter, Unit::Millimeter,
-                    Unit::Foot, Unit::Inch, Unit::Stud] {
+        for &u in &ALL {
             assert_eq!(convert(3.141_592_653_589_793, u, u), 3.141_592_653_589_793);
         }
     }
@@ -507,8 +557,7 @@ mod tests {
     /// Every unit pair round-trips a→b→a within f64 precision.
     #[test]
     fn round_trip_all_pairs() {
-        let units = [Unit::Meter, Unit::Centimeter, Unit::Millimeter,
-                     Unit::Foot, Unit::Inch, Unit::Stud];
+        let units = ALL;
         for &from in &units {
             for &to in &units {
                 let v = 12.345_678_9_f64;
@@ -532,22 +581,70 @@ mod tests {
         assert!((Unit::Foot.to_meters() - 12.0 * Unit::Inch.to_meters()).abs() < FUZZ);
     }
 
-    /// Stud derives from the engine's gravity tuning.
+    /// Crates below `common` cannot name [`STANDARD_GRAVITY`], so they keep
+    /// their own copies; every copy must be the same value.
     #[test]
-    fn stud_matches_engine_gravity_ratio() {
-        let studs_per_meter = 1.0 / Unit::Stud.to_meters();
-        // 196.8 / 9.815 = 20.0509424...
-        assert!((studs_per_meter - 196.8_f64 / 9.815_f64).abs() < FUZZ);
-        // 1 stud = 9.815 / 196.8 m ≈ 0.0498730 m. Compare against the exact
-        // defining expression — a hand-typed decimal literal does not match to
-        // within FUZZ (1e-10) because 1/(196.8/9.815) ≠ 9.815/196.8 once rounded.
-        assert!((Unit::Stud.to_meters() - 9.815_f64 / 196.8_f64).abs() < FUZZ);
+    fn every_standard_gravity_copy_agrees() {
+        assert_eq!(STANDARD_GRAVITY, 9.80665);
+        assert_eq!(eustress_avatar_schema::GRAVITY_MPS2, STANDARD_GRAVITY_F32);
+        assert_eq!(
+            eustress_particle_sim::SimParams::default().gravity.to_array(),
+            [0.0, -STANDARD_GRAVITY_F32, 0.0],
+        );
+        assert_eq!(
+            crate::services::workspace::Workspace::default().gravity.to_array(),
+            [0.0, -STANDARD_GRAVITY_F32, 0.0],
+        );
+    }
+
+    /// A stud is Roblox's, 0.28 m exactly.
+    #[test]
+    fn stud_is_roblox_stud() {
+        assert_eq!(Unit::Stud.to_meters(), 0.28);
+        assert!((convert(10.0, Unit::Stud, Unit::Meter) - 2.8).abs() < FUZZ);
+    }
+
+    /// The legacy stud is bit for bit the ratio older files were written
+    /// with, so every one of them loads at the size it always had.
+    #[test]
+    fn a_legacy_studs_file_keeps_its_size() {
+        let old_ratio = 9.815_f64 / 196.8_f64;
+        assert_eq!(Unit::LegacyStud.to_meters().to_bits(), old_ratio.to_bits());
+        let legacy = Unit::from_symbol("studs").expect("\"studs\" still parses");
+        for v in [0.0, 1.0, 196.8, 12.345_678_9, -40.5, 2048.0] {
+            assert_eq!(convert(v, legacy, Unit::Meter), v * old_ratio, "{v} studs");
+        }
+        // Written back in its own unit: the symbol stays "studs".
+        assert_eq!(legacy.symbol(), "studs");
+    }
+
+    /// Files name the legacy stud "studs"; nothing a user types or picks
+    /// names it.
+    #[test]
+    fn stud_symbols_map_to_the_right_stud() {
+        assert_eq!(Unit::from_symbol("studs"), Some(Unit::LegacyStud));
+        assert_eq!(Unit::from_symbol("stud"), Some(Unit::Stud));
+        assert_eq!(Unit::from_any("studs"), Some(Unit::Stud));
+        assert_eq!(Unit::from_any("stud"), Some(Unit::Stud));
+        assert_eq!(Unit::from_any("Studs"), Some(Unit::Stud));
+        assert!(!Unit::PICKABLE.contains(&Unit::LegacyStud));
+        assert!(Unit::PICKABLE.contains(&Unit::Stud));
+    }
+
+    /// Every pickable unit survives a trip through its symbol and back
+    /// through the lenient parser, so a picker that sends symbols works.
+    #[test]
+    fn every_pickable_unit_round_trips() {
+        assert_eq!(Unit::PICKABLE.len(), ALL.len() - 1);
+        for &u in Unit::PICKABLE {
+            assert_eq!(Unit::from_symbol(u.symbol()), Some(u), "{u:?}");
+            assert_eq!(Unit::from_any(u.symbol()), Some(u), "{u:?}");
+        }
     }
 
     #[test]
     fn symbol_round_trip() {
-        for &u in &[Unit::Meter, Unit::Centimeter, Unit::Millimeter,
-                    Unit::Foot, Unit::Inch, Unit::Stud] {
+        for &u in &ALL {
             let s = u.symbol();
             assert_eq!(Unit::from_symbol(s), Some(u), "symbol {} should reparse", s);
         }

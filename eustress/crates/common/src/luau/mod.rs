@@ -38,6 +38,12 @@ pub mod raycast;
 pub mod types;
 /// The Play-mode VM: scripts run against the live [`crate::datamodel`] tree.
 pub mod play;
+/// What a script can reach, as data: the VM resolves members through it and
+/// the script editor completes from it.
+pub mod catalog;
+/// Luau as the script editor reads it: tokens, completion, signatures,
+/// hover, and syntax errors from the VM's compiler.
+pub mod lang;
 
 pub use components::*;
 pub use runtime::*;

@@ -18,7 +18,7 @@
 //! - [`keys`] — the `KeyEncoder` trait + a flat encoder today, a
 //!   Morton/Hilbert encoder once chunk-streaming locality matters.
 //! - [`import`] — one-shot TOML → Fjall migration for existing
-//!   universes (Universe1, ARC-AGI-3, Benchmark, Test123).
+//!   universes (Universe1, Benchmark, Test123).
 //! - [`bake`] — Fjall snapshot → `.echk` chunked export per
 //!   [05_SPACE_STREAMING] Feature 7.
 //!
@@ -45,6 +45,7 @@ pub mod backend;
 pub mod bake;
 pub mod branch;
 pub mod changestream;
+pub mod checkpoint;
 pub mod datastore;
 pub mod error;
 pub mod fjall_backend;
@@ -62,6 +63,7 @@ pub mod tracing_hooks;
 pub use backend::{Commit, EntityId, RekeyReport, TreeEntry, WorldDb};
 pub use branch::{BranchHandle, WorldDbBranchExt};
 pub use changestream::{ChangeStream, CommitDelta, EntityChange, Filter, Subscription, TxId};
+pub use checkpoint::{restore_checkpoint, CheckpointInfo, RestoreSummary};
 pub use datastore::{DataStore, DataStorePages, DataStoreService, OrderedDataStore};
 pub use error::{Error, Result};
 pub use fjall_backend::{normalise_rel, FjallWorldDb};

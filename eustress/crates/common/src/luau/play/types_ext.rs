@@ -1,12 +1,12 @@
 //! Value types the Play VM adds on top of `luau::types`: Vector2, EnumItem,
-//! Random, NumberRange, NumberSequence, ColorSequence, Ray, RaycastParams
-//! and BrickColor.
+//! Random, NumberRange, NumberSequence, ColorSequence, Ray, RaycastParams,
+//! Region3 and BrickColor.
 
 use mlua::{FromLua, Lua, MetaMethod, Result as LuaResult, UserData, UserDataFields, UserDataMethods, Value};
 
-use crate::datamodel::{EnumItem, InstanceId};
-use crate::luau::types::{userdata_eq, LuauColor3, LuauVector3, UserDataPeek};
-use crate::scripting::{Color3, NumberRange, Vector2, Vector3};
+use crate::datamodel::{format_number, EnumItem, InstanceId};
+use crate::luau::types::{userdata_eq, LuauCFrame, LuauColor3, LuauVector3, UserDataPeek};
+use crate::scripting::{CFrame, Color3, NumberRange, Vector2, Vector3};
 
 // ============================================================================
 // Vector2
@@ -439,6 +439,87 @@ impl FromLua for LuauRaycastParams {
 }
 
 // ============================================================================
+// Region3
+// ============================================================================
+
+/// Roblox `Region3`: the axis-aligned box between two corners, in world
+/// units. `Region3.new` takes the corners in either order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LuauRegion3 {
+    pub min: Vector3,
+    pub max: Vector3,
+}
+
+impl LuauRegion3 {
+    /// The box spanning corners `a` and `b`.
+    pub fn new(a: Vector3, b: Vector3) -> Self {
+        Self { min: a.min(&b), max: a.max(&b) }
+    }
+
+    /// Centre of the box (`Region3.CFrame` carries no rotation).
+    pub fn center(&self) -> Vector3 {
+        (self.min + self.max) * 0.5
+    }
+
+    pub fn size(&self) -> Vector3 {
+        self.max - self.min
+    }
+
+    /// `Region3:ExpandToGrid(resolution)`: the corners moved out to
+    /// multiples of `resolution`, the low one down and the high one up.
+    pub fn expand_to_grid(&self, resolution: f64) -> Self {
+        let down = |v: f64| (v / resolution).floor() * resolution;
+        let up = |v: f64| (v / resolution).ceil() * resolution;
+        Self {
+            min: Vector3::new(down(self.min.x), down(self.min.y), down(self.min.z)),
+            max: Vector3::new(up(self.max.x), up(self.max.y), up(self.max.z)),
+        }
+    }
+}
+
+impl UserData for LuauRegion3 {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__type", "Region3");
+        fields.add_field_method_get("CFrame", |_, this| Ok(LuauCFrame(CFrame::from_position(this.center()))));
+        fields.add_field_method_get("Size", |_, this| Ok(LuauVector3(this.size())));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("ExpandToGrid", |_, this, resolution: f64| {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(mlua::Error::RuntimeError("ExpandToGrid: resolution must be a positive number".into()));
+            }
+            Ok(this.expand_to_grid(resolution))
+        });
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            Ok(userdata_eq::<LuauRegion3>(&a, &b, |p, q| p == q))
+        });
+        // The centre's CFrame components, then the size.
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
+            let (c, s) = (this.center(), this.size());
+            Ok(format!(
+                "{}, {}, {}, 1, 0, 0, 0, 1, 0, 0, 0, 1; {}, {}, {}",
+                format_number(c.x),
+                format_number(c.y),
+                format_number(c.z),
+                format_number(s.x),
+                format_number(s.y),
+                format_number(s.z)
+            ))
+        });
+    }
+}
+
+impl FromLua for LuauRegion3 {
+    fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
+        match value {
+            Value::UserData(ud) => Ok(ud.peek::<LuauRegion3>()?),
+            other => Err(conversion_error(&other, "Region3")),
+        }
+    }
+}
+
+// ============================================================================
 // BrickColor (a small named palette; enough for scripts that use names)
 // ============================================================================
 
@@ -664,6 +745,14 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
     let rp = lua.create_table()?;
     rp.set("new", lua.create_function(|_, ()| Ok(LuauRaycastParams::default()))?)?;
     globals.set("RaycastParams", rp)?;
+
+    // Region3.new(min, max); omitted corners are the origin.
+    let region3 = lua.create_table()?;
+    region3.set("new", lua.create_function(|_, (a, b): (Option<LuauVector3>, Option<LuauVector3>)| {
+        let corner = |v: Option<LuauVector3>| v.map_or(Vector3::ZERO, |v| v.0);
+        Ok(LuauRegion3::new(corner(a), corner(b)))
+    })?)?;
+    globals.set("Region3", region3)?;
 
     // BrickColor
     let bc = lua.create_table()?;

@@ -14,6 +14,50 @@ use gloo_storage::Storage;
 use uuid::Uuid;
 
 // -----------------------------------------------------------------------------
+// 1a. Which API this site talks to
+// -----------------------------------------------------------------------------
+
+/// The production API, which every site not named below uses.
+pub const PRODUCTION_API: &str = "https://api.eustress.dev";
+
+/// The staging API, for the staging website only.
+pub const STAGING_API: &str = "https://api-staging.eustress.dev";
+
+/// A local `wrangler dev` (its default port), for a site served from this
+/// machine.
+pub const LOCAL_API: &str = "http://127.0.0.1:8787";
+
+/// The one origin that is the staging website: Pages branch `staging` of the
+/// project `eustress`. The branch alias is stable across deployments; the
+/// per-deployment `<hash>.eustress-cbb.pages.dev` hosts are not listed, so
+/// they use production. The staging Worker's `ALLOWED_ORIGINS` names the same
+/// origin (infrastructure/cloudflare/api/wrangler.toml).
+const STAGING_SITE_HOST: &str = "staging.eustress-cbb.pages.dev";
+
+/// The API for the page served from `host`, chosen from this exact list and
+/// never from a pattern or a query: a link must not be able to point the site
+/// at another API, since the page sends the visitor's sign-in token to it.
+pub fn api_base_for_host(host: &str) -> &'static str {
+    match host {
+        STAGING_SITE_HOST => STAGING_API,
+        "localhost" | "127.0.0.1" => LOCAL_API,
+        _ => PRODUCTION_API,
+    }
+}
+
+/// The API for the page in front of the visitor. The prerender has no page,
+/// and its output carries no API calls, so it answers with production.
+pub fn api_base() -> String {
+    #[cfg(not(feature = "ssr"))]
+    {
+        if let Some(host) = web_sys::window().and_then(|w| w.location().hostname().ok()) {
+            return api_base_for_host(&host).to_string();
+        }
+    }
+    PRODUCTION_API.to_string()
+}
+
+// -----------------------------------------------------------------------------
 // 2. User State
 // -----------------------------------------------------------------------------
 
@@ -105,9 +149,10 @@ pub struct AppState {
 impl AppState {
     /// Create a new app state instance.
     pub fn new() -> Self {
-        // Auth always goes to Cloudflare Worker — it's the registration authority.
-        // The local Bliss node (localhost:7777) only handles co-signing.
-        let api_url = "https://api.eustress.dev".to_string();
+        // Auth always goes to the Cloudflare Worker, the registration authority:
+        // production, or staging's on the staging site. The local Bliss node
+        // (localhost:7777) only handles co-signing.
+        let api_url = api_base();
         
         // Check localStorage for saved preferences. The prerender build has no
         // localStorage to ask, and dark is the site default anyway.

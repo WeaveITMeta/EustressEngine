@@ -286,6 +286,68 @@ fn fetch_and_decode_mesh(
     Ok((relative_path(instance_dir, &glb_abs), native_extent))
 }
 
+/// Bake a textured copy of mesh `mesh_id` with texture `tex_id` as its glTF
+/// material, under `<space_root>/assets/meshes/`, and return its path relative
+/// to `instance_dir`. The file name carries both ids and the look's key, so
+/// parts that look the same share one file and a second part finds it on disk.
+///
+/// Errors (texture not PNG/JPEG, fetch or decode failure) leave the caller on
+/// the untextured mesh.
+pub fn bake_textured_mesh(
+    fetcher: &dyn AssetFetcher,
+    mesh_id: u64,
+    tex_id: u64,
+    look: &crate::texture_bake::TextureLook,
+    space_root: &Path,
+    instance_dir: &Path,
+) -> Result<PathBuf, String> {
+    use crate::texture_bake as tb;
+    let meshes_dir = space_root.join("assets").join("meshes");
+    let glb_abs = meshes_dir.join(format!("rbx-{mesh_id}-tex-{tex_id}-{}.glb", look.key()));
+    if glb_abs.is_file() {
+        return Ok(relative_path(instance_dir, &glb_abs));
+    }
+
+    let mesh_bytes = fetcher.fetch(mesh_id)?;
+    if !crate::roblox_mesh::looks_like_roblox_mesh(&mesh_bytes) {
+        return Err(format!("rbxassetid://{mesh_id} is not a Roblox .mesh"));
+    }
+    let mesh = crate::roblox_mesh::decode_mesh(&mesh_bytes)
+        .map_err(|e| format!("rbxassetid://{mesh_id} .mesh decode failed: {e}"))?;
+    if mesh.uvs.len() != mesh.positions.len() {
+        return Err(format!("rbxassetid://{mesh_id} has no UVs to map a texture with"));
+    }
+
+    let tex = fetcher.fetch(tex_id)?;
+    let mime = tb::image_mime(&tex)
+        .ok_or_else(|| format!("rbxassetid://{tex_id} is not a PNG or JPEG texture"))?;
+    let (image, alpha_from_texture) = match (look.under, mime) {
+        (Some(under), "image/png") => match tb::composite_over(&tex, under)? {
+            Some(composited) => (composited, false),
+            None => (tex, false),
+        },
+        (None, "image/png") => {
+            let transparent = tb::png_has_transparency(&tex)?;
+            (tex, transparent)
+        }
+        (_, _) => (tex, false),
+    };
+    let alpha_mode = if alpha_from_texture || look.opacity < 0.999 { "BLEND" } else { "OPAQUE" };
+    let material = crate::csg::GlbMaterial {
+        image,
+        mime,
+        base_color: [look.tint[0], look.tint[1], look.tint[2], look.opacity],
+        roughness: look.roughness,
+        metallic: look.metallic,
+        alpha_mode,
+    };
+    std::fs::create_dir_all(&meshes_dir)
+        .map_err(|e| format!("create {}: {e}", meshes_dir.display()))?;
+    crate::csg::write_glb_with_material(&glb_abs, &mesh, &material)
+        .map_err(|e| format!("write {}: {e}", glb_abs.display()))?;
+    Ok(relative_path(instance_dir, &glb_abs))
+}
+
 /// A sniffed media kind: the `assets/` subdirectory it belongs in plus the
 /// file extension to write.
 struct MediaKind {

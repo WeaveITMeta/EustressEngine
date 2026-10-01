@@ -982,6 +982,11 @@ mod imp {
         ACTIVE.read().ok().and_then(|g| g.as_ref().map(|a| a.db.clone()))
     }
 
+    /// The Space root the installed DB belongs to.
+    pub fn root() -> Option<PathBuf> {
+        ACTIVE.read().ok().and_then(|g| g.as_ref().map(|a| a.root.clone()))
+    }
+
     /// Bumped on every `set`/`clear`; keys the capped-count memo.
     static DB_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     /// `(generation, cap, count)` of the last capped count.
@@ -994,6 +999,55 @@ mod imp {
     pub fn preseed_count(cap: usize, count: usize) {
         let gen = DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
         *COUNT_MEMO.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, cap, count));
+    }
+
+    /// `(generation, ids)`: every Morton core's stored id in the active Space,
+    /// taken with one key scan and reused until [`forget_core_ids`] or a
+    /// Space switch.
+    static CORE_IDS: RwLock<Option<(u64, Arc<std::collections::HashSet<u64>>)>> =
+        RwLock::new(None);
+
+    /// Whether the active Space holds a Morton core for this uuid, under the
+    /// canonical id or the legacy one a bake before v3 wrote. The streaming
+    /// loader asks this before skipping a tree entity, so an entity is only
+    /// left to residency when residency actually has it.
+    pub fn has_instance_core_for(uuid_hex: &str) -> bool {
+        let Some(uuid) = eustress_common::instance_create::uuid_hex_to_bytes(uuid_hex) else {
+            return false;
+        };
+        let Some(ids) = core_ids() else {
+            return false;
+        };
+        ids.contains(&crate::space::bake_cores::stored_id_from_uuid(&uuid))
+            || ids.contains(&crate::space::bake_cores::legacy_stored_id_from_uuid(&uuid))
+    }
+
+    /// Drop the cached core-id set. Called when a load settles, so a later
+    /// load (a rescan, or the next open) scans the partition as it is then.
+    pub fn forget_core_ids() {
+        if let Ok(mut w) = CORE_IDS.write() {
+            *w = None;
+        }
+    }
+
+    fn core_ids() -> Option<Arc<std::collections::HashSet<u64>>> {
+        let gen = DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+        if let Ok(g) = CORE_IDS.read() {
+            if let Some((cached_gen, ids)) = g.as_ref() {
+                if *cached_gen == gen {
+                    return Some(ids.clone());
+                }
+            }
+        }
+        let ids: Arc<std::collections::HashSet<u64>> = {
+            let g = ACTIVE.read().ok()?;
+            let a = g.as_ref()?;
+            Arc::new(a.db.instance_core_ids().ok()?.into_iter().map(|e| e.0).collect())
+        };
+        if let Ok(mut w) = CORE_IDS.write() {
+            *w = Some((gen, ids.clone()));
+        }
+        Some(ids)
     }
 
     /// Every distinct class in `class_index` with its entity count, sorted
@@ -1466,6 +1520,10 @@ mod imp {
     pub fn put_tree_file(_abs: &Path, _bytes: &[u8]) -> bool {
         false
     }
+    pub fn has_instance_core_for(_uuid_hex: &str) -> bool {
+        false
+    }
+    pub fn forget_core_ids() {}
     pub fn delete_tree_file(_abs: &Path) -> bool {
         false
     }
@@ -1486,6 +1544,9 @@ mod imp {
         0
     }
     pub fn db_arc() -> Option<std::sync::Arc<dyn eustress_worlddb::WorldDb>> {
+        None
+    }
+    pub fn root() -> Option<std::path::PathBuf> {
         None
     }
     pub fn preseed_count(_cap: usize, _count: usize) {}

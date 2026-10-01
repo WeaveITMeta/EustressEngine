@@ -21,15 +21,17 @@ use serde::{Deserialize, Serialize};
 /// [`PhysicsDomain`](crate::realism::PhysicsDomain) flag gates that domain's
 /// systems through a run condition, so switching one off stops the work rather
 /// than just recording a preference.
+///
+/// GRAVITY IS NOT HERE. It belongs to the Workspace
+/// ([`crate::services::workspace::Workspace::gravity`]), which
+/// `sync_workspace_gravity_to_avian` copies into Avian every frame. This struct
+/// carried its own `gravity` field that nothing read; wiring it to Avian made a
+/// second writer, and the Workspace sync overwrote it on the next frame, so an
+/// edit here was reported as applied and silently undone. One quantity, one
+/// owner.
 #[derive(Resource, Reflect, Clone, Debug)]
 #[reflect(Resource)]
 pub struct PhysicsService {
-    /// Gravity vector, in metres per second squared.
-    ///
-    /// Eustress is metre-native (studs are a display unit only), so this is
-    /// -9.80665 on Y. It previously defaulted to -196.2, the stud-scale value,
-    /// which was 20x the acceleration the engine actually applied.
-    pub gravity: Vec3,
     /// Master switch. False stops every domain below, whatever they are set to.
     pub enabled: bool,
     /// Time scale (1.0 = normal)
@@ -77,9 +79,6 @@ pub struct PhysicsService {
 impl Default for PhysicsService {
     fn default() -> Self {
         Self {
-            // Metres per second squared. See the field docs for why this is
-            // not the stud-scale 196.2 it used to be.
-            gravity: Vec3::new(0.0, -9.80665, 0.0),
             enabled: true,
             time_scale: 1.0,
             allow_sleep: true,
@@ -179,17 +178,13 @@ pub enum PhysicsSettingKind {
 ///
 /// `solver_iterations` and `allow_sleep` are deliberately absent: nothing
 /// applies them to Avian yet, and offering a knob that changes nothing is the
-/// defect this surface was built to get rid of.
+/// defect this surface was built to get rid of. Gravity is absent because it
+/// is a Workspace setting, not a PhysicsService one; see [`PhysicsService`].
 pub const PHYSICS_GENERAL_SETTINGS: &[(&str, PhysicsSettingKind, &str)] = &[
     (
         "enabled",
         PhysicsSettingKind::Bool,
         "Master switch. Off stops every physics domain, whatever the individual flags say.",
-    ),
-    (
-        "gravity",
-        PhysicsSettingKind::Vec3,
-        "Gravity in metres per second squared, as [x, y, z]. Earth is [0, -9.80665, 0], the Moon [0, -1.62, 0], Mars [0, -3.71, 0].",
     ),
     (
         "time_scale",

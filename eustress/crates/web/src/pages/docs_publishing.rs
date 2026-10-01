@@ -336,7 +336,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                     <tr><td>"Description"</td><td>"The listing description."</td></tr>
                                     <tr><td>"Genre"</td><td>"All, Adventure, Building, Comedy, Fighting, FPS, Horror, Medieval, Military, Naval, RPG, Sci-Fi, Sports, Town and City, or Western."</td></tr>
                                     <tr><td>"Public"</td><td>"On by default. On: "<em>"Anyone can play"</em>", once review approves. Off: "<em>"Only you can access"</em>"."</td></tr>
-                                    <tr><td>"Share Source"</td><td>"Allow source access and reuse. Studio records the choice in the Space's publish manifest and in the review dossier; the listing on the website does not carry it yet."</td></tr>
+                                    <tr><td>"Share Source"</td><td>"Allow source access and reuse. The listing page then shows Edit in Studio, which downloads the world into the viewer's own Studio as a new Universe they can change and publish as their own listing."</td></tr>
                                 </tbody>
                             </table>
                             <p>
@@ -394,6 +394,15 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                 (scripts, meshes, textures) share a chunk, split whenever it grows past 64 MB, and
                                 the Universe's shared "<code>"assets"</code>" folder goes up in chunks of about
                                 32 MB."
+                            </p>
+                            <p>
+                                "Players never receive ServerScriptService or ServerStorage, nor the code of any
+                                other server Script (they get the Script itself, without its source), as in Roblox,
+                                where none of that reaches a player: it is where a game keeps what runs only on
+                                the server and what must stay private. It leaves your computer only when Share
+                                Source is on, in a second world that the listing page's Edit in Studio downloads.
+                                A publish stops, naming the files, when anything the public could download holds
+                                a Discord or Slack webhook URL, since whoever has one can post to your channel."
                             </p>
                             <p>"A publish leaves out:"</p>
                             <ul class="docs-list">
@@ -618,7 +627,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                             <p>
                                 "The listing page's Play Now button opens a dialog titled "
                                 <em>"Eustress Player Required"</em>", with a download link and a Try Again button
-                                that opens an "<code>"eustress://play/<id>"</code>" link. "
+                                that opens an "<code>"eustress-player://play/<id>"</code>" link. "
                                 <code>"eustress.dev/play/<id>"</code>" counts a visit (the number the listing
                                 shows) and gives the same link, with the command that opens the simulation in
                                 the Eustress Player:"
@@ -747,7 +756,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                             <h3>"Playing Published Worlds"</h3>
                             <p>
                                 "The Player opens a published simulation today from its command line. Next: the
-                                installer ships the Player and registers "<code>"eustress://play/"</code>" links
+                                installer ships the Player and registers "<code>"eustress-player://"</code>" links
                                 to it, so Play Now opens the simulation; a browser build plays it on the listing
                                 page; and a listing can have hosted sessions that players join together. The
                                 multiplayer phases are listed on the "

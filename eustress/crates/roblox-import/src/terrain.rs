@@ -101,9 +101,10 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// The Eustress voxel-chunk file format version (spec §6.6).
 pub const EUSTRESS_CHUNK_VERSION: u8 = 1;
 
-/// Roblox terrain cell edge in studs. Like every imported length it is 1 stud =
-/// 1 ft (0.3048 m); the Terrain instance carries `metadata.unit = "ft"`, and
-/// whatever lays the voxels out in the world must convert, exactly as parts do.
+/// Roblox terrain cell edge in studs. Like every imported length it is in the
+/// Eustress stud (0.28 m); the Terrain instance carries `metadata.unit =
+/// "stud"`, and whatever lays the voxels out in the world converts from it,
+/// exactly as parts do.
 pub const ROBLOX_CELL_STUDS: f32 = 4.0;
 
 // ---------------------------------------------------------------------------

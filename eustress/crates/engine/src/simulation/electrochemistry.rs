@@ -45,8 +45,8 @@ impl Plugin for ElectrochemistryPlugin {
                 electrochemical_tick.after(apply_sim_values_to_ecs),
                 publish_echem_to_sim_values.after(electrochemical_tick),
             ).run_if(in_state(PlayModeState::Playing)),
-        )
-        .add_systems(OnEnter(PlayModeState::Playing), set_default_discharge);
+        );
+        add_default_discharge(app);
     }
 }
 
@@ -145,6 +145,13 @@ fn publish_echem_to_sim_values(
     for (k, v) in &values {
         sim_res.0.insert(k.to_string(), *v);
     }
+}
+
+/// The default discharge is set once, as a Play session starts: a Resume
+/// enters Playing too, and setting it there overwrote whatever a script had
+/// set since (charging, say).
+fn add_default_discharge(app: &mut App) {
+    app.add_systems(crate::play_mode::session_start(), set_default_discharge);
 }
 
 /// Set a default 0.5C discharge current on play start so the demo shows
@@ -897,5 +904,41 @@ fn electrochemical_tick(
             }
         }
         } // end substep
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn go(app: &mut App, state: PlayModeState) {
+        app.world_mut().resource_mut::<NextState<PlayModeState>>().set(state);
+        app.update();
+    }
+
+    fn current(app: &App, cell: Entity) -> f32 {
+        app.world().get::<ElectrochemicalState>(cell).expect("a cell").current
+    }
+
+    /// The default discharge is set once per session: a current a script set
+    /// (charging) survives a Pause and Resume, and the next session starts
+    /// at the default again.
+    #[test]
+    fn a_resume_keeps_the_current_a_script_set() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<PlayModeState>();
+        add_default_discharge(&mut app);
+        app.update();
+        let cell = app.world_mut().spawn(ElectrochemicalState { capacity_ah: 10.0, ..Default::default() }).id();
+        go(&mut app, PlayModeState::Playing);
+        assert_eq!(current(&app, cell), 5.0, "0.5C as the session starts");
+        app.world_mut().get_mut::<ElectrochemicalState>(cell).unwrap().current = -3.0;
+        go(&mut app, PlayModeState::Paused);
+        go(&mut app, PlayModeState::Playing);
+        assert_eq!(current(&app, cell), -3.0, "a Resume kept the script's charging current");
+        go(&mut app, PlayModeState::Editing);
+        go(&mut app, PlayModeState::Playing);
+        assert_eq!(current(&app, cell), 5.0, "the next session starts at the default");
     }
 }

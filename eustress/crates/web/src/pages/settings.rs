@@ -8,9 +8,17 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use web_sys::NotificationPermission;
+use crate::api::ApiClient;
 use crate::components::{CentralNav, Footer};
 use crate::services::notifications;
 use crate::state::{AppState, AuthState};
+
+/// `GET` and `PUT /api/notifications/prefs`.
+#[derive(Clone, Debug, serde::Deserialize)]
+struct NotificationPrefs {
+    #[serde(default)]
+    moderation_email: bool,
+}
 
 /// Settings page component.
 #[component]
@@ -35,7 +43,44 @@ pub fn SettingsPage() -> impl IntoView {
     let allow_messages = RwSignal::new(true);
     let allow_friend_requests = RwSignal::new(true);
     let show_online_status = RwSignal::new(true);
-    
+
+    // Whether review results are emailed. `None` until the server has said.
+    let review_email = RwSignal::new(None::<bool>);
+    let review_email_error = RwSignal::new(String::new());
+    {
+        let api_url = app_state.api_url.clone();
+        Effect::new(move |_| {
+            let api_url = api_url.clone();
+            spawn_local(async move {
+                let client = ApiClient::new(&api_url);
+                if let Ok(prefs) = client.get::<NotificationPrefs>("/api/notifications/prefs").await {
+                    review_email.set(Some(prefs.moderation_email));
+                }
+            });
+        });
+    }
+    let toggle_review_email = {
+        let api_url = app_state.api_url.clone();
+        move |_| {
+            let Some(current) = review_email.get_untracked() else { return };
+            let next = !current;
+            // Shown at once; put back if the server does not take it.
+            review_email.set(Some(next));
+            review_email_error.set(String::new());
+            let api_url = api_url.clone();
+            spawn_local(async move {
+                let client = ApiClient::new(&api_url);
+                let saved = client
+                    .put::<serde_json::Value, _>("/api/notifications/prefs", &serde_json::json!({ "moderation_email": next }))
+                    .await;
+                if saved.is_err() {
+                    review_email.set(Some(current));
+                    review_email_error.set("Could not save this. Try again.".to_string());
+                }
+            });
+        }
+    };
+
     // Get current user info
     let user_email = move || {
         match auth.get() {
@@ -456,6 +501,32 @@ pub fn SettingsPage() -> impl IntoView {
                             <h1 class="panel-title">"Notifications"</h1>
                             <p class="panel-description">"Choose what notifications you want to receive"</p>
                             
+                            // Review results by email
+                            <div class="settings-group">
+                                <h2 class="group-title">"Review Results"</h2>
+
+                                <div class="toggle-row">
+                                    <div class="toggle-info">
+                                        <span class="toggle-label">"Email me review results"</span>
+                                        <span class="toggle-description">
+                                            "When a simulation you published is listed, not listed, or needs changes"
+                                        </span>
+                                    </div>
+                                    <button
+                                        class="toggle-switch"
+                                        class:active=move || review_email.get() == Some(true)
+                                        disabled=move || review_email.get().is_none()
+                                        aria-label="Email me review results"
+                                        on:click=toggle_review_email.clone()
+                                    >
+                                        <span class="toggle-knob"></span>
+                                    </button>
+                                </div>
+                                <Show when=move || !review_email_error.get().is_empty()>
+                                    <p class="settings-error">{move || review_email_error.get()}</p>
+                                </Show>
+                            </div>
+
                             // Desktop Notifications Permission
                             <div class="settings-group">
                                 <h2 class="group-title">"Desktop Notifications"</h2>

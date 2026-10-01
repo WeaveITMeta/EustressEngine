@@ -1464,6 +1464,297 @@ impl ToolHandler for PublishSpaceTool {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshots: save_snapshot / list_snapshots / diff_snapshot /
+// revert_to_snapshot / cancel_pending_revert  ->  snapshot.*
+// ---------------------------------------------------------------------------
+
+/// A snapshot commits the Space on the engine's main thread, and the first
+/// commit of a big Space hashes every file.
+const SNAPSHOT_SAVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+/// A revert takes a safety snapshot, then reopens the Space and restores it.
+/// The engine gives up waiting at 300 s and says so; this outlasts it.
+const SNAPSHOT_REVERT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(540);
+
+fn copy_params(input: &Value, keys: &[&str]) -> Value {
+    let mut params = serde_json::Map::new();
+    for key in keys {
+        if let Some(v) = input.get(*key) {
+            if !v.is_null() {
+                params.insert((*key).to_string(), v.clone());
+            }
+        }
+    }
+    Value::Object(params)
+}
+
+pub struct SaveSnapshotTool;
+
+impl ToolHandler for SaveSnapshotTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "save_snapshot",
+            description: "Save the LIVE engine's open Space and record it as a restore point that revert_to_snapshot can return to. Take one before any risky or multi-step change. It writes every unsaved edit (the same save as Ctrl+S), then commits the Space to its git history; on a Space that keeps instances in its world database it also checkpoints the database, so the restore point covers everything. All or nothing: if any item fails to save, or the commit fails, no snapshot is recorded and the error says why. Script tabs with unsaved edits are left in the editor and listed in `unsaved_script_tabs`; the snapshot holds their saved files. The newest 20 database checkpoints are kept. Refused during Play (Stop first). The editor pauses while it commits, usually well under a second. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "What this restore point is, such as \"before re-roofing the tower\". One line, up to 120 characters." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = copy_params(&input, &["label"]);
+        // Named in the snapshot's commit. Set here, never taken from the
+        // caller's input.
+        if let (Some(principal), Some(map)) = (&ctx.permissions.principal, params.as_object_mut()) {
+            map.insert("requested_by".to_string(), Value::String(principal.clone()));
+        }
+        match eustress_bridge_client::call_engine_with_timeout(
+            &ctx.universe_root,
+            "snapshot.save",
+            params,
+            SNAPSHOT_SAVE_DEADLINE,
+        ) {
+            Ok(result) => {
+                let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let written = result.get("written").and_then(|v| v.as_u64()).unwrap_or(0);
+                let db = result
+                    .get("database_checkpoint")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mut summary = format!(
+                    "Snapshot {id} saved ({written} item(s) written{}).",
+                    if db { ", database checkpointed" } else { "" }
+                );
+                let tabs: Vec<&str> = result
+                    .get("unsaved_script_tabs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+                    .unwrap_or_default();
+                if !tabs.is_empty() {
+                    summary.push_str(&format!(
+                        "\n  Not included: unsaved edits in script tab(s) {}.",
+                        tabs.join(", ")
+                    ));
+                }
+                ok("save_snapshot", summary, result)
+            }
+            Err(e) => fail("save_snapshot", e),
+        }
+    }
+}
+
+pub struct ListSnapshotsTool;
+
+impl ToolHandler for ListSnapshotsTool {
+    /// Read-only: lists restore points, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_snapshots",
+            description: "List the restore points of the LIVE engine's open Space, newest first: id, label, time, and whether it can still be reverted to. On a Space that keeps instances in its world database, only snapshots whose database checkpoint is still kept (the newest 20) are revertible. Also reports a revert that is pending or the reason the last one failed. Changes nothing. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "How many to list (default 20)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "snapshot.list", copy_params(&input, &["limit"])) {
+            Ok(result) => {
+                let snaps = result.get("snapshots").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let mut summary = if snaps.is_empty() {
+                    "No snapshots yet. save_snapshot makes one.".to_string()
+                } else {
+                    let lines: Vec<String> = snaps
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "  {}  {}  {}{}",
+                                s.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+                                s.get("created").and_then(|v| v.as_str()).unwrap_or(""),
+                                s.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+                                if s.get("revertible").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                    ""
+                                } else {
+                                    "  (not revertible: checkpoint pruned)"
+                                }
+                            )
+                        })
+                        .collect();
+                    format!("{} snapshot(s), newest first:\n{}", snaps.len(), lines.join("\n"))
+                };
+                if result.get("revert_pending").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    summary.push_str("\n  A revert is pending: it applies when the Space next opens.");
+                }
+                if let Some(reason) = result.get("last_revert_failure").and_then(|v| v.as_str()) {
+                    summary.push_str(&format!("\n  The last revert failed: {reason}"));
+                }
+                ok("list_snapshots", summary, result)
+            }
+            Err(e) => fail("list_snapshots", e),
+        }
+    }
+}
+
+pub struct DiffSnapshotTool;
+
+impl ToolHandler for DiffSnapshotTool {
+    /// Read-only: compares, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "diff_snapshot",
+            description: "List the files of the LIVE engine's open Space that changed since a snapshot: added, modified, or deleted, as saved on disk now. Edits not yet saved are not on disk, so they are not listed; `unsaved_edits` says whether there are any (save_snapshot or Ctrl+S writes them). On a Space that keeps instances in its world database, instances stored only there are not compared. Use it to check what revert_to_snapshot would undo. Changes nothing. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id":    { "type": "string",  "description": "The snapshot id, from list_snapshots." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Most changes to return (default 200). `total` counts them all." }
+                },
+                "required": ["id"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "snapshot.diff", copy_params(&input, &["id", "limit"])) {
+            Ok(result) => {
+                let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let changes = result.get("changes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let mut summary = format!("{total} file(s) changed since snapshot {id}.");
+                for c in &changes {
+                    summary.push_str(&format!(
+                        "\n  {:<8} {}",
+                        c.get("change").and_then(|v| v.as_str()).unwrap_or("?"),
+                        c.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+                    ));
+                }
+                if result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    summary.push_str(&format!("\n  ...and {} more (raise `limit`).", total as usize - changes.len()));
+                }
+                if result.get("unsaved_edits").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    summary.push_str("\n  There are unsaved edits, which this list does not include.");
+                }
+                ok("diff_snapshot", summary, result)
+            }
+            Err(e) => fail("diff_snapshot", e),
+        }
+    }
+}
+
+pub struct RevertToSnapshotTool;
+
+impl ToolHandler for RevertToSnapshotTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "revert_to_snapshot",
+            description: "Return the LIVE engine's open Space to a snapshot. First it saves a safety snapshot of the Space as it is now, script tabs with unsaved edits included, and it goes no further unless that snapshot was made; revert to the returned `safety_snapshot` to undo the revert. Then it restores the snapshot's files (and, on a Space that keeps instances in its world database, the database) and reopens the Space. `paths` reverts only those files or folders, relative to the Space (such as Workspace/Tower); a database-backed Space always reverts as a whole. The editor is unresponsive while the Space reopens, which can take a while for a big Space. If the restore fails, the Space reopens unchanged and the error says why. Refused during Play (Stop first). Check what it would undo with diff_snapshot first. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id":    { "type": "string", "description": "The snapshot to return to, from list_snapshots." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Revert only these files or folders, relative to the Space. Leave out to revert the whole Space." }
+                },
+                "required": ["id"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = copy_params(&input, &["id", "paths"]);
+        // Named in the commit that records the revert. Set here, never taken
+        // from the caller's input.
+        if let (Some(principal), Some(map)) = (&ctx.permissions.principal, params.as_object_mut()) {
+            map.insert("requested_by".to_string(), Value::String(principal.clone()));
+        }
+        match eustress_bridge_client::call_engine_with_timeout(
+            &ctx.universe_root,
+            "snapshot.revert",
+            params,
+            SNAPSHOT_REVERT_DEADLINE,
+        ) {
+            Ok(result) => {
+                let target = result.get("reverted_to").and_then(|v| v.as_str()).unwrap_or("?");
+                let safety = result.get("safety_snapshot").and_then(|v| v.as_str()).unwrap_or("?");
+                let scope = match result.get("paths").and_then(|v| v.as_array()) {
+                    Some(p) if !p.is_empty() => format!(
+                        " ({})",
+                        p.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    _ => String::new(),
+                };
+                ok(
+                    "revert_to_snapshot",
+                    format!(
+                        "Reverted to snapshot {target}{scope} and reopened the Space. To undo \
+                         this revert, revert to safety snapshot {safety}."
+                    ),
+                    result,
+                )
+            }
+            Err(e) => fail("revert_to_snapshot", e),
+        }
+    }
+}
+
+pub struct CancelPendingRevertTool;
+
+impl ToolHandler for CancelPendingRevertTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cancel_pending_revert",
+            description: "Withdraw a revert that is waiting to apply when the LIVE engine's open Space next opens. A revert normally applies at once; one is left waiting only when the engine stopped partway through, and while it waits the Space refuses to save. list_snapshots reports whether one is pending. Reports whether there was one to withdraw. Requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "snapshot.cancel_revert", serde_json::json!({})) {
+            Ok(result) => {
+                let cancelled = result.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
+                ok(
+                    "cancel_pending_revert",
+                    if cancelled {
+                        "Withdrew the pending revert. The Space stays as it is.".to_string()
+                    } else {
+                        "No revert was pending.".to_string()
+                    },
+                    result,
+                )
+            }
+            Err(e) => fail("cancel_pending_revert", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // export_instances_toml  ->  db.export_toml
 // ---------------------------------------------------------------------------
 
@@ -1613,6 +1904,13 @@ impl ToolHandler for NewUniverseTool {
             None => return fail("new_universe", "cannot resolve the documents root".to_string()),
         };
         let uni = root.join(&name);
+        // A relative path would land under this process's working directory.
+        if !uni.is_absolute() {
+            return fail(
+                "new_universe",
+                format!("could not resolve the documents root to an absolute path (got {})", uni.display()),
+            );
+        }
         if uni.exists() {
             return fail("new_universe", format!("universe '{name}' already exists at {}", uni.display()));
         }
@@ -1667,6 +1965,14 @@ impl ToolHandler for NewSpaceTool {
             None => ctx.universe_root.clone(),
         };
         let space = universe.join("Spaces").join(&name);
+        // A relative path would land under this process's working directory,
+        // not under the Eustress documents root.
+        if !space.is_absolute() {
+            return fail(
+                "new_space",
+                format!("could not resolve the Universe to an absolute path (got {}); pass its absolute path", space.display()),
+            );
+        }
         if space.exists() {
             return fail("new_space", format!("space '{name}' already exists at {}", space.display()));
         }
@@ -1968,7 +2274,7 @@ impl ToolHandler for InvokeActionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "invoke_action",
-            description: "Invoke any LIVE engine editor action by name over the bridge — the AI equivalent of pressing its keyboard shortcut. Runs the SAME handler a real key press does. Examples: Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, SelectAll, Undo, Redo, SaveScene, and tool switches SelectTool/MoveTool/ScaleTool/RotateTool. Combine with select_entity (to set the operand) + inspect_scene/get_editor_state (to verify the effect) for end-to-end editor testing. Requires the engine to be running. BLAST RADIUS: this accepts ANY variant of the editor's Action enum, not just the examples above — the set includes irreversible ones (Delete, Cut) and OUTWARD-FACING ones (PublishSpace, PublishUniverse, which start a publish to the public gallery). Treat an action name you have not verified as unbounded, and do not use this to publish: publish_space exists for that and states what it does.",
+            description: "Run a LIVE engine editor action by name over the bridge: the AI equivalent of pressing its keyboard shortcut, through the same handler. Each action is judged by what its handler can reach. A caller with the standard grant (read and write) may run the ones that change the view, the selection, a tool or a setting, or make an edit the editor's Undo reverses, such as ViewMode2D, ViewTop, FocusSelection, SelectAll, MoveTool, SnapMode1, Copy, Paste, Duplicate, Group, ToggleAnchor, RotateY90 and SaveScene. Refused at that grant: removing or overwriting data (Delete, Cut, the CSG operations, Ungroup, and terrain region Cut, Delete and Duplicate), Undo and Redo, switching or blocking the session (NewSpace, NewUniverse, OpenFile, SaveSceneAs), hosting (StartServer, StopServer), publishing (PublishSpace, PublishUniverse), and starting Play (PlaySolo, PlayWithCharacter, which run the Space's scripts). The name must be the exact variant name. Pair it with select_entity to set what it acts on, and with inspect_scene or get_editor_state to check the result. Requires the engine running.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1986,19 +2292,20 @@ impl ToolHandler for InvokeActionTool {
     }
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if action.is_empty() {
+        // Exactly the request the permission gate classified: the same
+        // builder, and the same parse the engine runs.
+        let params = eustress_tools::capability::invoke_action_params(&input);
+        let Some(action) = eustress_common::editor_action::parse_action(&params) else {
             return fail(
                 "invoke_action",
-                "Missing required `action` (e.g. Copy, Group, Undo, SaveScene, MoveTool).".to_string(),
+                "`action` must be an editor action's exact name, such as ViewMode2D, Copy, Group or \
+                 SaveScene."
+                    .to_string(),
             );
-        }
-        match call_engine(
-            &ctx.universe_root,
-            "action.invoke",
-            serde_json::json!({ "action": action }),
-        ) {
-            Ok(result) => ok("invoke_action", format!("Invoked action '{action}'."), result),
+        };
+        let class = eustress_tools::capability::action_capability(action).label();
+        match call_engine(&ctx.universe_root, "action.invoke", params) {
+            Ok(result) => ok("invoke_action", format!("Invoked action '{action:?}' ({class})."), result),
             Err(e) => fail("invoke_action", e),
         }
     }
@@ -2144,6 +2451,18 @@ fn physics_settings_schema() -> Value {
         };
         props.insert(key.to_string(), schema);
     }
+    // Gravity is the Workspace's, not a PhysicsService setting, so it is not in
+    // PHYSICS_GENERAL_SETTINGS; the engine routes it to `Workspace.gravity`.
+    props.insert(
+        "gravity".to_string(),
+        serde_json::json!({
+            "description": "The Workspace's gravity (workspace.Gravity) in m/s². A number is a downward magnitude: 9.80665 is Earth, 1.62 the Moon, 3.71 Mars, 0 weightless, negative falls upward. An [x, y, z] array sets the full vector. Parts, NPCs, the player character, realism particles and buoyancy all follow it; the player falls straight down only, ignoring any sideways or upward part, and a ParticleSimulation object keeps its own Gravity property. Applied live and NOT saved: reopening the Space applies the gravity its Workspace service saves (a vector in m/s², the `gravity` key of Workspace/_service.toml), and Stop undoes a change made during Play.",
+            "anyOf": [
+                { "type": "number" },
+                { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+            ]
+        }),
+    );
     for domain in PhysicsDomain::ALL {
         props.insert(
             domain.key().to_string(),
@@ -2179,9 +2498,13 @@ fn summarize_physics_state(state: &Value) -> String {
         "Physics is on."
     };
     let g = &state["gravity"];
+    let gravity = if g.is_array() {
+        format!("[{}, {}, {}] m/s²", g[0], g[1], g[2])
+    } else {
+        "unknown (no Workspace)".to_string()
+    };
     format!(
-        "{master} Gravity [{}, {}, {}] m/s², time_scale {}, solver_substeps {}. Running: {}. Off: {}.",
-        g[0], g[1], g[2],
+        "{master} Workspace gravity {gravity}, time_scale {}, solver_substeps {}. Running: {}. Off: {}.",
         state["time_scale"],
         state["solver_substeps"],
         if running.is_empty() { "none".to_string() } else { running.join(", ") },
@@ -2199,7 +2522,7 @@ impl ToolHandler for GetPhysicsSettingsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_physics_settings",
-            description: "Read the running engine's PhysicsService: gravity in m/s², time_scale, solver_substeps, the master `enabled` switch, and for each physics domain (kinematics, thermodynamics, chemistry, electricity, deformation, fluids, materials, particles, particle_simulation, nuclear, visualizers) its own flag plus whether it is actually running. A domain whose flag is on is still stopped when `enabled` is off, so read `running`, not just `on`. Also lists the realism modules that cannot be toggled because they run no systems. Requires the engine running.",
+            description: "Read the running engine's physics settings: the Workspace's live gravity in m/s², PhysicsService time_scale, solver_substeps, the master `enabled` switch, and for each physics domain (kinematics, thermodynamics, chemistry, electricity, deformation, fluids, materials, particles, particle_simulation, nuclear, visualizers) its own flag plus whether it is actually running. A domain whose flag is on is still stopped when `enabled` is off, so read `running`, not just `on`. Also lists the realism modules that cannot be toggled because they run no systems. Requires the engine running.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             modes: &[WorkshopMode::General],
             requires_approval: false,
@@ -2221,7 +2544,7 @@ impl ToolHandler for SetPhysicsSettingsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "set_physics_settings",
-            description: "Change PhysicsService settings in the running engine. Pass ONLY the settings to change, for example {\"chemistry\": false} or {\"gravity\": [0, -3.71, 0], \"time_scale\": 0.5}. Each domain flag switches that kind of physics on or off from the next step, with no restart; `enabled` false stops every domain; `kinematics` false freezes rigid bodies without pausing Play. Validated all or nothing: an unknown key or an out-of-range value changes nothing and the error says why. Applied live and saved to the Space's PhysicsService/_service.toml exactly like a properties panel edit. Returns the keys that actually changed and the full resulting state. Call get_physics_settings first to see current values. Requires the engine running.",
+            description: "Change PhysicsService settings in the running engine. Pass ONLY the settings to change, for example {\"chemistry\": false} or {\"gravity\": [0, -3.71, 0], \"time_scale\": 0.5}. Each domain flag switches that kind of physics on or off from the next step, with no restart; `enabled` false stops every domain; `kinematics` false freezes rigid bodies without pausing Play. Validated all or nothing: an unknown key or an out-of-range value changes nothing and the error says why. PhysicsService settings are applied live and saved to the Space's PhysicsService/_service.toml exactly like a properties panel edit. `gravity` is the exception: it sets the Workspace's gravity (a number is downward m/s², or pass [x, y, z]), applies live, and is NOT saved; Stop undoes a change made during Play. Returns the keys that actually changed and the full resulting state. Call get_physics_settings first to see current values. Requires the engine running.",
             input_schema: physics_settings_schema(),
             modes: &[WorkshopMode::General],
             requires_approval: false,
@@ -2247,10 +2570,13 @@ impl ToolHandler for SetPhysicsSettingsTool {
                     (Some(true), Some(file)) => format!(" Saved to {file}."),
                     _ => String::new(),
                 };
-                let note = reply["note"]
-                    .as_str()
+                let note: String = reply["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| n.as_str())
                     .map(|n| format!(" {n}"))
-                    .unwrap_or_default();
+                    .collect();
                 let save_error = reply["save_error"]
                     .as_str()
                     .map(|e| format!(" Save error: {e}."))
@@ -2568,4 +2894,848 @@ impl ToolHandler for DemoteEntityTool {
             Err(e) => fail("demote_entity", e),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Terrain  ->  terrain.*
+// ---------------------------------------------------------------------------
+//
+// Reads answer for the ground the user sees, layers included. Every edit runs
+// in the engine through the command path the Terrain editor and scripts share:
+// one undo step, and the chunks it touched remesh and re-collide over the next
+// frames. terrain_generate and terrain_flat only queue work that finishes on
+// later frames, so they answer `queued` and point at terrain_stats to confirm.
+// terrain_carve and terrain_clear remove ground and are Destructive, which MCP
+// clients are not granted yet.
+
+/// Reply deadline for terrain calls. The engine answers on its next frame; the
+/// slack keeps a slow frame from reading as a dead engine while an edit is in
+/// flight, which would leave the caller unsure whether the edit landed.
+const TERRAIN_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Reply deadline for the calls that replace or delete a whole terrain.
+const TERRAIN_LONG_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The shape parameters terrain_fill and terrain_carve forward.
+const FILL_SHAPE_KEYS: [&str; 8] = ["shape", "center", "radius", "size", "height", "rotation", "min", "max"];
+
+/// The keys of `input` listed in `keys` that are present and not null.
+fn terrain_params(input: &Value, keys: &[&str]) -> serde_json::Map<String, Value> {
+    let mut params = serde_json::Map::new();
+    for key in keys {
+        if let Some(v) = input.get(*key).filter(|v| !v.is_null()) {
+            params.insert((*key).to_string(), v.clone());
+        }
+    }
+    params
+}
+
+/// Call a terrain bridge method on the live engine.
+fn call_terrain(
+    ctx: &ToolContext,
+    method: &str,
+    params: serde_json::Map<String, Value>,
+    deadline: std::time::Duration,
+) -> Result<Value, String> {
+    eustress_bridge_client::call_engine_with_timeout(&ctx.universe_root, method, Value::Object(params), deadline)
+}
+
+/// The built-in terrain material names, from the table the engine resolves
+/// names against.
+fn terrain_material_names() -> String {
+    eustress_common::terrain::TerrainMaterial::all()
+        .iter()
+        .map(|m| m.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `name` is Roblox's Air material in a spelling the engine accepts:
+/// "Air", "Enum.Material.Air" or "Material.Air", in any case (the parse of
+/// `TerrainFill::from_material_name`).
+fn is_air_material(name: &str) -> bool {
+    let name = name.trim();
+    for prefix in ["enum.material.", "material."] {
+        if name.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix)) {
+            return name[prefix.len()..].eq_ignore_ascii_case("air");
+        }
+    }
+    name.eq_ignore_ascii_case("air")
+}
+
+/// A world position schema, `[x, y, z]` in metres.
+fn xyz_schema(description: &str) -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": { "type": "number" },
+        "minItems": 3,
+        "maxItems": 3,
+        "description": description,
+    })
+}
+
+/// The shape parameters terrain_fill and terrain_carve share.
+fn fill_shape_properties() -> serde_json::Map<String, Value> {
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "shape".into(),
+        serde_json::json!({
+            "type": "string",
+            "enum": ["ball", "block", "cylinder", "region"],
+            "description": "ball takes center and radius; block takes center, size and an optional rotation; cylinder takes center, radius, height and an optional rotation; region takes min and max.",
+        }),
+    );
+    props.insert("center".into(), xyz_schema("Centre of a ball, block or cylinder [x, y, z], world metres."));
+    props.insert(
+        "radius".into(),
+        serde_json::json!({ "type": "number", "exclusiveMinimum": 0, "maximum": 256, "description": "Ball or cylinder radius, metres (up to 256)." }),
+    );
+    props.insert("size".into(), xyz_schema("Block size [x, y, z], metres (each up to 512)."));
+    props.insert(
+        "height".into(),
+        serde_json::json!({ "type": "number", "exclusiveMinimum": 0, "maximum": 512, "description": "Cylinder height along its local Y, metres (up to 512)." }),
+    );
+    props.insert(
+        "rotation".into(),
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 3,
+            "maxItems": 4,
+            "description": "Block or cylinder orientation: a quaternion [x, y, z, w], or Euler angles in degrees [x, y, z] applied like Roblox CFrame.Angles (about X, then the turned Y, then the turned Z). Default: none.",
+        }),
+    );
+    props.insert("min".into(), xyz_schema("One corner of a region [x, y, z], world metres."));
+    props.insert(
+        "max".into(),
+        xyz_schema("The opposite corner of a region [x, y, z], world metres, at most 512 m from min on each axis."),
+    );
+    props
+}
+
+/// Every layer class's properties, from the field tables the engine validates
+/// against, for the `fields` description of terrain_layer_create.
+fn layer_fields_description() -> String {
+    use eustress_common::realism::particle_sim::class::FieldKind;
+    use eustress_common::terrain::layer_instances::{
+        FLATTEN_PAD_FIELDS, MATERIAL_FILL_FIELDS, NOISE_FIELDS, SCATTER_FIELDS, SPLINE_FIELDS, STAMP_FIELDS,
+        WATER_BODY_FIELDS,
+    };
+    let classes = [
+        ("TerrainSpline", SPLINE_FIELDS),
+        ("TerrainStamp", STAMP_FIELDS),
+        ("TerrainFlattenPad", FLATTEN_PAD_FIELDS),
+        ("TerrainNoise", NOISE_FIELDS),
+        ("TerrainMaterialFill", MATERIAL_FILL_FIELDS),
+        ("TerrainScatter", SCATTER_FIELDS),
+        ("TerrainWaterBody", WATER_BODY_FIELDS),
+    ];
+    let mut out = String::from(
+        "Properties to set, by name, for example {\"Radius\": 30, \"Shape\": \"Crater\"}; the rest keep the \
+         class default. Lengths are metres and slopes degrees; material properties take a terrain material name \
+         or None. Per class: ",
+    );
+    for (class, fields) in classes {
+        let names: Vec<String> = fields
+            .iter()
+            .map(|f| match f.kind {
+                FieldKind::Choice(options) if options.first() != Some(&"None") => {
+                    format!("{} ({})", f.name, options.join("|"))
+                }
+                _ => f.name.to_string(),
+            })
+            .collect();
+        out.push_str(&format!("{class}: {}. ", names.join(", ")));
+    }
+    out.trim_end().to_string()
+}
+
+/// "[x, y, z]" from a JSON array of numbers, for summaries.
+fn fmt_numbers(v: &Value) -> String {
+    match v.as_array() {
+        Some(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|n| n.as_f64().map_or_else(|| "?".to_string(), |f| format!("{f:.2}")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "none".to_string(),
+    }
+}
+
+/// "x a to b, z c to d" from a `{min: [x, z], max: [x, z]}` rectangle, `None`
+/// when there is none.
+fn fmt_rect(rect: &Value) -> Option<String> {
+    let (min, max) = (&rect["min"], &rect["max"]);
+    Some(format!(
+        "x {:.1} to {:.1}, z {:.1} to {:.1}",
+        min[0].as_f64()?,
+        max[0].as_f64()?,
+        min[1].as_f64()?,
+        max[1].as_f64()?
+    ))
+}
+
+/// The outcome of a terrain edit in one paragraph.
+fn summarize_terrain_edit(what: &str, r: &Value) -> String {
+    if r["changed"].as_bool() == Some(false) {
+        return format!("{what}: nothing changed; the edit reached no terrain.");
+    }
+    let mut parts = Vec::new();
+    if let Some(rect) = fmt_rect(&r["height_rect"]) {
+        parts.push(format!("heights changed over {rect}"));
+    }
+    if let Some(rect) = fmt_rect(&r["material_rect"]) {
+        parts.push(format!("materials changed over {rect}"));
+    }
+    if let Some(n) = r["volume"]["bricks_changed"].as_u64() {
+        parts.push(format!("{n} volume brick(s) changed"));
+    }
+    if r["water_changed"].as_bool() == Some(true) {
+        parts.push("the water changed".to_string());
+    }
+    let changes = if parts.is_empty() { "applied".to_string() } else { parts.join("; ") };
+    if r["undoable"].as_bool() != Some(true) {
+        // Applied during Play, or while a brush stroke was open: no undo step
+        // records it, and the engine's note says which.
+        let note = r["note"].as_str().unwrap_or("It has no undo step.");
+        return format!("{what}: {changes}. {note}");
+    }
+    format!(
+        "{what} applied as one undo step (\"{}\"): {changes}. Meshes and colliders rebuild over the next frames.",
+        r["undo_label"].as_str().unwrap_or(what)
+    )
+}
+
+fn summarize_terrain_stats(r: &Value) -> String {
+    let layers: Vec<String> = r["layers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(class, n)| n.as_u64().filter(|n| *n > 0).map(|n| format!("{n} {class}")))
+        .collect();
+    let layers = if layers.is_empty() { "no layers".to_string() } else { format!("layers: {}", layers.join(", ")) };
+    let generation = if r["generation"]["busy"].as_bool() == Some(true) {
+        let status = r["generation"]["status"].as_str().map(|s| format!(" ({s})")).unwrap_or_default();
+        format!(" A generation is still running or meshing{status}.")
+    } else {
+        String::new()
+    };
+    if r["present"].as_bool() != Some(true) {
+        return format!(
+            "No terrain in the open Space ({layers}).{generation} terrain_generate or terrain_flat makes one."
+        );
+    }
+    let grid = &r["grid"];
+    let heights = match (r["heights_m"]["min"].as_f64(), r["heights_m"]["max"].as_f64()) {
+        (Some(low), Some(high)) => format!("heights {low:.1} to {high:.1} m"),
+        _ if r["raster"]["procedural"].as_bool() == Some(true) => {
+            "procedural, with no height raster the terrain tools can read or edit".to_string()
+        }
+        _ => "no heights".to_string(),
+    };
+    let materials: Vec<String> = r["materials"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(4)
+        .map(|m| {
+            format!(
+                "{} {:.0}%",
+                m["name"].as_str().unwrap_or("?"),
+                m["share"].as_f64().unwrap_or(0.0) * 100.0
+            )
+        })
+        .collect();
+    let materials = if materials.is_empty() { "no material layer".to_string() } else { materials.join(", ") };
+    let textured = if r["textured_surface"].as_bool() == Some(true) { ", textured" } else { "" };
+    format!(
+        "Terrain ({} source): {} x {} chunks of {} m ({} x {} m), {heights}; materials {materials}; {} cave \
+         brick(s); {layers}; {} chunk(s) spawned{textured}.{generation}",
+        r["source"].as_str().unwrap_or("?"),
+        grid["chunks_per_side"][0],
+        grid["chunks_per_side"][1],
+        grid["chunk_size_m"],
+        grid["size_m"][0],
+        grid["size_m"][1],
+        r["volume"]["bricks"].as_u64().unwrap_or(0),
+        r["chunks_spawned"].as_u64().unwrap_or(0),
+    )
+}
+
+pub struct TerrainStatsTool;
+
+impl ToolHandler for TerrainStatsTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_stats",
+            description: "Report the open Space's terrain in the LIVE engine: whether one exists and where it came from (disk: generated, flat, imported or saved; voxel: a converted Space's imported voxels; runtime), its grid (chunk size and resolution, chunks per side, footprint and size in world metres), its height range in world metres, the material histogram (the 8 most common surface materials with their share), the cave and overhang bricks in its volume, layer instances by class, imported water, how many chunks are spawned, whether chunks are still meshing or a generation is running, and whether the textured surface is drawing. Call it first, and again after terrain_generate or terrain_flat to confirm they finished. Read-only; requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_terrain(ctx, "terrain.stats", serde_json::Map::new(), TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_stats", summarize_terrain_stats(&r), r),
+            Err(e) => fail("terrain_stats", e),
+        }
+    }
+}
+
+pub struct TerrainQueryTool;
+
+impl ToolHandler for TerrainQueryTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_query",
+            description: "Sample the LIVE terrain's surface at world XZ positions: the height in world metres (of the heightfield; use terrain_raycast for the first solid surface under a point, overhangs included), the surface material name and slot, the surface normal, and whether the column is a hole (imported terrain with no ground there). Pass `points` ([[x, z], ...]) or `grid` ({min: [x, z], max: [x, z], step} in metres, sampled row by row with x fastest); at most 10,000 samples per call. Results are arrays in sample order; samples outside the terrain's footprint are null and listed in `outside`, holes in `holes`. Reads the ground the user sees, layers included. Read-only; requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "points": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 3 },
+                        "description": "World positions [[x, z], ...] in metres, at most 10,000. [x, y, z] also works; y is ignored.",
+                    },
+                    "grid": {
+                        "type": "object",
+                        "properties": {
+                            "min": { "type": "array", "items": { "type": "number" }, "description": "One corner [x, z], world metres." },
+                            "max": { "type": "array", "items": { "type": "number" }, "description": "The opposite corner [x, z], world metres." },
+                            "step": { "type": "number", "exclusiveMinimum": 0, "description": "Spacing between samples, metres." },
+                        },
+                        "required": ["min", "max", "step"],
+                        "description": "A regular grid from min to max inclusive, at most 10,000 samples. Samples run row by row, x fastest: index = ix + nx * iz.",
+                    },
+                },
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["points", "grid"]);
+        match call_terrain(ctx, "terrain.query", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_query", summarize_terrain_query(&r), r),
+            Err(e) => fail("terrain_query", e),
+        }
+    }
+}
+
+/// The range, the materials and the first few samples of a terrain query.
+fn summarize_terrain_query(r: &Value) -> String {
+    let count = r["count"].as_u64().unwrap_or(0);
+    let range = match (r["height_range"][0].as_f64(), r["height_range"][1].as_f64()) {
+        (Some(low), Some(high)) => format!("heights {low:.2} to {high:.2} m"),
+        _ => "no ground sampled".to_string(),
+    };
+    let mut tally: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for name in r["materials"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        *tally.entry(name).or_default() += 1;
+    }
+    let materials = if tally.is_empty() {
+        "none".to_string()
+    } else {
+        tally.iter().map(|(name, n)| format!("{name} {n}")).collect::<Vec<_>>().join(", ")
+    };
+    let holes = r["holes"].as_array().map_or(0, Vec::len);
+    let outside = r["outside"].as_array().map_or(0, Vec::len);
+    let mut lines = vec![format!(
+        "{count} sample(s): {range}; materials {materials}; {holes} hole(s); {outside} outside the footprint."
+    )];
+    for i in 0..(count as usize).min(5) {
+        let height = r["heights"][i].as_f64().map_or_else(|| "null".to_string(), |h| format!("{h:.2} m"));
+        lines.push(format!(
+            "  #{i}: height {height}, material {}, normal {}",
+            r["materials"][i].as_str().unwrap_or("none"),
+            fmt_numbers(&r["normals"][i])
+        ));
+    }
+    lines.join("\n")
+}
+
+pub struct TerrainRaycastTool;
+
+impl ToolHandler for TerrainRaycastTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_raycast",
+            description: "Cast a ray against the LIVE terrain alone (the heightfield plus caves and overhangs), ignoring parts and every other collider, and return where it first enters the ground: the hit point, the distance, the surface normal and the material, in world metres. `origin` [x, y, z] is required; `direction` defaults to straight down; `max_distance` defaults to 1000 and is capped at 100,000. Use scene_raycast to hit parts. Read-only; requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "origin": xyz_schema("Ray origin [x, y, z], world metres."),
+                    "direction": xyz_schema("Ray direction [x, y, z]; need not be normalized. Default [0, -1, 0]."),
+                    "max_distance": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000, "description": "Longest ray, metres (default 1000, at most 100,000)." },
+                },
+                "required": ["origin"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["origin", "direction", "max_distance"]);
+        match call_terrain(ctx, "terrain.raycast", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => {
+                let summary = if r["hit"].as_bool() == Some(true) {
+                    format!(
+                        "Hit the terrain at {} after {:.2} m: material {}, normal {}.",
+                        fmt_numbers(&r["point"]),
+                        r["distance"].as_f64().unwrap_or(0.0),
+                        r["material"].as_str().unwrap_or("none"),
+                        fmt_numbers(&r["normal"])
+                    )
+                } else {
+                    let note = r["note"].as_str().map(|n| format!(": {n}")).unwrap_or_default();
+                    format!("No terrain hit within {} m{note}.", r["max_distance"])
+                };
+                ok("terrain_raycast", summary, r)
+            }
+            Err(e) => fail("terrain_raycast", e),
+        }
+    }
+}
+
+pub struct TerrainReadVoxelsTool;
+
+impl ToolHandler for TerrainReadVoxelsTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_read_voxels",
+            description: "Read the LIVE terrain as voxels, like Roblox Terrain:ReadVoxels: the box from `min` to `max` (world metres) cut into cubes of `resolution` metres (default: the terrain's own lattice cell). Returns `size` [x, y, z] and two flat arrays indexed x + size_x * (y + size_y * z): `materials` (a terrain material name, Air or Water) and `occupancies` (0 to 1), plus a count per material. At most 32,768 voxels per call; raise `resolution` or shrink the box for more. Read-only; requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "min": xyz_schema("One corner of the box [x, y, z], world metres."),
+                    "max": xyz_schema("The opposite corner [x, y, z], world metres."),
+                    "resolution": { "type": "number", "exclusiveMinimum": 0, "description": "Voxel edge, metres (default: the terrain's lattice cell)." },
+                },
+                "required": ["min", "max"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["min", "max", "resolution"]);
+        match call_terrain(ctx, "terrain.read_voxels", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => {
+                let counts = r["material_counts"]
+                    .as_object()
+                    .map(|m| m.iter().map(|(name, n)| format!("{name} {n}")).collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default();
+                let summary = format!(
+                    "Read {} x {} x {} voxels of {} m from {}: {counts}. `materials` and `occupancies` are indexed x + size_x * (y + size_y * z).",
+                    r["size"][0],
+                    r["size"][1],
+                    r["size"][2],
+                    r["resolution"],
+                    fmt_numbers(&r["min"])
+                );
+                ok("terrain_read_voxels", summary, r)
+            }
+            Err(e) => fail("terrain_read_voxels", e),
+        }
+    }
+}
+
+pub struct TerrainGenerateTool;
+
+impl ToolHandler for TerrainGenerateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_generate",
+            description: "Generate a new procedural world (rivers, erosion, climate and materials) for the open Space, like the Terrain ribbon's Generate presets: `preset` small (2 x 2 regions of 1024 m), medium (3 x 3, the default) or large (4 x 4), and an optional whole-number `seed` (default 42, the ribbon's). It REPLACES the current terrain and its files under Workspace/Terrain; layers someone made under Workspace/Terrain/Layers are kept, while the default layers an earlier generation wrote are replaced. Generation runs in the background: the call returns `queued: true` at once and the world appears over the following seconds, then its chunks mesh. Confirm with terrain_stats (generation.busy turns false when it is done). Refused while another generation runs. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "preset": { "type": "string", "enum": ["small", "medium", "large"], "description": "World size (default medium)." },
+                    "seed": { "type": "integer", "minimum": 0, "description": "Generation seed (default 42). The same seed and preset give the same world." },
+                },
+            }),
+            modes: &[WorkshopMode::General],
+            // Replaces the whole terrain, and runs heavy work in the background.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["preset", "seed"]);
+        match call_terrain(ctx, "terrain.generate", params, TERRAIN_LONG_REPLY_TIMEOUT) {
+            Ok(r) => {
+                let summary = format!(
+                    "Queued a {} world (seed {}, {} x {} regions, {:.0} m square). It replaces the current terrain when generation finishes, then its chunks mesh; call terrain_stats until generation.busy is false.",
+                    r["preset"].as_str().unwrap_or("?"),
+                    r["seed"],
+                    r["regions"][0],
+                    r["regions"][1],
+                    r["size_m"][0].as_f64().unwrap_or(0.0)
+                );
+                ok("terrain_generate", summary, r)
+            }
+            Err(e) => fail("terrain_generate", e),
+        }
+    }
+}
+
+pub struct TerrainFlatTool;
+
+impl ToolHandler for TerrainFlatTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_flat",
+            description: "Replace the open Space's terrain with a dead-flat plate, like the Terrain ribbon's Generate > Flat: `size` small (5 x 5 chunks, 320 m), medium (9 x 9 chunks, 576 m, the default) or large (17 x 17 chunks, 1088 m), centred on the world origin, at `height_m` (world metres, default 0), covered in `material` (default Grass). The plate can later be dug 32 m below its height and raised 96 m above it. It REPLACES the current terrain and its files; layers under Workspace/Terrain/Layers are kept. Returns `queued: true`: the plate is written and loaded on the next frame and its chunks mesh over the frames after, so confirm with terrain_stats. Refused while a generation runs. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "size": { "type": "string", "enum": ["small", "medium", "large"], "description": "Plate size (default medium)." },
+                    "height_m": { "type": "number", "minimum": -10000, "maximum": 10000, "description": "World Y of the surface, metres (default 0)." },
+                    "material": { "type": "string", "description": format!("Surface material (default Grass): {}, or a material the Space defines.", terrain_material_names()) },
+                },
+            }),
+            modes: &[WorkshopMode::General],
+            // Replaces the whole terrain and its files.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["size", "height_m", "material"]);
+        match call_terrain(ctx, "terrain.flat", params, TERRAIN_LONG_REPLY_TIMEOUT) {
+            Ok(r) => {
+                let summary = format!(
+                    "Queued a {} flat plate: {} x {} chunks, {:.0} m square, at Y={} m in {}. It is written and loaded on the next frame and meshes over the frames after; call terrain_stats to confirm.",
+                    r["size"].as_str().unwrap_or("?"),
+                    r["chunks_per_side"],
+                    r["chunks_per_side"],
+                    r["extent_m"].as_f64().unwrap_or(0.0),
+                    r["height_m"],
+                    r["material"].as_str().unwrap_or("?")
+                );
+                ok("terrain_flat", summary, r)
+            }
+            Err(e) => fail("terrain_flat", e),
+        }
+    }
+}
+
+pub struct TerrainSculptTool;
+
+impl ToolHandler for TerrainSculptTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_sculpt",
+            description: "Sculpt the LIVE terrain's ground with one dab of the Terrain editor's round brush: `mode` raise, lower, flatten (to `height`, default the center's Y) or smooth, around `center` [x, y, z] within `radius` (up to 256), at `strength` 0 to 1 (default 0.5). Raise and lower move the ground at the centre by strength times a tenth of the terrain's height band (grid.height_band_m in terrain_stats); flatten and smooth blend it toward the target by strength; every mode fades to nothing at the rim. All lengths are world metres. Applied at once as one undo step (Ctrl+Z in the editor reverts it); meshes and colliders rebuild over the next frames. Refused on procedural terrain, which has no height raster. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["raise", "lower", "flatten", "smooth"], "description": "What the brush does to the ground." },
+                    "center": xyz_schema("Brush centre [x, y, z], world metres."),
+                    "radius": { "type": "number", "exclusiveMinimum": 0, "maximum": 256, "description": "Brush radius, metres (up to 256)." },
+                    "strength": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 to 1 (default 0.5)." },
+                    "height": { "type": "number", "description": "Flatten only: the world Y to flatten to, metres (default the center's Y)." },
+                },
+                "required": ["mode", "center", "radius"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["mode", "center", "radius", "strength", "height"]);
+        match call_terrain(ctx, "terrain.sculpt", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_sculpt", summarize_terrain_edit("Sculpt", &r), r),
+            Err(e) => fail("terrain_sculpt", e),
+        }
+    }
+}
+
+pub struct TerrainPaintTool;
+
+impl ToolHandler for TerrainPaintTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_paint",
+            description: "Paint a material onto the LIVE terrain's surface with a round brush, heights untouched: `center` [x, y, z] and `radius` (up to 256) in world metres, `material` (a terrain material name, or a material the Space defines) and `strength` 0 to 1 (default 1, which replaces the material outright; lower values blend). Water paints the Water material's look; use terrain_fill with Water for real water. One undo step; chunks recolour over the next frames. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "center": xyz_schema("Brush centre [x, y, z], world metres."),
+                    "radius": { "type": "number", "exclusiveMinimum": 0, "maximum": 256, "description": "Brush radius, metres (up to 256)." },
+                    "material": { "type": "string", "description": format!("Material to paint: {}, or a material the Space defines.", terrain_material_names()) },
+                    "strength": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 to 1 (default 1)." },
+                },
+                "required": ["center", "radius", "material"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["center", "radius", "material", "strength"]);
+        match call_terrain(ctx, "terrain.paint", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_paint", summarize_terrain_edit("Paint", &r), r),
+            Err(e) => fail("terrain_paint", e),
+        }
+    }
+}
+
+pub struct TerrainFillTool;
+
+impl ToolHandler for TerrainFillTool {
+    fn definition(&self) -> ToolDefinition {
+        let mut props = fill_shape_properties();
+        props.insert(
+            "material".into(),
+            serde_json::json!({
+                "type": "string",
+                "description": format!("What fills the shape: a terrain material ({}), or Water, which raises the water surface over the shape. Air is refused: carving is terrain_carve.", terrain_material_names()),
+            }),
+        );
+        ToolDefinition {
+            name: "terrain_fill",
+            description: "Fill a shape of the LIVE terrain with solid ground or with water, like Roblox Terrain:FillBall, FillBlock, FillCylinder and FillRegion. `shape` ball (`center`, `radius`), block (`center`, `size` [x, y, z], optional `rotation`), cylinder (`center`, `radius`, `height` along its local Y, optional `rotation`) or region (axis-aligned, `min` and `max` corners). Lengths are world metres: radius up to 256, extents up to 512 per axis, and a fill may not visit more than about 128 volume cells a side. `rotation` is a quaternion [x, y, z, w] or Euler angles in degrees [x, y, z] applied like Roblox CFrame.Angles. `material` is a terrain material name, or Water, which raises the water surface over the shape. Air is refused here because it removes ground: that is terrain_carve. One undo step; meshes and colliders rebuild over the next frames. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": props,
+                "required": ["shape", "material"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // A Write tool must not remove ground; the engine also refuses Air
+        // without the `carve` flag, which only terrain_carve sends.
+        if input.get("material").and_then(Value::as_str).is_some_and(is_air_material) {
+            return fail(
+                "terrain_fill",
+                "material Air removes ground, which is a carve: use terrain_carve (a Destructive tool, so it needs approval)".to_string(),
+            );
+        }
+        let mut keys = FILL_SHAPE_KEYS.to_vec();
+        keys.push("material");
+        match call_terrain(ctx, "terrain.fill", terrain_params(&input, &keys), TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_fill", summarize_terrain_edit("Fill", &r), r),
+            Err(e) => fail("terrain_fill", e),
+        }
+    }
+}
+
+pub struct TerrainCarveTool;
+
+impl ToolHandler for TerrainCarveTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_carve",
+            description: "Carve a shape out of the LIVE terrain, leaving air (caves, tunnels, craters, cuts) and removing any water there: the same shapes, parameters and limits as terrain_fill, in world metres, without `material`. Meshes and colliders rebuild over the next frames. It is one undo step in the editor, but it removes ground, so it is classed Destructive, and MCP clients are not granted Destructive tools yet: calls are refused until per-action approval lands. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": fill_shape_properties(),
+                "required": ["shape"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = terrain_params(&input, &FILL_SHAPE_KEYS);
+        params.insert("material".to_string(), Value::from("Air"));
+        params.insert("carve".to_string(), Value::Bool(true));
+        match call_terrain(ctx, "terrain.fill", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_carve", summarize_terrain_edit("Carve", &r), r),
+            Err(e) => fail("terrain_carve", e),
+        }
+    }
+}
+
+pub struct TerrainReplaceMaterialTool;
+
+impl ToolHandler for TerrainReplaceMaterialTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_replace_material",
+            description: "Replace one material with another inside a world box of the LIVE terrain, like Roblox Terrain:ReplaceMaterial: `min` and `max` corners [x, y, z] in world metres (up to 512 m apart per axis), `from` and `to` terrain material names. Covers the surface and the walls of caves inside the box; shapes are untouched. One undo step; chunks recolour over the next frames. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "min": xyz_schema("One corner of the box [x, y, z], world metres."),
+                    "max": xyz_schema("The opposite corner [x, y, z], world metres."),
+                    "from": { "type": "string", "description": format!("Material to replace: {}.", terrain_material_names()) },
+                    "to": { "type": "string", "description": "Material to put in its place, from the same list." },
+                },
+                "required": ["min", "max", "from", "to"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["min", "max", "from", "to"]);
+        match call_terrain(ctx, "terrain.replace_material", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_replace_material", summarize_terrain_edit("Replace material", &r), r),
+            Err(e) => fail("terrain_replace_material", e),
+        }
+    }
+}
+
+pub struct TerrainLayerCreateTool;
+
+impl ToolHandler for TerrainLayerCreateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_layer_create",
+            description: "Create a non-destructive terrain layer instance under Workspace/Terrain/Layers, as the Insert menu does: `class` TerrainSpline (a road, path, river, canyon or embankment along `points`), TerrainStamp (a crater, mound, plateau or ridge), TerrainFlattenPad (a flat pad), TerrainNoise (fractal noise over a rectangle), TerrainMaterialFill (a material painted by slope and height rules), TerrainScatter (grass, shrubs, rocks or trees placed by rules) or TerrainWaterBody (a lake); `position` [x, y, z] in world metres; an optional `name`; optional `fields` that set its properties by name; and for a TerrainSpline, `points` [[x, y, z], ...] in world metres in path order (2 to 64; default two points 20 m either side of the position along X, on the ground). An unknown class, property or value is refused with the valid list and nothing is created. Over the next frames a spline, stamp, pad, noise or material fill bakes over the ground and the chunks under it remesh and re-collide, a scatter places its objects and a water body floods its lake; deleting or disabling the layer restores the ground. One undo step removes it. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "class": {
+                        "type": "string",
+                        "enum": ["TerrainSpline", "TerrainStamp", "TerrainFlattenPad", "TerrainNoise", "TerrainMaterialFill", "TerrainScatter", "TerrainWaterBody"],
+                        "description": "The layer class.",
+                    },
+                    "position": xyz_schema("Where the layer sits [x, y, z], world metres: a stamp's centre, a pad's top, a lake's seed point, a spline's origin."),
+                    "name": { "type": "string", "description": "Instance name (default: the class name), made unique within the folder." },
+                    "fields": { "type": "object", "description": layer_fields_description() },
+                    "points": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                        "minItems": 2,
+                        "maxItems": 64,
+                        "description": "TerrainSpline only: control points [[x, y, z], ...] in world metres, in path order.",
+                    },
+                },
+                "required": ["class", "position"],
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["class", "name", "position", "fields", "points"]);
+        match call_terrain(ctx, "terrain.layer_create", params, TERRAIN_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_layer_create", summarize_layer_create(&r), r),
+            Err(e) => fail("terrain_layer_create", e),
+        }
+    }
+}
+
+/// What terrain_layer_create made, and where.
+fn summarize_layer_create(r: &Value) -> String {
+    let mut summary = format!(
+        "Created {} '{}' at {} in {}",
+        r["class"].as_str().unwrap_or("?"),
+        r["name"].as_str().unwrap_or("?"),
+        fmt_numbers(&r["position"]),
+        r["folder"].as_str().unwrap_or("?")
+    );
+    let fields: Vec<&str> = r["fields_set"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !fields.is_empty() {
+        summary.push_str(&format!(", with {} set", fields.join(", ")));
+    }
+    if let Some(points) = r["points"].as_u64().filter(|n| *n > 0) {
+        summary.push_str(&format!(" and {points} control point(s)"));
+    }
+    summary.push_str(
+        ". The file watcher spawns it on a following frame and the layer bakes over the next frames; one undo step removes it.",
+    );
+    let errors: Vec<&str> = r["point_errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !errors.is_empty() {
+        summary.push_str(&format!(" {} point(s) failed: {}.", errors.len(), errors.join("; ")));
+    }
+    summary
+}
+
+pub struct TerrainClearTool;
+
+impl ToolHandler for TerrainClearTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_clear",
+            description: "Delete the open Space's terrain, like the Terrain ribbon's Clear: every file under Workspace/Terrain (the height raster, material maps, caves, custom material files, _terrain.toml, imported voxel chunks) except the Terrain instance's own _instance.toml, which is kept and marked cleared (`[terrain] source = \"none\"`) so a converted Space's imported voxels, which live in its world database, do not load again; then every terrain chunk in the live world is removed. Layers under Workspace/Terrain/Layers are kept unless `include_layers` is true. IRREVERSIBLE: there is no undo. Classed Destructive, so MCP clients are refused until per-action approval lands. Refused while a generation runs. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "include_layers": { "type": "boolean", "description": "Also delete the layer instances under Workspace/Terrain/Layers (default false)." },
+                },
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params = terrain_params(&input, &["include_layers"]);
+        match call_terrain(ctx, "terrain.clear", params, TERRAIN_LONG_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_clear", summarize_terrain_clear(&r), r),
+            Err(e) => fail("terrain_clear", e),
+        }
+    }
+}
+
+/// What terrain_clear deleted, kept and could not delete.
+fn summarize_terrain_clear(r: &Value) -> String {
+    let removed: Vec<&str> = r["removed"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let removed = if removed.is_empty() { "nothing".to_string() } else { removed.join(", ") };
+    let layers = if r["layers_removed"].as_bool() == Some(true) { "removed" } else { "kept" };
+    let mut summary = format!(
+        "Cleared the terrain (irreversible): removed {removed}; despawned {} root(s) and {} chunk(s); layers {layers}.",
+        r["roots_despawned"], r["chunks_despawned"]
+    );
+    if r["marked_source_none"].as_bool() == Some(true) {
+        summary.push_str(" The Terrain instance is marked cleared, so imported voxel terrain does not load again.");
+    }
+    if let Some(e) = r["instance_file_error"].as_str() {
+        summary.push_str(&format!(" The Terrain instance could not be marked cleared: {e}."));
+    }
+    let failed = r["failed"].as_array().map_or(0, Vec::len);
+    if failed > 0 {
+        summary.push_str(&format!(" {failed} entry or entries could not be deleted; see `failed`."));
+    }
+    summary
 }

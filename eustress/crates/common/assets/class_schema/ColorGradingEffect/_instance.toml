@@ -1,13 +1,20 @@
-# ColorGradingEffect — post-FX color grade + tonemapper.
-# Distinct from ColorCorrectionEffect (which has no tonemapper).
+# ColorGradingEffect: a colour grade and the view's tonemapper (child of
+# Lighting). Graded after tonemapping on every view camera, in display space.
+#
+# tonemapper: Default (the engine's own), AgX, ACES, TonyMcMapface,
+#             BlenderFilmic, Reinhard, ReinhardLuminance or None.
+# brightness: added to every channel, -1 to 1.
+# contrast:   a factor on the distance from mid grey; 1 is unchanged.
+# saturation: a factor on the distance from grey; 1 is unchanged, 0 is grey.
+# tint_color: multiplied in last, 0-255.
 
 [color_grading_effect]
 enabled = true
-tonemapper = "AgX"
+tonemapper = "Default"
 brightness = 0.0
 contrast = 1.0
 saturation = 1.0
-tint_color = [1.0, 1.0, 1.0]
+tint_color = [255, 255, 255]
 
 [metadata]
 class_name = "ColorGradingEffect"

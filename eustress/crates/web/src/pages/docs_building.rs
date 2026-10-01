@@ -758,21 +758,27 @@ view_distance = 256.0      # chunks cover -4 to +4 around the origin"#}</code></
                             <h3>"Light Objects"</h3>
                             <p>
                                 "A light object adds a real light to the scene. A PointLight shines in every
-                                direction, a SpotLight in a cone, and a DirectionalLight in parallel rays
-                                across the whole Space, like the sun. A SurfaceLight currently shines as a
-                                point light from where it sits. Changes in the Properties panel apply to the
-                                light at once."
+                                direction, a SpotLight in a cone, and a SurfaceLight in a cone out of one face
+                                of its part. A DirectionalLight shines in parallel rays across the whole Space,
+                                like a second sun without a disc in the sky. As in Roblox, put a light inside a
+                                part and it shines from the part: a SpotLight or SurfaceLight shines out of the
+                                part's Face. Inserted with nothing selected, a light appears in front of the
+                                camera. A light inside no part is drawn as a small marker in Studio, and clicking
+                                the marker selects it; a selected light shows how far it reaches. Changes in the
+                                Properties panel apply to the light at once and are saved with the Space."
                             </p>
                             <table class="docs-table">
                                 <thead>
                                     <tr><th>"Property"</th><th>"Default"</th><th>"What it does"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr><td><code>"Brightness"</code></td><td>"1"</td><td>"A dial: each unit is 50,000 lumens for point, spot and surface lights, and 10,000 lux for a DirectionalLight"</td></tr>
+                                    <tr><td><code>"Brightness"</code></td><td>"1"</td><td>"A dial: 1 is a normal lamp. It lights a surface the same on screen at noon and at midnight, whatever the camera's exposure. A DirectionalLight at 1 is 10,000 lux in daylight"</td></tr>
                                     <tr><td><code>"Color"</code></td><td>"White"</td><td>"The light's color"</td></tr>
-                                    <tr><td><code>"Range"</code></td><td>"60 m"</td><td>"How far a point, spot or surface light reaches"</td></tr>
-                                    <tr><td><code>"Angle"</code></td><td>"45"</td><td>"SpotLight only: degrees from the center of the beam to its edge, so 45 makes a 90 degree cone, at full strength out to 85 percent of the angle"</td></tr>
-                                    <tr><td><code>"Shadows"</code></td><td>"On"</td><td>"Whether the light casts shadows"</td></tr>
+                                    <tr><td><code>"Range"</code></td><td>"16 m"</td><td>"How far a point, spot or surface light reaches: brightest near the light, still clearly lit at half the range, and dark at the range itself"</td></tr>
+                                    <tr><td><code>"Angle"</code></td><td>"90"</td><td>"SpotLight and SurfaceLight: the full width of the cone in degrees, as in Roblox. 180 lights everything in front of the face"</td></tr>
+                                    <tr><td><code>"Face"</code></td><td>"Front"</td><td>"SpotLight and SurfaceLight: the face of the part the light shines out of"</td></tr>
+                                    <tr><td><code>"Shadows"</code></td><td>"Off"</td><td>"Whether the light casts shadows. A DirectionalLight has them on"</td></tr>
+                                    <tr><td><code>"Enabled"</code></td><td>"On"</td><td>"Whether the light shines at all"</td></tr>
                                 </tbody>
                             </table>
                             <p>
@@ -869,11 +875,11 @@ view_distance = 256.0      # chunks cover -4 to +4 around the origin"#}</code></
                                 every part at once."
                             </p>
                             <p>
-                                "Lights are budgeted by distance to the camera. The 64 nearest point and spot
-                                lights shine; farther ones go dark beyond 350 m and relight within 250 m. The
-                                32 nearest cast shadows and the rest do not, whatever their own shadow
-                                setting says. The list is refreshed after 5 m of camera travel or every 30
-                                frames."
+                                "Lights are budgeted by distance to the camera. The 64 nearest point, spot and
+                                surface lights shine; farther ones go dark beyond 350 m and relight within
+                                250 m, exactly as authored, edits included. Of the lights with Shadows on, the
+                                32 nearest cast them; a light with Shadows off never does. The list is
+                                refreshed after 5 m of camera travel or every 30 frames."
                             </p>
                         </div>
 

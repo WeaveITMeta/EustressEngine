@@ -13,7 +13,6 @@ outdoor_ambient = [0.5, 0.5, 0.5, 1.0]
 brightness = 2.0
 color_shift_top = [0.0, 0.0, 0.0, 1.0]
 color_shift_bottom = [0.0, 0.0, 0.0, 1.0]
-shadow_softness = 0.2
 environment_diffuse_scale = 1.0
 environment_specular_scale = 1.0
 clock_time = 14.0
@@ -22,8 +21,9 @@ fog_color = [0.75, 0.75, 0.75, 1.0]
 fog_end = 100000.0
 fog_start = 0.0
 global_shadows = true
-technology = "ShadowMap"
 exposure_compensation = 0.0
+day_cycle = false
+day_length_minutes = 24.0
 
 [metadata]
 id = "lighting-service"

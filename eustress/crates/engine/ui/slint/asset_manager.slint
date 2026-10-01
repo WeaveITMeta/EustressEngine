@@ -1,10 +1,16 @@
 // ============================================================================
 // Eustress Engine Studio - Asset Manager Panel
 // Browse Universe-level and Space-level assets in a hierarchy tree
+//
+// A docked panel in the left tab strip, not a modal. Its controls follow the
+// dialog kit: KitButton for Import, a segmented category switch in the
+// KitSegmented style, and the selection cyan for the selected row
+// (DRAFTING_UX.md Law 3).
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ScrollView, GridBox, ComboBox } from "std-widgets.slint";
-import { Theme, PanelHeader } from "theme.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { KitButton, KitDivider } from "dialog_kit.slint";
 
 // A node in the asset tree (section headers, folders, and individual files)
 export struct AssetNode {
@@ -20,39 +26,34 @@ export struct AssetNode {
     path: string,
 }
 
-// Reusable category tab button
+// One category in the segmented switch, drawn like a KitSegmented option.
+// Driven by the category name Rust pushes, so a change from Rust always
+// shows.
 component CategoryTab inherits Rectangle {
     in property <string> label: "";
     in property <bool> active: false;
     callback clicked();
 
-    height: 26px;
     horizontal-stretch: 1;
+    border-radius: Theme.radius-sm - 1px;
+    min-width: tab-text.preferred-width + 12px;
+    background: root.active ? Theme.accent-cyan.with-alpha(0.2)
+        : tab-touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent-cyan.with-alpha(0.6);
+
+    tab-text := Text {
+        text: root.label;
+        color: root.active ? Theme.text-primary : Theme.text-secondary;
+        font-size: Theme.font-sm;
+        font-weight: root.active ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 
     tab-touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
-    }
-
-    Rectangle {
-        background: root.active ? Theme.panel-background :
-                    tab-touch.has-hover ? Theme.explorer-item-hover : transparent;
-        border-radius: 4px;
-
-        Text {
-            text: root.label;
-            color: root.active ? Theme.text-primary : Theme.text-secondary;
-            font-size: 11px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
-    if root.active: Rectangle {
-        y: parent.height - 2px;
-        height: 2px;
-        background: Theme.accent-blue;
-        border-radius: 1px;
     }
 }
 
@@ -70,12 +71,14 @@ component AssetTreeRow inherits Rectangle {
     callback clicked();
     callback toggle-expand();
     callback context-menu();
-    // Double-click on a leaf (non-expandable) row — host decides what to do
-    // based on asset-type (media → radial import chooser, script → editor…).
+    // Double-click on a leaf (non-expandable) row: the host decides what to do
+    // based on asset-type (media opens the radial import chooser, a script the editor).
     callback double-clicked();
 
-    height: 24px;
-    background: root.selected ? Theme.selection-background :
+    property <bool> section: root.asset-type == "section";
+
+    height: root.section ? 28px : 24px;
+    background: root.selected ? Theme.accent-cyan.with-alpha(0.14) :
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
     row-touch := TouchArea {
@@ -95,27 +98,44 @@ component AssetTreeRow inherits Rectangle {
         }
     }
 
+    // The selection bar on the left edge.
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.selected ? 16px : 0px;
+        border-radius: 1.5px;
+        background: Theme.accent-cyan;
+    }
+
     HorizontalLayout {
         padding-left: 8px + root.depth * 16px;
-        spacing: 4px;
-        alignment: start;
+        padding-right: 10px;
+        spacing: 5px;
 
         // Expand/collapse arrow
-        if root.expandable: Rectangle {
-            width: 14px;
-            height: 14px;
+        if root.expandable: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                background: expand-touch.has-hover ? Theme.button-hover : transparent;
 
-            expand-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.toggle-expand(); }
-            }
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    source: root.expanded ? @image-url("../../assets/icons/ui/chevron-down.svg") : @image-url("../../assets/icons/ui/chevron-right.svg");
+                    image-fit: contain;
+                    colorize: Theme.text-secondary;
+                }
 
-            Text {
-                text: root.expanded ? "▾" : "▸";
-                color: Theme.text-secondary;
-                font-size: 10px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                expand-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-expand(); }
+                }
             }
         }
         if !root.expandable: Rectangle {
@@ -123,21 +143,23 @@ component AssetTreeRow inherits Rectangle {
         }
 
         // Icon
-        Image {
-            width: 16px;
-            height: 16px;
-            source: root.icon;
-            image-fit: contain;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+                image-fit: contain;
+            }
         }
 
         // Name
         Text {
             text: root.name;
-            color: root.asset-type == "section" ? Theme.accent-blue :
-                   root.selected ? white : Theme.text-primary;
-            font-size: root.asset-type == "section" ? 12px : 11px;
-            font-weight: root.asset-type == "section" ? 700 : 400;
+            color: root.section ? Theme.text-primary :
+                   root.selected ? Theme.text-primary : Theme.text-primary.with-alpha(0.88);
+            font-size: root.section ? 12px : 11px;
+            font-weight: root.section ? 700 : root.selected ? 600 : 400;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
@@ -147,12 +169,10 @@ component AssetTreeRow inherits Rectangle {
         if root.size != "": Text {
             text: root.size;
             color: Theme.text-disabled;
-            font-size: 10px;
+            font-size: Theme.font-xs;
+            horizontal-alignment: right;
             vertical-alignment: center;
         }
-
-        // Right padding
-        Rectangle { width: 8px; }
     }
 }
 
@@ -183,108 +203,100 @@ export component AssetManager inherits Rectangle {
 
         // Toolbar: Search + Import
         Rectangle {
-            height: 36px;
+            height: 40px;
             clip: true;
             background: Theme.header-background;
 
             HorizontalLayout {
-                padding: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 6px;
+                padding-bottom: 6px;
                 spacing: 6px;
 
-                Image {
-                    width: 16px;
-                    height: 16px;
-                    source: @image-url("../../assets/icons/ui/search.svg");
-                    image-fit: contain;
-                    vertical-alignment: center;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/search.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                    }
                 }
 
                 LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Search assets...";
+                    placeholder-text: "Search assets";
                     text <=> root.search-text;
                     edited(text) => { root.on-search-changed(text); }
                 }
 
-                Rectangle {
-                    width: 70px;
-                    height: 28px;
-                    background: import-touch.has-hover ? Theme.button-primary-hover : Theme.button-primary;
-                    border-radius: 4px;
-
-                    import-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-import-asset(""); }
-                    }
-
-                    HorizontalLayout {
-                        alignment: center;
-                        padding-top: 6px;
-                        padding-bottom: 6px;
-                        spacing: 4px;
-
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/import.svg");
-                            image-fit: contain;
-                            colorize: white;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: "Import";
-                            color: white;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                    }
+                KitButton {
+                    text: "Import";
+                    kind: "primary";
+                    has-icon: true;
+                    icon: @image-url("../../assets/icons/ui/import.svg");
+                    clicked => { root.on-import-asset(""); }
                 }
             }
         }
 
-        // Category filter tabs
+        // Category filter: one segmented switch
         Rectangle {
-            height: 28px;
+            height: 36px;
             background: Theme.background-secondary;
 
-            HorizontalLayout {
-                spacing: 2px;
-                padding-left: 4px;
-                padding-right: 4px;
+            Rectangle {
+                x: 8px;
+                y: 5px;
+                width: parent.width - 16px;
+                height: 26px;
+                border-radius: Theme.radius-sm;
+                background: Theme.input-background;
+                border-width: 1px;
+                border-color: Theme.input-border;
 
-                CategoryTab { label: "All"; active: root.current-category == "All"; clicked => { root.on-category-changed("All"); } }
-                CategoryTab { label: "Meshes"; active: root.current-category == "Meshes"; clicked => { root.on-category-changed("Meshes"); } }
-                CategoryTab { label: "Textures"; active: root.current-category == "Textures"; clicked => { root.on-category-changed("Textures"); } }
-                CategoryTab { label: "Audio"; active: root.current-category == "Audio"; clicked => { root.on-category-changed("Audio"); } }
-                CategoryTab { label: "Scripts"; active: root.current-category == "Scripts"; clicked => { root.on-category-changed("Scripts"); } }
+                HorizontalLayout {
+                    padding: 2px;
+                    spacing: 2px;
+
+                    CategoryTab { label: "All"; active: root.current-category == "All"; clicked => { root.on-category-changed("All"); } }
+                    CategoryTab { label: "Meshes"; active: root.current-category == "Meshes"; clicked => { root.on-category-changed("Meshes"); } }
+                    CategoryTab { label: "Textures"; active: root.current-category == "Textures"; clicked => { root.on-category-changed("Textures"); } }
+                    CategoryTab { label: "Audio"; active: root.current-category == "Audio"; clicked => { root.on-category-changed("Audio"); } }
+                    CategoryTab { label: "Scripts"; active: root.current-category == "Scripts"; clicked => { root.on-category-changed("Scripts"); } }
+                }
             }
         }
 
         // Summary bar
         Rectangle {
-            height: 22px;
-            background: Theme.background-tertiary;
+            height: 24px;
+            background: Theme.background-secondary;
 
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 12px;
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 14px;
+                alignment: start;
 
                 Text {
-                    text: "Universe: " + root.universe-asset-count;
+                    text: "Universe " + root.universe-asset-count;
                     color: Theme.text-secondary;
-                    font-size: 10px;
+                    font-size: Theme.font-xs;
                     vertical-alignment: center;
                 }
                 Text {
-                    text: "Space: " + root.space-asset-count;
+                    text: "Space " + root.space-asset-count;
                     color: Theme.text-secondary;
-                    font-size: 10px;
+                    font-size: Theme.font-xs;
                     vertical-alignment: center;
                 }
             }
         }
+
+        KitDivider { }
 
         // Asset tree or empty state
         if root.asset-nodes.length == 0: Rectangle {
@@ -293,29 +305,31 @@ export component AssetManager inherits Rectangle {
             VerticalLayout {
                 alignment: center;
                 horizontal-stretch: 1;
-                spacing: 4px;
+                spacing: 6px;
 
                 HorizontalLayout {
                     alignment: center;
                     Image {
-                        width: 48px;
-                        height: 48px;
+                        width: 40px;
+                        height: 40px;
                         source: @image-url("../../assets/icons/ui/package.svg");
                         image-fit: contain;
-                        opacity: 0.4;
+                        colorize: Theme.text-disabled;
                     }
                 }
 
                 Text {
                     text: "No assets found";
                     color: Theme.text-secondary;
+                    font-size: 12px;
+                    font-weight: 600;
                     horizontal-alignment: center;
                 }
 
                 Text {
                     text: "Import assets or open a Space";
                     color: Theme.text-disabled;
-                    font-size: 12px;
+                    font-size: Theme.font-sm;
                     horizontal-alignment: center;
                 }
             }
@@ -325,7 +339,8 @@ export component AssetManager inherits Rectangle {
             vertical-stretch: 1;
 
             VerticalLayout {
-                padding: 0px;
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 0px;
 
                 for node[index] in root.asset-nodes: AssetTreeRow {

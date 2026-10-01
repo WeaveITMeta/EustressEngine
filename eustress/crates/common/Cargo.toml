@@ -128,6 +128,18 @@ base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["model-import", "geotiff", "streaming", "units_v1"]
+# The view cameras' image stack (plugins/camera_look.rs): TonyMcMapface,
+# SMAA and bloom need these bevy features, the set Studio and the Player
+# already build with. Optional so the web Player and luau-only builds still
+# compile; without it view cameras keep their own stack.
+view-look = [
+    "bevy/bevy_anti_alias",
+    "bevy/bevy_post_process",
+    "bevy/tonemapping_luts",
+    "bevy/zstd_rust",
+    "bevy/smaa_luts",
+    "bevy/ktx2",
+]
 # Enable physics for terrain collisions
 physics = ["avian3d"]
 # Enable async asset loading (HTTP, IPFS, etc.)

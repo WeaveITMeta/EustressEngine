@@ -5,7 +5,7 @@
 
 import { HorizontalBox, VerticalBox, ScrollView, Slider, LineEdit } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
-import { TerrainMaterialSlotData } from "terrain_editor.slint";
+import { TerrainToolsUi } from "terrain_tool_bar.slint";
 
 // An "Eustress Mode" entry for the Modes dropdown (id/name/icon-id pushed
 // from Rust's ModeRegistry). `icon-id` is one of the small compile-time
@@ -84,17 +84,19 @@ export struct SavedIdentityData {
     active: bool,
 }
 
-// One insertable class in the data-driven Insert dropdown. Fed from the
-// Rust side (`insert_classes::build_catalog`) off the live ClassRegistry,
-// filtered to classes that have a creatable template. `class-name` is the
-// canonical ClassName string the click routes through
-// `on-menu-action("insert:" + class-name)`; `show-header` marks the first
-// row of each category so the loop can draw a heading above it.
+// One row of the Insert menu or the Insert Object dialog. Fed from the Rust
+// side (`insert_classes`), rebuilt from the class templates on disk each time
+// either surface opens. `class-name` is the action id the click routes through
+// `on-menu-action("insert:" + class-name)`: a canonical ClassName for catalog
+// rows, the id that was used for a Recent row. `show-header` marks the first
+// row of each group so the loop can draw a heading above it; the heading is
+// `section` when set ("Suggested for Part", "Recent"), else `category`.
 export struct InsertClassData {
     class-name: string,
     category: string,
     display: string,
     show-header: bool,
+    section: string,
 }
 
 // One File > Recent entry, pushed from Rust (`EditorSettings.recent_spaces`).
@@ -123,211 +125,6 @@ export struct PluginButtonData {
     label: string,
     tooltip: string,
     action-id: string,
-}
-
-// Floating brush settings modal that appears beneath toolbar buttons
-component BrushSettingsModal inherits PopupWindow {
-    in property <string> brush-name: "";
-    in property <float> brush-size: 10.0;
-    in property <float> brush-strength: 0.5;
-    in property <string> brush-falloff: "smooth";
-    // Paint only: the material picker, a swatch grid of every slot with the
-    // painted one outlined (names are in the Terrain panel's list).
-    in property <[TerrainMaterialSlotData]> materials: [];
-    in property <int> paint-material: 0;
-    in property <string> paint-material-name: "";
-
-    callback size-changed(float);
-    callback strength-changed(float);
-    callback falloff-changed(string);
-    callback material-changed(int);
-
-    width: 220px;
-    
-    Rectangle {
-        background: Theme.dialog-background;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 8px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        VerticalBox {
-            padding: 12px;
-            spacing: 10px;
-            
-            // Header
-            Text {
-                text: root.brush-name + " Settings";
-                color: Theme.text-primary;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            
-            Rectangle { height: 1px; background: Theme.border-color; }
-            
-            // Size slider
-            VerticalBox {
-                spacing: 4px;
-                
-                HorizontalBox {
-                    Text {
-                        text: "Size";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: Math.round(root.brush-size);
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        min-width: 30px;
-                        horizontal-alignment: right;
-                    }
-                }
-                
-                Slider {
-                    // TerrainBrush's radius range (the `[` / `]` keys stop at 50).
-                    minimum: 1.0;
-                    maximum: 50.0;
-                    value: root.brush-size;
-                    changed(val) => { root.size-changed(val); }
-                }
-            }
-            
-            // Strength slider
-            VerticalBox {
-                spacing: 4px;
-                
-                HorizontalBox {
-                    Text {
-                        text: "Strength";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: Math.round(root.brush-strength * 100) + "%";
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        min-width: 40px;
-                        horizontal-alignment: right;
-                    }
-                }
-                
-                Slider {
-                    minimum: 0.0;
-                    maximum: 1.0;
-                    value: root.brush-strength;
-                    changed(val) => { root.strength-changed(val); }
-                }
-            }
-            
-            // Falloff selector
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Falloff";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                }
-                
-                HorizontalBox {
-                    spacing: 4px;
-                    
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 24px;
-                        background: root.brush-falloff == "linear" ? Theme.selection-background : Theme.button-background;
-                        border-radius: 3px;
-                        TouchArea { clicked => { root.falloff-changed("linear"); } }
-                        Text {
-                            text: "Linear";
-                            color: Theme.text-primary;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 24px;
-                        background: root.brush-falloff == "smooth" ? Theme.selection-background : Theme.button-background;
-                        border-radius: 3px;
-                        TouchArea { clicked => { root.falloff-changed("smooth"); } }
-                        Text {
-                            text: "Smooth";
-                            color: Theme.text-primary;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 24px;
-                        background: root.brush-falloff == "sharp" ? Theme.selection-background : Theme.button-background;
-                        border-radius: 3px;
-                        TouchArea { clicked => { root.falloff-changed("sharp"); } }
-                        Text {
-                            text: "Sharp";
-                            color: Theme.text-primary;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-
-            // Material picker (Paint only). Seven 28px cells fill the
-            // modal's 196px content width exactly, so no padding here.
-            if root.brush-name == "Paint": VerticalBox {
-                padding: 0px;
-                spacing: 4px;
-
-                HorizontalBox {
-                    padding: 0px;
-                    Text {
-                        text: "Material";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: root.paint-material-name;
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        horizontal-alignment: right;
-                        overflow: elide;
-                    }
-                }
-
-                Rectangle {
-                    height: Math.ceil(root.materials.length / 7) * 28px;
-
-                    for mat[i] in root.materials: Rectangle {
-                        x: Math.mod(i, 7) * 28px;
-                        y: Math.floor(i / 7) * 28px;
-                        width: 24px;
-                        height: 24px;
-                        background: mat.swatch;
-                        border-radius: 4px;
-                        border-width: mat.slot-id == root.paint-material ? 2px : 1px;
-                        border-color: mat.slot-id == root.paint-material ? Theme.accent-eustress
-                            : (swatch-touch.has-hover ? Theme.text-primary : Theme.border-color);
-
-                        swatch-touch := TouchArea {
-                            clicked => { root.material-changed(mat.slot-id); }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 // Grouped toolbar section with icon row + compact category label
@@ -510,21 +307,46 @@ component DropdownSeparator inherits Rectangle {
 export component Ribbon inherits Rectangle {
     // Properties
     in property <string> current-tool: "select";
+    // The tool rows are folded away, leaving the menu bar and the tab row.
+    // Set from Rust (EditorSettings); `set-collapsed` asks for a change.
+    in property <bool> collapsed: false;
+    callback set-collapsed(bool);
     // Active terrain brush id ("raise", "lower", ...) and sculpt-mode flag,
     // pushed from Rust off TerrainBrush / TerrainMode. The Terrain tab's
     // brush buttons had no `selected` binding at all, so an armed brush
     // looked identical to an unarmed one.
     in property <string> current-terrain-brush: "";
     in property <bool> terrain-edit-mode: false;
-    // Terrain material picker for the Paint brush settings, pushed from Rust
-    // off TerrainMaterialSlots / TerrainBrush (same feed as the Terrain panel).
-    in property <[TerrainMaterialSlotData]> terrain-materials: [];
-    in property <int> terrain-paint-material: 0;
-    in property <string> terrain-paint-material-name: "";
-    /// Data-driven Insert-menu catalog — every creatable registered class,
-    /// grouped by category, fed from Rust (`set_insert_classes`). Drives
-    /// the dynamic section of the Insert dropdown below the pinned items.
+    /// Data-driven Insert-menu catalog: every class with a creatable
+    /// template, grouped by category, fed from Rust (`set_insert_classes`)
+    /// and rebuilt from disk each time the menu opens. Drives the class
+    /// list below the pinned items.
     in property <[InsertClassData]> insert-classes: [];
+    /// The Insert menu's context, recomputed each time it opens: classes
+    /// suggested for the selection, then recent inserts, each group headed
+    /// by its rows' `section`.
+    in property <[InsertClassData]> insert-context: [];
+    /// Where the next insert lands: the selected instance or service, or
+    /// "its usual service" when nothing is selected.
+    in property <string> insert-target: "";
+    // Icon for an Insert row, by its category. `@image-url` is resolved at
+    // compile time, so the data-driven rows pick from this fixed set.
+    pure function insert-icon(category: string) -> image {
+        return category == "Parts" ? @image-url("../../assets/icons/part.svg")
+            : category == "Structure" ? @image-url("../../assets/icons/folder.svg")
+            : category == "Lighting" ? @image-url("../../assets/icons/lighting.svg")
+            : category == "Constraints" ? @image-url("../../assets/icons/weldconstraint.svg")
+            : category == "Effects" ? @image-url("../../assets/icons/particleemitter.svg")
+            : category == "Simulation" ? @image-url("../../assets/icons/particlesimulation.svg")
+            : category == "Terrain" ? @image-url("../../assets/icons/ui/terrain.svg")
+            : category == "Audio" ? @image-url("../../assets/icons/sound.svg")
+            : category == "GUI" ? @image-url("../../assets/icons/screengui.svg")
+            : category == "Scripting" ? @image-url("../../assets/icons/script.svg")
+            : category == "Animation" ? @image-url("../../assets/icons/animator.svg")
+            : category == "Meshes" ? @image-url("../../assets/icons/meshpart.svg")
+            : category == "Data" ? @image-url("../../assets/icons/filetypes/table.svg")
+            : @image-url("../../assets/icons/instance.svg");
+    }
     /// Plugins ribbon tab content — flattened section/button lists fed from
     /// `TabRegistry` each sync tick (mirrors `insert-classes` above). See
     /// `PluginSectionData`/`PluginButtonData` for why this is two flat
@@ -656,6 +478,9 @@ export component Ribbon inherits Rectangle {
     callback on-publish-universe();
     callback on-publish-space();
     callback on-show-insert-object();
+    // The Insert menu is opening: Rust rebuilds the catalog from disk and
+    // recomputes the target, suggestions and recent inserts.
+    callback on-insert-menu-opened();
     callback on-open-recent(string);
     callback on-close-space();
     callback on-toggle-snap();
@@ -723,23 +548,12 @@ export component Ribbon inherits Rectangle {
     // Terrain callbacks
     callback on-spawn-terrain(string);
     callback on-toggle-terrain-edit();
+    // A terrain tool id ("draw", "sculpt", ...), or "leave" from the lit
+    // tool's button to leave the terrain tools.
     callback on-set-terrain-brush(string);
-    callback on-set-terrain-paint-material(int);
     callback on-import-heightmap();
     callback on-export-heightmap();
-    callback on-brush-size-changed(float);
-    callback on-brush-strength-changed(float);
-    callback on-brush-falloff-changed(string);
-    
-    // Brush settings properties
-    in-out property <float> brush-size: 10.0;
-    in-out property <float> brush-strength: 0.5;
-    in-out property <string> brush-falloff: "smooth";
-    in-out property <bool> show-brush-settings: false;
-    in-out property <string> settings-brush-name: "";
-    in-out property <length> settings-modal-x: 0px;
-    in-out property <length> settings-modal-y: 0px;
-    
+
     // Plugin callbacks
     callback on-plugin-action(string);
     
@@ -971,7 +785,8 @@ export component Ribbon inherits Rectangle {
         root.ribbon-tab = root.ribbon-tabs.length > 0 ? root.ribbon-tabs[0].id : "home";
     }
 
-    height: 118px;
+    // Menu bar 24px + tab row 22px + tool rows 72px.
+    height: root.collapsed ? 46px : 118px;
     background: Theme.ribbon-background;
     
     // Bottom edge separator
@@ -1393,7 +1208,12 @@ export component Ribbon inherits Rectangle {
                     background: insert-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    insert-touch := TouchArea { clicked => { insert-popup.show(); } }
+                    insert-touch := TouchArea {
+                        clicked => {
+                            root.on-insert-menu-opened();
+                            insert-popup.show();
+                        }
+                    }
                     insert-label := Text { text: "Insert"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
                     insert-popup := PopupWindow {
@@ -1421,13 +1241,45 @@ export component Ribbon inherits Rectangle {
                                     padding-bottom: 4px;
                                     width: 240px;
 
+                                    // Where the next insert lands, from the
+                                    // Explorer selection when the menu opened.
+                                    if root.insert-target != "": Rectangle {
+                                        height: 22px;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            Text {
+                                                text: "Inserts into " + root.insert-target;
+                                                color: Theme.text-secondary;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                    DropdownItem { icon: @image-url("../../assets/icons/ui/plus.svg"); label: "Insert Object..."; shortcut: root.shortcut-insert-object; clicked => { root.on-show-insert-object(); } }
+                                    DropdownSeparator {}
+
+                                    // ── Suggested for the selection, then recent inserts ──
+                                    // Recomputed in Rust each time the menu
+                                    // opens (`insert_classes::context_rows`).
+                                    for item in root.insert-context: VerticalLayout {
+                                        if item.show-header: DropdownHeader {
+                                            label: item.section;
+                                        }
+                                        DropdownItem {
+                                            icon: root.insert-icon(item.category);
+                                            label: item.display;
+                                            clicked => { root.on-menu-action("insert:" + item.class-name); }
+                                        }
+                                    }
+                                    if root.insert-context.length > 0: DropdownSeparator {}
+
                                     // ── Pinned common inserts ──
                                     // Kept hardcoded for ergonomics + the
                                     // fast primitive-mesh path (`insert:part`
                                     // etc. spawn with a real block/sphere
                                     // mesh, not a blank Part template).
-                                    DropdownItem { icon: @image-url("../../assets/icons/ui/plus.svg"); label: "Insert Object..."; shortcut: root.shortcut-insert-object; clicked => { root.on-show-insert-object(); } }
-                                    DropdownSeparator {}
                                     DropdownHeader { label: "COMMON"; }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
@@ -1437,36 +1289,21 @@ export component Ribbon inherits Rectangle {
                                     DropdownItem { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
                                     DropdownSeparator {}
 
-                                    // ── All creatable registered classes ──
-                                    // Data-driven from the ClassRegistry
-                                    // (`set_insert_classes`), grouped by
-                                    // category. Each row emits the canonical
-                                    // PascalCase `insert:<ClassName>` action,
-                                    // routed through `create_instance` on the
-                                    // Rust side. `show-header` (precomputed in
-                                    // Rust) draws the category heading above
-                                    // the first row of each group.
+                                    // ── Every class with a creatable template ──
+                                    // Rebuilt from disk in Rust each time the
+                                    // menu opens (`set_insert_classes`),
+                                    // grouped by category. Each row emits the
+                                    // canonical PascalCase `insert:<ClassName>`
+                                    // action, routed through `create_instance`
+                                    // on the Rust side. `show-header`
+                                    // (precomputed in Rust) draws the category
+                                    // heading above the first row of each group.
                                     for item in root.insert-classes: VerticalLayout {
                                         if item.show-header: DropdownHeader {
                                             label: item.category;
                                         }
                                         DropdownItem {
-                                            // Per-category icon. Slint @image-url is compile-time,
-                                            // so a ternary over the (precomputed) category gives the
-                                            // dynamic rows real icons instead of one generic glyph.
-                                            icon: item.category == "Parts" ? @image-url("../../assets/icons/part.svg")
-                                                : item.category == "Structure" ? @image-url("../../assets/icons/folder.svg")
-                                                : item.category == "Lighting" ? @image-url("../../assets/icons/lighting.svg")
-                                                : item.category == "Constraints" ? @image-url("../../assets/icons/weldconstraint.svg")
-                                                : item.category == "Effects" ? @image-url("../../assets/icons/particleemitter.svg")
-                                                : item.category == "Simulation" ? @image-url("../../assets/icons/particlesimulation.svg")
-                                                : item.category == "Audio" ? @image-url("../../assets/icons/sound.svg")
-                                                : item.category == "GUI" ? @image-url("../../assets/icons/screengui.svg")
-                                                : item.category == "Scripting" ? @image-url("../../assets/icons/script.svg")
-                                                : item.category == "Animation" ? @image-url("../../assets/icons/animator.svg")
-                                                : item.category == "Meshes" ? @image-url("../../assets/icons/meshpart.svg")
-                                                : item.category == "Data" ? @image-url("../../assets/icons/filetypes/table.svg")
-                                                : @image-url("../../assets/icons/instance.svg");
+                                            icon: root.insert-icon(item.category);
                                             label: item.display;
                                             clicked => { root.on-menu-action("insert:" + item.class-name); }
                                         }
@@ -1726,17 +1563,17 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Flat Medium (576 m)"; clicked => { root.on-spawn-terrain("flat"); } }
                                 DropdownItem { label: "Flat Large (1.1 km)"; clicked => { root.on-spawn-terrain("flat-large"); } }
                                 DropdownSeparator {}
-                                DropdownItem { label: "Toggle Edit Mode"; shortcut: "T"; clicked => { root.on-toggle-terrain-edit(); } }
+                                DropdownItem { label: "Terrain Tools"; shortcut: TerrainToolsUi.tools-key; clicked => { root.on-toggle-terrain-edit(); } }
                                 DropdownItem { label: "Show/Hide Terrain"; clicked => { root.on-menu-action("terrain:toggle-visibility"); } }
                                 DropdownSeparator {}
-                                DropdownHeader { label: "BRUSH TOOLS"; }
-                                DropdownItem { label: "Raise"; shortcut: "1"; clicked => { root.on-set-terrain-brush("raise"); } }
-                                DropdownItem { label: "Lower"; shortcut: "2"; clicked => { root.on-set-terrain-brush("lower"); } }
-                                DropdownItem { label: "Smooth"; shortcut: "3"; clicked => { root.on-set-terrain-brush("smooth"); } }
-                                DropdownItem { label: "Flatten"; shortcut: "4"; clicked => { root.on-set-terrain-brush("flatten"); } }
-                                DropdownItem { label: "Paint"; shortcut: "5"; clicked => { root.on-set-terrain-brush("paint"); } }
-                                DropdownItem { label: "Add (3D)"; clicked => { root.on-set-terrain-brush("voxeladd"); } }
-                                DropdownItem { label: "Subtract (3D)"; clicked => { root.on-set-terrain-brush("voxelremove"); } }
+                                DropdownHeader { label: "TOOLS"; }
+                                DropdownItem { label: "Draw"; shortcut: TerrainToolsUi.tool-keys[0]; clicked => { root.on-set-terrain-brush("draw"); } }
+                                DropdownItem { label: "Sculpt"; shortcut: TerrainToolsUi.tool-keys[1]; clicked => { root.on-set-terrain-brush("sculpt"); } }
+                                DropdownItem { label: "Smooth"; shortcut: TerrainToolsUi.tool-keys[2]; clicked => { root.on-set-terrain-brush("smooth"); } }
+                                DropdownItem { label: "Flatten"; shortcut: TerrainToolsUi.tool-keys[3]; clicked => { root.on-set-terrain-brush("flatten"); } }
+                                DropdownItem { label: "Paint"; shortcut: TerrainToolsUi.tool-keys[4]; clicked => { root.on-set-terrain-brush("paint"); } }
+                                DropdownItem { label: "Sea Level"; shortcut: TerrainToolsUi.tool-keys[5]; clicked => { root.on-set-terrain-brush("sealevel"); } }
+                                DropdownItem { label: "Region"; shortcut: TerrainToolsUi.tool-keys[6]; clicked => { root.on-set-terrain-brush("region"); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "ASSETS"; }
                                 DropdownItem { label: "Import Heightmap..."; clicked => { root.on-import-heightmap(); } }
@@ -1885,7 +1722,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Millimeters (mm)"; clicked => { root.on-set-display-unit("mm"); } }
                                 DropdownItem { label: "Feet (ft)"; clicked => { root.on-set-display-unit("ft"); } }
                                 DropdownItem { label: "Inches (in)"; clicked => { root.on-set-display-unit("in"); } }
-                                DropdownItem { label: "Studs"; clicked => { root.on-set-display-unit("studs"); } }
+                                DropdownItem { label: "Studs"; clicked => { root.on-set-display-unit("stud"); } }
                             }
                         }
                     }
@@ -2464,9 +2301,35 @@ export component Ribbon inherits Rectangle {
                         }
                     }
                 }
+
+                // Restore: while the tool rows are folded away, brings them
+                // back. At the right end of the menu bar, above the fold
+                // chevron at the end of the tab bar, and pointing down like
+                // it does while the rows are hidden.
+                if root.collapsed: Rectangle {
+                    width: 24px;
+                    height: 20px;
+                    border-radius: 3px;
+                    background: ribbon-restore-touch.has-hover ? Theme.button-hover : transparent;
+
+                    ribbon-restore-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.set-collapsed(false); }
+                    }
+
+                    Image {
+                        x: 5px;
+                        y: 3px;
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                        colorize: Theme.accent-blue;
+                        image-fit: contain;
+                    }
+                }
             }
         }
-        
+
         // ── Ribbon tab selector row ──
         Rectangle {
             height: 22px;
@@ -2603,7 +2466,13 @@ export component Ribbon inherits Rectangle {
 
                     tab-touch := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.ribbon-tab = tab-item.id; }
+                        clicked => {
+                            root.ribbon-tab = tab-item.id;
+                            // Picking a tab while folded shows its tools.
+                            if root.collapsed {
+                                root.set-collapsed(false);
+                            }
+                        }
                     }
 
                     tab-text := Text {
@@ -2637,7 +2506,9 @@ export component Ribbon inherits Rectangle {
         
         // ── Toolbar content area — switches based on active ribbon tab ──
         Rectangle {
-            height: 72px;
+            height: root.collapsed ? 0px : 72px;
+            visible: !root.collapsed;
+            clip: true;
             background: Theme.ribbon-background;
             
             // ════════════════════════════════════════════════════════════
@@ -2935,7 +2806,8 @@ export component Ribbon inherits Rectangle {
             }
 
             // ════════════════════════════════════════════════════════════
-            // MODEL TAB — Parts, Structure, Constraints, Effects, CSG, Assets
+            // MODEL TAB: Parts, Parametric, Sketch, Structure, Constraints,
+            // Effects, Assets
             // ════════════════════════════════════════════════════════════
             if root.ribbon-tab == "model": HorizontalLayout {
                 padding-left: 6px;
@@ -2949,19 +2821,25 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:unionoperation"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:seat"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+                }
+                GroupDivider {}
 
-                    // ── Parametric — feature-tree CadPart (eustress-cad)
+                // Parametric parts are parts (DRAFTING_UX.md Law 3): the same
+                // hue as Parts, in a group of their own so neither group runs
+                // past the button budget of Law 4.
+                ToolGroup {
+                    label: "Parametric";
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        icon: @image-url("../../assets/icons/ui/cad-plate.svg");
                         label: "Plate"; shortcut: "";
                         tooltip: "Parametric plate";
                         tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("insert:cad_plate"); }
                     }
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        icon: @image-url("../../assets/icons/ui/cad-box.svg");
                         label: "Box"; shortcut: "";
-                        tooltip: "Parametric cube";
+                        tooltip: "Parametric box";
                         tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("insert:cad_box"); }
                     }
@@ -2973,46 +2851,48 @@ export component Ribbon inherits Rectangle {
                         clicked => { root.on-menu-action("insert:cad_cylinder"); }
                     }
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
+                        icon: @image-url("../../assets/icons/ui/cad-hole.svg");
                         label: "Hole"; shortcut: "";
-                        tooltip: "Plate + through-hole";
+                        tooltip: "Plate with hole";
                         tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("insert:cad_plate_hole"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/corner.svg");
                         label: "L-Bracket"; shortcut: "";
-                        tooltip: "L-bracket polyline extrude";
+                        tooltip: "L-bracket";
                         tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("insert:cad_lbracket"); }
                     }
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/cad-frame.svg");
-                        label: "Frame"; shortcut: "";
-                        tooltip: "Constrained frame sketch";
-                        tint: Theme.cat-parts;
-                        clicked => { root.on-menu-action("insert:cad_frame"); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        icon: @image-url("../../assets/icons/ui/cad-shell.svg");
                         label: "Shell"; shortcut: "";
                         tooltip: "Shelled box";
                         tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("insert:cad_shell"); }
                     }
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/export.svg");
-                        label: "GLB"; shortcut: "";
-                        tooltip: "Export selected CadPart to .glb (self-describing extras with variables)";
-                        tint: Theme.accent-yellow;
-                        clicked => { root.on-menu-action("cad:export_glb"); }
+                        icon: @image-url("../../assets/icons/ui/cad-frame.svg");
+                        label: "Frame"; shortcut: "";
+                        tooltip: "Constrained frame";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_frame"); }
                     }
+                }
+                GroupDivider {}
+
+                // The way into the selected CadPart's sketch (DRAFTING_UX.md
+                // §1.2), the same panel a double-click opens. Solving happens
+                // on every constraint added; the panel keeps a Solve button
+                // for writing solved positions back.
+                ToolGroup {
+                    label: "Sketch";
                     IconButton {
-                        icon: @image-url("../../assets/icons/ui/cad-solve.svg");
-                        label: "Solve"; shortcut: "";
-                        tooltip: "Run 2D constraint solver on all sketches in the selected CadPart";
-                        tint: Theme.accent-green;
-                        clicked => { root.on-menu-action("cad:solve_sketch"); }
+                        icon: @image-url("../../assets/icons/ui/pen.svg");
+                        label: "Edit"; shortcut: "";
+                        tooltip: "Edit sketch";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("cad:open_sketch"); }
                     }
                 }
                 GroupDivider {}
@@ -3075,6 +2955,14 @@ export component Ribbon inherits Rectangle {
                     label: "Assets";
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Model (OBJ/FBX/GLTF)"; tint: Theme.cat-data; clicked => { root.on-menu-action("model:import"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Selection"; tint: Theme.cat-data; clicked => { root.on-menu-action("model:export"); } }
+                    // Import and export are IO, so GLB takes the IO hue.
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cad-glb.svg");
+                        label: "GLB"; shortcut: "";
+                        tooltip: "Export GLB";
+                        tint: Theme.cat-data;
+                        clicked => { root.on-menu-action("cad:export_glb"); }
+                    }
                 }
             }
             
@@ -3086,7 +2974,15 @@ export component Ribbon inherits Rectangle {
                 padding-right: 6px;
                 spacing: 6px;
                 alignment: center;
-                
+
+                // The built-in UI Builder plugin (`ui_builder/`): a whole
+                // game UI from one line. Same action as its Plugins-tab button.
+                ToolGroup {
+                    label: "Generate";
+                    IconButton { icon: @image-url("../../assets/icons/ui/sparkle.svg"); label: "UI Builder"; tooltip: "UI Builder: a HUD and every screen from one line"; tint: Theme.accent-purple; clicked => { root.on-plugin-action("uibuilder:toggle"); } }
+                }
+                GroupDivider {}
+
                 ToolGroup {
                     label: "Containers";
                     IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:screengui"); } }
@@ -3126,270 +3022,151 @@ export component Ribbon inherits Rectangle {
             }
             
             // ════════════════════════════════════════════════════════════
-            // TERRAIN TAB — Generate, Edit, Brushes, Water, Assets
+            // TERRAIN TAB — Create, Brushes, Water, Region, View
+            // (docs/design/TERRAIN_TOOLS_UX.md section 7.3). Choosing a tool
+            // enters the terrain tools; its settings are in the tool bar over
+            // the viewport. Keys come from the keybinding table.
             // ════════════════════════════════════════════════════════════
             if root.ribbon-tab == "terrain": HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
                 alignment: center;
-                
+
                 ToolGroup {
-                    label: "Generate";
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("small"); } }
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("medium"); } }
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("large"); } }
+                    label: "Create";
+                    generate-btn := IconButton {
+                        icon: @image-url("../../assets/icons/terrain.svg");
+                        label: "Generate";
+                        tooltip: "Generate terrain with rivers, climate and materials: Small, Medium or Large";
+                        tint: Theme.accent-green;
+                        clicked => { generate-popup.show(); }
+                    }
+                    generate-popup := PopupWindow {
+                        x: generate-btn.x;
+                        y: generate-btn.y + generate-btn.height;
+                        width: 190px;
+                        Rectangle {
+                            background: Theme.dialog-background;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow-color;
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                DropdownItem { label: "Small (128 m)"; clicked => { root.on-spawn-terrain("small"); } }
+                                DropdownItem { label: "Medium (512 m)"; clicked => { root.on-spawn-terrain("medium"); } }
+                                DropdownItem { label: "Large (2 km)"; clicked => { root.on-spawn-terrain("large"); } }
+                            }
+                        }
+                    }
                     // Flat baseplate: a dead-level sculptable plate, written
-                    // straight to disk. Small/Medium/Large above run the full
-                    // worldgen pipeline (rivers, climate, materials) and take
-                    // a while; this one returns immediately. The dig and raise
-                    // depths are the height band `flat_preset` writes.
+                    // straight to disk; it returns immediately. The dig and
+                    // raise depths are the height band `flat_preset` writes.
                     IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Flat"; tooltip: "Flat baseplate (576 m): instant, dig down 32 m or raise 96 m"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("flat"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import a heightmap"; tint: Theme.accent-green; clicked => { root.on-import-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export the heightmap"; tint: Theme.accent-green; clicked => { root.on-export-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Clear"; tooltip: "Clear the terrain"; tint: Theme.text-error; clicked => { root.on-menu-action("terrain:clear"); } }
                 }
                 GroupDivider {}
-                
+
                 ToolGroup {
-                    label: "Edit";
-                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: Theme.accent-yellow; selected: root.terrain-edit-mode; clicked => { root.on-toggle-terrain-edit(); } }
+                    label: "Brushes";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-draw.svg");
+                        label: "Draw";
+                        shortcut: TerrainToolsUi.tool-keys[0];
+                        tooltip: "Draw: add or carve a 3D shape (hold Ctrl to swap, Shift to smooth)";
+                        tint: Theme.cat-structure;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "draw";
+                        clicked => { root.on-set-terrain-brush(root.terrain-edit-mode && root.current-terrain-brush == "draw" ? "leave" : "draw"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-sculpt.svg");
+                        label: "Sculpt";
+                        shortcut: TerrainToolsUi.tool-keys[1];
+                        tooltip: "Sculpt: grow or erode the ground (hold Ctrl to swap, Shift to smooth)";
+                        tint: Theme.cat-structure;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "sculpt";
+                        clicked => { root.on-set-terrain-brush(root.terrain-edit-mode && root.current-terrain-brush == "sculpt" ? "leave" : "sculpt"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-smooth.svg");
+                        label: "Smooth";
+                        shortcut: TerrainToolsUi.tool-keys[2];
+                        tooltip: "Smooth: relax the ground and round caves and overhangs";
+                        tint: Theme.cat-structure;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "smooth";
+                        clicked => { root.on-set-terrain-brush(root.terrain-edit-mode && root.current-terrain-brush == "smooth" ? "leave" : "smooth"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-flatten.svg");
+                        label: "Flatten";
+                        shortcut: TerrainToolsUi.tool-keys[3];
+                        tooltip: "Flatten: level to the height under the press, or to the locked plane";
+                        tint: Theme.cat-structure;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "flatten";
+                        clicked => { root.on-set-terrain-brush(root.terrain-edit-mode && root.current-terrain-brush == "flatten" ? "leave" : "flatten"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-paint.svg");
+                        label: "Paint";
+                        shortcut: TerrainToolsUi.tool-keys[4];
+                        tooltip: "Paint: lay a material, or replace one material with another";
+                        tint: Theme.cat-structure;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "paint";
+                        clicked => { root.on-set-terrain-brush(root.terrain-edit-mode && root.current-terrain-brush == "paint" ? "leave" : "paint"); }
+                    }
+                }
+                GroupDivider {}
+
+                ToolGroup {
+                    label: "Water";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-sealevel.svg");
+                        label: "Sea Level";
+                        shortcut: TerrainToolsUi.tool-keys[5];
+                        tooltip: "Sea Level: fill or evaporate water below a level";
+                        tint: Theme.text-accent;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "sealevel";
+                        clicked => { root.on-set-terrain-brush("sealevel"); }
+                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Ocean"; tooltip: "Show or hide the ocean at the terrain's sea level"; tint: Theme.text-accent; clicked => { root.on-menu-action("terrain:water"); } }
+                }
+                GroupDivider {}
+
+                ToolGroup {
+                    label: "Region";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain/tool-region.svg");
+                        label: "Region";
+                        shortcut: TerrainToolsUi.tool-keys[6];
+                        tooltip: "Region: select, transform and fill a box of terrain";
+                        tint: Theme.cat-parts;
+                        selected: root.terrain-edit-mode && root.current-terrain-brush == "region";
+                        clicked => { root.on-set-terrain-brush("region"); }
+                    }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "View";
-                    // Show/Hide is VISIBILITY only — terrain entities, voxel
-                    // chunks and files are untouched, so it's instant and
-                    // reversible. Distinct from Clear (in Assets), which
-                    // despawns and deletes.
+                    // Show/Hide is VISIBILITY only: terrain entities, voxel
+                    // chunks and files are untouched, so it is instant and
+                    // reversible. Distinct from Clear, which despawns and
+                    // deletes.
                     IconButton {
                         icon: @image-url("../../assets/icons/terrain.svg");
                         label: "Show/Hide";
-                        tooltip: "Show or hide terrain in the viewport (visibility only — does not delete)";
+                        tooltip: "Show or hide terrain in the viewport (visibility only, does not delete)";
                         tint: Theme.text-success;
                         clicked => { root.on-menu-action("terrain:toggle-visibility"); }
                     }
                 }
-                GroupDivider {}
-                
-                ToolGroup {
-                    label: "Brushes";
-                    raise-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/chevron-up.svg"); 
-                        label: "Raise"; 
-                        tooltip: "Raise (1) | Hold or right-click for settings"; 
-                        tint: Theme.cat-structure; 
-                        selected: root.current-terrain-brush == "raise";
-                        clicked => { root.on-set-terrain-brush("raise"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Raise";
-                            root.settings-modal-x = raise-btn.absolute-position.x;
-                            root.settings-modal-y = raise-btn.absolute-position.y + raise-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Raise";
-                            root.settings-modal-x = raise-btn.absolute-position.x;
-                            root.settings-modal-y = raise-btn.absolute-position.y + raise-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    lower-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/chevron-down.svg"); 
-                        label: "Lower"; 
-                        tooltip: "Lower (2) | Hold or right-click for settings"; 
-                        tint: Theme.accent-red; 
-                        selected: root.current-terrain-brush == "lower";
-                        clicked => { root.on-set-terrain-brush("lower"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Lower";
-                            root.settings-modal-x = lower-btn.absolute-position.x;
-                            root.settings-modal-y = lower-btn.absolute-position.y + lower-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Lower";
-                            root.settings-modal-x = lower-btn.absolute-position.x;
-                            root.settings-modal-y = lower-btn.absolute-position.y + lower-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    smooth-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/filter.svg"); 
-                        label: "Smooth"; 
-                        tooltip: "Smooth (3) | Hold or right-click for settings"; 
-                        tint: Theme.cat-parts; 
-                        selected: root.current-terrain-brush == "smooth";
-                        clicked => { root.on-set-terrain-brush("smooth"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Smooth";
-                            root.settings-modal-x = smooth-btn.absolute-position.x;
-                            root.settings-modal-y = smooth-btn.absolute-position.y + smooth-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Smooth";
-                            root.settings-modal-x = smooth-btn.absolute-position.x;
-                            root.settings-modal-y = smooth-btn.absolute-position.y + smooth-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    flatten-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/reset.svg"); 
-                        label: "Flatten"; 
-                        tooltip: "Flatten (4) | Hold or right-click for settings"; 
-                        tint: Theme.cat-constraint; 
-                        selected: root.current-terrain-brush == "flatten";
-                        clicked => { root.on-set-terrain-brush("flatten"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Flatten";
-                            root.settings-modal-x = flatten-btn.absolute-position.x;
-                            root.settings-modal-y = flatten-btn.absolute-position.y + flatten-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => {
-                            root.settings-brush-name = "Flatten";
-                            root.settings-modal-x = flatten-btn.absolute-position.x;
-                            root.settings-modal-y = flatten-btn.absolute-position.y + flatten-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    // 3D brushes: they edit the terrain volume, so they can
-                    // build overhangs and arches (Add) or dig caves and
-                    // tunnels (Subtract) that one height per column cannot.
-                    voxel-add-btn := IconButton {
-                        icon: @image-url("../../assets/icons/ui/csg-union.svg");
-                        label: "Add";
-                        tooltip: "Add terrain in 3D (overhangs, arches) | Hold or right-click for settings";
-                        tint: Theme.accent-green;
-                        selected: root.current-terrain-brush == "voxeladd";
-                        clicked => { root.on-set-terrain-brush("voxeladd"); }
-                        right-clicked => {
-                            root.settings-brush-name = "Add";
-                            root.settings-modal-x = voxel-add-btn.absolute-position.x;
-                            root.settings-modal-y = voxel-add-btn.absolute-position.y + voxel-add-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => {
-                            root.settings-brush-name = "Add";
-                            root.settings-modal-x = voxel-add-btn.absolute-position.x;
-                            root.settings-modal-y = voxel-add-btn.absolute-position.y + voxel-add-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    voxel-subtract-btn := IconButton {
-                        icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
-                        label: "Subtract";
-                        tooltip: "Carve caves and tunnels in 3D | Hold or right-click for settings";
-                        tint: Theme.accent-orange;
-                        selected: root.current-terrain-brush == "voxelremove";
-                        clicked => { root.on-set-terrain-brush("voxelremove"); }
-                        right-clicked => {
-                            root.settings-brush-name = "Subtract";
-                            root.settings-modal-x = voxel-subtract-btn.absolute-position.x;
-                            root.settings-modal-y = voxel-subtract-btn.absolute-position.y + voxel-subtract-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => {
-                            root.settings-brush-name = "Subtract";
-                            root.settings-modal-x = voxel-subtract-btn.absolute-position.x;
-                            root.settings-modal-y = voxel-subtract-btn.absolute-position.y + voxel-subtract-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    paint-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/palette.svg"); 
-                        label: "Paint"; 
-                        tooltip: "Paint (5) | Hold or right-click for material and settings";
-                        tint: Theme.accent-purple; 
-                        selected: root.current-terrain-brush == "paint";
-                        clicked => { root.on-set-terrain-brush("paint"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Paint";
-                            root.settings-modal-x = paint-btn.absolute-position.x;
-                            root.settings-modal-y = paint-btn.absolute-position.y + paint-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Paint";
-                            root.settings-modal-x = paint-btn.absolute-position.x;
-                            root.settings-modal-y = paint-btn.absolute-position.y + paint-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    region-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/frame.svg"); 
-                        label: "Region"; 
-                        tooltip: "Region | Hold or right-click for settings"; 
-                        tint: Theme.cat-parts; 
-                        selected: root.current-terrain-brush == "region";
-                        clicked => { root.on-set-terrain-brush("region"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Region";
-                            root.settings-modal-x = region-btn.absolute-position.x;
-                            root.settings-modal-y = region-btn.absolute-position.y + region-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Region";
-                            root.settings-modal-x = region-btn.absolute-position.x;
-                            root.settings-modal-y = region-btn.absolute-position.y + region-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                    fill-btn := IconButton { 
-                        icon: @image-url("../../assets/icons/ui/palette.svg"); 
-                        label: "Fill"; 
-                        tooltip: "Fill | Hold or right-click for settings"; 
-                        tint: Theme.cat-structure; 
-                        selected: root.current-terrain-brush == "fill";
-                        clicked => { root.on-set-terrain-brush("fill"); }
-                        right-clicked => { 
-                            root.settings-brush-name = "Fill";
-                            root.settings-modal-x = fill-btn.absolute-position.x;
-                            root.settings-modal-y = fill-btn.absolute-position.y + fill-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                        long-pressed => { 
-                            root.settings-brush-name = "Fill";
-                            root.settings-modal-x = fill-btn.absolute-position.x;
-                            root.settings-modal-y = fill-btn.absolute-position.y + fill-btn.height;
-                            root.show-brush-settings = true;
-                            brush-settings-modal.show();
-                        }
-                    }
-                }
-                GroupDivider {}
-                
-                ToolGroup {
-                    label: "Water";
-                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Show or hide the water plane at the terrain's sea level"; tint: Theme.text-accent; clicked => { root.on-menu-action("terrain:water"); } }
-                }
-                GroupDivider {}
-                
-                ToolGroup {
-                    label: "Assets";
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Heightmap"; tint: Theme.cat-data; clicked => { root.on-import-heightmap(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Heightmap"; tint: Theme.cat-data; clicked => { root.on-export-heightmap(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Clear"; tooltip: "Clear Terrain"; tint: Theme.text-error; clicked => { root.on-menu-action("terrain:clear"); } }
-                }
             }
-            
+
             // ════════════════════════════════════════════════════════════
             // TEST TAB — Server, Clients, Play, Network, Benchmark, Debug
             // ════════════════════════════════════════════════════════════
@@ -3692,30 +3469,4 @@ export component Ribbon inherits Rectangle {
         }
     }
     
-    // Brush settings modal - positioned beneath clicked brush button
-    brush-settings-modal := BrushSettingsModal {
-        x: root.settings-modal-x;
-        y: root.settings-modal-y;
-        brush-name: root.settings-brush-name;
-        brush-size: root.brush-size;
-        brush-strength: root.brush-strength;
-        brush-falloff: root.brush-falloff;
-        materials: root.terrain-materials;
-        paint-material: root.terrain-paint-material;
-        paint-material-name: root.terrain-paint-material-name;
-
-        material-changed(slot) => { root.on-set-terrain-paint-material(slot); }
-        size-changed(val) => {
-            root.brush-size = val;
-            root.on-brush-size-changed(val);
-        }
-        strength-changed(val) => { 
-            root.brush-strength = val;
-            root.on-brush-strength-changed(val);
-        }
-        falloff-changed(val) => { 
-            root.brush-falloff = val;
-            root.on-brush-falloff-changed(val);
-        }
-    }
 }

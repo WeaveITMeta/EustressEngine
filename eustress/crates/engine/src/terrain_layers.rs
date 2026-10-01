@@ -381,6 +381,137 @@ fn write_point_index(toml_path: &Path, index: f64) {
 }
 
 // ============================================================================
+// Duplicate
+// ============================================================================
+
+/// Where a copy of the terrain layer of class `class_name`, copied from
+/// `src_folder`, goes: a layer into the Space's `Layers` folder wherever it
+/// was copied from, and a spline point beside its source, in the same
+/// spline's folder. `None` for every other class, which the generic paste
+/// places. A copy written anywhere else is no layer of this terrain: the
+/// Client reads only `Layers`, Clear and regenerate touch only `Layers`, and a
+/// point outside its spline joins no path.
+pub fn duplicate_destination(class_name: &str, src_folder: &Path, space_root: &Path) -> Option<PathBuf> {
+    let class = ClassName::from_str(class_name).ok().filter(ClassName::is_terrain_layer)?;
+    if class == ClassName::TerrainSplinePoint {
+        let spline = src_folder.parent()?;
+        let beside = spline.starts_with(space_root) && spline.join("_instance.toml").is_file();
+        return beside.then(|| spline.to_path_buf());
+    }
+    Some(layers_dir(space_root))
+}
+
+/// Make the folder copy at `dst_folder`, written by paste from `src_folder`
+/// (a terrain layer or spline point of class `class_name`), a layer of its
+/// own rather than a second claim on the source's identity:
+/// - every instance below it gets a fresh uuid (paste mints one for the root
+///   alone, and a layer's id comes from its uuid, so a copied spline's points
+///   would share the original's);
+/// - its name is its folder's, which paste made unique among its siblings;
+/// - a point takes an `Index` and a position that put it in the spline: halfway
+///   to the point after its source, or past the last point along the way the
+///   spline leaves it, never on top of the source with the same `Index`,
+///   which leaves their order to chance.
+pub fn finish_duplicate(class_name: &str, src_folder: &Path, dst_folder: &Path) {
+    let Some(class) = ClassName::from_str(class_name).ok().filter(ClassName::is_terrain_layer) else { return };
+    remint_descendant_uuids(dst_folder);
+    let toml_path = dst_folder.join("_instance.toml");
+    let Ok(text) = std::fs::read_to_string(&toml_path) else { return };
+    let Ok(mut doc) = text.parse::<toml::Value>() else { return };
+    if let (Some(name), Some(meta)) =
+        (dst_folder.file_name().and_then(|n| n.to_str()), doc.get_mut("metadata").and_then(toml::Value::as_table_mut))
+    {
+        meta.insert("name".to_string(), toml::Value::String(name.to_string()));
+    }
+    if class == ClassName::TerrainSplinePoint {
+        if let Some((index, position)) = place_duplicated_point(src_folder, dst_folder) {
+            if let Some(root) = doc.as_table_mut() {
+                root.insert(
+                    TerrainSplinePoint::SECTION.to_string(),
+                    toml::Value::Table(TerrainSplinePoint { index }.to_toml_table()),
+                );
+            }
+            if let Err(e) = crate::space::instance_loader::set_authored_transform_toml(&mut doc, position, Quat::IDENTITY, None)
+            {
+                warn!("{}: duplicated point not placed: {e}", toml_path.display());
+            }
+        }
+    }
+    match toml::to_string_pretty(&doc) {
+        Ok(out) => {
+            if let Err(e) = crate::space::gui_loader::write_atomic(&toml_path, out.as_bytes()) {
+                warn!("{}: duplicated layer not finished: {e}", toml_path.display());
+            }
+        }
+        Err(e) => warn!("{}: duplicated layer not finished: {e}", toml_path.display()),
+    }
+}
+
+/// Give every instance folder below `folder` a fresh uuid, at any depth.
+fn remint_descendant_uuids(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let toml_path = path.join("_instance.toml");
+        if let Some(mut doc) = std::fs::read_to_string(&toml_path).ok().and_then(|text| text.parse::<toml::Value>().ok()) {
+            if let Some(meta) = doc.get_mut("metadata").and_then(toml::Value::as_table_mut) {
+                meta.insert(
+                    "uuid".to_string(),
+                    toml::Value::String(eustress_common::instance_create::fresh_uuid_for_create()),
+                );
+                if let Ok(out) = toml::to_string_pretty(&doc) {
+                    if let Err(e) = crate::space::gui_loader::write_atomic(&toml_path, out.as_bytes()) {
+                        warn!("{}: duplicated uuid not written: {e}", toml_path.display());
+                    }
+                }
+            }
+        }
+        remint_descendant_uuids(&path);
+    }
+}
+
+/// The `Index` and position under its spline of the point at `toml_path`.
+fn read_point(toml_path: &Path) -> Option<(f64, Vec3)> {
+    let text = instance_text(toml_path)?;
+    let name = toml_path.parent()?.file_name()?.to_str()?;
+    let (point, _) = parse_layer_instance(&text, name).ok()??;
+    match point.component {
+        LayerComponent::Point(p) => Some((p.index, point.transform.translation)),
+        _ => None,
+    }
+}
+
+/// Where the copy at `dst_folder` of the point at `src_folder` goes in its
+/// spline: its `Index` and position. Halfway between the source and the point
+/// after it, or past the last point (as Insert puts one) when the source is
+/// last. The spline's other points are read from its folder, both copies of
+/// the source left out.
+fn place_duplicated_point(src_folder: &Path, dst_folder: &Path) -> Option<(f64, Vec3)> {
+    let spline_dir = dst_folder.parent()?;
+    // A copy pasted into another spline (Paste Into) or another Space has
+    // none of this spline's neighbours to sit between: it keeps the Index and
+    // position paste gave it.
+    if src_folder.parent() != Some(spline_dir) {
+        return None;
+    }
+    let (src_index, src_position) = read_point(&src_folder.join("_instance.toml"))?;
+    let mut others: Vec<(f64, Vec3)> =
+        read_spline_points(spline_dir).into_iter().filter(|(index, _)| *index != src_index).collect();
+    let after: Option<(f64, Vec3)> = others.iter().copied().find(|(index, _)| *index > src_index);
+    match after {
+        Some((next_index, next_position)) => Some(((src_index + next_index) / 2.0, (src_position + next_position) * 0.5)),
+        None => {
+            others.push((src_index, src_position));
+            others.sort_by(|a, b| a.0.total_cmp(&b.0));
+            Some((src_index.floor() + 1.0, next_point_position(&others)))
+        }
+    }
+}
+
+// ============================================================================
 // Gizmos
 // ============================================================================
 
@@ -602,6 +733,120 @@ mod tests {
 
         let lone = SplineLayer { points: vec![Vec3::ZERO], ..layer.clone() };
         assert!(gizmo_path(&lone, None).is_none(), "one point is no path");
+    }
+
+    /// A spline folder holding points at `(Index, position)`, named Point1...
+    /// in Index order, each with a uuid of its own. Returns the Space root.
+    fn spline_with_points(tag: &str, points: &[(f64, Vec3)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("eustress_terrain_dup_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spline = layers_dir(&root).join("Road");
+        std::fs::create_dir_all(&spline).unwrap();
+        std::fs::write(
+            spline.join("_instance.toml"),
+            "[transform]\nposition = [0.0, 0.0, 0.0]\n\n[metadata]\nclass_name = \"TerrainSpline\"\nname = \"Road\"\n\
+             uuid = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\n[terrain_spline]\nmode = \"Road\"\n",
+        )
+        .unwrap();
+        for (i, (index, position)) in points.iter().enumerate() {
+            let folder = spline.join(format!("Point{}", i + 1));
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("_instance.toml"),
+                format!(
+                    "[transform]\nposition = [{}, {}, {}]\n\n[metadata]\nclass_name = \"TerrainSplinePoint\"\n\
+                     name = \"Point{}\"\nuuid = \"{:032x}\"\n\n[terrain_spline_point]\nindex = {:?}\n",
+                    position.x,
+                    position.y,
+                    position.z,
+                    i + 1,
+                    i + 1,
+                    index
+                ),
+            )
+            .unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn a_duplicated_layer_goes_in_layers_and_a_duplicated_point_beside_its_source() {
+        let root = spline_with_points("dest", &[(0.0, Vec3::ZERO), (1.0, Vec3::X)]);
+        let spline = layers_dir(&root).join("Road");
+        // A layer lands in Layers whatever folder it came from; a stray copy in
+        // the Workspace comes home.
+        let stray = root.join("Workspace").join("Hill");
+        assert_eq!(duplicate_destination("TerrainStamp", &stray, &root), Some(layers_dir(&root)));
+        assert_eq!(duplicate_destination("TerrainSpline", &spline, &root), Some(layers_dir(&root)));
+        // A point stays in its spline's folder.
+        assert_eq!(duplicate_destination("TerrainSplinePoint", &spline.join("Point2"), &root), Some(spline.clone()));
+        // A point whose spline is in another Space has no home here, and other
+        // classes are the generic paste's.
+        assert_eq!(duplicate_destination("TerrainSplinePoint", Path::new("/else/Layers/Road/Point1"), &root), None);
+        assert_eq!(duplicate_destination("Part", &stray, &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_duplicated_point_takes_an_index_between_its_neighbours_or_one_past_the_last() {
+        let points = [(0.0, Vec3::ZERO), (1.0, Vec3::new(10.0, 0.0, 0.0)), (2.0, Vec3::new(20.0, 0.0, 0.0))];
+        let root = spline_with_points("place", &points);
+        let spline = layers_dir(&root).join("Road");
+        let copy_of = |n: usize, name: &str| {
+            let dst = spline.join(name);
+            std::fs::create_dir_all(&dst).unwrap();
+            std::fs::copy(spline.join(format!("Point{n}")).join("_instance.toml"), dst.join("_instance.toml")).unwrap();
+            dst
+        };
+
+        // Point 2 (Index 1) duplicated: halfway to Index 2.
+        let dst = copy_of(2, "Point2b");
+        finish_duplicate("TerrainSplinePoint", &spline.join("Point2"), &dst);
+        let (index, position) = read_point(&dst.join("_instance.toml")).expect("the copy reads as a point");
+        assert_eq!(index, 1.5);
+        assert!((position - Vec3::new(15.0, 0.0, 0.0)).length() < 1e-3, "halfway to the next point: {position}");
+
+        // The last point duplicated: one past it, further along the spline.
+        let dst = copy_of(3, "Point3b");
+        finish_duplicate("TerrainSplinePoint", &spline.join("Point3"), &dst);
+        let (index, position) = read_point(&dst.join("_instance.toml")).expect("the copy reads as a point");
+        assert_eq!(index, 3.0);
+        assert!(position.x > 20.0 && position.y == 0.0, "past the last point, along the spline: {position}");
+
+        // A copy has its own name, and a uuid unlike its source's.
+        let text = std::fs::read_to_string(dst.join("_instance.toml")).unwrap();
+        assert!(text.contains("name = \"Point3b\""), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_duplicated_spline_gets_new_uuids_for_its_points() {
+        let root = spline_with_points("uuids", &[(0.0, Vec3::ZERO), (1.0, Vec3::X)]);
+        let layers = layers_dir(&root);
+        let copy = layers.join("Road2");
+        std::fs::create_dir_all(copy.join("Point1")).unwrap();
+        std::fs::create_dir_all(copy.join("Point2")).unwrap();
+        for name in ["Point1", "Point2"] {
+            std::fs::copy(
+                layers.join("Road").join(name).join("_instance.toml"),
+                copy.join(name).join("_instance.toml"),
+            )
+            .unwrap();
+        }
+        std::fs::copy(layers.join("Road").join("_instance.toml"), copy.join("_instance.toml")).unwrap();
+        finish_duplicate("TerrainSpline", &layers.join("Road"), &copy);
+
+        let uuid_of = |path: PathBuf| {
+            let doc: toml::Value = std::fs::read_to_string(path.join("_instance.toml")).unwrap().parse().unwrap();
+            doc["metadata"]["uuid"].as_str().unwrap().to_string()
+        };
+        for name in ["Point1", "Point2"] {
+            let (original, fresh) = (uuid_of(layers.join("Road").join(name)), uuid_of(copy.join(name)));
+            assert_ne!(original, fresh, "{name} keeps no claim on the original's identity");
+            assert!(eustress_common::instance_create::is_valid_uuid(&fresh), "{fresh}");
+        }
+        assert_ne!(uuid_of(copy.join("Point1")), uuid_of(copy.join("Point2")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

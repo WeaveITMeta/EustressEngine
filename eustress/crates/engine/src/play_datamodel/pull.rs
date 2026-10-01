@@ -7,14 +7,20 @@ use bevy::window::PrimaryWindow;
 
 use avian3d::prelude::{CollisionEnd, CollisionStart, LinearVelocity, Sensor, SpatialQuery, SpatialQueryFilter};
 
+use eustress_common::animation::character::{furnish_character, locomotion_sample};
+use eustress_common::animation::humanoid::{report_state, LocomotionSample};
+use eustress_common::avatar::abilities::AvatarAbilities;
+use eustress_common::avatar::climb::AvatarClimb;
 use eustress_common::avatar::control::AvatarCamera;
-use eustress_common::avatar::spawn::{AvatarBody, AvatarIntent};
+use eustress_common::avatar::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use eustress_common::avatar::LocalAvatar;
 use eustress_common::classes::BasePart;
-use eustress_common::datamodel::{DmEvent, DmValue, EnumItem, InputEvent, InputPhase, InstanceId};
+use eustress_common::datamodel::{DataModel, DmEvent, DmValue, InstanceId};
+use eustress_common::luau::play::terrain::terrain_instance;
 use eustress_common::luau::play::{RayHit, RayQuery};
-use eustress_common::luau::{bevy_keycode_to_roblox, bevy_mouse_to_roblox};
-use eustress_common::scripting::{CFrame, Vector2, Vector3};
+use eustress_common::machine_input::{write_camera, write_input, write_mouse, DeviceFrame, Taken, ViewRect};
+use eustress_common::scripting::{CFrame, Vector3};
+use eustress_common::terrain::TerrainChunkCollider;
 
 use super::seed::world_cframe;
 use super::PlayDataModel;
@@ -159,18 +165,6 @@ pub fn apply_injected_buttons(
     injected.tap_due = std::mem::take(&mut injected.tap);
 }
 
-/// The visible 3D viewport in window logical pixels.
-fn viewport_rect(window: &Window, bounds: Option<&crate::ui::ViewportBounds>) -> (Vec2, Vec2) {
-    let scale = window.scale_factor().max(0.0001);
-    match bounds {
-        Some(b) if b.width > 0.0 && b.height > 0.0 => (
-            Vec2::new(b.x / scale, b.y / scale),
-            Vec2::new(b.width / scale, b.height / scale),
-        ),
-        _ => (Vec2::ZERO, Vec2::new(window.width(), window.height())),
-    }
-}
-
 /// Time, input, and the viewport.
 #[allow(clippy::too_many_arguments)]
 pub fn pull_frame_state(
@@ -183,6 +177,7 @@ pub fn pull_frame_state(
     windows: Query<&Window, With<PrimaryWindow>>,
     bounds: Option<Res<crate::ui::ViewportBounds>>,
     focus: Option<Res<crate::ui::SlintUIFocus>>,
+    hud: Option<Res<eustress_play_runtime::hud_input::HudPointer>>,
     mut ray_state: ResMut<MouseRayState>,
     mut injected: ResMut<InjectedInput>,
 ) {
@@ -191,119 +186,45 @@ pub fn pull_frame_state(
         return;
     };
     let window = windows.single().ok();
-    let (origin, size) = window.map(|w| viewport_rect(w, bounds.as_deref())).unwrap_or((Vec2::ZERO, Vec2::new(1280.0, 720.0)));
+    let rect = window
+        .map(|w| ViewRect::of(w, bounds.as_deref()))
+        .unwrap_or(ViewRect { origin: Vec2::ZERO, size: Vec2::new(1280.0, 720.0) });
     // An injected cursor stands in for the OS one while it is set.
     let injecting = injected.cursor.is_some();
-    let cursor = injected.cursor.or_else(|| window.and_then(|w| w.cursor_position()).map(|c| c - origin));
-    *ray_state = MouseRayState { cursor, viewport_origin: origin, viewport_size: size };
+    let cursor = injected.cursor.or_else(|| window.and_then(|w| w.cursor_position()).map(|c| rect.local(c)));
+    *ray_state = MouseRayState { cursor, viewport_origin: rect.origin, viewport_size: rect.size };
 
-    // Where the real mouse is says nothing about an injected cursor.
-    let over_panel = !injecting && focus.as_deref().map_or(false, |f| f.has_focus);
-    let over_gui = !injecting && focus.as_deref().map_or(false, |f| f.gui_element_hit);
-    let typing = focus.as_deref().map_or(false, |f| f.text_input_focused);
-    let (cx, cy) = cursor.map(|c| (c.x as f64, c.y as f64)).unwrap_or((0.0, 0.0));
-    let delta = motion.as_deref().map(|m| m.delta).unwrap_or(Vec2::ZERO);
-
-    let event = |phase, input_type: &str, key: &str, processed: bool, wheel_steps: f64| InputEvent {
-        phase,
-        input_type: input_type.to_string(),
-        key_code: key.to_string(),
-        x: cx,
-        y: cy,
-        dx: delta.x as f64,
-        dy: delta.y as f64,
-        wheel: wheel_steps,
-        game_processed: processed,
+    let taken = Taken {
+        // Where the real mouse is says nothing about an injected cursor.
+        over_panel: !injecting && focus.as_deref().map_or(false, |f| f.has_focus),
+        over_gui: !injecting && focus.as_deref().map_or(false, |f| f.gui_element_hit),
+        // A HUD TextBox holding the keyboard processes the keys as much as
+        // a Studio text field does.
+        typing: focus.as_deref().map_or(false, |f| f.text_input_focused)
+            || hud.as_deref().is_some_and(|h| h.typing),
     };
-    let mut events: Vec<InputEvent> = Vec::new();
-    let mut keys_down: Vec<String> = Vec::new();
-    let mut buttons_down: Vec<String> = Vec::new();
-
-    if let Some(kb) = keyboard.as_deref() {
-        if !typing {
-            for k in kb.get_pressed() {
-                if let Some(name) = bevy_keycode_to_roblox(*k) {
-                    keys_down.push(name.to_string());
-                }
-            }
-        }
-        for k in kb.get_just_pressed() {
-            if let Some(name) = bevy_keycode_to_roblox(*k) {
-                events.push(event(InputPhase::Began, "Keyboard", name, typing, 0.0));
-            }
-        }
-        for k in kb.get_just_released() {
-            if let Some(name) = bevy_keycode_to_roblox(*k) {
-                events.push(event(InputPhase::Ended, "Keyboard", name, typing, 0.0));
-            }
-        }
-    }
-    if let Some(mb) = mouse.as_deref() {
-        if !over_panel {
-            for b in mb.get_pressed() {
-                if let Some(name) = bevy_mouse_to_roblox(*b) {
-                    buttons_down.push(name.to_string());
-                }
-            }
-        }
-        let processed = over_panel || over_gui;
-        for b in mb.get_just_pressed() {
-            if let Some(name) = bevy_mouse_to_roblox(*b) {
-                events.push(event(InputPhase::Began, name, "Unknown", processed, 0.0));
-            }
-        }
-        for b in mb.get_just_released() {
-            if let Some(name) = bevy_mouse_to_roblox(*b) {
-                events.push(event(InputPhase::Ended, name, "Unknown", processed, 0.0));
-            }
-        }
-    }
-    if delta != Vec2::ZERO && cursor.is_some() {
-        events.push(event(InputPhase::Changed, "MouseMovement", "Unknown", over_panel, 0.0));
-    }
-
-    // Injected cursor travel (injected keys and buttons already arrived
-    // through the ButtonInputs above).
-    if injected.moved != Vec2::ZERO {
-        let moved = std::mem::take(&mut injected.moved);
-        events.push(InputEvent {
-            phase: InputPhase::Changed,
-            input_type: "MouseMovement".into(),
-            key_code: "Unknown".into(),
-            x: cx,
-            y: cy,
-            dx: moved.x as f64,
-            dy: moved.y as f64,
-            wheel: 0.0,
-            game_processed: false,
-        });
-    }
-
     let mut steps = std::mem::take(&mut injected.wheel);
     for w in wheel.read() {
         steps += w.y as f64;
     }
-    if steps != 0.0 {
-        events.push(event(InputPhase::Changed, "MouseWheel", "Unknown", over_panel || over_gui, steps.signum()));
-    }
+    // Injected keys and buttons arrive through the ButtonInputs; injected
+    // cursor travel has no device behind it.
+    let frame = DeviceFrame {
+        keyboard: keyboard.as_deref(),
+        mouse: mouse.as_deref(),
+        cursor,
+        motion: motion.as_deref().map(|m| m.delta).unwrap_or(Vec2::ZERO),
+        wheel: steps,
+        extra_motion: std::mem::take(&mut injected.moved),
+        rect,
+        taken,
+    };
 
     let mut g = dm.dm.lock();
     g.frame.dt = time.delta_secs_f64();
     g.frame.time += g.frame.dt;
     g.frame.frame += 1;
-    g.input.viewport_w = size.x as f64;
-    g.input.viewport_h = size.y as f64;
-    g.input.viewport_focused = !over_panel && !typing;
-    g.input.mouse_dx = delta.x as f64;
-    g.input.mouse_dy = delta.y as f64;
-    if cursor.is_some() {
-        g.input.mouse_x = cx;
-        g.input.mouse_y = cy;
-    }
-    g.input.wheel = steps;
-    g.input.keys = keys_down.into_iter().collect();
-    g.input.buttons = buttons_down.into_iter().collect();
-    g.input.events = events;
+    write_input(&mut g, &frame);
 }
 
 /// Poses that physics (or anything else) changed since last frame.
@@ -330,11 +251,13 @@ pub fn pull_poses(
     }
 }
 
-/// Avian contacts -> `Touched` / `TouchEnded` on both parts.
+/// Avian contacts -> `Touched` / `TouchEnded` on both parts. A terrain chunk
+/// collider has no instance of its own and touches as the Terrain.
 pub fn pull_collisions(
     dm: Option<Res<PlayDataModel>>,
     mut started: MessageReader<CollisionStart>,
     mut ended: MessageReader<CollisionEnd>,
+    terrain_colliders: Query<(), With<TerrainChunkCollider>>,
 ) {
     let Some(dm) = dm else {
         started.clear();
@@ -342,8 +265,11 @@ pub fn pull_collisions(
         return;
     };
     let mut g = dm.dm.lock();
+    let terrain = terrain_instance(&g);
     let resolve = |g: &eustress_common::datamodel::DataModel, collider: Entity, body: Option<Entity>| -> Option<InstanceId> {
-        g.by_entity(collider.to_bits()).or_else(|| body.and_then(|b| g.by_entity(b.to_bits())))
+        g.by_entity(collider.to_bits())
+            .or_else(|| body.and_then(|b| g.by_entity(b.to_bits())))
+            .or_else(|| terrain.filter(|_| terrain_colliders.contains(collider)))
     };
     for ev in started.read() {
         let (Some(a), Some(b)) = (resolve(&g, ev.collider1, ev.body1), resolve(&g, ev.collider2, ev.body2)) else { continue };
@@ -363,10 +289,21 @@ pub fn pull_collisions(
 
 /// The local avatar as the player's `Character`: a Model in Workspace with a
 /// `HumanoidRootPart` bound to the avatar body, a `Head`, and a `Humanoid`.
+/// Joined players get theirs the same way, on the avatar that stands for
+/// them here (`remote_players::pull_remote_characters`).
+#[allow(clippy::type_complexity)]
 pub fn pull_character(
     dm: Option<Res<PlayDataModel>>,
     avatars: Query<
-        (Entity, &Transform, &AvatarBody, &AvatarIntent, Option<&eustress_common::avatar::abilities::AvatarAbilities>),
+        (
+            Entity,
+            &Transform,
+            &AvatarBody,
+            &AvatarIntent,
+            Option<&AvatarAbilities>,
+            Option<&AvatarLocomotion>,
+            Option<&AvatarClimb>,
+        ),
         With<LocalAvatar>,
     >,
     mut bound: Local<Option<(Entity, InstanceId)>>,
@@ -396,102 +333,146 @@ pub fn pull_character(
     // The avatar went away (respawn or despawn): retire the character.
     if let Some((body, model)) = *bound {
         if avatar.map(|(e, ..)| e) != Some(body) {
-            if let Some(root) = g.find_first_child(model, "HumanoidRootPart", false) {
-                g.unbind_entity(root);
-            }
-            g.push_event(DmEvent::CharacterRemoving { player, character: model });
-            g.destroy(model);
-            let _ = g.set_prop(player, "Character", DmValue::Nil);
-            let _ = g.take_dirty_of(player);
+            retire_character(&mut g, player, model);
             *bound = None;
         }
     }
-    let Some((body, tf, avatar_body, intent, abilities)) = avatar else { return };
+    let Some((body, tf, avatar_body, intent, abilities, loco, climb)) = avatar else { return };
     // The character spawns once the player has joined, so `CharacterAdded`
     // reaches the handlers `PlayerAdded` connected.
     if bound.is_none() && !g.in_tree(player) {
         return;
     }
-
-    let half = avatar_body.metrics.capsule_half_extent();
-    let root_cf = {
-        let mut cf = CFrame::from_quaternion([tf.rotation.x as f64, tf.rotation.y as f64, tf.rotation.z as f64, tf.rotation.w as f64]);
-        cf.position = Vector3::from_vec3(tf.translation);
-        cf
-    };
-    let eye = (avatar_body.metrics.eye_height - half) as f64;
-
     if bound.is_none() {
-        let ws = match g.find_service("Workspace") {
-            Some(ws) => ws,
-            None => return,
-        };
-        let name = g.name_of(player).unwrap_or("Player").to_string();
-        let model = g.create_virtual("Model", &name, Some(ws));
-        let height = (half * 2.0) as f64;
-        let root = g.create_bound(
-            "Part",
-            "HumanoidRootPart",
-            body.to_bits(),
-            Some(model),
-            vec![
-                ("CFrame".into(), DmValue::CFrame(root_cf)),
-                ("Size".into(), DmValue::Vector3(Vector3::new(0.6, height, 0.4))),
-                ("Transparency".into(), DmValue::Number(1.0)),
-                ("CanCollide".into(), DmValue::Bool(true)),
-                ("Anchored".into(), DmValue::Bool(false)),
-            ],
-        );
-        let mut head_cf = root_cf;
-        head_cf.position = root_cf.position + Vector3::new(0.0, eye, 0.0);
-        let head = g.create_virtual("Part", "Head", Some(model));
-        let _ = g.set_prop(head, "CFrame", DmValue::CFrame(head_cf));
-        let _ = g.set_prop(head, "Size", DmValue::Vector3(Vector3::new(0.3, 0.3, 0.3)));
-        let _ = g.set_prop(head, "Transparency", DmValue::Number(1.0));
-        let humanoid = g.create_virtual("Humanoid", "Humanoid", Some(model));
-        let _ = g.set_prop(humanoid, "WalkSpeed", DmValue::Number(avatar_body.motion.walk_speed as f64));
-        let _ = g.set_prop(humanoid, "JumpHeight", DmValue::Number(avatar_body.motion.jump_apex_m as f64));
-        // The movement verbs this character starts with (the Space's
-        // StarterPlayer switches), so a script reads what is actually in force.
         let abilities = abilities.copied().unwrap_or_default();
-        for name in eustress_common::avatar::abilities::AvatarAbilities::PROPERTIES {
-            let _ = g.set_prop(humanoid, name, DmValue::Bool(abilities.get(name).unwrap_or(true)));
-        }
-        let _ = g.set_prop(model, "PrimaryPart", DmValue::Instance(root));
-        let _ = g.set_prop(player, "Character", DmValue::Instance(model));
-        // Setup writes are not script writes: nothing to apply.
-        let _ = g.take_dirty_of(model);
-        let _ = g.take_dirty_of(head);
-        let _ = g.take_dirty_of(humanoid);
-        let _ = g.take_dirty_of(player);
-        g.push_event(DmEvent::CharacterAdded { player, character: model });
+        let Some(model) = build_character(&mut g, player, body, tf, avatar_body, abilities) else { return };
         *bound = Some((body, model));
         info!("🧍 Character bound to the local avatar ({:?})", body);
     }
-
     let Some((_, model)) = *bound else { return };
+    place_character(&mut g, model, tf, avatar_body, intent, loco.map(|l| locomotion_sample(l, climb)));
+}
+
+/// A character's root pose: the avatar body's.
+fn root_cframe(tf: &Transform) -> CFrame {
+    let mut cf = CFrame::from_quaternion([tf.rotation.x as f64, tf.rotation.y as f64, tf.rotation.z as f64, tf.rotation.w as f64]);
+    cf.position = Vector3::from_vec3(tf.translation);
+    cf
+}
+
+/// How far above the root a character's `Head` sits: the avatar's eyes.
+fn head_offset(avatar: &AvatarBody) -> Vector3 {
+    Vector3::new(0.0, (avatar.metrics.eye_height - avatar.metrics.capsule_half_extent()) as f64, 0.0)
+}
+
+/// A `Character` for `player`, on the avatar `body` that stands for it on
+/// this machine: a Model in Workspace named after the player, its
+/// `HumanoidRootPart` bound to `body` (touches and raycasts on the avatar
+/// resolve to it), a `Head`, and a `Humanoid` with the avatar's movement
+/// settings and abilities. Sets `Player.Character` and fires
+/// `CharacterAdded`. `None` when the tree has no Workspace.
+pub(super) fn build_character(
+    g: &mut DataModel,
+    player: InstanceId,
+    body: Entity,
+    tf: &Transform,
+    avatar: &AvatarBody,
+    abilities: AvatarAbilities,
+) -> Option<InstanceId> {
+    let ws = g.find_service("Workspace")?;
+    let root_cf = root_cframe(tf);
+    let name = g.name_of(player).unwrap_or("Player").to_string();
+    let model = g.create_virtual("Model", &name, Some(ws));
+    let height = (avatar.metrics.capsule_half_extent() * 2.0) as f64;
+    let root = g.create_bound(
+        "Part",
+        "HumanoidRootPart",
+        body.to_bits(),
+        Some(model),
+        vec![
+            ("CFrame".into(), DmValue::CFrame(root_cf)),
+            ("Size".into(), DmValue::Vector3(Vector3::new(0.6, height, 0.4))),
+            ("Transparency".into(), DmValue::Number(1.0)),
+            ("CanCollide".into(), DmValue::Bool(true)),
+            ("Anchored".into(), DmValue::Bool(false)),
+        ],
+    );
+    let mut head_cf = root_cf;
+    head_cf.position = root_cf.position + head_offset(avatar);
+    let head = g.create_virtual("Part", "Head", Some(model));
+    let _ = g.set_prop(head, "CFrame", DmValue::CFrame(head_cf));
+    let _ = g.set_prop(head, "Size", DmValue::Vector3(Vector3::new(0.3, 0.3, 0.3)));
+    let _ = g.set_prop(head, "Transparency", DmValue::Number(1.0));
+    let humanoid = g.create_virtual("Humanoid", "Humanoid", Some(model));
+    let _ = g.set_prop(humanoid, "WalkSpeed", DmValue::Number(avatar.motion.walk_speed as f64));
+    let _ = g.set_prop(humanoid, "JumpHeight", DmValue::Number(avatar.motion.jump_apex_m as f64));
+    // A launch speed is JumpPower under UseJumpPower; without one, JumpPower
+    // keeps the class default and JumpHeight rules.
+    let _ = g.set_prop(humanoid, "UseJumpPower", DmValue::Bool(avatar.motion.jump_speed_mps.is_some()));
+    if let Some(speed) = avatar.motion.jump_speed_mps {
+        let _ = g.set_prop(humanoid, "JumpPower", DmValue::Number(speed as f64));
+    }
+    // The movement verbs this character starts with (the Space's
+    // StarterPlayer switches), so a script reads what is actually in force.
+    for name in AvatarAbilities::PROPERTIES {
+        let _ = g.set_prop(humanoid, name, DmValue::Bool(abilities.get(name).unwrap_or(true)));
+    }
+    let _ = g.set_prop(model, "PrimaryPart", DmValue::Instance(root));
+    // The Animator, the pacing attributes, and the Space's character scripts
+    // or the default Animate, in place before `CharacterAdded`.
+    furnish_character(g, model, humanoid, avatar.motion.capped_run_and_sprint().0 as f64, avatar.metrics.stride_scale as f64);
+    let _ = g.set_prop(player, "Character", DmValue::Instance(model));
+    // Setup writes are not script writes: nothing to apply.
+    let _ = g.take_dirty_of(model);
+    let _ = g.take_dirty_of(head);
+    let _ = g.take_dirty_of(humanoid);
+    let _ = g.take_dirty_of(player);
+    g.push_event(DmEvent::CharacterAdded { player, character: model });
+    Some(model)
+}
+
+/// Keep a character on its avatar: the root and head where the body is,
+/// `Humanoid.MoveDirection` from its intent, and, given the avatar's
+/// movement, the Humanoid's state and signals (`Running`, `Jumping`,
+/// `FreeFalling`, `Climbing`, `StateChanged`). Engine writes, never dirty.
+pub(super) fn place_character(
+    g: &mut DataModel,
+    model: InstanceId,
+    tf: &Transform,
+    avatar: &AvatarBody,
+    intent: &AvatarIntent,
+    movement: Option<LocomotionSample>,
+) {
+    let root_cf = root_cframe(tf);
     if let Some(root) = g.find_first_child(model, "HumanoidRootPart", false) {
         g.set_prop_from_engine(root, "CFrame", DmValue::CFrame(root_cf));
     }
     if let Some(head) = g.find_first_child(model, "Head", false) {
         let mut head_cf = root_cf;
-        head_cf.position = root_cf.position + Vector3::new(0.0, eye, 0.0);
+        head_cf.position = root_cf.position + head_offset(avatar);
         g.set_prop_from_engine(head, "CFrame", DmValue::CFrame(head_cf));
     }
     if let Some(h) = g.find_first_child_of_class(model, "Humanoid", false) {
         let d = intent.direction;
         g.set_prop_from_engine(h, "MoveDirection", DmValue::Vector3(Vector3::new(d.x as f64, 0.0, d.z as f64)));
+        eustress_common::animation::character::follow_run_speed(g, h, avatar.motion.capped_run_and_sprint().0 as f64);
+        if let Some(sample) = movement {
+            let dead = g.get_prop(h, "Health").and_then(|v| v.as_number()).is_some_and(|hp| hp <= 0.0);
+            report_state(g, h, LocomotionSample { dead, ..sample });
+        }
     }
 }
 
-/// ScreenGui button clicks -> `MouseButton1Click` / `Activated`.
-pub fn pull_gui_clicks(dm: Option<Res<PlayDataModel>>, focus: Option<Res<crate::ui::SlintUIFocus>>) {
-    let (Some(dm), Some(focus)) = (dm, focus) else { return };
-    let Some(entity) = focus.gui_clicked_entity else { return };
-    let mut g = dm.dm.lock();
-    if let Some(button) = g.by_entity(entity.to_bits()) {
-        g.push_event(DmEvent::GuiActivated { button });
+/// Retire `player`'s character `model`, whose avatar went away. The root is
+/// unbound first, so destroying the model never despawns the avatar.
+pub(super) fn retire_character(g: &mut DataModel, player: InstanceId, model: InstanceId) {
+    if let Some(root) = g.find_first_child(model, "HumanoidRootPart", false) {
+        g.unbind_entity(root);
     }
+    g.push_event(DmEvent::CharacterRemoving { player, character: model });
+    g.destroy(model);
+    let _ = g.set_prop(player, "Character", DmValue::Nil);
+    let _ = g.take_dirty_of(player);
 }
 
 /// The cursor's ray through the play camera, `Mouse.Hit` / `Mouse.Target`,
@@ -500,10 +481,20 @@ pub fn pull_gui_clicks(dm: Option<Res<PlayDataModel>>, focus: Option<Res<crate::
 pub fn pull_mouse_hit(
     dm: Option<Res<PlayDataModel>>,
     ray_state: Res<MouseRayState>,
-    cameras: Query<(&Camera, &GlobalTransform, &Projection), With<AvatarCamera>>,
-    editor_cameras: Query<(&Camera, &GlobalTransform, &Projection), (With<crate::camera_controller::EustressCamera>, Without<AvatarCamera>)>,
+    cameras: Query<
+        (&Camera, &GlobalTransform, &Projection),
+        Or<(With<AvatarCamera>, With<super::camera::ScriptedPlayCamera>)>,
+    >,
+    editor_cameras: Query<
+        (&Camera, &GlobalTransform, &Projection),
+        (
+            With<crate::camera_controller::EustressCamera>,
+            Without<AvatarCamera>,
+            Without<super::camera::ScriptedPlayCamera>,
+        ),
+    >,
     spatial: SpatialQuery,
-    colliders: Query<(Option<&BasePart>, Has<Sensor>)>,
+    colliders: eustress_common::machine_input::MouseColliders,
     avatars: Query<Entity, With<LocalAvatar>>,
 ) {
     let Some(dm) = dm else { return };
@@ -512,83 +503,18 @@ pub fn pull_mouse_hit(
         .find(|(c, ..)| c.is_active)
         .or_else(|| editor_cameras.iter().find(|(c, ..)| c.is_active));
     let Some((camera, cam_gt, projection)) = cam else { return };
-
+    let rect = ViewRect { origin: ray_state.viewport_origin, size: ray_state.viewport_size };
     // Camera state for scripts (the scripted-camera system overrides it when
-    // CameraType is Scriptable).
-    {
-        let mut g = dm.dm.lock();
-        if let Some(cam_id) = g.current_camera() {
-            let scripted = g.get_prop(cam_id, "CameraType").and_then(|v| v.as_enum_name().map(str::to_string))
-                == Some("Scriptable".to_string());
-            if !scripted {
-                g.set_prop_from_engine(cam_id, "CFrame", DmValue::CFrame(world_cframe(cam_gt)));
-                match projection {
-                    Projection::Perspective(p) => {
-                        g.set_prop_from_engine(cam_id, "FieldOfView", DmValue::Number(p.fov.to_degrees() as f64));
-                        g.set_prop_from_engine(cam_id, "Projection", DmValue::Enum(EnumItem::new("CameraProjection", "Perspective")));
-                    }
-                    Projection::Orthographic(_) => {
-                        g.set_prop_from_engine(cam_id, "Projection", DmValue::Enum(EnumItem::new("CameraProjection", "Orthographic")));
-                    }
-                    _ => {}
-                }
-            }
-            let (w, h) = (g.input.viewport_w, g.input.viewport_h);
-            g.set_prop_from_engine(cam_id, "ViewportSize", DmValue::Vector2(Vector2::new(w, h)));
-        }
-    }
-
-    let Some(cursor) = ray_state.cursor else { return };
-    // `viewport_to_world` takes WINDOW logical pixels and subtracts the
-    // camera's own viewport origin itself, so both the play camera (drawn
-    // into the viewport rect) and a full-window camera get the window point.
-    let point = cursor + ray_state.viewport_origin;
-    let Ok(ray) = camera.viewport_to_world(cam_gt, point) else { return };
-
-    // The local character never blocks its own cursor (Roblox ignores it for
-    // Mouse.Hit on the local client), and neither does Mouse.TargetFilter.
-    let mut excluded: Vec<Entity> = avatars.iter().collect();
-    {
-        let g = dm.dm.lock();
-        if let Some(f) = g.mouse.target_filter {
-            if let Some(e) = g.entity_of(f) {
-                excluded.push(Entity::from_bits(e));
-            }
-            for d in g.descendants(f) {
-                if let Some(e) = g.entity_of(d) {
-                    excluded.push(Entity::from_bits(e));
-                }
-            }
-        }
-    }
-    // One call: `with_excluded_entities` replaces the set rather than adding.
-    let filter = SpatialQueryFilter::default().with_excluded_entities(excluded);
-    let hit = spatial.cast_ray_predicate(ray.origin, ray.direction, 2000.0, true, &filter, &|e| {
-        colliders.get(e).map_or(true, |(bp, sensor)| !sensor && bp.map_or(true, |b| b.transparency < 1.0 || b.can_collide))
-    });
-
-    let mut g = dm.dm.lock();
-    g.mouse.ray_origin = Vector3::from_vec3(ray.origin);
-    g.mouse.ray_direction = Vector3::from_vec3(*ray.direction);
-    match hit {
-        Some(h) => {
-            let p = ray.origin + *ray.direction * h.distance;
-            g.mouse.has_hit = true;
-            g.mouse.hit_position = Vector3::from_vec3(p);
-            g.mouse.hit_normal = Vector3::from_vec3(h.normal);
-            g.mouse.target = g.by_entity(h.entity.to_bits());
-        }
-        None => {
-            g.mouse.has_hit = false;
-            g.mouse.target = None;
-        }
-    }
+    // CameraType is Scriptable), then Mouse.Hit, Target and UnitRay.
+    write_camera(&mut dm.dm.lock(), cam_gt, projection, rect);
+    write_mouse(&dm.dm, camera, cam_gt, rect, ray_state.cursor, &spatial, &colliders, avatars.iter());
 }
 
-/// `workspace:Raycast` against Avian, synchronously.
+/// `workspace:Raycast` against Avian, synchronously. Terrain chunk colliders
+/// have no instance: the filter takes or skips them together, as the Terrain.
 pub fn cast_ray(
     spatial: &SpatialQuery,
-    colliders: &Query<(Option<&BasePart>, Has<Sensor>)>,
+    colliders: &Query<(Option<&BasePart>, Has<Sensor>, Has<TerrainChunkCollider>)>,
     q: &RayQuery,
 ) -> Option<RayHit> {
     let origin = q.origin.to_vec3();
@@ -604,15 +530,17 @@ pub fn cast_ray(
         filter = filter.with_excluded_entities(listed.iter().map(|b| Entity::from_bits(*b)));
     }
     let hit = spatial.cast_ray_predicate(origin, direction, len, true, &filter, &|e| {
+        let (part, sensor, terrain) = colliders.get(e).unwrap_or((None, false, false));
+        if terrain {
+            // Include lists take the Terrain only when they name it; exclude
+            // lists skip it only when they do.
+            return q.include == q.terrain_listed;
+        }
         if q.include && !listed.contains(&e.to_bits()) {
             return false;
         }
-        if q.respect_can_collide {
-            if let Ok((bp, sensor)) = colliders.get(e) {
-                if sensor || bp.map_or(false, |b| !b.can_collide) {
-                    return false;
-                }
-            }
+        if q.respect_can_collide && (sensor || part.map_or(false, |b| !b.can_collide)) {
+            return false;
         }
         true
     })?;
@@ -622,5 +550,6 @@ pub fn cast_ray(
         position: Vector3::from_vec3(p),
         normal: Vector3::from_vec3(hit.normal),
         distance: hit.distance as f64,
+        terrain: colliders.get(hit.entity).map_or(false, |(_, _, terrain)| terrain),
     })
 }

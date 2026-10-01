@@ -2,12 +2,14 @@
 // Insert Object dialog (Ctrl+I, the Explorer row plus button, the ribbon
 // "Insert Object..." item).
 //
-// A search box over every insertable class. Rust filters the catalog on each
-// keystroke (`insert-search-changed`) and pushes `results`; the dialog keeps
-// a highlighted row so Up/Down/Enter insert without the mouse. Inserting
-// fires `on-insert(class-name)`, which the window routes through the same
-// `insert:<class>` menu action the ribbon uses, so the object lands under
-// the current selection exactly as a ribbon insert would.
+// A search box over every insertable class and shape. With the search empty,
+// the rows are what Rust suggests for the selection, the recent inserts, the
+// shapes, then every class by category, each group under a heading. Rust
+// ranks the matches on each keystroke (`insert-search-changed`) and pushes
+// `results`; the dialog keeps a highlighted row so Up/Down/Enter insert
+// without the mouse. Inserting fires `on-insert(class-name)`, which the window
+// routes through the same `insert:<id>` menu action the ribbon uses, so the
+// object lands under the current selection exactly as a ribbon insert would.
 // ============================================================================
 
 import { LineEdit, ScrollView } from "std-widgets.slint";
@@ -138,7 +140,7 @@ export component InsertObjectDialog inherits Rectangle {
                 }
 
                 search := LineEdit {
-                    placeholder-text: "Type a class name (Part, Model, PointLight, TextLabel)";
+                    placeholder-text: "Type a class or shape (Part, Sphere, PointLight, TextLabel)";
                     text <=> root.search-query;
                     init => { self.focus(); }
                     edited(text) => {
@@ -154,12 +156,28 @@ export component InsertObjectDialog inherits Rectangle {
                     ScrollView {
                         VerticalLayout {
                             spacing: 1px;
-                            for row[idx] in root.results: ResultRow {
-                                display: row.display;
-                                category: row.category;
-                                highlighted: idx == root.highlight;
-                                chosen => { root.on-insert(row.class-name); }
-                                hovered => { root.highlight = idx; }
+                            for row[idx] in root.results: VerticalLayout {
+                                // Group heading: "Suggested for Part",
+                                // "Recent", "Shapes", or the category.
+                                if row.show-header: HorizontalLayout {
+                                    height: 22px;
+                                    padding-left: 10px;
+                                    padding-top: idx == 0 ? 0px : 4px;
+                                    Text {
+                                        text: row.section != "" ? row.section : row.category;
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                ResultRow {
+                                    display: row.display;
+                                    category: row.category;
+                                    highlighted: idx == root.highlight;
+                                    chosen => { root.on-insert(row.class-name); }
+                                    hovered => { root.highlight = idx; }
+                                }
                             }
                             if root.results.length == 0: Text {
                                 height: 26px;

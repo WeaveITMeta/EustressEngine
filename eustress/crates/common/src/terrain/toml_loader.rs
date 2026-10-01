@@ -195,6 +195,9 @@ impl TerrainTomlFile {
             // Actual chunk count is dynamic based on camera position
             chunks_x: (self.streaming.view_distance / self.terrain.chunk_size).ceil() as u32,
             chunks_z: (self.streaming.view_distance / self.terrain.chunk_size).ceil() as u32,
+            // The toml records no grid centre, so a terrain read from disk is
+            // centred on the origin, the grid its chunk files were written on.
+            center_chunk: bevy::math::IVec2::ZERO,
             lod_levels: self.lod.levels,
             lod_distances: self.lod.distances.clone(),
             view_distance: self.streaming.view_distance,
@@ -203,6 +206,73 @@ impl TerrainTomlFile {
             seed: self.terrain.seed,
         }
     }
+}
+
+/// `_terrain.toml` text for the terrain held in memory as `config`, with the
+/// ocean `water` describes: what Save writes when a terrain's file is gone, so
+/// the heightmaps beside it can be read again (see
+/// `save_terrain_to_disk`). Reading it back with [`load_terrain_toml`] and
+/// [`TerrainTomlFile::to_terrain_config`] gives `config` again, but for the
+/// grid's centre (the toml records none; see `to_terrain_config`) and a view
+/// distance that did not reach the grid's edge, which becomes the distance
+/// that does. No palette is written: the Space's `materials/*.mat.toml`
+/// files carry their own slots.
+pub fn render_terrain_toml(config: &super::TerrainConfig, water: &TerrainTomlWater) -> String {
+    // The loader derives the grid's half extent from the view distance, so it
+    // has to name the grid's own: a distance that rounds to another count of
+    // chunks would load a different grid than the heightmaps were written on.
+    let half = config.chunks_x.max(config.chunks_z);
+    let reaches = config.chunk_size > 0.0 && (config.view_distance / config.chunk_size).ceil() as u32 == half;
+    let view_distance = if reaches { config.view_distance } else { half as f32 * config.chunk_size };
+    let distances = config.lod_distances.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", ");
+    format!(
+        "# Eustress Engine — Terrain Configuration\n\
+         # Written by Save for a terrain whose file was missing. Heightmaps: chunks/x<cx>_z<cz>.r16,\n\
+         # world Y = height_offset + value / 65535 * height_scale. The loader derives the chunk grid\n\
+         # from view_distance / chunk_size, so view_distance is load-bearing.\n\
+         \n\
+         [terrain]\n\
+         chunk_size = {chunk_size:?}\n\
+         chunk_resolution = {chunk_resolution}\n\
+         height_scale = {height_scale:?}\n\
+         height_offset = {height_offset:?}\n\
+         seed = {seed}\n\
+         water_level = {sea_level:?}\n\
+         \n\
+         [streaming]\n\
+         view_distance = {view_distance:?}\n\
+         cull_margin = {cull_margin:?}\n\
+         chunks_per_frame = {chunks_per_frame}\n\
+         \n\
+         [lod]\n\
+         levels = {lod_levels}\n\
+         distances = [{distances}]\n\
+         \n\
+         [materials]\n\
+         \n\
+         [water]\n\
+         enabled = {enabled}\n\
+         sea_level = {sea_level:?}\n\
+         mode = {mode:?}\n\
+         color = [{r:?}, {g:?}, {b:?}, {a:?}]\n",
+        chunk_size = config.chunk_size,
+        chunk_resolution = config.chunk_resolution,
+        height_scale = config.height_scale,
+        height_offset = config.height_offset,
+        seed = config.seed,
+        sea_level = water.sea_level,
+        view_distance = view_distance,
+        cull_margin = default_cull_margin(),
+        chunks_per_frame = default_chunks_per_frame(),
+        lod_levels = config.lod_levels,
+        distances = distances,
+        enabled = water.enabled,
+        mode = water.mode,
+        r = water.color[0],
+        g = water.color[1],
+        b = water.color[2],
+        a = water.color[3],
+    )
 }
 
 // ============================================================================
@@ -264,6 +334,24 @@ pub fn load_chunk_r16(path: &Path, resolution: u32) -> Result<Vec<f32>, String> 
 /// Heights should be normalized 0.0-1.0. Values are clamped and converted
 /// to 16-bit unsigned integers (little-endian).
 pub fn save_chunk_r16(path: &Path, heights: &[f32], resolution: u32) -> Result<(), String> {
+    let bytes = encode_r16(heights, resolution)?;
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create chunks directory {:?}: {}", parent, error))?;
+    }
+
+    std::fs::write(path, &bytes)
+        .map_err(|error| format!("Failed to write R16 file {:?}: {}", path, error))?;
+
+    Ok(())
+}
+
+/// The R16 bytes of a chunk's `resolution²` normalized heights: each clamped
+/// to 0..1 and stored as a little-endian u16. Shared by Save and the host
+/// snapshot (`disk::TerrainSnapshot`), so the two cannot drift apart.
+pub fn encode_r16(heights: &[f32], resolution: u32) -> Result<Vec<u8>, String> {
     let expected_count = (resolution * resolution) as usize;
     if heights.len() != expected_count {
         return Err(format!(
@@ -271,25 +359,64 @@ pub fn save_chunk_r16(path: &Path, heights: &[f32], resolution: u32) -> Result<(
             expected_count, resolution, resolution, heights.len()
         ));
     }
-    
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create chunks directory {:?}: {}", parent, error))?;
-    }
-    
-    // Convert normalized f32 to little-endian u16 bytes
     let mut bytes = Vec::with_capacity(heights.len() * 2);
     for &height in heights {
         let clamped = height.clamp(0.0, 1.0);
         let raw = (clamped * 65535.0).round() as u16;
         bytes.extend_from_slice(&raw.to_le_bytes());
     }
-    
-    std::fs::write(path, &bytes)
-        .map_err(|error| format!("Failed to write R16 file {:?}: {}", path, error))?;
-    
-    Ok(())
+    Ok(bytes)
+}
+
+/// Chunk `chunk_pos`'s tile of the height cache, `resolution²` values, rows
+/// along Z: the heights its R16 file holds. A chunk off the grid has no
+/// tile and, like a row past the raster, reads as zeros.
+pub fn chunk_heights(config: &super::TerrainConfig, data: &super::TerrainData, chunk_pos: bevy::math::IVec2) -> Vec<f32> {
+    let resolution = config.chunk_resolution as usize;
+    let cache_width = data.cache_width as usize;
+    let tile = config
+        .chunk_grid_index(chunk_pos)
+        .map(|grid| (grid.x as usize * resolution, grid.y as usize * resolution));
+    let mut heights = Vec::with_capacity(resolution * resolution);
+    for row in 0..resolution {
+        let start = tile.map(|(offset_x, offset_z)| (offset_z + row) * cache_width + offset_x);
+        match start {
+            Some(start) if start + resolution <= data.height_cache.len() => {
+                heights.extend_from_slice(&data.height_cache[start..start + resolution]);
+            }
+            // Pad with zeros if out of bounds
+            _ => heights.extend(std::iter::repeat(0.0f32).take(resolution)),
+        }
+    }
+    heights
+}
+
+/// Chunk `chunk_pos`'s tile of the material map, `resolution²` cells, rows
+/// along Z: the cells its matmap PNG holds. Fails for a chunk whose tile
+/// lies outside the map.
+pub fn chunk_material_cells(
+    config: &super::TerrainConfig,
+    data: &super::TerrainData,
+    chunk_pos: bevy::math::IVec2,
+) -> Result<Vec<MaterialCell>, String> {
+    let resolution = config.chunk_resolution as usize;
+    let (cache_width, cache_height) = (data.cache_width as usize, data.cache_height as usize);
+    let tile = config.chunk_grid_index(chunk_pos).filter(|grid| {
+        (grid.x as usize + 1) * resolution <= cache_width && (grid.y as usize + 1) * resolution <= cache_height
+    });
+    let Some(grid) = tile else {
+        return Err(format!(
+            "material chunk x{}_z{} lies outside the {}x{} cell material map",
+            chunk_pos.x, chunk_pos.y, cache_width, cache_height
+        ));
+    };
+    let (offset_x, offset_z) = (grid.x as usize * resolution, grid.y as usize * resolution);
+    let mut cells = Vec::with_capacity(resolution * resolution);
+    for row in 0..resolution {
+        let start = (offset_z + row) * cache_width + offset_x;
+        cells.extend_from_slice(&data.material_cache[start..start + resolution]);
+    }
+    Ok(cells)
 }
 
 /// `_terrain.toml` text with `height_offset` and `height_scale` of its
@@ -515,7 +642,10 @@ color = [0.1, 0.3, 0.6, 0.8]
 /// Scans `terrain_dir/chunks/` for `x{N}_z{N}.r16` files and populates the
 /// height cache at the correct offsets, and each found chunk's material
 /// cells from its matmap, else its converted legacy splatmap, else Grass
-/// (see the module docs). Returns a list of chunk coordinates found.
+/// (see the module docs). Files are named by the chunk's own coordinates;
+/// one for a chunk off `config`'s grid (left behind by a larger terrain) has
+/// no place in the raster and is skipped. Returns the chunk coordinates
+/// loaded.
 pub fn load_chunks_from_disk(
     terrain_dir: &Path,
     config: &super::TerrainConfig,
@@ -570,7 +700,11 @@ pub fn load_chunks_from_disk(
             Some(value) => value,
             None => continue,
         };
-        
+        if !config.contains_chunk(IVec2::new(chunk_x, chunk_z)) {
+            tracing::warn!("Skipping chunk x{}_z{}: outside the terrain's chunk grid", chunk_x, chunk_z);
+            continue;
+        }
+
         // Load the R16 data
         let r16_path = entry.path();
         match load_chunk_r16(&r16_path, config.chunk_resolution) {
@@ -601,11 +735,13 @@ pub fn load_chunks_from_disk(
 ///
 /// Public so the Wave 9.C voxel loader (engine-side) and the voxel
 /// extractor (`super::voxel_extract`) reuse the EXACT offset math the
-/// `.r16` disk path uses — a chunk at grid `(chunk_x, chunk_z)` lands at
-/// cache offset `((chunk_pos + half) * resolution)`, the same centering
-/// `generate_chunk_mesh` reads back via its `world_u`/`world_v`. Heights
-/// are whatever `TerrainConfig::world_height` turns into world Y; the
-/// voxel path stores raw studs with `height_scale = 1.0` and
+/// `.r16` disk path uses: chunk `chunk_pos` lands at cache offset
+/// `chunk_grid_index(chunk_pos) * resolution` (see
+/// `TerrainConfig::chunk_grid_index`), the same placement
+/// `generate_chunk_mesh` reads back through `TerrainConfig::chunk_point_uv`.
+/// A chunk off the grid has no place in the cache and writes nothing.
+/// Heights are whatever `TerrainConfig::world_height` turns into world Y;
+/// the voxel path stores raw studs with `height_scale = 1.0` and
 /// `height_offset = 0.0`.
 pub fn write_chunk_to_cache(
     data: &mut super::TerrainData,
@@ -615,14 +751,15 @@ pub fn write_chunk_to_cache(
 ) {
     let resolution = config.chunk_resolution as usize;
     let cache_width = data.cache_width as usize;
-    
-    // Calculate the pixel offset of this chunk in the global cache
-    // Chunk (0,0) is at center, chunks extend in both directions
-    let half_x = config.chunks_x as i32;
-    let half_z = config.chunks_z as i32;
-    let offset_x = ((chunk_pos.x + half_x) as usize) * resolution;
-    let offset_z = ((chunk_pos.y + half_z) as usize) * resolution;
-    
+
+    // The pixel offset of this chunk in the global cache: its index on the
+    // grid, counted from the grid's lowest chunk.
+    let Some(grid) = config.chunk_grid_index(chunk_pos) else {
+        return;
+    };
+    let offset_x = grid.x as usize * resolution;
+    let offset_z = grid.y as usize * resolution;
+
     // Copy row by row
     for row in 0..resolution {
         let src_start = row * resolution;
@@ -709,12 +846,12 @@ pub fn convert_legacy_splat_tile(
 }
 
 /// Write one chunk's material cells, `chunk_resolution²` row-major, into
-/// `TerrainData.material_cache` with the centred offset math of
-/// [`write_chunk_to_cache`] (chunk `(cx, cz)` at cache offset
-/// `(chunk_pos + half) * resolution`), so the material map lines up 1:1
-/// with the heightfield. Allocates an all-Grass layer first when the
-/// terrain has none. A chunk outside the raster, or the part of one past
-/// its edge, is skipped rather than wrapped.
+/// `TerrainData.material_cache` with the offset math of
+/// [`write_chunk_to_cache`] (chunk `chunk_pos` at cache offset
+/// `chunk_grid_index(chunk_pos) * resolution`), so the material map lines
+/// up 1:1 with the heightfield. Allocates an all-Grass layer first when the
+/// terrain has none. A chunk off the grid, or the part of one past the
+/// raster's edge, is skipped rather than wrapped.
 pub fn write_material_tile_to_cache(
     data: &mut super::TerrainData,
     config: &super::TerrainConfig,
@@ -725,13 +862,10 @@ pub fn write_material_tile_to_cache(
     let resolution = config.chunk_resolution as usize;
     let cache_width = data.cache_width as usize;
     let cache_height = data.cache_height as usize;
-    let (Ok(grid_x), Ok(grid_z)) = (
-        usize::try_from(chunk_pos.x + config.chunks_x as i32),
-        usize::try_from(chunk_pos.y + config.chunks_z as i32),
-    ) else {
+    let Some(grid) = config.chunk_grid_index(chunk_pos) else {
         return;
     };
-    let (offset_x, offset_z) = (grid_x * resolution, grid_z * resolution);
+    let (offset_x, offset_z) = (grid.x as usize * resolution, grid.y as usize * resolution);
     let width = resolution.min(cache_width.saturating_sub(offset_x));
     for row in 0..resolution {
         let z = offset_z + row;
@@ -762,7 +896,10 @@ pub fn save_chunks_to_disk(
 /// height band stages every chunk in the new band, commits `_terrain.toml`,
 /// and only then commits the chunks, so the R16 files never sit in another
 /// band than the toml says. Staged files end in `.tmp`, so a leftover is
-/// never read as a chunk. On an error every file staged so far is removed.
+/// never read as a chunk. Each file is named by the chunk's own coordinates
+/// and filled from its tile of the cache (see [`write_chunk_to_cache`]); a
+/// chunk off the grid has no tile and, like a row past the raster, is
+/// written as zeros. On an error every file staged so far is removed.
 /// Returns the `(staged, destination)` pairs.
 pub fn stage_chunks_to_disk(
     terrain_dir: &Path,
@@ -770,28 +907,10 @@ pub fn stage_chunks_to_disk(
     data: &super::TerrainData,
     chunks: &[bevy::math::IVec2],
 ) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    let resolution = config.chunk_resolution as usize;
-    let cache_width = data.cache_width as usize;
-    let half_x = config.chunks_x as i32;
-    let half_z = config.chunks_z as i32;
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(chunks.len());
 
     for chunk_pos in chunks {
-        let offset_x = ((chunk_pos.x + half_x) as usize) * resolution;
-        let offset_z = ((chunk_pos.y + half_z) as usize) * resolution;
-
-        // Extract chunk heights from global cache
-        let mut heights = Vec::with_capacity(resolution * resolution);
-        for row in 0..resolution {
-            let start = (offset_z + row) * cache_width + offset_x;
-            if start + resolution <= data.height_cache.len() {
-                heights.extend_from_slice(&data.height_cache[start..start + resolution]);
-            } else {
-                // Pad with zeros if out of bounds
-                heights.extend(std::iter::repeat(0.0f32).take(resolution));
-            }
-        }
-
+        let heights = chunk_heights(config, data, *chunk_pos);
         let destination = chunk_r16_path(terrain_dir, chunk_pos.x, chunk_pos.y);
         let temporary = destination.with_extension("r16.tmp");
         if let Err(error) = save_chunk_r16(&temporary, &heights, config.chunk_resolution) {
@@ -828,7 +947,7 @@ pub fn discard_staged_chunks(staged: &[(PathBuf, PathBuf)]) {
 
 /// Save the material layer of `chunks` to `matmap/x{cx}_z{cz}.png`, the
 /// exact inverse of the loader's matmap read plus
-/// [`write_material_tile_to_cache`]: same centred tile offsets, rows along
+/// [`write_material_tile_to_cache`]: same tile offsets, rows along
 /// Z, columns along X, one RGBA8 pixel per cell holding the cell's four
 /// bytes as they are, so a reload is bit-exact.
 ///
@@ -865,38 +984,19 @@ pub fn save_material_chunks_to_disk(
         ));
     }
 
-    let half_x = config.chunks_x as i32;
-    let half_z = config.chunks_z as i32;
+    // Every tile is read before any file is touched.
     let mut tiles = Vec::with_capacity(chunks.len());
     for chunk_pos in chunks {
-        let grid_x = chunk_pos.x + half_x;
-        let grid_z = chunk_pos.y + half_z;
-        let inside = grid_x >= 0
-            && grid_z >= 0
-            && (grid_x as usize + 1) * resolution <= cache_width
-            && (grid_z as usize + 1) * resolution <= cache_height;
-        if !inside {
-            return Err(format!(
-                "material chunk x{}_z{} lies outside the {}x{} cell material map",
-                chunk_pos.x, chunk_pos.y, cache_width, cache_height
-            ));
-        }
-        tiles.push((*chunk_pos, grid_x as usize * resolution, grid_z as usize * resolution));
+        tiles.push((*chunk_pos, chunk_material_cells(config, data, *chunk_pos)?));
     }
 
     let matmap_dir = terrain_dir.join(MATMAP_DIR);
     std::fs::create_dir_all(&matmap_dir)
         .map_err(|error| format!("Failed to create matmap directory {:?}: {}", matmap_dir, error))?;
 
-    let mut cells: Vec<MaterialCell> = Vec::with_capacity(resolution * resolution);
     let mut saved = 0;
-    for (chunk_pos, offset_x, offset_z) in &tiles {
-        cells.clear();
-        for row in 0..resolution {
-            let start = (offset_z + row) * cache_width + offset_x;
-            cells.extend_from_slice(&data.material_cache[start..start + resolution]);
-        }
-        let png = encode_material_tile_png(&cells, config.chunk_resolution)
+    for (chunk_pos, cells) in &tiles {
+        let png = encode_material_tile_png(cells, config.chunk_resolution)
             .map_err(|error| format!("matmap x{}_z{}: {}", chunk_pos.x, chunk_pos.y, error))?;
         let path = chunk_matmap_path(terrain_dir, chunk_pos.x, chunk_pos.y);
         std::fs::write(&path, &png)
@@ -904,7 +1004,7 @@ pub fn save_material_chunks_to_disk(
         saved += 1;
     }
 
-    remove_legacy_splatmaps(terrain_dir, tiles.iter().map(|(chunk_pos, _, _)| *chunk_pos));
+    remove_legacy_splatmaps(terrain_dir, tiles.iter().map(|(chunk_pos, _)| *chunk_pos));
     Ok(saved)
 }
 
@@ -1134,6 +1234,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_rendered_terrain_toml_reads_back_as_the_terrain_it_describes() {
+        // The grid and band of a 10 km world: 25 chunks of 400 m a side.
+        let config = super::super::TerrainConfig {
+            chunk_size: 400.0,
+            chunk_resolution: 160,
+            chunks_x: 12,
+            chunks_z: 12,
+            lod_levels: 5,
+            lod_distances: vec![400.0, 900.0, 1800.0, 3200.0, 6000.0],
+            view_distance: 4800.0,
+            height_scale: 1280.0,
+            height_offset: -64.0,
+            seed: 9_282_026,
+            ..super::super::TerrainConfig::default()
+        };
+        let water = TerrainTomlWater { enabled: true, sea_level: -2.5, ..TerrainTomlWater::default() };
+        let text = render_terrain_toml(&config, &water);
+        let parsed: TerrainTomlFile = toml::from_str(&text).expect("the rendered file parses");
+        let back = parsed.to_terrain_config();
+        assert_eq!(
+            (back.chunk_size, back.chunk_resolution, back.chunks_x, back.chunks_z, back.height_scale, back.height_offset, back.seed),
+            (400.0, 160, 12, 12, 1280.0, -64.0, 9_282_026)
+        );
+        assert_eq!((back.lod_levels, back.lod_distances.clone(), back.view_distance), (5, config.lod_distances.clone(), 4800.0));
+        assert!(parsed.water.enabled && parsed.water.sea_level == -2.5 && parsed.terrain.water_level == -2.5);
+
+        // A view distance that stops short of the grid's edge is replaced by
+        // the one that reaches it, or the loader would read a smaller grid
+        // than the heightmaps were written on.
+        let short = super::super::TerrainConfig { view_distance: 100.0, ..config.clone() };
+        let parsed: TerrainTomlFile = toml::from_str(&render_terrain_toml(&short, &water)).unwrap();
+        assert_eq!(parsed.to_terrain_config().chunks_x, 12);
+        assert_eq!(parsed.streaming.view_distance, 12.0 * 400.0);
+    }
+
+    #[test]
     fn a_toml_without_height_offset_loads_at_zero() {
         let parsed: TerrainTomlFile = toml::from_str("[terrain]\nchunk_size = 64.0\n").unwrap();
         assert_eq!(parsed.terrain.height_offset, 0.0);
@@ -1278,10 +1414,7 @@ mod tests {
         }
 
         fn every_chunk(config: &TerrainConfig) -> Vec<IVec2> {
-            let (hx, hz) = (config.chunks_x as i32, config.chunks_z as i32);
-            (-hx..=hx)
-                .flat_map(|x| (-hz..=hz).map(move |z| IVec2::new(x, z)))
-                .collect()
+            config.grid_chunks().collect()
         }
 
         /// A known cell per cache cell: pure built-ins, mixes, custom slots,
@@ -1335,8 +1468,8 @@ mod tests {
         fn tile_cells(config: &TerrainConfig, data: &TerrainData, chunk: IVec2) -> Vec<MaterialCell> {
             let res = config.chunk_resolution as usize;
             let w = data.cache_width as usize;
-            let x0 = (chunk.x + config.chunks_x as i32) as usize * res;
-            let z0 = (chunk.y + config.chunks_z as i32) as usize * res;
+            let grid = config.chunk_grid_index(chunk).expect("a chunk on the grid");
+            let (x0, z0) = (grid.x as usize * res, grid.y as usize * res);
             (0..res)
                 .flat_map(|row| {
                     let start = (z0 + row) * w + x0;
@@ -1564,5 +1697,60 @@ mod tests {
         write_material_tile_to_cache(&mut data, &config, IVec2::new(-2, 0), &vec![rock; 16]);
         write_material_tile_to_cache(&mut data, &config, IVec2::new(2, 0), &vec![rock; 16]);
         assert_eq!(data.material_cache, before);
+    }
+
+    #[test]
+    fn an_off_centre_grid_keeps_its_chunk_files_at_their_own_coordinates() {
+        use crate::terrain::{TerrainConfig, TerrainData};
+        use bevy::math::IVec2;
+        // 3 x 3 chunks around chunk (5, -3): chunks 4..=6 by -4..=-2.
+        let config = TerrainConfig {
+            chunk_resolution: 4,
+            chunks_x: 1,
+            chunks_z: 1,
+            center_chunk: IVec2::new(5, -3),
+            ..TerrainConfig::default()
+        };
+        let mut data = TerrainData::default();
+        data.resize_cache(&config);
+        // Whole R16 codes, so every height survives the save exactly.
+        for (i, h) in data.height_cache.iter_mut().enumerate() {
+            *h = (i * 211 % 65536) as f32 / 65535.0;
+        }
+        let w = data.cache_width as usize;
+        let dir = std::env::temp_dir().join(format!("eustress_terrain_off_centre_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let chunks: Vec<IVec2> = config.grid_chunks().collect();
+        assert_eq!(save_chunks_to_disk(&dir, &config, &data, &chunks), Ok(9));
+        // Named by the chunks' own coordinates, not by their grid indices.
+        assert!(chunk_r16_path(&dir, 4, -4).exists() && chunk_r16_path(&dir, 6, -2).exists());
+        assert!(!chunk_r16_path(&dir, 0, 0).exists());
+        // Chunk (6, -4) is grid index (2, 0): columns 8..12 of rows 0..4.
+        let tile = load_chunk_r16(&chunk_r16_path(&dir, 6, -4), 4).unwrap();
+        let expected: Vec<f32> = (0..4).flat_map(|row| data.height_cache[row * w + 8..row * w + 12].to_vec()).collect();
+        assert_eq!(tile, expected);
+
+        let mut loaded = TerrainData::default();
+        let mut found = load_chunks_from_disk(&dir, &config, &mut loaded);
+        found.sort_by_key(|chunk| (chunk.y, chunk.x));
+        assert_eq!(found, chunks);
+        assert_eq!(loaded.height_cache, data.height_cache);
+
+        // A material tile lands on the cells its heights did.
+        let rock = material_cell(TerrainMaterial::Rock.to_u8());
+        write_material_tile_to_cache(&mut loaded, &config, IVec2::new(6, -4), &vec![rock; 16]);
+        for (i, cell) in loaded.material_cache.iter().enumerate() {
+            let (x, z) = (i % w, i / w);
+            assert_eq!(*cell == rock, (8..12).contains(&x) && z < 4, "cell ({x}, {z})");
+        }
+
+        // The origin-centred grid a toml describes holds none of these
+        // chunks, so nothing loads and nothing wraps into its raster.
+        let centred = TerrainConfig { center_chunk: IVec2::ZERO, ..config.clone() };
+        let mut elsewhere = TerrainData::default();
+        assert!(load_chunks_from_disk(&dir, &centred, &mut elsewhere).is_empty());
+        assert!(elsewhere.height_cache.iter().all(|h| *h == 0.0));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

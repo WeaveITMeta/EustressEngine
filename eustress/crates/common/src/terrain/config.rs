@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use super::material::MaterialCell;
+use super::material::{MaterialCell, MATERIAL_SLOT_NONE};
 use super::material_slots::TerrainSlotPalette;
 
 /// Configuration for terrain generation and rendering.
@@ -31,7 +31,11 @@ pub struct TerrainConfig {
     
     /// Number of chunks in Z direction (from center)
     pub chunks_z: u32,
-    
+
+    /// Chunk at the centre of the grid, which spans `center_chunk.x - chunks_x ..= center_chunk.x + chunks_x`
+    /// in X and likewise in Z. Zero centres the grid on the world origin.
+    pub center_chunk: IVec2,
+
     /// Number of LOD levels (0 = highest detail)
     pub lod_levels: u32,
     
@@ -63,6 +67,7 @@ impl Default for TerrainConfig {
             chunk_resolution: 32,
             chunks_x: 3,
             chunks_z: 3,
+            center_chunk: IVec2::ZERO,
             lod_levels: 4,
             lod_distances: vec![64.0, 128.0, 256.0, 512.0],
             view_distance: 512.0,
@@ -116,6 +121,7 @@ impl TerrainConfig {
             chunk_resolution: 64,         // 64x64 vertices per chunk (balanced for performance)
             chunks_x: 12,                 // 25 chunks across (12 on each side of center + center)
             chunks_z: 12,                 // 25 chunks deep
+            center_chunk: IVec2::ZERO,    // Centred on the world origin
             lod_levels: 6,                // 6 LOD levels for massive view distances
             lod_distances: vec![
                 200.0,   // LOD 0: Full detail within 200m
@@ -142,6 +148,7 @@ impl TerrainConfig {
             chunk_resolution: 128,        // 128x128 vertices per chunk (high detail)
             chunks_x: 12,                 // 25 chunks across
             chunks_z: 12,                 // 25 chunks deep
+            center_chunk: IVec2::ZERO,    // Centred on the world origin
             lod_levels: 6,
             lod_distances: vec![
                 300.0,   // LOD 0: Full detail within 300m
@@ -201,18 +208,91 @@ impl TerrainConfig {
     
     /// World XZ rectangle `(min, max)` the chunk grid covers. Chunk `c` spans
     /// `[c * chunk_size, (c + 1) * chunk_size]` from its corner, and the grid
-    /// runs `-chunks_x..=chunks_x`, so the extent is one chunk wider on the
-    /// positive side than on the negative side of the origin.
+    /// runs from [`Self::chunk_min`] to [`Self::chunk_max`], so the extent is
+    /// one chunk wider on the positive side of the centre chunk's corner than
+    /// on the negative side.
     pub fn footprint_xz(&self) -> (Vec2, Vec2) {
-        let min = Vec2::new(
-            -(self.chunks_x as f32) * self.chunk_size,
-            -(self.chunks_z as f32) * self.chunk_size,
-        );
+        let (lo, hi) = (self.chunk_min(), self.chunk_max());
+        let min = Vec2::new(lo.x as f32 * self.chunk_size, lo.y as f32 * self.chunk_size);
         let max = Vec2::new(
-            (self.chunks_x as f32 + 1.0) * self.chunk_size,
-            (self.chunks_z as f32 + 1.0) * self.chunk_size,
+            (hi.x as f32 + 1.0) * self.chunk_size,
+            (hi.y as f32 + 1.0) * self.chunk_size,
         );
         (min, max)
+    }
+
+    /// `(chunks_x, chunks_z)` as chunk offsets, held to the `i32` range.
+    fn half_extents(&self) -> IVec2 {
+        let offset = |n: u32| n.min(i32::MAX as u32) as i32;
+        IVec2::new(offset(self.chunks_x), offset(self.chunks_z))
+    }
+
+    /// Lowest chunk coordinate on the grid (inclusive).
+    pub fn chunk_min(&self) -> IVec2 {
+        self.center_chunk.saturating_sub(self.half_extents())
+    }
+
+    /// Highest chunk coordinate on the grid (inclusive).
+    pub fn chunk_max(&self) -> IVec2 {
+        self.center_chunk.saturating_add(self.half_extents())
+    }
+
+    /// Whether `chunk` lies on the grid.
+    pub fn contains_chunk(&self, chunk: IVec2) -> bool {
+        let (min, max) = (self.chunk_min(), self.chunk_max());
+        chunk.x >= min.x && chunk.x <= max.x && chunk.y >= min.y && chunk.y <= max.y
+    }
+
+    /// Grid-relative index of `chunk`, counted from [`Self::chunk_min`], or
+    /// `None` off the grid. Chunk `c` owns the raster tile starting at cell
+    /// `chunk_grid_index(c) * chunk_resolution`, the block its `.r16` and
+    /// matmap PNG load into.
+    pub fn chunk_grid_index(&self, chunk: IVec2) -> Option<UVec2> {
+        if !self.contains_chunk(chunk) {
+            return None;
+        }
+        let min = self.chunk_min();
+        Some(UVec2::new(chunk.x.abs_diff(min.x), chunk.y.abs_diff(min.y)))
+    }
+
+    /// Every chunk on the grid, row by row (Z outer, X inner).
+    pub fn grid_chunks(&self) -> impl Iterator<Item = IVec2> {
+        let (min, max) = (self.chunk_min(), self.chunk_max());
+        (min.y..=max.y).flat_map(move |z| (min.x..=max.x).map(move |x| IVec2::new(x, z)))
+    }
+
+    /// Global raster UV (0..1 across the whole raster, unclamped) of point
+    /// `(u, v)` (each 0..1 across the chunk) of chunk `chunk`: its offset
+    /// from [`Self::chunk_min`] plus `(u, v)`, over the chunks across the
+    /// grid. The offset is measured from the centre chunk, with the half
+    /// extent added after `u`, which keeps the arithmetic on small numbers
+    /// wherever the grid sits and makes a grid centred on the origin evaluate
+    /// exactly `(chunk.x + u + chunks_x) / (2 * chunks_x + 1)`. The chunk
+    /// meshers and the volume lattice both sample through this, so a lattice
+    /// height equals the mesh vertex over it bit for bit.
+    pub fn chunk_point_uv(&self, chunk: IVec2, u: f32, v: f32) -> Vec2 {
+        let total_x = (self.chunks_x * 2 + 1) as f32;
+        let total_z = (self.chunks_z * 2 + 1) as f32;
+        let dx = (i64::from(chunk.x) - i64::from(self.center_chunk.x)) as f32;
+        let dz = (i64::from(chunk.y) - i64::from(self.center_chunk.y)) as f32;
+        Vec2::new(
+            (dx + u + self.chunks_x as f32) / total_x,
+            (dz + v + self.chunks_z as f32) / total_z,
+        )
+    }
+
+    /// Global raster UV (unclamped) of world XZ `(world_x, world_z)`, the
+    /// inverse of [`Self::chunk_point_uv`]: `world_x / chunk_size` is a chunk
+    /// coordinate plus the fraction across that chunk, so no chunk lookup is
+    /// needed.
+    pub fn world_to_uv(&self, world_x: f32, world_z: f32) -> Vec2 {
+        let size = self.chunk_size.max(1e-3);
+        let total_x = (self.chunks_x * 2 + 1) as f32;
+        let total_z = (self.chunks_z * 2 + 1) as f32;
+        Vec2::new(
+            (world_x / size - self.center_chunk.x as f32 + self.chunks_x as f32) / total_x,
+            (world_z / size - self.center_chunk.y as f32 + self.chunks_z as f32) / total_z,
+        )
     }
 
     /// Calculate total terrain area in square meters
@@ -288,6 +368,12 @@ pub struct TerrainData {
     /// the built-in slots; cheap to clone (shared).
     #[reflect(ignore)]
     pub slot_palette: TerrainSlotPalette,
+
+    /// Columns without ground are holes: when true, a raster cell whose material
+    /// `id_a` is `MATERIAL_SLOT_NONE` has no ground, so meshes, colliders and
+    /// terrain raycasts leave it out. Imported voxel terrain sets it; every
+    /// other terrain keeps a full surface.
+    pub sparse_surface: bool,
 }
 
 impl TerrainData {
@@ -365,6 +451,54 @@ impl TerrainData {
         (x, z)
     }
 
+    /// Whether raster cell `index` (row-major, like `height_cache`) is a
+    /// hole: on a sparse surface (see [`Self::sparse_surface`]), a cell whose
+    /// material `id_a` is [`MATERIAL_SLOT_NONE`]. Never on a full surface,
+    /// nor for an index past the material layer.
+    #[inline]
+    pub fn cell_is_hole(&self, index: usize) -> bool {
+        self.sparse_surface && self.material_cache.get(index).is_some_and(|cell| cell[0] == MATERIAL_SLOT_NONE)
+    }
+
+    /// Whether the mesh vertex at `(u, v)` (each 0..1 across the chunk) of
+    /// chunk `chunk` stands on a hole: the raster cell its global UV
+    /// ([`TerrainConfig::chunk_point_uv`], clamped onto the raster) lands in
+    /// ([`Self::cell_at_uv`]) is one ([`Self::cell_is_hole`]). The heightfield
+    /// mesher, the marching-cubes lattice and the terrain raycasts all judge
+    /// holes through this, at the vertices they share.
+    pub fn point_is_hole(&self, config: &TerrainConfig, chunk: IVec2, u: f32, v: f32) -> bool {
+        if !self.sparse_surface || self.cache_width == 0 || self.cache_height == 0 {
+            return false;
+        }
+        let uv = config.chunk_point_uv(chunk, u, v);
+        let (x, z) = self.cell_at_uv(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0));
+        self.cell_is_hole(z * self.cache_width as usize + x)
+    }
+
+    /// Whether chunk `chunk` has any ground: every chunk of a full surface
+    /// does; on a sparse one, a chunk does when a raster cell of its tile
+    /// (the `chunk_resolution`-square block starting at cell
+    /// `chunk_grid_index(chunk) * chunk_resolution`) is not a hole. A chunk
+    /// off the grid has none. On a raster laid out by [`Self::resize_cache`]
+    /// with at least 4 cells a chunk, every quad of a chunk's mesh, at any
+    /// LOD, has a corner standing on its tile, so a chunk without ground keeps
+    /// no quad at all.
+    pub fn chunk_has_ground(&self, config: &TerrainConfig, chunk: IVec2) -> bool {
+        if !self.sparse_surface {
+            return true;
+        }
+        let Some(tile) = config.chunk_grid_index(chunk) else {
+            return false;
+        };
+        let side = config.chunk_resolution as usize;
+        let width = self.cache_width as usize;
+        let x0 = (tile.x as usize).saturating_mul(side);
+        let z0 = (tile.y as usize).saturating_mul(side);
+        let x1 = x0.saturating_add(side).min(width);
+        let z1 = z0.saturating_add(side).min(self.cache_height as usize);
+        (z0..z1).any(|z| (x0..x1).any(|x| !self.cell_is_hole(z * width + x)))
+    }
+
     /// Set height at world UV coordinates (for editing)
     pub fn set_height(&mut self, world_u: f32, world_v: f32, height: f32) {
         if self.height_cache.is_empty() || self.cache_width == 0 || self.cache_height == 0 {
@@ -427,16 +561,18 @@ impl HeightBand {
 }
 
 /// The grid a terrain's derived pieces (scatter batches, water body surfaces)
-/// are built on: a change means none of them fits. The height band is left
-/// out, since Save re-expresses heights in a new band without moving them.
-/// `chunk_size` is compared by its bits so a NaN size still equals itself and
-/// does not rebuild everything every frame.
+/// are built on: a change means none of them fits, and that includes the grid
+/// moving to another centre chunk. The height band is left out, since Save
+/// re-expresses heights in a new band without moving them. `chunk_size` is
+/// compared by its bits so a NaN size still equals itself and does not
+/// rebuild everything every frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerrainGridKey {
     chunk_size_bits: u32,
     chunk_resolution: u32,
     chunks_x: u32,
     chunks_z: u32,
+    center_chunk: IVec2,
 }
 
 impl TerrainGridKey {
@@ -447,6 +583,7 @@ impl TerrainGridKey {
             chunk_resolution: config.chunk_resolution,
             chunks_x: config.chunks_x,
             chunks_z: config.chunks_z,
+            center_chunk: config.center_chunk,
         }
     }
 }
@@ -558,6 +695,119 @@ mod tests {
         assert_eq!(max - min, Vec2::new(width, depth));
     }
 
+    /// 5 x 3 chunks of 10 m around chunk (5, -3): chunks 3..=7 in X and
+    /// -4..=-2 in Z, nowhere near the origin.
+    fn off_centre_config() -> TerrainConfig {
+        TerrainConfig {
+            chunk_size: 10.0,
+            chunk_resolution: 4,
+            chunks_x: 2,
+            chunks_z: 1,
+            center_chunk: IVec2::new(5, -3),
+            ..TerrainConfig::default()
+        }
+    }
+
+    #[test]
+    fn an_off_centre_grid_spans_its_centre_chunk_and_half_extents() {
+        let config = off_centre_config();
+        assert_eq!(config.chunk_min(), IVec2::new(3, -4));
+        assert_eq!(config.chunk_max(), IVec2::new(7, -2));
+
+        for chunk in [IVec2::new(3, -4), IVec2::new(7, -2), IVec2::new(3, -2), IVec2::new(7, -4), IVec2::new(5, -3)] {
+            assert!(config.contains_chunk(chunk), "{chunk} is on the grid");
+        }
+        // One chunk past each edge, and the origin.
+        for chunk in [IVec2::new(2, -3), IVec2::new(8, -3), IVec2::new(5, -5), IVec2::new(5, -1), IVec2::ZERO] {
+            assert!(!config.contains_chunk(chunk), "{chunk} is off the grid");
+            assert_eq!(config.chunk_grid_index(chunk), None, "{chunk} has no index");
+        }
+        assert_eq!(config.chunk_grid_index(IVec2::new(3, -4)), Some(UVec2::ZERO));
+        assert_eq!(config.chunk_grid_index(IVec2::new(5, -3)), Some(UVec2::new(2, 1)));
+        assert_eq!(config.chunk_grid_index(IVec2::new(7, -2)), Some(UVec2::new(4, 2)));
+
+        let chunks: Vec<IVec2> = config.grid_chunks().collect();
+        assert_eq!(chunks.len(), config.total_chunks() as usize);
+        assert_eq!(chunks.first(), Some(&IVec2::new(3, -4)));
+        assert_eq!(chunks.last(), Some(&IVec2::new(7, -2)));
+        // Row by row, X running fastest, each chunk at the index its place says.
+        for (i, chunk) in chunks.iter().enumerate() {
+            let expected = UVec2::new(i as u32 % 5, i as u32 / 5);
+            assert_eq!(config.chunk_grid_index(*chunk), Some(expected), "chunk {i} is {chunk}");
+        }
+
+        let (min, max) = config.footprint_xz();
+        assert_eq!(min, Vec2::new(30.0, -40.0));
+        assert_eq!(max, Vec2::new(80.0, -10.0));
+        let (width, depth) = config.total_size();
+        assert_eq!(max - min, Vec2::new(width, depth));
+
+        // Moving the grid is a new grid for everything built on it.
+        let moved = TerrainConfig { center_chunk: IVec2::new(6, -3), ..config.clone() };
+        assert_ne!(TerrainGridKey::of(&moved), TerrainGridKey::of(&config));
+    }
+
+    #[test]
+    fn an_off_centre_grid_maps_its_footprint_onto_the_whole_raster() {
+        let config = off_centre_config();
+        let (min, max) = config.footprint_xz();
+        assert_eq!(config.world_to_uv(min.x, min.y), Vec2::ZERO);
+        assert_eq!(config.world_to_uv(max.x, max.y), Vec2::ONE);
+        assert_eq!(config.chunk_point_uv(config.chunk_min(), 0.0, 0.0), Vec2::ZERO);
+        assert_eq!(config.chunk_point_uv(config.chunk_max(), 1.0, 1.0), Vec2::ONE);
+
+        // A chunk corner reached from the world and from the chunk: the same
+        // UV, three fifths across and a third down.
+        let chunk = IVec2::new(6, -3);
+        let corner = chunk.as_vec2() * config.chunk_size;
+        assert_eq!(config.world_to_uv(corner.x, corner.y), config.chunk_point_uv(chunk, 0.0, 0.0));
+        assert_eq!(config.chunk_point_uv(chunk, 0.0, 0.0), Vec2::new(3.0 / 5.0, 1.0 / 3.0));
+        // The far corner of one chunk is the near corner of the next.
+        assert_eq!(config.chunk_point_uv(chunk, 1.0, 1.0), config.chunk_point_uv(chunk + IVec2::ONE, 0.0, 0.0));
+
+        // Unclamped outside the footprint.
+        let outside = config.world_to_uv(min.x - 5.0, max.y + 15.0);
+        assert!(outside.x < 0.0 && outside.y > 1.0, "{outside}");
+    }
+
+    #[test]
+    fn a_grid_centred_on_the_origin_keeps_its_formulas_bit_for_bit() {
+        let config = TerrainConfig { chunk_size: 48.0, chunks_x: 3, chunks_z: 2, ..TerrainConfig::default() };
+        assert_eq!(config.center_chunk, IVec2::ZERO);
+        let (hx, hz) = (config.chunks_x as i32, config.chunks_z as i32);
+        assert_eq!((config.chunk_min(), config.chunk_max()), (IVec2::new(-hx, -hz), IVec2::new(hx, hz)));
+        let expected: Vec<IVec2> = (-hz..=hz).flat_map(|z| (-hx..=hx).map(move |x| IVec2::new(x, z))).collect();
+        assert_eq!(config.grid_chunks().collect::<Vec<_>>(), expected);
+
+        let total_x = (config.chunks_x * 2 + 1) as f32;
+        let total_z = (config.chunks_z * 2 + 1) as f32;
+        let bits = |uv: Vec2| (uv.x.to_bits(), uv.y.to_bits());
+        for chunk in [IVec2::new(-3, -2), IVec2::ZERO, IVec2::new(2, -1), IVec2::new(3, 2), IVec2::new(-1, 1), IVec2::new(4, 0)] {
+            let inside = chunk.x.abs() <= hx && chunk.y.abs() <= hz;
+            assert_eq!(config.contains_chunk(chunk), inside, "{chunk}");
+            let index = inside.then(|| UVec2::new((chunk.x + hx) as u32, (chunk.y + hz) as u32));
+            assert_eq!(config.chunk_grid_index(chunk), index, "{chunk}");
+            for (u, v) in [(0.0f32, 0.0f32), (0.25, 0.75), (1.0 / 3.0, 0.1), (0.9, 1.0 / 7.0), (1.0, 1.0)] {
+                let old = Vec2::new(
+                    (chunk.x as f32 + u + config.chunks_x as f32) / total_x,
+                    (chunk.y as f32 + v + config.chunks_z as f32) / total_z,
+                );
+                assert_eq!(bits(config.chunk_point_uv(chunk, u, v)), bits(old), "chunk {chunk} at ({u}, {v})");
+            }
+        }
+        for (x, z) in [(0.0f32, 0.0f32), (-144.0, -96.0), (13.7, -55.25), (191.9, 143.9), (-0.3, 7.77), (-1e5, 1e5)] {
+            let old = Vec2::new(
+                (x / config.chunk_size.max(1e-3) + config.chunks_x as f32) / total_x,
+                (z / config.chunk_size.max(1e-3) + config.chunks_z as f32) / total_z,
+            );
+            assert_eq!(bits(config.world_to_uv(x, z)), bits(old), "world ({x}, {z})");
+        }
+        let (min, max) = config.footprint_xz();
+        let old_min = Vec2::new(-(config.chunks_x as f32) * config.chunk_size, -(config.chunks_z as f32) * config.chunk_size);
+        let old_max = Vec2::new((config.chunks_x as f32 + 1.0) * config.chunk_size, (config.chunks_z as f32 + 1.0) * config.chunk_size);
+        assert_eq!((bits(min), bits(max)), (bits(old_min), bits(old_max)));
+    }
+
     #[test]
     fn normalized_height_guards_a_zero_scale() {
         let config = TerrainConfig {
@@ -663,5 +913,61 @@ mod tests {
             let want = heights[i % heights.len()];
             assert!((config.world_height(*n) - want).abs() < 1e-3, "{want} moved to {}", config.world_height(*n));
         }
+    }
+
+    const NO_MATERIAL: MaterialCell = [MATERIAL_SLOT_NONE, MATERIAL_SLOT_NONE, 0, 0];
+
+    #[test]
+    fn a_hole_is_a_cell_without_material_on_a_sparse_surface_only() {
+        use crate::terrain::material::{material_cell, TerrainMaterial};
+
+        let config = band_config(0.0, 50.0);
+        let mut data = TerrainData::procedural();
+        data.resize_cache(&config);
+        let total = data.height_cache.len();
+        data.material_cache = vec![material_cell(TerrainMaterial::Grass.to_u8()); total];
+        data.material_cache[5] = NO_MATERIAL;
+        // Only `id_a` decides: a single material leaves `id_b` empty.
+        data.material_cache[6] = material_cell(TerrainMaterial::Rock.to_u8());
+        assert!(!data.cell_is_hole(5), "a full surface has no holes");
+
+        data.sparse_surface = true;
+        assert!(data.cell_is_hole(5));
+        assert!(!data.cell_is_hole(4) && !data.cell_is_hole(6));
+        assert!(!data.cell_is_hole(total), "past the material layer");
+        data.material_cache.clear();
+        assert!(!data.cell_is_hole(5), "no material layer, no holes");
+    }
+
+    #[test]
+    fn a_chunk_has_ground_where_a_cell_of_its_tile_is_not_a_hole() {
+        use crate::terrain::material::{material_cell, TerrainMaterial};
+
+        // 5 x 3 chunks of 4 x 4 cells around chunk (5, -3): a 20 x 12 raster.
+        let config = off_centre_config();
+        let mut data = TerrainData::procedural();
+        data.resize_cache(&config);
+        assert_eq!((data.cache_width, data.cache_height), (20, 12));
+        data.material_cache = vec![NO_MATERIAL; 240];
+        for chunk in config.grid_chunks().chain([IVec2::ZERO]) {
+            assert!(data.chunk_has_ground(&config, chunk), "a full surface has ground everywhere, {chunk} too");
+        }
+
+        data.sparse_surface = true;
+        for chunk in config.grid_chunks() {
+            assert!(!data.chunk_has_ground(&config, chunk), "{chunk} is all holes");
+        }
+        // One cell of ground at column 13, row 5: tile (3, 1), chunk (6, -3).
+        data.material_cache[5 * 20 + 13] = material_cell(TerrainMaterial::Grass.to_u8());
+        for chunk in config.grid_chunks() {
+            assert_eq!(data.chunk_has_ground(&config, chunk), chunk == IVec2::new(6, -3), "{chunk}");
+        }
+        assert!(!data.chunk_has_ground(&config, IVec2::ZERO), "off the grid there is no ground");
+
+        // The one mesh vertex of chunk (6, -3) on that cell is not a hole, its
+        // neighbour is.
+        let vertex = |u: f32, v: f32| data.point_is_hole(&config, IVec2::new(6, -3), u, v);
+        let on_ground = (0..=4).flat_map(|z| (0..=4).map(move |x| (x, z))).filter(|&(x, z)| !vertex(x as f32 / 4.0, z as f32 / 4.0));
+        assert_eq!(on_ground.count(), 1);
     }
 }

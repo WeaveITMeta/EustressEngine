@@ -70,6 +70,11 @@ const CRATER_RIM_WIDTH: f32 = 0.1;
 const CANYON_WALL_FRACTION: f32 = 0.25;
 /// How far a path pulls its bed toward the profile at full smoothing.
 const PATH_PULL: f32 = 0.5;
+/// How far below its profile a road carves its bed, metres, fading out
+/// across the shoulders. The drivable ribbon stands at the profile
+/// (`road_surface::ROAD_SURFACE_LIFT` above the bed), so the ground between
+/// raster cells stays under it rather than poking through its edges.
+pub const ROAD_BED_SINK: f32 = 0.2;
 /// Extra elevation knots sit this far apart at zero smoothing...
 const MIN_KNOT_SPACING: f32 = 5.0;
 /// ...and this much farther at full smoothing: sparser knots, a smoother
@@ -544,7 +549,7 @@ fn spline_cross_section(spline: &SplineLayer, lateral: f32, profile_y: f32, h: f
     let blend = 1.0 - smoothstep(t);
     let depth = spline.depth.abs();
     let shaped = match spline.mode {
-        SplineMode::Road => lerp(h, profile_y, blend),
+        SplineMode::Road => lerp(h, profile_y - ROAD_BED_SINK, blend),
         SplineMode::Path => lerp(h, profile_y, PATH_PULL * spline.smoothing.clamp(0.0, 1.0) * blend),
         SplineMode::River => h.min(lerp(h, profile_y - depth, blend)),
         SplineMode::Canyon => {
@@ -1121,6 +1126,18 @@ impl PreparedLayers {
         })
     }
 
+    /// Whether world `p` lies on the bed of a spline in one of `modes`,
+    /// shoulders excluded: within half the spline's width of the stations it
+    /// was laid along. Scatter keeps out of river beds through this.
+    pub fn in_bed(&self, p: Vec2, modes: &[SplineMode]) -> bool {
+        self.layers.iter().any(|layer| match (&layer.desc.kind, &layer.spline) {
+            (LayerKind::Spline(spline), Some(prepared)) if modes.contains(&spline.mode) && layer.contains(p) => {
+                prepared.closest(p).is_some_and(|(lateral, _)| lateral <= spline.half_width())
+            }
+            _ => false,
+        })
+    }
+
     fn paints_materials(&self) -> bool {
         self.layers.iter().any(|layer| layer.desc.paints_materials())
     }
@@ -1213,12 +1230,14 @@ impl PreparedLayers {
 
     /// A base with no height raster (procedural terrain) gives layers nothing
     /// to act on, so its bake is the base. Copied only when `out` differs in
-    /// shape, so a bake of such a terrain does not dirty every chunk each time.
+    /// shape or in its sparse flag (a runtime Clear leaves nothing to draw),
+    /// so a bake of such a terrain does not dirty every chunk each time.
     fn take_rasterless_base(&self, base: &TerrainData, out: &mut TerrainData) -> bool {
         let same = out.cache_width == base.cache_width
             && out.cache_height == base.cache_height
             && out.height_cache.len() == base.height_cache.len()
-            && out.material_cache.len() == base.material_cache.len();
+            && out.material_cache.len() == base.material_cache.len()
+            && out.sparse_surface == base.sparse_surface;
         if same {
             return false;
         }
@@ -1230,7 +1249,9 @@ impl PreparedLayers {
     /// and a material layer when `base` has one or a layer paints (all Grass
     /// under the paint where `base` has none, as painting the base itself
     /// would allocate). Rebuilds `out` from `base` and returns `true` when it
-    /// had another layout. Keeps its slot palette `base`'s either way.
+    /// had another layout. Keeps its slot palette and its sparse flag
+    /// `base`'s either way, so a bake shows the same holes as its base (a
+    /// runtime Clear makes every cell one without changing the layout).
     fn prepare_layout(&self, base: &TerrainData, out: &mut TerrainData) -> bool {
         let wants_material = base.has_material_layer() || self.paints_materials();
         let fits = out.cache_width == base.cache_width
@@ -1241,6 +1262,7 @@ impl PreparedLayers {
             if out.slot_palette != base.slot_palette {
                 out.slot_palette = base.slot_palette.clone();
             }
+            out.sparse_surface = base.sparse_surface;
             return false;
         }
         let mut fresh = base.clone();
@@ -1896,7 +1918,8 @@ mod tests {
         let config = config();
         let base = bumpy(&config);
         // Nodes closer than the knot spacing, all at 10 m: the profile is 10 m
-        // everywhere, so the bed must be too, over ground at 15 to 25 m.
+        // everywhere, so the bed is the sink under it everywhere too, over
+        // ground at 15 to 25 m.
         let points: Vec<Vec3> = (-3..=3).map(|i| Vec3::new(i as f32 * 8.0, 10.0, 4.0)).collect();
         let desc = layer(1, 0, LayerKind::Spline(road(points)));
         let out = bake_whole(&config, &base, std::slice::from_ref(&desc));
@@ -1905,7 +1928,7 @@ mod tests {
         for x in (-20..=20).map(|x| x as f32) {
             for z in [1.5f32, 4.0, 6.5] {
                 let h = cell_height(&config, &out, x, z);
-                assert!((h - 10.0).abs() < 1e-3, "bed at ({x}, {z}) is {h}, not the 10 m profile");
+                assert!((h - (10.0 - ROAD_BED_SINK)).abs() < 1e-3, "bed at ({x}, {z}) is {h}, not sunk under the 10 m profile");
                 assert_eq!(material_at_world(&config, &out, x, z).map(|m| m.primary), Some(asphalt));
             }
         }
@@ -1923,7 +1946,7 @@ mod tests {
         let points: Vec<Vec3> = (0..=4).map(|i| Vec3::new(-20.0 + i as f32 * 10.0, 10.0 + i as f32 * 2.5, -8.0)).collect();
         let out = bake_whole(&config, &base, &[layer(1, 0, LayerKind::Spline(road(points)))]);
         for x in [-15.0f32, -5.0, 5.0, 15.0] {
-            let expected = 10.0 + (x + 20.0) * 0.25;
+            let expected = 10.0 + (x + 20.0) * 0.25 - ROAD_BED_SINK;
             let h = cell_height(&config, &out, x, -8.0);
             assert!((h - expected).abs() < 0.2, "centreline at x {x} is {h}, the profile is {expected}");
         }
@@ -1946,7 +1969,7 @@ mod tests {
         // half a cell along the road from a station.
         for station in &stations[2..stations.len() - 2] {
             let bed = cell_height(&config, &baked.data, station.x, station.z);
-            assert!((bed - station.y).abs() < 0.2, "the bed under {station:?} is at {bed}");
+            assert!((bed - (station.y - ROAD_BED_SINK)).abs() < 0.2, "the bed under {station:?} is at {bed}");
         }
         assert!(baked.baked_spline(8).is_none(), "no layer has that id");
 

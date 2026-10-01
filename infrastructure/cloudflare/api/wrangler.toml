@@ -49,17 +49,6 @@ id = "750bd5aed0d64667af72534b60ffb97e"
 binding = "WORKSHOP_CONTEXT"
 id = "44abf849a950492c8699a3fd3b7e3c27"
 
-# The Workshop model picker's list, recompiled nightly by Grok 4.6 from live
-# search (see the MODEL CATALOG section in src/index.js). Read publicly at
-# /api/models/catalog; the engine ships the same seed compiled in, so an
-# unbound namespace or an unreachable worker costs currency, never the picker.
-#   catalog:current          the live catalog
-#   catalog:snapshot:{date}  one per applied run, for /api/admin/models/rollback
-#   run:{date}               applied/rejected, with the changes and the reasons
-[[kv_namespaces]]
-binding = "MODELS"
-id = "2f1bbdb3b77744c5829c12b162813cd2"
-
 # Web analytics counters (pageviews + cookieless uniques) feeding /api/admin/stats.
 # The /api/analytics/hit beacon and /api/admin/stats both no-op gracefully until
 # this is bound, so deploys are safe with it commented out. To enable:
@@ -199,12 +188,63 @@ class_name = "Treasury"
 tag = "v2-treasury"
 new_sqlite_classes = ["Treasury"]
 
+# Live hosts (src/live.mjs): who is hosting each published simulation right
+# now and the join link they advertise, fed by Studio's heartbeat while it
+# hosts and read by the listing's Live indicator. One instance per simulation
+# id; its alarm clears a host whose heartbeat stopped. A Durable Object rather
+# than KV, whose Free plan allows 1,000 writes a day against one host's 2,880
+# heartbeats. See docs/launch/GOAL_LIVE_GALLERY_PLAY.md (M3).
+[[durable_objects.bindings]]
+name = "LIVE_HOSTS"
+class_name = "LiveHost"
+
+[[migrations]]
+tag = "v3-live-hosts"
+new_sqlite_classes = ["LiveHost"]
+
+# Guest allowances (src/guest.mjs): one object per guest id, which is a keyed
+# hash of a network address and the UTC day. It holds the simulations started
+# and the seconds played that day and deletes itself 25 hours after the day
+# began. A Durable Object because the allowance needs atomic updates that KV
+# cannot give. See docs/architecture/GUEST_PLAY.md.
+[[durable_objects.bindings]]
+name = "GUEST_ALLOWANCE"
+class_name = "GuestAllowance"
+
+[[migrations]]
+tag = "v4-guest"
+new_sqlite_classes = ["GuestAllowance"]
+
 # Cosign claims per account. The engine sends at most 6 claims per 5-minute
 # flush; this only meets a script. Per Cloudflare location, like the manifest
 # limiter above.
 [[ratelimits]]
 name = "COSIGN_RATE_LIMITER"
 namespace_id = "2002"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+# The author notification feed (/api/notifications, its read marks and email
+# prefs), keyed on the account. Studio polls it while a review is pending, so
+# 60 per minute is generous for a person and a ceiling for a loop.
+[[ratelimits]]
+name = "NOTIFY_RATE_LIMITER"
+namespace_id = "2003"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+# The unauthenticated auth routes (/api/auth/register, /challenge and
+# /verify-challenge), keyed on the caller's address. A sign-in is two calls and a
+# registration a few more, so 30 a minute leaves a household or an office
+# behind one address plenty of room, and stops a loop that mints accounts or
+# fills the challenge store. Per Cloudflare location, like the limiters above.
+[[ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "2004"
 
   [ratelimits.simple]
   limit = 30
@@ -227,3 +267,142 @@ FORK_ID = "eustress.dev"
 # for example '{"hard_hold":0.30,"audit_rate":0.05}'. Unknown keys and
 # non-numeric values are ignored; the defaults are the calibrated baseline.
 # MODERATION_THRESHOLDS = ""
+
+# ---------------------------------------------------------------------------
+# STAGING (2026-09-26): `npx wrangler deploy --env staging` deploys the Worker
+# "eustress-api-staging" at api-staging.eustress.dev with its OWN empty storage
+# and its own secrets (set with `npx wrangler secret put <NAME> --env staging`).
+# Nothing here touches production. Bindings are not inherited, so each is
+# restated with the staging resources.
+# ---------------------------------------------------------------------------
+[env.staging]
+name = "eustress-api-staging"
+routes = [{ pattern = "api-staging.eustress.dev", custom_domain = true }]
+
+[[env.staging.kv_namespaces]]
+binding = "USERS"
+id = "b6602c578a864bc1b8418b1fcfca58c3"
+
+[[env.staging.kv_namespaces]]
+binding = "CHALLENGES"
+id = "fc253d01fff84a80a260db8db1f66236"
+
+[[env.staging.kv_namespaces]]
+binding = "KYC_STATUS"
+id = "686d497f602949db96ec5711d9d26bd0"
+
+[[env.staging.kv_namespaces]]
+binding = "SOCIAL"
+id = "eb7cc0f9f10d4591a7e24da6e0402480"
+
+[[env.staging.kv_namespaces]]
+binding = "INVENTORY"
+id = "d919334c29514a60b8518f2fa999c395"
+
+[[env.staging.kv_namespaces]]
+binding = "SCREENING"
+id = "e0e4f183704e43feb58b853ad17475ba"
+
+[[env.staging.kv_namespaces]]
+binding = "AUDIT_LOG"
+id = "960baf7cde37422783d2cd98451688d5"
+
+[[env.staging.kv_namespaces]]
+binding = "PAYOUTS"
+id = "5ac0117848584f34b9e5da8acda01a48"
+
+[[env.staging.kv_namespaces]]
+binding = "TELEMETRY"
+id = "0a449051aa384ed0bacceeb7a50784f0"
+
+[[env.staging.kv_namespaces]]
+binding = "WORKSHOP_CONTEXT"
+id = "239b860725f0424e9a9ae90df510cc0a"
+
+[[env.staging.r2_buckets]]
+binding = "KYC_BUCKET"
+bucket_name = "eustress-kyc-documents-staging"
+
+[[env.staging.r2_buckets]]
+binding = "SCENES"
+bucket_name = "eustress-simulations-staging"
+
+[[env.staging.ratelimits]]
+name = "MANIFEST_RATE_LIMITER"
+namespace_id = "3001"
+  [env.staging.ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[env.staging.ratelimits]]
+name = "COSIGN_RATE_LIMITER"
+namespace_id = "3002"
+  [env.staging.ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[env.staging.ratelimits]]
+name = "NOTIFY_RATE_LIMITER"
+namespace_id = "3003"
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[env.staging.ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "3004"
+  [env.staging.ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[env.staging.durable_objects.bindings]]
+name = "WALLETS"
+class_name = "Wallet"
+
+[[env.staging.durable_objects.bindings]]
+name = "COMMERCE_HUBS"
+class_name = "CommerceHub"
+
+[[env.staging.durable_objects.bindings]]
+name = "TREASURY"
+class_name = "Treasury"
+
+[[env.staging.durable_objects.bindings]]
+name = "LIVE_HOSTS"
+class_name = "LiveHost"
+
+[[env.staging.migrations]]
+tag = "v1-commerce"
+new_sqlite_classes = ["Wallet", "CommerceHub"]
+
+[[env.staging.migrations]]
+tag = "v2-treasury"
+new_sqlite_classes = ["Treasury"]
+
+[[env.staging.migrations]]
+tag = "v3-live-hosts"
+new_sqlite_classes = ["LiveHost"]
+
+[[env.staging.durable_objects.bindings]]
+name = "GUEST_ALLOWANCE"
+class_name = "GuestAllowance"
+
+[[env.staging.migrations]]
+tag = "v4-guest"
+new_sqlite_classes = ["GuestAllowance"]
+
+[[env.staging.send_email]]
+name = "EMAIL"
+
+[env.staging.vars]
+FORK_ID = "eustress.dev"
+# Links in review emails (unsubscribe, review details). Production defaults to
+# api.eustress.dev and eustress.dev in src/moderation.mjs.
+PUBLIC_API_ORIGIN = "https://api-staging.eustress.dev"
+# The staging website: Pages branch "staging" of the project "eustress". Its
+# alias is stable across deployments, unlike the per-deployment
+# <hash>.eustress-cbb.pages.dev hosts, which stay unlisted.
+PUBLIC_SITE_ORIGIN = "https://staging.eustress-cbb.pages.dev"
+# Browser origins admitted besides eustress.dev and localhost:3000: exact
+# origins, comma separated, no wildcards (src/cors.mjs). Production sets none.
+ALLOWED_ORIGINS = "https://staging.eustress-cbb.pages.dev"

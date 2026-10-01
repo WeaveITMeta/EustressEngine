@@ -324,7 +324,7 @@ pub fn DocsRealismPage() -> impl IntoView {
 
                         <div id="authoring-sections" class="subsection">
                             <h3>"Sections in a Part File"</h3>
-                            <p>"A part joins a realism system through a section in its file. The loader reads five sections on any class:"</p>
+                            <p>"A part joins a realism system through a section in its file. The loader reads four sections on any class:"</p>
                             <table class="docs-table">
                                 <thead>
                                     <tr><th>"Section"</th><th>"Holds"</th><th>"Used by"</th></tr>
@@ -333,7 +333,6 @@ pub fn DocsRealismPage() -> impl IntoView {
                                     <tr><td><code>"[material]"</code></td><td>"Mechanical and thermal constants"</td><td>"Heat conduction; dents and fracture"</td></tr>
                                     <tr><td><code>"[thermodynamic]"</code></td><td>"Temperature, pressure, volume, energy, entropy, moles"</td><td>"Heat conduction; the cell model's temperature"</td></tr>
                                     <tr><td><code>"[electrochemical]"</code></td><td>"A cell's design and starting state"</td><td>"The cell model"</td></tr>
-                                    <tr><td><code>"[nuclear]"</code></td><td>"Starting state of an "<code>"ArcReactorCore"</code></td><td>"The ARC-1 reactor model ("<a href="#roadmap-components">"not yet active"</a>")"</td></tr>
                                     <tr><td><code>"[plasma]"</code></td><td>"Densities, temperatures, ionization, field"</td><td>"No per-frame system yet"</td></tr>
                                 </tbody>
                             </table>
@@ -840,7 +839,7 @@ class_name = "Part""#}</code></pre>
                                     <tr><td><code>"propulsion"</code></td><td>"Rockets, jets, propellers, electric thrusters"</td><td><code>"tsiolkovsky_delta_v"</code></td></tr>
                                     <tr><td><code>"optics"</code></td><td>"Lenses, mirrors, interference, diffraction, photons"</td><td><code>"bragg_angle"</code></td></tr>
                                     <tr><td><code>"acoustics"</code></td><td>"Sound speed and level, Doppler, room acoustics"</td><td><code>"sabine_reverberation_time"</code></td></tr>
-                                    <tr><td><code>"nuclear"</code></td><td>"Decay, shielding, criticality"</td><td><code>"critical_radius_sphere"</code></td></tr>
+                                    <tr><td><code>"nuclear"</code></td><td>"Decay, shielding, criticality, reactor kinetics, decay heat"</td><td><code>"critical_radius_sphere"</code></td></tr>
                                     <tr><td><code>"plasma"</code></td><td>"Debye length, MHD, fusion"</td><td><code>"lawson_triple_product"</code></td></tr>
                                     <tr><td><code>"control"</code></td><td>"Step response, damping, decibels"</td><td><code>"settling_time_2pct"</code></td></tr>
                                     <tr><td><code>"numerics"</code></td><td>"Interpolation, error function, distributions"</td><td><code>"gaussian_cdf"</code></td></tr>
@@ -1040,22 +1039,13 @@ pub fn on_update(dt) {
                                 parts. They will gain file sections or classes, so a part can carry a circuit or a
                                 reactor the way it carries a cell today."
                             </p>
-                            <p>
-                                "The ARC-1 reactor model already exists as systems: one-group point kinetics,
-                                thermal-hydraulics, power conversion, a battery buffer, a three-loop PID controller
-                                and a scram monitor, publishing "<code>"arc1.*"</code>" watchpoints. A "
-                                <code>"[nuclear]"</code>" section already records an "<code>"ArcReactorCore"</code>
-                                "'s starting state. The plugin that attaches the reactor's components to such
-                                instances is not yet added to the app; once it is, the reactor will run in any
-                                Space."
-                            </p>
                         </div>
 
                         <div id="roadmap-time" class="subsection">
                             <h3>"Simulated Time for Every Law"</h3>
                             <p>
                                 "Only the cell model integrates against the simulation clock today. Heat
-                                conduction, the reactor and the reaction and circuit systems step on frame time,
+                                conduction and the reaction and circuit systems step on frame time,
                                 several of them limited to 0.05 s per frame, so a time scale does not speed them up.
                                 Moving them onto the clock will make one time scale apply to every model in a run.
                                 The GPU fluid path and the symbolic solver will follow."

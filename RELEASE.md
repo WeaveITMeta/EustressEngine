@@ -209,6 +209,66 @@ correct answer: it means the Worker answered.
 
 ---
 
+## Eustress Player
+
+The Player (`eustress-client`) ships through its own workflow,
+[`.github/workflows/player-release.yml`](.github/workflows/player-release.yml),
+on its own version line. Promotion is the same: fast-forward `Core`, then tag
+it.
+
+```bash
+git tag -a player-v0.1.0 -m "Eustress Player v0.1.0: <short summary>"
+git push origin player-v0.1.0
+```
+
+The tag must match `version` in `eustress/crates/client/Cargo.toml`. The first
+job refuses a mismatch, and each build checks that `eustress-client --version`
+prints the tagged version.
+
+CI builds Windows x64, macOS ARM64 and Linux x64. The Windows Player links the
+C runtime statically, so it starts on a machine without the Visual C++
+redistributable. Releases go into the same bucket under `player/`, served at:
+
+| URL | Contents |
+|---|---|
+| `https://downloads.eustress.dev/player/latest.json` | Manifest, same shape as Studio's |
+| `https://downloads.eustress.dev/player/latest/<platform>` | 302 to the current release's file |
+| `https://downloads.eustress.dev/player/vX.Y.Z/EustressPlayer-Setup.exe` | Windows installer |
+| `https://downloads.eustress.dev/player/vX.Y.Z/eustress-player-vX.Y.Z-windows-x64.zip` | Windows, portable |
+| `https://downloads.eustress.dev/player/vX.Y.Z/eustress-player-vX.Y.Z-macos-arm64.dmg` | macOS |
+| `https://downloads.eustress.dev/player/vX.Y.Z/eustress-player-vX.Y.Z-linux-x64.tar.gz` | Linux, with `install.sh` |
+| `https://downloads.eustress.dev/player/vX.Y.Z/checksums.txt` | SHA-256 of each file |
+
+`<platform>` is a key of the manifest: `windows-x64-installer`, `windows-x64`,
+`macos-arm64` or `linux-x64`. The routes live in
+`infrastructure/cloudflare/download-worker.js`, and the verify step fetches the
+manifest, the checksums file and every permanent link back through them. Check
+that the Worker answers for the Player with:
+
+```bash
+curl -i https://downloads.eustress.dev/player/latest.json
+```
+
+Before the first Player release, `404 {"error":"No releases available"}` is the
+correct answer.
+
+Every package makes the Player the handler for `eustress-player://` links,
+since `eustress://` belongs to Studio:
+
+- **Windows:** `installer/windows/eustress-player.iss` installs for the current
+  user by default, with no administrator prompt, and registers the scheme
+  under that user's classes.
+- **macOS:** the app's `Info.plist` declares the scheme in `CFBundleURLTypes`.
+- **Linux:** `install.sh` installs the desktop entry, which declares
+  `x-scheme-handler/eustress-player`, and sets it as the default handler.
+  `install.sh --uninstall` removes the Player again.
+
+`installer/stage-player.ps1` builds the layout all three ship: the executable
+with the committed `common/assets` beside it. GitHub releases for the Player
+are never marked Latest, which stays Studio's.
+
+---
+
 ## Reference commands
 
 ```bash

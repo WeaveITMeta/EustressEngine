@@ -17,7 +17,7 @@ struct PlayResponse {
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct LaunchInfo {
-    /// `eustress://play/<id>`, for a Player registered to open it.
+    /// `eustress-player://play/<id>`, which opens the Player where it is installed.
     #[serde(default)]
     link: Option<String>,
     command: String,
@@ -112,7 +112,7 @@ pub fn PlayPage() -> impl IntoView {
                     }}
 
                     <div class="play-actions">
-                        <a href="/download" class="play-download-btn">"Download Eustress"</a>
+                        <a href="/downloads/player" class="play-download-btn">"Download Eustress Player"</a>
                         <a href={move || format!("/simulation/{}", id())} class="play-back-btn">"Back to Details"</a>
                     </div>
                 </div>

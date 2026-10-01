@@ -22,28 +22,49 @@
 //!   movement intent and pulled toward the sender's position. It therefore
 //!   walks, jumps and animates through the same runtime as the local
 //!   character, not a second one.
+//! - **Everything the host's scripts and physics do** ([`crate::repl`]): the
+//!   host shell hands the session world frames ([`SendWorld`]) and motion
+//!   ([`SendMotion`]); a player's session hands them to its shell
+//!   ([`WorldArrived`], [`MotionArrived`]). A player that just arrived gets
+//!   its catch-up before any live frame.
+//! - **Each player's input** ([`crate::repl::input`]), every tick, kept on the
+//!   host in [`PeerInputs`] for anything there to read.
+//! - **Remote calls** from players ([`FireRemote`]), bounded and rate-limited
+//!   here before the host shell sees them ([`RemoteArrived`]).
 //!
 //! Scripts run on the host only. A joined Player renders the world and the
 //! avatars and sends its own input; it never runs a server script to see the
 //! game.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use bevy::prelude::*;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde::Serialize;
 
+use eustress_common::avatar::seat::AvatarSeated;
 use eustress_common::avatar::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use eustress_common::avatar::{
     AvatarControl, AvatarDescriptor, AvatarSystems, LocalAvatar, SpawnAvatar, SpawnedByAvatarRuntime,
 };
 use eustress_echk::{content_hash, decode_chunk, is_safe_record_path, Record, WorldManifest, MAX_CHUNK_BYTES};
 
+use crate::repl::input::{
+    encode_dir, key_bit, AXIS_LEFT_TRIGGER, AXIS_LEFT_X, AXIS_LEFT_Y, AXIS_RIGHT_TRIGGER, AXIS_RIGHT_X, AXIS_RIGHT_Y,
+    INPUT_REDUNDANCY, MOUSE_LEFT, MOUSE_MIDDLE, MOUSE_RIGHT,
+};
+use crate::repl::motion::{tick_at, TICK_HZ};
+use crate::repl::remote::check_call;
+use crate::repl::tracks::MAX_TRACK_OPS_PER_MESSAGE;
+use crate::repl::{
+    InputFrame, InputSample, MotionFrame, PeerInputs, RemoteCall, RemoteRates, RemoteReply, TickClock, TrackWire,
+    ValueLimits, WorldFrame,
+};
 use crate::wire::{
-    decode_body, decode_datagram, encode_datagram, encode_frame, sanitize_chat, sanitize_name, AvatarFrame, Hello,
-    PeerId, PeerInfo, ToHost, ToPlayer, Welcome, CHUNK_PIECE_BYTES, HOST_PEER, MAX_APPEARANCE_BYTES,
-    PROTOCOL_VERSION,
+    decode_body, decode_datagram, encode_datagram, encode_frame, sanitize_chat, sanitize_name, sanitize_receipts,
+    sanitize_ticket, AvatarFrame, Datagram, Hello, PeerId, PeerInfo, ToHost, ToPlayer, Welcome, CHUNK_PIECE_BYTES,
+    HOST_PEER, MAX_APPEARANCE_BYTES, MAX_SIM_ID_CHARS, PROTOCOL_VERSION,
 };
 
 /// Avatar samples per second, each direction.
@@ -60,6 +81,9 @@ const SPEED_SLACK_M: f32 = 6.0;
 const WORLD_LIMIT: f32 = 1.0e5;
 /// Position error past which a replica snaps rather than easing.
 const SNAP_DISTANCE: f32 = 4.0;
+/// Seconds a replica moved on this machine (a host script's teleport) keeps
+/// its new place while its sender's samples still show the old one.
+const TELEPORT_HOLD: f64 = 1.0;
 /// Seconds without a sample before a replica stops walking.
 const STALE_AFTER: f64 = 1.0;
 /// Seconds a player waits for the host's Welcome.
@@ -72,6 +96,12 @@ const VIOLATION_WINDOW: f64 = 10.0;
 /// Chat lines one player may send inside [`CHAT_WINDOW`].
 const CHAT_BURST: usize = 8;
 const CHAT_WINDOW: f64 = 10.0;
+/// Receipt lists one player may send inside [`RECEIPT_WINDOW`]: each costs
+/// the host API calls.
+const RECEIPT_BURST: usize = 4;
+const RECEIPT_WINDOW: f64 = 10.0;
+/// Purchase prompts one player may have open at once.
+const MAX_OPEN_PROMPTS: usize = 16;
 /// Spacing of player spawn points around the host's spawn, so joiners do
 /// not appear inside one another.
 const SPAWN_RING_M: f32 = 1.6;
@@ -188,6 +218,16 @@ pub enum NetNotice {
     PeerJoined { peer: PeerId, name: String },
     PeerLeft { peer: PeerId, name: String },
     Chat { peer: PeerId, name: String, text: String },
+    /// Host: the player who just joined sent an identity ticket. Unverified:
+    /// the shell checks it with the API before trusting the account it names.
+    PeerIdentity { peer: PeerId, ticket: String },
+    /// Host: a player answered a purchase prompt this host sent it.
+    PurchaseClosed { peer: PeerId, prompt: u32, purchased: bool },
+    /// Host: purchase ids a player says its account holds. Unverified.
+    Receipts { peer: PeerId, purchase_ids: Vec<String> },
+    /// Player: the host asks this player to buy `product` (see
+    /// [`crate::wire::ToPlayer::PurchasePrompt`]). Answer with [`ClosePurchase`].
+    PurchasePrompt { prompt: u32, product: u64, expects: u8 },
 }
 
 /// A joined player's world, decoded and verified, ready for the shell to open.
@@ -224,6 +264,102 @@ pub struct EndSession {
     pub reason: String,
 }
 
+/// Host shell → session: ask player `peer` to buy `product`. `prompt` is the
+/// shell's own id for the ask; the answer arrives as
+/// [`NetNotice::PurchaseClosed`] with the same id.
+#[derive(Message, Debug, Clone)]
+pub struct PromptPurchase {
+    pub peer: PeerId,
+    pub prompt: u32,
+    pub product: u64,
+    /// 0 for any product, 1 for a consumable, 2 for a pass.
+    pub expects: u8,
+}
+
+/// Player shell → session: the player answered prompt `prompt`.
+#[derive(Message, Debug, Clone)]
+pub struct ClosePurchase {
+    pub prompt: u32,
+    pub purchased: bool,
+}
+
+/// Player shell → session: purchase ids the player's account holds for this
+/// listing, for the host to verify and grant.
+#[derive(Message, Debug, Clone)]
+pub struct SendReceipts {
+    pub purchase_ids: Vec<String>,
+}
+
+/// Host shell → session: world frames for one player, in order. `catch_up`
+/// marks the frames that bring a player who just arrived up to date; until
+/// those are sent, that player gets no live frames, which its catch-up
+/// already includes.
+#[derive(Message, Debug, Clone)]
+pub struct SendWorld {
+    pub peer: PeerId,
+    pub frames: Vec<WorldFrame>,
+    pub catch_up: bool,
+}
+
+/// Host shell → session: motion for every player in the world, each frame
+/// already small enough for one datagram
+/// ([`crate::repl::motion::split_motion`]).
+#[derive(Message, Debug, Clone)]
+pub struct SendMotion {
+    pub frames: Vec<MotionFrame>,
+}
+
+/// Host shell → session: the answer to a player's `InvokeServer`.
+#[derive(Message, Debug, Clone)]
+pub struct SendRemoteReply {
+    pub peer: PeerId,
+    pub reply: RemoteReply,
+}
+
+/// Session → host shell: a player's remote call, its arguments bounded and
+/// the player within its rate. The shell still checks that the player can
+/// see the remote and every instance the arguments name.
+#[derive(Message, Debug, Clone)]
+pub struct RemoteArrived {
+    pub peer: PeerId,
+    pub call: RemoteCall,
+    pub unreliable: bool,
+}
+
+/// Session → player shell: what the host's tree did in one tick.
+#[derive(Message, Debug, Clone)]
+pub struct WorldArrived(pub WorldFrame);
+
+/// Session → player shell: where the host's moving bodies are.
+#[derive(Message, Debug, Clone)]
+pub struct MotionArrived(pub MotionFrame);
+
+/// Session → player shell: the answer to an `InvokeServer`.
+#[derive(Message, Debug, Clone)]
+pub struct RemoteReplied(pub RemoteReply);
+
+/// Player shell → session: `FireServer`, `InvokeServer`, or (with
+/// `unreliable`) `UnreliableRemoteEvent:FireServer`.
+#[derive(Message, Debug, Clone)]
+pub struct FireRemote {
+    pub call: RemoteCall,
+    pub unreliable: bool,
+}
+
+/// Player shell → session: animation track changes this player's scripts
+/// made on its own character, in order.
+#[derive(Message, Debug, Clone)]
+pub struct SendTracks(pub Vec<TrackWire>);
+
+/// Session → host shell: a player's track changes, at most
+/// [`MAX_TRACK_OPS_PER_MESSAGE`] at a time. The shell checks each one
+/// (`repl::HostTracks::player_ops`).
+#[derive(Message, Debug, Clone)]
+pub struct TracksArrived {
+    pub peer: PeerId,
+    pub ops: Vec<TrackWire>,
+}
+
 /// Marks an avatar that mirrors another participant.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct NetReplica {
@@ -245,6 +381,8 @@ pub struct HostConfig {
     pub chunks: HashMap<String, Arc<Vec<u8>>>,
     /// Players spawn around this point.
     pub spawn: [f32; 3],
+    /// The gallery listing the world is published as, when it is one.
+    pub sim_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +408,46 @@ struct HostPeer {
     violations: u32,
     violation_window: f64,
     chat_times: VecDeque<f64>,
+    /// The identity ticket its Hello carried, unverified.
+    identity: Option<String>,
+    /// Purchase prompts sent to this player and not yet answered.
+    prompts: HashSet<u32>,
+    receipt_times: VecDeque<f64>,
+    /// Its catch-up world frames went out; live ones may follow.
+    caught_up: bool,
+}
+
+impl HostPeer {
+    fn new(peer: PeerId, remote: String, datagrams: bool, now: f64) -> Self {
+        Self {
+            peer,
+            name: String::new(),
+            stage: PeerStage::AwaitingHello,
+            datagrams,
+            remote,
+            appearance: None,
+            outbox: VecDeque::new(),
+            last_sample: None,
+            violations: 0,
+            violation_window: now,
+            chat_times: VecDeque::new(),
+            identity: None,
+            prompts: HashSet::new(),
+            receipt_times: VecDeque::new(),
+            caught_up: false,
+        }
+    }
+
+    /// Count one thing the host refused from this player; true when that
+    /// makes too many inside the window.
+    fn violation(&mut self, now: f64) -> bool {
+        if now - self.violation_window > VIOLATION_WINDOW {
+            self.violation_window = now;
+            self.violations = 0;
+        }
+        self.violations += 1;
+        self.violations > MAX_VIOLATIONS
+    }
 }
 
 /// A running host. Inserted by the Studio shell together with a [`NetLink`].
@@ -281,11 +459,41 @@ pub struct HostSession {
     peers: HashMap<ConnId, HostPeer>,
     next_peer: PeerId,
     appearance: Option<String>,
+    /// The host's own identity ticket, bound to its pin; sent in every Welcome.
+    identity: Option<String>,
+    rates: RemoteRates,
 }
 
 impl HostSession {
     pub fn new(config: HostConfig) -> Self {
-        Self { config, port: 0, pin: None, peers: HashMap::new(), next_peer: 1, appearance: None }
+        Self {
+            config,
+            port: 0,
+            pin: None,
+            peers: HashMap::new(),
+            next_peer: 1,
+            appearance: None,
+            identity: None,
+            rates: RemoteRates::default(),
+        }
+    }
+
+    /// Players in the world, and whether each has had its catch-up.
+    pub fn ready_peers(&self) -> Vec<(PeerId, bool)> {
+        self.ready().map(|(_, p)| (p.peer, p.caught_up)).collect()
+    }
+
+    /// Set the host's own identity ticket (audience: its pin, as 64 hex
+    /// characters), for players to verify who hosts. The pin exists only once
+    /// [`NetNotice::Hosting`] arrives, so the shell fetches the ticket then.
+    /// Players who joined before it is set received none.
+    pub fn set_identity(&mut self, ticket: Option<String>) {
+        self.identity = ticket.as_deref().and_then(sanitize_ticket);
+    }
+
+    /// The gallery listing this session's world is published as, if any.
+    pub fn sim_id(&self) -> Option<&str> {
+        self.config.sim_id.as_deref()
     }
 
     /// The bound port, once the listener is up.
@@ -301,6 +509,11 @@ impl HostSession {
     /// Players in the world.
     pub fn player_count(&self) -> usize {
         self.peers.values().filter(|p| p.stage == PeerStage::Ready).count()
+    }
+
+    /// Players the session takes besides the host.
+    pub fn max_players(&self) -> u16 {
+        self.config.max_players
     }
 
     /// Names of players in the world.
@@ -347,11 +560,22 @@ pub enum JoinStage {
     Playing,
 }
 
+/// The app this machine runs, with its version (`eustress-client 0.1.0`),
+/// which a joining player tells the host in its [`Hello`]. The Player shell
+/// inserts it; without it, the Hello names this crate's version.
+#[derive(Resource, Debug, Clone)]
+pub struct AppVersion(pub String);
+
 /// A joining or joined player. Inserted by the Player shell together with a
 /// [`NetLink`].
 #[derive(Resource)]
 pub struct PlayerSession {
     name: String,
+    /// This player's identity ticket, sent in Hello.
+    identity: Option<String>,
+    /// From Welcome: the listing, and the host's own ticket.
+    sim_id: Option<String>,
+    host_identity: Option<String>,
     stage: JoinStage,
     stage_since: Option<f64>,
     peer: Option<PeerId>,
@@ -367,12 +591,20 @@ pub struct PlayerSession {
     total: u64,
     last_progress: f64,
     names: HashMap<PeerId, String>,
+    /// The host's clock, as the ticks its frames carry reveal it.
+    clock: TickClock,
+    /// The newest input samples sent, newest first.
+    input_sent: VecDeque<InputSample>,
+    input_accum: f32,
 }
 
 impl PlayerSession {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, identity: Option<String>) -> Self {
         Self {
             name: sanitize_name(name),
+            identity: identity.as_deref().and_then(sanitize_ticket),
+            sim_id: None,
+            host_identity: None,
             stage: JoinStage::Connecting,
             stage_since: None,
             peer: None,
@@ -388,11 +620,25 @@ impl PlayerSession {
             total: 0,
             last_progress: 0.0,
             names: HashMap::new(),
+            clock: TickClock::default(),
+            input_sent: VecDeque::new(),
+            input_accum: 0.0,
         }
     }
 
     pub fn stage(&self) -> JoinStage {
         self.stage
+    }
+
+    /// The host's tick now (fractional), once any frame has revealed it.
+    /// `local_secs` is this app's `Time::elapsed_secs_f64`.
+    pub fn host_tick(&self, local_secs: f64) -> Option<f64> {
+        self.clock.host_tick(local_secs)
+    }
+
+    /// The host's clock, for drawing its bodies a little in the past.
+    pub fn clock(&self) -> &TickClock {
+        &self.clock
     }
 
     pub fn peer(&self) -> Option<PeerId> {
@@ -401,6 +647,17 @@ impl PlayerSession {
 
     pub fn host_name(&self) -> &str {
         &self.host_name
+    }
+
+    /// The gallery listing the host's world is published as, if it said so.
+    pub fn sim_id(&self) -> Option<&str> {
+        self.sim_id.as_deref()
+    }
+
+    /// The host's own identity ticket, unverified: check it with the API
+    /// (audience: the join link's pin) before trusting who hosts.
+    pub fn host_identity(&self) -> Option<&str> {
+        self.host_identity.as_deref()
     }
 
     fn set_stage(&mut self, stage: JoinStage) {
@@ -434,6 +691,31 @@ struct Remote {
     applied_jumps: Option<u8>,
     entity: Option<Entity>,
     respawn: bool,
+    /// Where the correction left the replica last frame.
+    placed: Option<Vec3>,
+    /// Something on this machine moved the replica (a host script's
+    /// teleport): where to, and when.
+    teleport_hold: Option<(Vec3, f64)>,
+}
+
+impl Remote {
+    /// Where to pull this peer's replica now, or `None` to leave it. A move
+    /// on this machine farther than a snap since the last correction (a host
+    /// script teleporting a joined player) is kept: the sender's samples,
+    /// from before it heard of the move, are ignored until one lands near
+    /// the new place, or for at most [`TELEPORT_HOLD`] seconds.
+    fn correction_target(&mut self, current: Vec3, sample: Vec3, now: f64) -> Option<Vec3> {
+        if self.teleport_hold.is_none() && self.placed.is_some_and(|p| current.distance(p) > SNAP_DISTANCE) {
+            self.teleport_hold = Some((current, now));
+        }
+        if let Some((to, since)) = self.teleport_hold {
+            if sample.distance(to) > SNAP_DISTANCE && now - since < TELEPORT_HOLD {
+                return None;
+            }
+            self.teleport_hold = None;
+        }
+        Some(sample)
+    }
 }
 
 /// Every other participant's avatar, as this machine knows it.
@@ -454,6 +736,8 @@ impl RemoteAvatars {
             applied_jumps: None,
             entity: None,
             respawn: false,
+            placed: None,
+            teleport_hold: None,
         });
     }
 
@@ -472,7 +756,12 @@ impl RemoteAvatars {
     }
 
     /// Keep the newest sample. `seq` wraps, so "newer" is a wrapping compare.
+    /// Every replica's spawn point, pose and intent come from the sample kept
+    /// here, so only a finite one within [`WORLD_LIMIT`] is kept.
     fn accept_frame(&mut self, frame: AvatarFrame, now: f64) {
+        if !frame.is_finite() || Vec3::from_array(frame.position).abs().max_element() >= WORLD_LIMIT {
+            return;
+        }
         if let Some(r) = self.peers.get_mut(&frame.peer) {
             if let Some(prev) = r.latest {
                 let ahead = frame.seq.wrapping_sub(prev.seq);
@@ -531,11 +820,25 @@ impl Plugin for NetPlugin {
             .add_message::<LocalWorldReady>()
             .add_message::<SendChat>()
             .add_message::<EndSession>()
+            .add_message::<PromptPurchase>()
+            .add_message::<ClosePurchase>()
+            .add_message::<SendReceipts>()
+            .add_message::<SendWorld>()
+            .add_message::<SendMotion>()
+            .add_message::<SendRemoteReply>()
+            .add_message::<RemoteArrived>()
+            .add_message::<WorldArrived>()
+            .add_message::<MotionArrived>()
+            .add_message::<RemoteReplied>()
+            .add_message::<FireRemote>()
+            .add_message::<SendTracks>()
+            .add_message::<TracksArrived>()
             // Idempotent; the avatar runtime registers it too. Registered here
             // so the replica spawner's writer is valid in any shell.
             .add_message::<SpawnAvatar>()
             .init_resource::<RemoteAvatars>()
-            .init_resource::<LocalAvatarNet>();
+            .init_resource::<LocalAvatarNet>()
+            .init_resource::<PeerInputs>();
 
         // Every system is gated on a session existing, and Bevy evaluates run
         // conditions before validating parameters, so a shell that never
@@ -548,6 +851,10 @@ impl Plugin for NetPlugin {
                 player_pump.run_if(joined),
                 handle_shell_requests.run_if(in_session),
                 host_send_chunks.run_if(hosting),
+                host_send_replication.run_if(hosting),
+                player_send_remotes.run_if(joined),
+                player_send_tracks.run_if(joined),
+                send_local_input.run_if(joined),
                 player_timeouts.run_if(joined),
                 announce_local_appearance.run_if(in_session),
                 spawn_replicas.run_if(in_session),
@@ -584,9 +891,10 @@ pub fn begin_host(commands: &mut Commands, link: NetLink, config: HostConfig) {
     commands.insert_resource(link);
 }
 
-/// Start joining: the shell passes the link it got from the transport.
-pub fn begin_join(commands: &mut Commands, link: NetLink, player_name: &str) {
-    commands.insert_resource(PlayerSession::new(player_name));
+/// Start joining: the shell passes the link it got from the transport, and
+/// the player's identity ticket when it has one (see [`Hello::identity`]).
+pub fn begin_join(commands: &mut Commands, link: NetLink, player_name: &str, identity: Option<String>) {
+    commands.insert_resource(PlayerSession::new(player_name, identity));
     commands.insert_resource(link);
 }
 
@@ -602,13 +910,17 @@ fn end_session(commands: &mut Commands) {
 // Host systems
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn host_pump(
     mut commands: Commands,
     time: Res<Time>,
     link: Res<NetLink>,
     mut host: ResMut<HostSession>,
     mut remotes: ResMut<RemoteAvatars>,
+    mut inputs: ResMut<PeerInputs>,
     mut notices: MessageWriter<NetNotice>,
+    mut arrivals: MessageWriter<RemoteArrived>,
+    mut tracks: MessageWriter<TracksArrived>,
 ) {
     let now = time.elapsed_secs_f64();
     for _ in 0..MAX_EVENTS_PER_FRAME {
@@ -627,34 +939,27 @@ fn host_pump(
                 }
                 let peer = host.next_peer;
                 host.next_peer += 1;
-                host.peers.insert(
-                    conn,
-                    HostPeer {
-                        peer,
-                        name: String::new(),
-                        stage: PeerStage::AwaitingHello,
-                        datagrams,
-                        remote,
-                        appearance: None,
-                        outbox: VecDeque::new(),
-                        last_sample: None,
-                        violations: 0,
-                        violation_window: now,
-                        chat_times: VecDeque::new(),
-                    },
-                );
+                host.peers.insert(conn, HostPeer::new(peer, remote, datagrams, now));
             }
             LinkEvent::Frame { conn, body } => match decode_body::<ToHost>(&body) {
+                Ok(ToHost::Remote(call)) => host_remote(&link, &mut host, &mut arrivals, conn, call, false, now),
+                Ok(ToHost::Input(frame)) => host_input(&host, &mut inputs, conn, &frame),
+                Ok(ToHost::Tracks(ops)) => host_tracks(&link, &mut host, &mut tracks, conn, ops, now),
                 Ok(msg) => host_message(&mut commands, &link, &mut host, &mut remotes, &mut notices, conn, msg, now),
                 Err(e) => kick(&link, &mut host, conn, &format!("unreadable message: {e}")),
             },
-            LinkEvent::Datagram { conn, bytes } => {
-                if let Ok(frame) = decode_datagram(&bytes) {
-                    host_avatar_frame(&link, &mut host, &mut remotes, conn, frame, now);
-                }
-            }
+            LinkEvent::Datagram { conn, bytes } => match decode_datagram(&bytes) {
+                Ok(Datagram::Avatar(frame)) => host_avatar_frame(&link, &mut host, &mut remotes, conn, frame, now),
+                Ok(Datagram::Input(frame)) => host_input(&host, &mut inputs, conn, &frame),
+                Ok(Datagram::Remote(call)) => host_remote(&link, &mut host, &mut arrivals, conn, call, true, now),
+                // Motion flows host to player only; an unreadable datagram is
+                // dropped like a lost one.
+                Ok(Datagram::Motion(_)) | Err(_) => {}
+            },
             LinkEvent::Closed { conn, reason } => {
                 if let Some(p) = host.peers.remove(&conn) {
+                    inputs.by_peer.remove(&p.peer);
+                    host.rates.forget_peer(p.peer);
                     if p.stage == PeerStage::Ready {
                         for (other, _) in host.ready() {
                             link.send(other, &ToPlayer::PeerLeft { peer: p.peer });
@@ -719,11 +1024,17 @@ fn host_message(
                 world: host.config.world.clone(),
                 spawn,
                 max_players: host.config.max_players,
+                sim_id: host.config.sim_id.clone(),
+                host_identity: host.identity.clone(),
+                tick: tick_at(now),
             };
             let p = host.peers.get_mut(&conn).expect("present above");
             p.name = name.clone();
             p.stage = PeerStage::Downloading;
-            info!("net: {name} ({}) joined as peer {peer}, engine {}", p.remote, hello.engine_version);
+            p.identity = hello.identity.as_deref().and_then(sanitize_ticket);
+            // The player's own words, so printable and short before logging.
+            let app: String = hello.engine_version.chars().filter(|c| !c.is_control()).take(64).collect();
+            info!("net: {name} ({}) joined as peer {peer}, running {}", p.remote, app.trim());
             link.send(conn, &ToPlayer::Welcome(welcome));
         }
         ToHost::RequestChunks { hashes } => {
@@ -754,10 +1065,10 @@ fn host_message(
             if stage != PeerStage::Downloading {
                 return;
             }
-            let (peer, name, appearance) = {
+            let (peer, name, appearance, identity) = {
                 let p = host.peers.get_mut(&conn).expect("present above");
                 p.stage = PeerStage::Ready;
-                (p.peer, p.name.clone(), p.appearance.clone())
+                (p.peer, p.name.clone(), p.appearance.clone(), p.identity.clone())
             };
             // Tell the newcomer who is here: the host, then every other player.
             link.send(conn, &ToPlayer::PeerJoined(PeerInfo { peer: HOST_PEER, name: host.config.host_name.clone() }));
@@ -783,6 +1094,9 @@ fn host_message(
                 remotes.set_appearance(peer, desc);
             }
             notices.write(NetNotice::PeerJoined { peer, name });
+            if let Some(ticket) = identity {
+                notices.write(NetNotice::PeerIdentity { peer, ticket });
+            }
         }
         ToHost::Appearance { descriptor_json } => {
             if stage == PeerStage::AwaitingHello {
@@ -834,8 +1148,140 @@ fn host_message(
         ToHost::Goodbye => {
             link.close(conn, "left");
         }
+        ToHost::PurchaseClosed { prompt, purchased } => {
+            if stage != PeerStage::Ready {
+                return;
+            }
+            let p = host.peers.get_mut(&conn).expect("present above");
+            // Only an answer to a prompt this host sent this player counts.
+            if p.prompts.remove(&prompt) {
+                notices.write(NetNotice::PurchaseClosed { peer: p.peer, prompt, purchased });
+            }
+        }
+        ToHost::Receipts { purchase_ids } => {
+            if stage != PeerStage::Ready {
+                return;
+            }
+            let p = host.peers.get_mut(&conn).expect("present above");
+            while p.receipt_times.front().is_some_and(|t| now - t > RECEIPT_WINDOW) {
+                p.receipt_times.pop_front();
+            }
+            if p.receipt_times.len() >= RECEIPT_BURST {
+                return;
+            }
+            p.receipt_times.push_back(now);
+            let purchase_ids = sanitize_receipts(&purchase_ids);
+            if !purchase_ids.is_empty() {
+                notices.write(NetNotice::Receipts { peer: p.peer, purchase_ids });
+            }
+        }
+        // Routed by `host_pump` before they reach here.
+        ToHost::Remote(_) | ToHost::Input(_) | ToHost::Tracks(_) => {}
     }
     let _ = commands;
+}
+
+/// Pass a player's track changes to the shell. A message over the size
+/// limit counts toward removing the player; the shell checks each change and
+/// the player's rate.
+fn host_tracks(
+    link: &NetLink,
+    host: &mut HostSession,
+    tracks: &mut MessageWriter<TracksArrived>,
+    conn: ConnId,
+    ops: Vec<TrackWire>,
+    now: f64,
+) {
+    let Some(p) = host.peers.get_mut(&conn).filter(|p| p.stage == PeerStage::Ready) else { return };
+    if ops.len() > MAX_TRACK_OPS_PER_MESSAGE {
+        if p.violation(now) {
+            return kick(link, host, conn, "animation changes the host could not accept");
+        }
+        return;
+    }
+    if !ops.is_empty() {
+        tracks.write(TracksArrived { peer: p.peer, ops });
+    }
+}
+
+/// Keep a player's input samples for anything on the host to read.
+fn host_input(host: &HostSession, inputs: &mut PeerInputs, conn: ConnId, frame: &InputFrame) {
+    let Some(p) = host.peers.get(&conn).filter(|p| p.stage == PeerStage::Ready) else { return };
+    inputs.by_peer.entry(p.peer).or_default().accept(frame);
+}
+
+/// Pass a player's remote call to the shell when it is bounded and within
+/// the player's rate. Malformed calls count toward removing the player; a
+/// call over the rate is only dropped, since a busy script causes those.
+fn host_remote(
+    link: &NetLink,
+    host: &mut HostSession,
+    arrivals: &mut MessageWriter<RemoteArrived>,
+    conn: ConnId,
+    call: RemoteCall,
+    unreliable: bool,
+    now: f64,
+) {
+    let Some(p) = host.peers.get_mut(&conn).filter(|p| p.stage == PeerStage::Ready) else { return };
+    let peer = p.peer;
+    if let Err(e) = check_call(&call, &ValueLimits::default()) {
+        debug!("net: refused a remote call from {}: {e}", p.name);
+        if p.violation(now) {
+            return kick(link, host, conn, "remote calls the host could not accept");
+        }
+        return;
+    }
+    if !host.rates.allow(peer, call.remote, now) {
+        return;
+    }
+    arrivals.write(RemoteArrived { peer, call, unreliable });
+}
+
+/// Send what the host shell replicated: world frames to one player each (a
+/// player's catch-up first), motion to everyone in the world, and answers to
+/// invocations.
+fn host_send_replication(
+    link: Res<NetLink>,
+    mut host: ResMut<HostSession>,
+    mut worlds: MessageReader<SendWorld>,
+    mut motion: MessageReader<SendMotion>,
+    mut replies: MessageReader<SendRemoteReply>,
+) {
+    for msg in worlds.read() {
+        deliver_world(&link, &mut host, msg);
+    }
+    for msg in motion.read() {
+        for (conn, p) in host.ready() {
+            for frame in &msg.frames {
+                if p.datagrams {
+                    link.datagram(conn, encode_datagram(&Datagram::Motion(frame.clone())));
+                } else {
+                    link.send(conn, &ToPlayer::Motion(frame.clone()));
+                }
+            }
+        }
+    }
+    for msg in replies.read() {
+        if let Some((conn, _)) = host.ready().find(|(_, p)| p.peer == msg.peer) {
+            link.send(conn, &ToPlayer::RemoteReply(msg.reply.clone()));
+        }
+    }
+}
+
+/// Send one player's world frames, holding live ones back until its
+/// catch-up has gone. Returns the frames sent.
+fn deliver_world(link: &NetLink, host: &mut HostSession, msg: &SendWorld) -> usize {
+    let Some((conn, p)) = host.peers.iter_mut().find(|(_, p)| p.peer == msg.peer && p.stage == PeerStage::Ready) else {
+        return 0;
+    };
+    if !msg.catch_up && !p.caught_up {
+        return 0; // its catch-up, still to come, includes this
+    }
+    p.caught_up = true;
+    for frame in &msg.frames {
+        link.send(*conn, &ToPlayer::World(frame.clone()));
+    }
+    msg.frames.len()
 }
 
 /// Validate a player's avatar sample, keep it, and relay it to everyone else.
@@ -859,12 +1305,7 @@ fn host_avatar_frame(
             pos.distance(last) <= MAX_AVATAR_SPEED * dt + SPEED_SLACK_M
         });
     if !plausible {
-        if now - p.violation_window > VIOLATION_WINDOW {
-            p.violation_window = now;
-            p.violations = 0;
-        }
-        p.violations += 1;
-        if p.violations > MAX_VIOLATIONS {
+        if p.violation(now) {
             let name = p.name.clone();
             warn!("net: removing {name}: {MAX_VIOLATIONS} impossible movements in {VIOLATION_WINDOW} s");
             return kick(link, host, conn, "movement the host could not accept");
@@ -875,7 +1316,7 @@ fn host_avatar_frame(
     frame.peer = p.peer; // never trust the sender's claim of who it is
     remotes.accept_frame(frame, now);
 
-    let bytes = encode_datagram(&frame);
+    let bytes = encode_datagram(&Datagram::Avatar(frame));
     for (other, o) in host.ready() {
         if other == conn {
             continue;
@@ -942,6 +1383,12 @@ fn player_pump(
     cache: Option<Res<ChunkCacheRes>>,
     mut notices: MessageWriter<NetNotice>,
     mut downloaded: MessageWriter<WorldDownloaded>,
+    (mut worlds, mut motions, mut replies): (
+        MessageWriter<WorldArrived>,
+        MessageWriter<MotionArrived>,
+        MessageWriter<RemoteReplied>,
+    ),
+    app: Option<Res<AppVersion>>,
 ) {
     let now = time.elapsed_secs_f64();
     if player.stage_since.is_none() {
@@ -952,18 +1399,39 @@ fn player_pump(
         let outcome = match event {
             LinkEvent::Opened { datagrams, .. } => {
                 player.datagrams = datagrams;
+                let engine_version = app.as_ref().map_or_else(
+                    || concat!("eustress-networking ", env!("CARGO_PKG_VERSION")).to_string(),
+                    |a| a.0.clone(),
+                );
                 link.send(
                     HOST_CONN,
                     &ToHost::Hello(Hello {
                         protocol: PROTOCOL_VERSION,
                         name: player.name.clone(),
-                        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                        engine_version,
+                        identity: player.identity.clone(),
                     }),
                 );
                 player.set_stage(JoinStage::AwaitingWelcome);
                 Ok(())
             }
             LinkEvent::Frame { body, .. } => match decode_body::<ToPlayer>(&body) {
+                Ok(ToPlayer::World(frame)) => {
+                    // Only once the world it changes is open.
+                    if matches!(player.stage, JoinStage::Opening | JoinStage::Playing) {
+                        player.clock.observe(frame.tick, now);
+                        worlds.write(WorldArrived(frame));
+                    }
+                    Ok(())
+                }
+                Ok(ToPlayer::Motion(frame)) => {
+                    player_motion(&mut player, &mut motions, frame, now);
+                    Ok(())
+                }
+                Ok(ToPlayer::RemoteReply(reply)) => {
+                    replies.write(RemoteReplied(reply));
+                    Ok(())
+                }
                 Ok(msg) => player_message(
                     &mut commands,
                     &link,
@@ -978,8 +1446,11 @@ fn player_pump(
                 Err(e) => Err(format!("the host sent an unreadable message: {e}")),
             },
             LinkEvent::Datagram { bytes, .. } => {
-                if let Ok(frame) = decode_datagram(&bytes) {
-                    player_avatar_frame(&player, &mut remotes, frame, now);
+                match decode_datagram(&bytes) {
+                    Ok(Datagram::Avatar(frame)) => player_avatar_frame(&player, &mut remotes, frame, now),
+                    Ok(Datagram::Motion(frame)) => player_motion(&mut player, &mut motions, frame, now),
+                    // Input and remote calls flow player to host only.
+                    Ok(Datagram::Input(_)) | Ok(Datagram::Remote(_)) | Err(_) => {}
                 }
                 Ok(())
             }
@@ -1025,9 +1496,14 @@ fn player_message(
                 ));
             }
             w.world.validate().map_err(|e| format!("the host's world was refused: {e}"))?;
+            player.clock.observe(w.tick, now);
             player.peer = Some(w.peer);
             player.host_name = w.host_name.clone();
             player.spawn = w.spawn;
+            player.sim_id = w
+                .sim_id
+                .filter(|id| !id.is_empty() && id.len() <= MAX_SIM_ID_CHARS && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
+            player.host_identity = w.host_identity.as_deref().and_then(sanitize_ticket);
             player.sizes = w.world.all_chunks().map(|c| (c.blake3.clone(), c.size)).collect();
             player.total = w.world.download_bytes();
 
@@ -1130,10 +1606,153 @@ fn player_message(
             }
         }
         ToPlayer::Avatar(frame) => player_avatar_frame(player, remotes, frame, now),
+        ToPlayer::PurchasePrompt { prompt, product, expects } => {
+            // Only in the world; the shell decides whether to offer it.
+            if player.stage == JoinStage::Playing {
+                notices.write(NetNotice::PurchasePrompt { prompt, product, expects });
+            }
+        }
+        // Routed by `player_pump` before they reach here.
+        ToPlayer::World(_) | ToPlayer::Motion(_) | ToPlayer::RemoteReply(_) => {}
     }
     let _ = link;
     Ok(())
 }
+
+/// Hand the host's motion to the shell, once this player is in the world.
+fn player_motion(player: &mut PlayerSession, motions: &mut MessageWriter<MotionArrived>, frame: MotionFrame, now: f64) {
+    if player.stage != JoinStage::Playing {
+        return;
+    }
+    player.clock.observe(frame.tick, now);
+    motions.write(MotionArrived(frame));
+}
+
+/// Send the shell's remote calls to the host.
+fn player_send_remotes(link: Res<NetLink>, player: Res<PlayerSession>, mut calls: MessageReader<FireRemote>) {
+    for fire in calls.read() {
+        if player.stage != JoinStage::Playing {
+            continue;
+        }
+        if fire.unreliable && player.datagrams {
+            let bytes = encode_datagram(&Datagram::Remote(fire.call.clone()));
+            if !bytes.is_empty() && bytes.len() <= crate::repl::motion::MAX_MOTION_DATAGRAM {
+                link.datagram(HOST_CONN, bytes);
+            }
+            // Too large for a datagram: an unreliable call may be lost anyway.
+        } else {
+            link.send(HOST_CONN, &ToHost::Remote(fire.call.clone()));
+        }
+    }
+}
+
+/// Send the shell's track changes to the host, in messages it accepts.
+fn player_send_tracks(link: Res<NetLink>, player: Res<PlayerSession>, mut sends: MessageReader<SendTracks>) {
+    for SendTracks(ops) in sends.read() {
+        if player.stage != JoinStage::Playing {
+            continue;
+        }
+        for chunk in ops.chunks(MAX_TRACK_OPS_PER_MESSAGE) {
+            link.send(HOST_CONN, &ToHost::Tracks(chunk.to_vec()));
+        }
+    }
+}
+
+/// Sample this player's devices every tick and send the newest few samples.
+#[allow(clippy::too_many_arguments)]
+fn send_local_input(
+    time: Res<Time>,
+    link: Res<NetLink>,
+    mut player: ResMut<PlayerSession>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    gamepads: Query<&Gamepad>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+) {
+    if player.stage != JoinStage::Playing {
+        return;
+    }
+    let period = (1.0 / TICK_HZ) as f32;
+    player.input_accum += time.delta_secs();
+    if player.input_accum < period {
+        return;
+    }
+    player.input_accum = (player.input_accum - period).min(period);
+
+    let now = time.elapsed_secs_f64();
+    let mut s = InputSample { tick: player.clock.host_tick(now).map_or(0, |t| t as u64), ..Default::default() };
+    if let Some(keys) = &keys {
+        for k in keys.get_pressed() {
+            if let Some(bit) = key_bit(*k) {
+                s.set_key(bit);
+            }
+        }
+    }
+    if let Some(mouse) = &mouse {
+        for (button, bit) in [(MouseButton::Left, MOUSE_LEFT), (MouseButton::Right, MOUSE_RIGHT), (MouseButton::Middle, MOUSE_MIDDLE)] {
+            if mouse.pressed(button) {
+                s.mouse |= bit;
+            }
+        }
+    }
+    if let Some(pad) = gamepads.iter().next() {
+        for (i, button) in PAD_BUTTONS.iter().enumerate() {
+            if pad.pressed(*button) {
+                s.pad |= 1 << i;
+            }
+        }
+        let axis = |a: GamepadAxis| (pad.get(a).unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0) as i16;
+        s.axes[AXIS_LEFT_X] = axis(GamepadAxis::LeftStickX);
+        s.axes[AXIS_LEFT_Y] = axis(GamepadAxis::LeftStickY);
+        s.axes[AXIS_RIGHT_X] = axis(GamepadAxis::RightStickX);
+        s.axes[AXIS_RIGHT_Y] = axis(GamepadAxis::RightStickY);
+        let trigger = |b: GamepadButton| (pad.get(b).unwrap_or(0.0).clamp(0.0, 1.0) * 32767.0) as i16;
+        s.axes[AXIS_LEFT_TRIGGER] = trigger(GamepadButton::LeftTrigger2);
+        s.axes[AXIS_RIGHT_TRIGGER] = trigger(GamepadButton::RightTrigger2);
+    }
+    // The camera that draws last is the one the player looks through.
+    if let Some((camera, tf)) = cameras.iter().filter(|(c, _)| c.is_active).max_by_key(|(c, _)| c.order) {
+        s.camera = tf.translation().to_array();
+        let look = tf.forward().as_vec3();
+        s.look = encode_dir(look);
+        let cursor = windows.iter().next().and_then(|w| w.cursor_position());
+        let aim = cursor.and_then(|c| camera.viewport_to_world(tf, c).ok()).map(|ray| ray.direction.as_vec3());
+        s.aim = encode_dir(aim.unwrap_or(look));
+    }
+    if !s.is_valid() {
+        return;
+    }
+
+    player.input_sent.push_front(s);
+    player.input_sent.truncate(INPUT_REDUNDANCY);
+    let frame = InputFrame { samples: player.input_sent.iter().copied().collect() };
+    if player.datagrams {
+        link.datagram(HOST_CONN, encode_datagram(&Datagram::Input(frame)));
+    } else {
+        link.send(HOST_CONN, &ToHost::Input(frame));
+    }
+}
+
+/// Gamepad buttons, by bit of [`InputSample::pad`].
+const PAD_BUTTONS: [GamepadButton; 16] = [
+    GamepadButton::South,
+    GamepadButton::East,
+    GamepadButton::North,
+    GamepadButton::West,
+    GamepadButton::LeftTrigger,
+    GamepadButton::RightTrigger,
+    GamepadButton::LeftTrigger2,
+    GamepadButton::RightTrigger2,
+    GamepadButton::Select,
+    GamepadButton::Start,
+    GamepadButton::LeftThumb,
+    GamepadButton::RightThumb,
+    GamepadButton::DPadUp,
+    GamepadButton::DPadDown,
+    GamepadButton::DPadLeft,
+    GamepadButton::DPadRight,
+];
 
 /// Decode a world's chunks into records, checking every path, whichever way
 /// the chunks arrived: from a host, or downloaded from R2 by a published
@@ -1224,6 +1843,11 @@ fn handle_shell_requests(
     mut ready: MessageReader<LocalWorldReady>,
     mut ends: MessageReader<EndSession>,
     mut notices: MessageWriter<NetNotice>,
+    (mut prompts, mut closes, mut receipts): (
+        MessageReader<PromptPurchase>,
+        MessageReader<ClosePurchase>,
+        MessageReader<SendReceipts>,
+    ),
 ) {
     if let Some(end) = ends.read().last() {
         if let Some(host) = &host {
@@ -1250,6 +1874,38 @@ fn handle_shell_requests(
             notices.write(NetNotice::Chat { peer: HOST_PEER, name, text });
         } else {
             link.send(HOST_CONN, &ToHost::Chat { text });
+        }
+    }
+
+    // Purchases. A prompt goes to a player in the world with room for it;
+    // any other is answered "not purchased" at once, so the asking script
+    // never waits on a prompt nobody saw.
+    let mut host = host;
+    for ask in prompts.read() {
+        let Some(host) = host.as_mut() else { continue };
+        let target = host
+            .peers
+            .iter_mut()
+            .find(|(_, p)| p.peer == ask.peer && p.stage == PeerStage::Ready && p.prompts.len() < MAX_OPEN_PROMPTS);
+        match target {
+            Some((conn, p)) => {
+                p.prompts.insert(ask.prompt);
+                link.send(*conn, &ToPlayer::PurchasePrompt { prompt: ask.prompt, product: ask.product, expects: ask.expects });
+            }
+            None => {
+                notices.write(NetNotice::PurchaseClosed { peer: ask.peer, prompt: ask.prompt, purchased: false });
+            }
+        }
+    }
+    if host.is_none() {
+        for close in closes.read() {
+            link.send(HOST_CONN, &ToHost::PurchaseClosed { prompt: close.prompt, purchased: close.purchased });
+        }
+        for list in receipts.read() {
+            let purchase_ids = sanitize_receipts(&list.purchase_ids);
+            if !purchase_ids.is_empty() {
+                link.send(HOST_CONN, &ToHost::Receipts { purchase_ids });
+            }
         }
     }
 
@@ -1374,7 +2030,7 @@ fn send_local_avatar(
     }
 
     if let Some(host) = &host {
-        let bytes = encode_datagram(&frame);
+        let bytes = encode_datagram(&Datagram::Avatar(frame));
         for (conn, p) in host.ready() {
             if p.datagrams {
                 link.datagram(conn, bytes.clone());
@@ -1388,7 +2044,7 @@ fn send_local_avatar(
         }
         frame.peer = player.peer.unwrap_or_default();
         if player.datagrams {
-            link.datagram(HOST_CONN, encode_datagram(&frame));
+            link.datagram(HOST_CONN, encode_datagram(&Datagram::Avatar(frame)));
         } else {
             link.send(HOST_CONN, &ToHost::Avatar(frame));
         }
@@ -1491,22 +2147,46 @@ fn drive_replica_intent(
     }
 }
 
-/// Pull each replica toward where its sender says it is.
-fn correct_replicas(time: Res<Time>, remotes: Res<RemoteAvatars>, mut replicas: Query<(&NetReplica, &mut Transform)>) {
+/// Pull each replica toward where its sender says it is. A seated replica
+/// rides its seat instead (`AvatarSeated`), as its sender's avatar does.
+fn correct_replicas(
+    time: Res<Time>,
+    mut remotes: ResMut<RemoteAvatars>,
+    mut replicas: Query<(&NetReplica, &mut Transform), Without<AvatarSeated>>,
+    mut reset: Local<HashSet<PeerId>>,
+) {
     let dt = time.delta_secs();
+    let now = time.elapsed_secs_f64();
     let move_blend = 1.0 - (-dt * 10.0).exp();
     let turn_blend = 1.0 - (-dt * 12.0).exp();
     for (replica, mut tf) in &mut replicas {
-        let Some(frame) = remotes.peers.get(&replica.peer).and_then(|r| r.latest) else { continue };
-        let target = Vec3::from_array(frame.position);
-        let error = target - tf.translation;
-        if error.length() > SNAP_DISTANCE {
-            tf.translation = target;
-        } else {
-            tf.translation += error * move_blend;
-        }
+        let Some(r) = remotes.peers.get_mut(&replica.peer) else { continue };
+        let Some(frame) = r.latest else { continue };
+        let sample = Vec3::from_array(frame.position);
         let facing = Quat::from_rotation_y(frame.yaw);
-        tf.rotation = tf.rotation.slerp(facing, turn_blend);
+        // The sender is the truth for its own avatar. A pose the local avatar
+        // runtime made non-finite starts again from the sample, before the
+        // bones and foot probes read it.
+        if !tf.translation.is_finite() || !tf.rotation.is_finite() {
+            if reset.insert(replica.peer) {
+                warn!("net: peer {}'s avatar went non-finite on this machine; placed at its last sample", replica.peer);
+            }
+            tf.translation = sample;
+            tf.rotation = facing;
+            r.placed = Some(sample);
+            r.teleport_hold = None;
+            continue;
+        }
+        if let Some(target) = r.correction_target(tf.translation, sample, now) {
+            let error = target - tf.translation;
+            if error.length() > SNAP_DISTANCE {
+                tf.translation = target;
+            } else {
+                tf.translation += error * move_blend;
+            }
+            tf.rotation = tf.rotation.slerp(facing, turn_blend);
+        }
+        r.placed = Some(tf.translation);
     }
 }
 
@@ -1515,10 +2195,14 @@ fn clear_replicas_after_session(
     mut commands: Commands,
     mut remotes: ResMut<RemoteAvatars>,
     mut local: ResMut<LocalAvatarNet>,
+    mut inputs: ResMut<PeerInputs>,
     replicas: Query<Entity, With<NetReplica>>,
 ) {
     for e in &replicas {
         commands.entity(e).try_despawn();
+    }
+    if !inputs.by_peer.is_empty() {
+        inputs.by_peer.clear();
     }
     if !remotes.peers.is_empty() || remotes.in_flight.is_some() {
         remotes.peers.clear();
@@ -1567,35 +2251,107 @@ mod tests {
     }
 
     #[test]
+    fn a_host_teleport_holds_until_the_sender_catches_up() {
+        let mut r = RemoteAvatars::default();
+        r.add_peer(1, "A".into());
+        let p = r.peers.get_mut(&1).unwrap();
+        let home = Vec3::ZERO;
+        let far = Vec3::new(100.0, 0.0, 0.0);
+        assert_eq!(p.correction_target(home, home, 0.0), Some(home));
+        p.placed = Some(home);
+        // A host script moves the replica 100 m; its sender still reports home.
+        assert_eq!(p.correction_target(far, home, 0.1), None);
+        p.placed = Some(far);
+        assert_eq!(p.correction_target(far, home, 0.5), None);
+        // The sender's own avatar arrives there: correction resumes.
+        assert_eq!(p.correction_target(far, far + Vec3::X, 0.6), Some(far + Vec3::X));
+        // A move the sender never follows is given up after the hold.
+        let elsewhere = Vec3::new(0.0, 0.0, 300.0);
+        assert_eq!(p.correction_target(elsewhere, far, 1.0), None);
+        assert_eq!(p.correction_target(elsewhere, far, 1.0 + TELEPORT_HOLD + 0.01), Some(far));
+    }
+
+    #[test]
+    fn only_usable_samples_are_kept() {
+        let mut r = RemoteAvatars::default();
+        r.add_peer(1, "A".into());
+        let mut lost = frame(1, 1);
+        lost.direction = [f32::NAN, 0.0, 0.0];
+        let mut spun = frame(1, 2);
+        spun.yaw = f32::INFINITY;
+        let mut far = frame(1, 3);
+        far.position = [0.0, -WORLD_LIMIT, 0.0];
+        for (at, f) in [lost, spun, far].into_iter().enumerate() {
+            r.accept_frame(f, at as f64);
+        }
+        assert!(r.peers[&1].latest.is_none(), "a replica never spawns from them");
+        r.accept_frame(frame(1, 4), 4.0);
+        assert_eq!(r.peers[&1].latest.map(|f| f.seq), Some(4));
+    }
+
+    #[test]
     fn spawn_points_spread_and_names_stay_unique() {
-        let mut host = HostSession::new(HostConfig {
-            host_name: "Host".into(),
-            max_players: 8,
-            world: WorldManifest::new("U", "0", 256.0),
-            chunks: HashMap::new(),
-            spawn: [0.0, 1.0, 0.0],
-        });
+        let mut host = HostSession::new(host_config());
         let a = host.spawn_for(1);
         let b = host.spawn_for(2);
         assert!(Vec3::from_array(a).distance(Vec3::from_array(b)) > 1.0);
         assert_eq!(host.unique_name("Host", 1), "Host (2)");
         assert_eq!(host.unique_name("", 3), "Player3");
-        host.peers.insert(
-            7,
-            HostPeer {
-                peer: 1,
-                name: "Ada".into(),
-                stage: PeerStage::Ready,
-                datagrams: true,
-                remote: String::new(),
-                appearance: None,
-                outbox: VecDeque::new(),
-                last_sample: None,
-                violations: 0,
-                violation_window: 0.0,
-                chat_times: VecDeque::new(),
-            },
-        );
+        let mut ada = HostPeer::new(1, String::new(), true, 0.0);
+        ada.name = "Ada".into();
+        ada.stage = PeerStage::Ready;
+        host.peers.insert(7, ada);
         assert_eq!(host.unique_name("Ada", 2), "Ada (2)");
+    }
+
+    fn host_config() -> HostConfig {
+        HostConfig {
+            host_name: "Host".into(),
+            max_players: 8,
+            world: WorldManifest::new("U", "0", 256.0),
+            chunks: HashMap::new(),
+            spawn: [0.0, 1.0, 0.0],
+            sim_id: None,
+        }
+    }
+
+    #[test]
+    fn live_world_frames_wait_for_the_catch_up() {
+        let (link, ends) = link_pair();
+        let mut host = HostSession::new(host_config());
+        let mut p = HostPeer::new(4, String::new(), true, 0.0);
+        p.stage = PeerStage::Ready;
+        host.peers.insert(9, p);
+        let frame = |tick| WorldFrame { tick, ops: vec![] };
+        let send = |peer, ticks: &[u64], catch_up| SendWorld { peer, frames: ticks.iter().map(|t| frame(*t)).collect(), catch_up };
+        assert_eq!(deliver_world(&link, &mut host, &send(4, &[1], false)), 0, "held: the catch-up includes it");
+        assert_eq!(deliver_world(&link, &mut host, &send(4, &[2, 3], true)), 2);
+        assert_eq!(deliver_world(&link, &mut host, &send(4, &[4], false)), 1);
+        assert_eq!(deliver_world(&link, &mut host, &send(5, &[5], true)), 0, "no such player");
+        let sent: Vec<u64> = ends
+            .commands
+            .try_iter()
+            .filter_map(|c| match c {
+                LinkCommand::Frame { conn: 9, frame } => match decode_body::<ToPlayer>(&frame[4..]) {
+                    Ok(ToPlayer::World(w)) => Some(w.tick),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn tickets_are_kept_only_when_printable_and_short() {
+        let mut host = HostSession::new(host_config());
+        host.set_identity(Some("eus_t1.abc-DEF_09".into()));
+        assert_eq!(host.identity.as_deref(), Some("eus_t1.abc-DEF_09"));
+        for bad in ["", "has space", "line\nbreak", &"x".repeat(crate::wire::MAX_TICKET_CHARS + 1)] {
+            host.set_identity(Some(bad.to_string()));
+            assert_eq!(host.identity, None, "kept {bad:?}");
+        }
+        let player = PlayerSession::new("P", Some("tab\there".into()));
+        assert_eq!(player.identity, None);
     }
 }

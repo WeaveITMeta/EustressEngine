@@ -24,16 +24,15 @@
 //! - The moon's `DirectionalLight` is owned by [`update_moon_position`].
 
 use bevy::prelude::*;
-use bevy::light::{GlobalAmbientLight, SunDisk};
+use bevy::light::{light_consts::lux, CascadeShadowConfigBuilder, GlobalAmbientLight, SunDisk, VolumetricLight};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use tracing::info;
 
-use crate::classes::{Moon as MoonClass, Sky, Sun as SunClass};
+use crate::classes::{Atmosphere, Moon as MoonClass, Sky, Sun as SunClass};
 use crate::plugins::moon_disc::MoonDiscPlugin;
 use crate::plugins::reflections::ReflectionsPlugin;
 use crate::plugins::sky_atmosphere::{
-    luminance, moonlight_color, moonlight_lux, SkyAtmospherePlugin, SkyExposure, SkyLight,
-    SkyLightSet,
+    luminance, moonlight_color, moonlight_lux, SkyAtmospherePlugin, SkyLight, SkyLightSet,
 };
 use crate::plugins::volumetric_clouds::VolumetricCloudsPlugin;
 use crate::services::lighting::{
@@ -65,9 +64,18 @@ impl Plugin for SharedLightingPlugin {
             // Local reflection probes and (opt-in) screen-space reflections.
             .add_plugins(ReflectionsPlugin)
             // The moon's disc and the volumetric cloud layer, both drawn at
-            // sky distance and lit from `SkyLight`.
-            .add_plugins((MoonDiscPlugin, VolumetricCloudsPlugin))
+            // sky distance and lit from `SkyLight`, and the sky dome, the
+            // sky itself wherever bevy's atmosphere is not drawing it.
+            .add_plugins((MoonDiscPlugin, VolumetricCloudsPlugin, crate::plugins::sky_dome::SkyDomePlugin))
+            // PointLight / SpotLight / SurfaceLight / DirectionalLight
+            // instances: their Bevy lights, display-referred against the
+            // exposure `SkyAtmospherePlugin` adapts.
+            .add_plugins(crate::plugins::light_classes::LightClassSyncPlugin)
+            // Every camera a person looks through, in both apps: the view
+            // stack, Bloom objects and the colour grade.
+            .add_plugins(crate::plugins::camera_look::CameraLookPlugin)
             .init_resource::<LightingService>()
+            .init_resource::<DayRollovers>()
             .register_type::<LightingService>()
             .register_type::<Sky>()
             .register_type::<SunMarker>()
@@ -78,10 +86,17 @@ impl Plugin for SharedLightingPlugin {
             .add_systems(
                 Update,
                 (
-                    // The clock drives the classes the sky light is computed
-                    // from, so it runs first.
+                    // The clock and the latitude place the Sun the sky light
+                    // is computed from, so they run first.
                     sync_clock_time_to_sun.before(SkyLightSet),
+                    sync_sun_latitude.before(update_sun_position),
+                    // The Atmosphere object's values into the resource the
+                    // sky draws from, before this frame's sky.
+                    sync_atmosphere_to_rendering.before(SkyLightSet),
                     update_sun_position.after(sync_clock_time_to_sun).before(SkyLightSet),
+                    // A day rolled over by the cycle turns the calendar
+                    // before this frame's sky is computed.
+                    advance_calendar.after(update_sun_position).before(SkyLightSet),
                     update_moon_position.after(SkyLightSet),
                     // Sole owner of GlobalAmbientLight. After the sky light, so
                     // it reads this frame's sun and moon, not last frame's.
@@ -105,14 +120,167 @@ fn arr_to_color(arr: [f32; 4]) -> Color {
 /// Set the ambient baseline. Everything else is loaded per Space.
 ///
 /// Sun and Moon entities are deliberately not spawned here: each Space owns its
-/// lighting through `Lighting/*.instance.toml`. The file loader spawns bare
-/// `Instance` entities and the engine's `hydrate_lighting_entities` attaches
-/// `DirectionalLight`, `SunMarker`, cascade shadows and `SunDisk` on the next
-/// frame. That keeps a Space switch from leaving duplicates behind, and lets
-/// each Space carry its own time of day and latitude.
+/// lighting through `Lighting/*.instance.toml`. In Studio the file loader
+/// spawns the instances and the engine's `hydrate_lighting_entities` lights
+/// them with [`sun_light`] and [`moon_light`]; the Player spawns them lit with
+/// the same two (`celestial_sections::spawn_space_celestials`). That keeps a
+/// Space switch from leaving duplicates behind, and lets each Space carry its
+/// own time of day and latitude.
 fn setup_lighting(mut commands: Commands) {
     commands.insert_resource(GlobalAmbientLight::NONE);
     info!("💡 SharedLightingPlugin ready (lighting entities load from the Space)");
+}
+
+// ============================================================================
+// The Sun's and Moon's lights, as both apps build them
+// ============================================================================
+
+/// How far the sun's cascade shadows reach, metres: `EUSTRESS_SHADOW_DISTANCE`,
+/// read once, else 1,000.
+///
+/// A generated world spans kilometres, so the old 200 m street-scale reach
+/// left almost the whole surface shadowless and flat-looking; 1,000 m with 4
+/// cascades keeps near shadows crisp while distant relief still casts. Past
+/// it the HLOD whole-map proxies are `NotShadowCaster`, so longer cascades
+/// only re-walk near casters at a coarser resolution. Dense part-heavy scenes
+/// can dial it back.
+pub fn sun_shadow_distance() -> f32 {
+    static D: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("EUSTRESS_SHADOW_DISTANCE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(1000.0)
+    })
+}
+
+/// Everything a Sun object carries once it is lit, built the same way in
+/// Studio (lighting hydration) and the Player (`spawn_space_celestials`): its
+/// `DirectionalLight`, `SunDisk`, cascade shadows and volumetric light, the
+/// `SunMarker` the sun systems drive, and its `SunClass`, placed by
+/// Lighting's clock and latitude. [`update_sun_position`] sets the light's
+/// strength and aim from the next frame on. `contact_shadows` is Studio's
+/// photoreal switch (screen-space contact shadows reach only a camera that
+/// carries `ContactShadows`).
+pub fn sun_light(sun: &SunClass, lighting: &LightingService, contact_shadows: bool) -> impl Bundle {
+    let mut sun = sun.clone();
+    sun.time_of_day = lighting.time_of_day * 24.0;
+    sun.latitude = lighting.geographic_latitude;
+    let sun_dir = lighting.sun_direction();
+    let cascades = CascadeShadowConfigBuilder {
+        num_cascades: 4,
+        minimum_distance: 0.1,
+        maximum_distance: sun_shadow_distance(),
+        first_cascade_far_bound: 90.0,
+        overlap_proportion: 0.25,
+        ..default()
+    }
+    .build();
+    (
+        DirectionalLight {
+            color: Color::srgba(sun.noon_color[0], sun.noon_color[1], sun.noon_color[2], sun.noon_color[3]),
+            illuminance: lux::RAW_SUNLIGHT,
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: contact_shadows,
+            shadow_depth_bias: 0.02,
+            shadow_normal_bias: 1.8,
+            ..default()
+        },
+        // The light's true size, which is how bevy's atmosphere fades it as
+        // it sets, and no disc of bevy's own: the sky dome draws the Sun at
+        // its AngularSize on every sky path (`sync_sun_disk`).
+        SunDisk {
+            angular_size: crate::plugins::sky_atmosphere::SUN_LIGHT_ANGULAR_SIZE.to_radians(),
+            intensity: 0.0,
+        },
+        Transform::from_translation(sun_dir * 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+        VolumetricLight,
+        cascades,
+        SunMarker,
+        sun,
+    )
+}
+
+/// Everything a Moon object carries once it is lit, in both apps: a
+/// `DirectionalLight` left dark until [`update_moon_position`] places it on
+/// the next frame (a 500 lux placeholder moon once hung overhead, lit day
+/// and night until something edited the clock), the `MoonMarker`, and its
+/// `MoonClass`. [`hide_moon_sun_disk`] keeps bevy from drawing a sun disc on it.
+pub fn moon_light(moon: &MoonClass) -> impl Bundle {
+    (
+        DirectionalLight {
+            color: Color::srgb(0.7, 0.75, 0.9),
+            illuminance: 0.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(50.0, 80.0, -30.0).looking_at(Vec3::ZERO, Vec3::Y),
+        MoonMarker,
+        moon.clone(),
+    )
+}
+
+/// Carry Lighting's GeographicLatitude to the Sun: where the sun stands is
+/// the service's, like the clock ([`sync_clock_time_to_sun`] owns its time).
+///
+/// Only that. The sun's light, colour, disc and shadows are the Sun's own
+/// properties, in its `[star]` section. It compares every frame rather than
+/// waiting for the service to change: a Sun spawned after the service last
+/// changed (every Space open) would otherwise keep the default latitude, and
+/// writing only a different value keeps `Changed<SunClass>` quiet.
+fn sync_sun_latitude(lighting: Res<LightingService>, mut suns: Query<&mut SunClass>) {
+    for mut sun in suns.iter_mut() {
+        if sun.latitude != lighting.geographic_latitude {
+            sun.latitude = lighting.geographic_latitude;
+        }
+    }
+}
+
+/// Sync the authored Atmosphere object into the `SceneAtmosphere` resource
+/// the sky draws from.
+///
+/// `Atmosphere` (the Explorer class) carries the six artistic properties;
+/// `EustressAtmosphere` carries those, the scattering model and the Enabled
+/// switch. The Space's first enabled Atmosphere is the one drawn: its model
+/// with the Explorer class's six fields over it (a script or an older path
+/// may have set only those). With none, because it is switched off or
+/// deleted, the sky is the engine's own, as for a Space that never had one;
+/// before, a deleted Atmosphere's values stayed on screen.
+fn sync_atmosphere_to_rendering(
+    changed: Query<(), Or<(Changed<Atmosphere>, Changed<EustressAtmosphere>)>>,
+    mut removed_class: RemovedComponents<Atmosphere>,
+    mut removed_model: RemovedComponents<EustressAtmosphere>,
+    objects: Query<(Option<&Atmosphere>, Option<&EustressAtmosphere>), Or<(With<Atmosphere>, With<EustressAtmosphere>)>>,
+    mut scene_atmosphere: ResMut<SceneAtmosphere>,
+) {
+    let removed = removed_class.read().count() + removed_model.read().count() > 0;
+    if changed.is_empty() && !removed {
+        return;
+    }
+    let drawn = objects.iter().find(|(_, model)| model.map_or(true, |m| m.enabled));
+    let atmosphere = match drawn {
+        Some((class, model)) => {
+            let mut atmosphere = model.cloned().unwrap_or_else(|| SceneAtmosphere::default().atmosphere);
+            if let Some(class) = class {
+                atmosphere.density = class.density;
+                atmosphere.offset = class.offset;
+                atmosphere.color = class.color;
+                atmosphere.decay = class.decay;
+                atmosphere.glare = class.glare;
+                atmosphere.haze = class.haze;
+            }
+            atmosphere
+        }
+        None => SceneAtmosphere::default().atmosphere,
+    };
+    info!(
+        "🌫️ Synced Atmosphere to rendering ({}, density: {}, haze: {})",
+        if drawn.is_some() { "authored" } else { "none enabled: the engine's own sky" },
+        atmosphere.density,
+        atmosphere.haze
+    );
+    scene_atmosphere.atmosphere = atmosphere;
 }
 
 // ============================================================================
@@ -154,6 +322,8 @@ fn update_sun_position(
     // pixel of the scene.
     sun_dirty: Query<(), (With<SunMarker>, Or<(Added<SunMarker>, Changed<SunClass>)>)>,
     time: Res<Time>,
+    medium: Option<Res<crate::plugins::sky_atmosphere::SkyMedium>>,
+    rollovers: Option<ResMut<DayRollovers>>,
     mut last_reported: Local<f32>,
 ) {
     let Some(mut lighting) = lighting else { return };
@@ -164,6 +334,9 @@ fn update_sun_position(
             lighting.time_of_day += time.delta_secs() / day_length_secs;
             if lighting.time_of_day > 1.0 {
                 lighting.time_of_day -= 1.0;
+                if let Some(mut rollovers) = rollovers {
+                    rollovers.0 = rollovers.0.wrapping_add(1);
+                }
             }
             // Keep the clock in step. `sync_clock_time_to_sun` and the
             // Properties panel both read the clock string, so advancing only
@@ -215,18 +388,40 @@ fn update_sun_position(
     // light is faded out, so a camera that renders without the atmosphere
     // (the AI capture camera) is not lit from under the ground all night.
     let twilight = ((sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees() + 16.0) / 6.0).clamp(0.0, 1.0);
+    // The Sun's own switch and shadows, and Lighting's GlobalShadows over
+    // every light.
+    let lit = |sc: &SunClass| if sc.enabled { 1.0 } else { 0.0 };
+    let shadows = |sc: &SunClass| sc.enabled && sc.cast_shadows && lighting.shadows_enabled;
     match sun_class {
         Some(sc) if atmosphere => {
             sun_light.color = arr_to_color(sc.noon_color);
-            sun_light.illuminance = sc.noon_intensity.max(0.0) * scale * twilight;
-            sun_light.shadow_maps_enabled = sc.cast_shadows && sun_up;
+            sun_light.illuminance = sc.noon_intensity.max(0.0) * scale * twilight * lit(sc);
+            sun_light.shadow_maps_enabled = shadows(sc) && sun_up;
         }
-        // No atmosphere to redden a low sun: `SunClass` models colour and
-        // intensity against solar elevation instead.
+        // No atmosphere to redden and dim the sun on the GPU, so the light
+        // carries what `SkyMedium` (the same medium the CPU sky model
+        // integrates) lets through: a low sun is orange, a set sun lights
+        // nothing, and the ground, the sky dome and the exposure agree.
+        // `SunClass::current_intensity()` gave a sun 4 degrees down 329 lux
+        // while the exposure opened up for dusk, which blew every surface
+        // facing it out to white.
         Some(sc) => {
-            sun_light.color = arr_to_color(sc.current_color());
-            sun_light.illuminance = sc.current_intensity() * scale;
-            sun_light.shadow_maps_enabled = sc.cast_shadows && sun_dir.y > 0.05;
+            let noon = Color::srgb(sc.noon_color[0], sc.noon_color[1], sc.noon_color[2]).to_linear();
+            let through = medium.as_ref().map_or(Vec3::ONE, |m| m.transmittance(0.0, sun_dir.y))
+                * crate::plugins::sky_atmosphere::disc_visibility(
+                    sun_dir.y,
+                    (crate::plugins::sky_atmosphere::SUN_LIGHT_ANGULAR_SIZE * 0.5).to_radians(),
+                );
+            let reaching = Vec3::new(noon.red, noon.green, noon.blue) * through;
+            let share = luminance(reaching);
+            sun_light.color = if share > 1e-6 {
+                let hue = reaching / share;
+                Color::linear_rgb(hue.x, hue.y, hue.z)
+            } else {
+                arr_to_color(sc.noon_color)
+            };
+            sun_light.illuminance = sc.noon_intensity.max(0.0) * share * scale * lit(sc);
+            sun_light.shadow_maps_enabled = shadows(sc) && sun_dir.y > 0.05;
         }
         None if atmosphere => {
             sun_light.color = arr_to_color(lighting.sun_color);
@@ -240,6 +435,8 @@ fn update_sun_position(
         }
     }
 
+    sun_light.color = color_shifted(sun_light.color, lighting.color_shift_top);
+
     sun_transform.translation = sun_dir * 100.0;
     sun_transform.look_at(Vec3::ZERO, Vec3::Y);
 
@@ -252,6 +449,64 @@ fn update_sun_position(
         *last_reported = lux;
         info!("☀️ Sun illuminance {lux:.0} lux (elevation {:.1}°)", sun_dir.y.asin().to_degrees());
     }
+}
+
+/// Roblox's `ColorShift_Top` and `ColorShift_Bottom`: a hue a light takes on.
+///
+/// `shift` is an sRGB colour, black for none. The light's colour is
+/// multiplied by `1 + shift` and brought back to its own luminance, so a
+/// shift moves the hue and never the brightness the exposure is calibrated
+/// against. On the atmosphere path the key light's colour also tints the sky
+/// bevy scatters from it.
+pub fn color_shifted(color: Color, shift: [f32; 4]) -> Color {
+    let s = Color::srgb(shift[0].clamp(0.0, 1.0), shift[1].clamp(0.0, 1.0), shift[2].clamp(0.0, 1.0)).to_linear();
+    if s.red + s.green + s.blue <= 0.0 {
+        return color;
+    }
+    let c = color.to_linear();
+    let base = Vec3::new(c.red, c.green, c.blue);
+    let tinted = base * (Vec3::ONE + Vec3::new(s.red, s.green, s.blue));
+    let (was, now) = (luminance(base), luminance(tinted));
+    let out = if now > 1e-6 { tinted * (was / now) } else { base };
+    Color::linear_rgba(out.x, out.y, out.z, c.alpha)
+}
+
+/// How many times the day cycle has carried the clock past midnight. Only
+/// the running cycle counts: scrubbing the clock never turns the date.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct DayRollovers(pub u32);
+
+/// `day` of the year moved on `days`, 365 wrapping to 1.
+pub fn next_day_of_year(day: u16, days: u32) -> u16 {
+    ((day.clamp(1, 365) as u32 - 1 + days) % 365 + 1) as u16
+}
+
+/// Turn the calendar for each day the cycle rolled over: the Sun's date
+/// moves on, and a Moon that follows the calendar (its FollowsCalendar
+/// property) moves through its phases, so a running cycle shows the moon
+/// wax and wane instead of holding one phase forever. `Moon::advance` also
+/// precesses its orbit's node.
+fn advance_calendar(
+    rollovers: Res<DayRollovers>,
+    mut seen: Local<Option<u32>>,
+    mut suns: Query<&mut SunClass, With<SunMarker>>,
+    mut moons: Query<&mut MoonClass, With<MoonMarker>>,
+) {
+    let now = rollovers.0;
+    let Some(before) = seen.replace(now) else { return };
+    let days = now.wrapping_sub(before);
+    if days == 0 {
+        return;
+    }
+    for mut sun in suns.iter_mut() {
+        sun.day_of_year = next_day_of_year(sun.day_of_year, days);
+    }
+    for mut moon in moons.iter_mut() {
+        if moon.sync_with_sun {
+            moon.advance(days as f32);
+        }
+    }
+    info!("📅 Calendar turned {days} day(s)");
 }
 
 /// The brightest the sun's disc is drawn, as a pre-tonemap value.
@@ -283,24 +538,15 @@ pub fn sun_disk_intensity(illuminance: f32, angular_size: f32, ev100: f32) -> f3
 ///
 /// The disc is drawn by bevy's atmosphere from this component, so it is the one
 /// place the sun's apparent size is set.
-fn sync_sun_disk(
-    exposure: Res<SkyExposure>,
-    mut suns: Query<(&SunClass, &DirectionalLight, &mut SunDisk), With<SunMarker>>,
-    skies: Query<&Sky>,
-) {
-    let shown = skies.iter().next().map_or(true, |s| s.celestial_bodies_shown);
-    for (sun_class, light, mut disk) in suns.iter_mut() {
-        let angular_size = sun_class.angular_size.clamp(0.05, 20.0).to_radians();
-        let intensity = if shown {
-            sun_disk_intensity(light.illuminance, angular_size, exposure.camera_ev100)
-        } else {
-            0.0
-        };
-        if (disk.angular_size - angular_size).abs() > 1e-5 {
-            disk.angular_size = angular_size;
-        }
-        if (disk.intensity - intensity).abs() > disk.intensity.max(intensity) * 0.02 + 1e-6 {
-            disk.intensity = intensity;
+fn sync_sun_disk(mut suns: Query<&mut SunDisk, With<SunMarker>>) {
+    // The drawn disc is the sky dome's, at the Sun's AngularSize, on every
+    // sky path. Bevy's `SunDisk` keeps only the light's true size, which is
+    // how its atmosphere fades the light as the sun sets: an 8 degree drawn
+    // sun would otherwise light the ground until it was 4 degrees down.
+    let angular_size = crate::plugins::sky_atmosphere::SUN_LIGHT_ANGULAR_SIZE.to_radians();
+    for mut disk in suns.iter_mut() {
+        if (disk.angular_size - angular_size).abs() > 1e-6 || disk.intensity != 0.0 {
+            *disk = SunDisk { angular_size, intensity: 0.0 };
         }
     }
 }
@@ -310,14 +556,15 @@ fn sync_sun_disk(
 /// Bevy's atmosphere draws a sun disc for EVERY directional light, and a
 /// light without a `SunDisk` gets `SunDisk::EARTH`: a flat, sun-bright disc
 /// sat exactly where the moon is, a small white hole in front of the moon's
-/// own disc. Intensity 0 turns the drawing off; the angular size is kept so
-/// the atmosphere still eases moonlight off as the moon sets.
+/// own disc. Intensity 0 turns the drawing off; the true moon's size is kept
+/// so the atmosphere eases moonlight off as the real disc would set.
 fn hide_moon_sun_disk(
     mut commands: Commands,
     moons: Query<(Entity, &MoonClass, Option<&SunDisk>), With<MoonMarker>>,
 ) {
     for (entity, moon, disk) in moons.iter() {
-        let angular_size = moon.angular_size.clamp(0.05, 20.0).to_radians();
+        let _ = moon;
+        let angular_size = crate::plugins::sky_atmosphere::MOON_LIGHT_ANGULAR_SIZE.to_radians();
         let wanted = SunDisk { angular_size, intensity: 0.0 };
         let stale = disk.map_or(true, |d| {
             d.intensity != 0.0 || (d.angular_size - angular_size).abs() > 1e-5
@@ -408,7 +655,7 @@ fn update_moon_position(
     let color = moonlight_color(moon_data);
     let lux = moonlight_lux(moon_data) * brightness_scale(&lighting);
 
-    moon_light.color = Color::linear_rgb(color.x, color.y, color.z);
+    moon_light.color = color_shifted(Color::linear_rgb(color.x, color.y, color.z), lighting.color_shift_top);
     moon_light.illuminance = if atmosphere {
         // Faded out once it has set, for the same reason as the sun: a
         // camera without the atmosphere would be lit from under the ground.
@@ -491,7 +738,7 @@ const SKY_FILL_FRACTION_NO_IBL: f32 = 0.86;
 /// up to `MAX_NIGHT_ADAPTATION_EV` stops at night, so this reads about seven
 /// stops under a daylit scene. The old 40 was set against the daylight
 /// exposure and would read as dusk once the exposure adapts.
-const NIGHT_FLOOR_LUX: f32 = 6.0;
+pub(crate) const NIGHT_FLOOR_LUX: f32 = 6.0;
 
 /// Shadow fill at night leans toward moonlight's blue, as the eye sees it.
 const NIGHT_FILL_TINT: [f32; 3] = [0.75, 0.86, 1.18];
@@ -534,7 +781,7 @@ fn update_ambient_light(
     let base = sky_fill_color(&lighting);
     let night = sky_light.night;
     let tint = |i: usize| base[i] * (1.0 + (NIGHT_FILL_TINT[i] - 1.0) * night);
-    let color = Color::srgba(tint(0), tint(1), tint(2), base[3]);
+    let color = color_shifted(Color::srgba(tint(0), tint(1), tint(2), base[3]), lighting.color_shift_bottom);
     if ambient.color != color {
         ambient.color = color;
     }
@@ -651,6 +898,86 @@ impl SceneAtmosphere {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sun_is_lit_the_same_way_in_both_apps() {
+        // The pinned list: Studio's hydration and the Player's spawn both
+        // build the Sun from `sun_light`, so this is what both give it.
+        let mut world = World::new();
+        let lighting = LightingService { geographic_latitude: 12.5, ..default() };
+        let sun = SunClass { angular_size: 0.6, ..SunClass::default() };
+        let e = world.spawn(sun_light(&sun, &lighting, false)).id();
+        let entity = world.entity(e);
+        assert!(entity.contains::<SunMarker>());
+        assert!(entity.contains::<VolumetricLight>());
+        assert!(entity.contains::<bevy::light::CascadeShadowConfig>());
+        let light = entity.get::<DirectionalLight>().expect("a sun light");
+        assert!(light.shadow_maps_enabled && !light.contact_shadows_enabled);
+        assert_eq!(light.illuminance, lux::RAW_SUNLIGHT);
+        assert_eq!((light.shadow_depth_bias, light.shadow_normal_bias), (0.02, 1.8));
+        let disk = entity.get::<SunDisk>().expect("a sun disc");
+        assert!(
+            (disk.angular_size - crate::plugins::sky_atmosphere::SUN_LIGHT_ANGULAR_SIZE.to_radians()).abs() < 1e-6,
+            "the light's true size, not the drawn one"
+        );
+        assert_eq!(disk.intensity, 0.0, "the sky dome draws the disc");
+        let placed = entity.get::<SunClass>().expect("its class");
+        assert_eq!(placed.latitude, 12.5, "Lighting's latitude");
+        assert!((placed.time_of_day - lighting.time_of_day * 24.0).abs() < 1e-4, "Lighting's clock");
+    }
+
+    #[test]
+    fn a_moon_is_lit_the_same_way_in_both_apps() {
+        let mut world = World::new();
+        let e = world.spawn(moon_light(&MoonClass::default())).id();
+        let entity = world.entity(e);
+        assert!(entity.contains::<MoonMarker>() && entity.contains::<MoonClass>());
+        let light = entity.get::<DirectionalLight>().expect("a moon light");
+        assert_eq!(light.illuminance, 0.0, "dark until update_moon_position places it");
+        assert!(!light.shadow_maps_enabled);
+    }
+
+    #[test]
+    fn a_sun_that_arrives_late_still_takes_the_latitude() {
+        let mut app = App::new();
+        app.insert_resource(LightingService { geographic_latitude: 33.0, ..default() })
+            .add_systems(Update, sync_sun_latitude);
+        app.update();
+        // The Sun spawns after the service's last change, as on every open.
+        let e = app.world_mut().spawn(SunClass::default()).id();
+        app.update();
+        assert_eq!(app.world().get::<SunClass>(e).map(|s| s.latitude), Some(33.0));
+    }
+
+    #[test]
+    fn the_atmosphere_object_reaches_the_sky() {
+        let mut app = App::new();
+        app.init_resource::<SceneAtmosphere>().add_systems(Update, sync_atmosphere_to_rendering);
+        app.world_mut().spawn(Atmosphere { density: 0.9, haze: 2.5, ..Atmosphere::default() });
+        app.update();
+        let scene = app.world().resource::<SceneAtmosphere>();
+        assert_eq!((scene.atmosphere.density, scene.atmosphere.haze), (0.9, 2.5));
+    }
+
+    #[test]
+    fn a_switched_off_or_deleted_atmosphere_leaves_the_engines_sky() {
+        let mut app = App::new();
+        app.init_resource::<SceneAtmosphere>().add_systems(Update, sync_atmosphere_to_rendering);
+        let hazy = EustressAtmosphere { haze: 3.0, ..EustressAtmosphere::default() };
+        let e = app.world_mut().spawn(hazy.clone()).id();
+        app.update();
+        assert_eq!(app.world().resource::<SceneAtmosphere>().atmosphere.haze, 3.0);
+        app.world_mut().get_mut::<EustressAtmosphere>(e).unwrap().enabled = false;
+        app.update();
+        let engine = SceneAtmosphere::default().atmosphere.haze;
+        assert_eq!(app.world().resource::<SceneAtmosphere>().atmosphere.haze, engine, "switched off");
+        app.world_mut().get_mut::<EustressAtmosphere>(e).unwrap().enabled = true;
+        app.update();
+        assert_eq!(app.world().resource::<SceneAtmosphere>().atmosphere.haze, 3.0, "back on");
+        app.world_mut().despawn(e);
+        app.update();
+        assert_eq!(app.world().resource::<SceneAtmosphere>().atmosphere.haze, engine, "deleted");
+    }
 
     #[test]
     fn clock_time_parses_every_authored_shape() {
@@ -839,5 +1166,36 @@ mod tests {
             (start, start + 1.0)
         };
         assert!(e > s, "an equal pair must not divide by zero");
+    }
+
+    #[test]
+    fn the_calendar_wraps_the_year() {
+        assert_eq!(next_day_of_year(172, 1), 173);
+        assert_eq!(next_day_of_year(365, 1), 1);
+        assert_eq!(next_day_of_year(364, 3), 2);
+    }
+
+    #[test]
+    fn a_day_moves_the_moon_through_its_phases() {
+        let mut moon = MoonClass { lunar_day: 14.76, ..MoonClass::default() };
+        moon.advance(7.0);
+        assert!((moon.lunar_day - 21.76).abs() < 1e-4);
+        moon.advance(10.0);
+        assert!(moon.lunar_day < MoonClass::SYNODIC_MONTH, "it wraps: {}", moon.lunar_day);
+    }
+
+    #[test]
+    fn a_black_colour_shift_changes_nothing() {
+        let c = Color::srgb(0.9, 0.8, 0.7);
+        assert_eq!(color_shifted(c, [0.0, 0.0, 0.0, 1.0]), c);
+    }
+
+    #[test]
+    fn a_colour_shift_moves_the_hue_and_keeps_the_brightness() {
+        let white = Color::WHITE;
+        let warm = color_shifted(white, [1.0, 0.5, 0.0, 1.0]).to_linear();
+        let rgb = Vec3::new(warm.red, warm.green, warm.blue);
+        assert!(rgb.x > rgb.z, "{rgb:?} is not warmer");
+        assert!((luminance(rgb) - 1.0).abs() < 1e-4, "luminance {}", luminance(rgb));
     }
 }

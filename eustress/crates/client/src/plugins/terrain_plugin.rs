@@ -107,20 +107,18 @@ fn sync_terrain_class_to_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (_entity, terrain_class) in query.iter() {
+    // One terrain at a time: a root spawned here is not in `existing_terrain`
+    // until the commands apply, so a second instance added in the same frame
+    // would spawn a second root beside it.
+    for (_entity, terrain_class) in query.iter().take(1) {
         // Generate unique ID for this terrain
         let terrain_id = TerrainId(rand::random());
-        
-        // Check if we should replace existing or add new
-        let should_replace = existing_terrain.iter().count() > 0;
-        
-        if should_replace {
-            // Despawn existing terrain with same ID or all if no ID
-            for (existing, id) in existing_terrain.iter() {
-                if id.is_none() {
-                    commands.entity(existing).despawn();
-                }
-            }
+
+        // The new terrain replaces whatever terrain is there. The shared
+        // streaming, LOD and cull systems drive exactly one root (they read
+        // it with `single()`), so a second root would stop them all.
+        for (existing, _) in existing_terrain.iter() {
+            commands.entity(existing).despawn();
         }
         
         // Convert class to config

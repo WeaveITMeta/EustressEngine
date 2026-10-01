@@ -88,10 +88,27 @@ pub struct ImportReport {
     #[serde(default)]
     pub csg_fallback_aabb: usize,
 
+    /// Parts whose MeshPart `TextureID` or SpecialMesh `TextureId` was baked
+    /// into their glb as its material.
+    #[serde(default)]
+    pub textured_meshes: usize,
+
     /// Events / functions (`RemoteEvent`, `RemoteFunction`,
     /// `BindableEvent`, `BindableFunction`) imported.
     #[serde(default)]
     pub events_imported: usize,
+
+    /// `KeyframeSequence`s in the place written as clip records.
+    #[serde(default)]
+    pub animation_sequences: usize,
+    /// Roblox animation ids fetched and written as clip files under
+    /// `assets/animations/`, each named in `assets/roblox_ids.toml`.
+    #[serde(default)]
+    pub animation_clips: usize,
+    /// Roblox animation ids the place uses that have no clip in the Space,
+    /// and why.
+    #[serde(default)]
+    pub animation_ids_missing: Vec<MissingAnimation>,
 
     /// Wave 8.A: instance cores written directly to the worlddb binary
     /// store via `BinarySink` (bypassing the TOML intermediary). 0 in
@@ -274,6 +291,19 @@ pub struct UnmappedProperty {
     /// How many instances carried this unmapped property.
     #[serde(default)]
     pub count: usize,
+}
+
+/// A Roblox animation id the place uses with no clip in the Space.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingAnimation {
+    /// The Roblox asset id.
+    pub id: u64,
+    /// Where the place names it: `AnimationId` (an `Animation`'s property)
+    /// or `script` (a string literal in a script that works with
+    /// animations, which may also be an image or a sound).
+    pub found_in: String,
+    /// Why the Space has no clip for it.
+    pub reason: String,
 }
 
 /// An asset reference we couldn't (or didn't try to) fetch.

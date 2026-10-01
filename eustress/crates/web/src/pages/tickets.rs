@@ -11,7 +11,6 @@ use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
 
-const API_URL: &str = "https://api.eustress.dev";
 
 #[derive(Debug, Clone, Deserialize)]
 struct TicketPackage {
@@ -38,7 +37,7 @@ pub fn TicketsPage() -> impl IntoView {
 
     // Fetch packages on load
     spawn_local(async move {
-        if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/tickets/packages", API_URL))
+        if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/tickets/packages", crate::state::api_base()))
             .send().await
         {
             if let Ok(data) = resp.json::<PackagesResponse>().await {
@@ -155,7 +154,7 @@ pub fn TicketsPage() -> impl IntoView {
                         loading.set(true);
                         spawn_local(async move {
                             let body = serde_json::json!({ "package": pkg_id });
-                            let resp = gloo_net::http::Request::post(&format!("{}/api/tickets/checkout", API_URL))
+                            let resp = gloo_net::http::Request::post(&format!("{}/api/tickets/checkout", crate::state::api_base()))
                                 .header("Authorization", &format!("Bearer {}", token))
                                 .header("Content-Type", "application/json")
                                 .body(body.to_string())

@@ -1,0 +1,19 @@
+# ColorCorrectionEffect: Roblox's colour correction (child of Lighting).
+# Graded after tonemapping on every view camera, in display space. Several
+# combine: offsets add, factors multiply.
+#
+# brightness: added to every channel, -1 to 1.
+# contrast:   the change in contrast around mid grey, -1 to 1; 0 is none.
+# saturation: the change in saturation, -1 to 1; 0 is none, -1 is grey.
+# tint_color: multiplied in last, 0-255.
+
+[color_correction_effect]
+enabled = true
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+tint_color = [255, 255, 255]
+
+[metadata]
+class_name = "ColorCorrectionEffect"
+archivable = true

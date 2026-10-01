@@ -1,11 +1,39 @@
-# Clouds — Volumetric cloud system (child of Lighting service)
-# Bevy: Custom volumetric cloud shader
+# Clouds: a volumetric cloud layer (child of the Lighting service)
+# Bevy: the raymarched cloud dome, read by common/src/plugins/celestial_sections.rs
+#
+# No Clouds object, no clouds (Roblox's rule). These defaults are fair
+# weather: scattered cumulus over about a third of the sky.
+#
+# cover:               share of the layer that is cloud, 0 to 1 (Roblox's Cover).
+# density:             how opaque the cloud is, 0 to 1.
+# color, shadow_color: the lit tops' tint and the undersides' hue, 0-255.
+# layer_type:          Cumulus, Cirrus, Stratus, Cumulonimbus or Altocumulus.
+# softness:            0 crisp edges, 1 soft.
+# spread:              how large the cloud shapes are.
+# altitude, thickness: the base height and the layer's depth, metres.
+# coverage_mode:       Full, Scattered, Horizon, Zenith, or a compass side.
+# coverage_bias:       how strongly the mode gathers the cloud, 0 to 1.
+# wind_speed:          metres per second; wind_direction: degrees from north.
+# animation_speed:     how fast the shapes evolve, 1 is natural.
+# time_of_day_tinting: sunset colours on the cloud light.
 
 [clouds]
 enabled = true
-cover = 0.5
-density = 0.7
+cover = 0.3
+density = 0.45
 color = [255, 255, 255]
+shadow_color = [102, 102, 128]
+layer_type = "Cumulus"
+softness = 0.6
+spread = 1.0
+altitude = 1400.0
+thickness = 900.0
+coverage_mode = "Full"
+coverage_bias = 0.5
+wind_speed = 6.0
+wind_direction = 45.0
+animation_speed = 1.0
+time_of_day_tinting = true
 
 [metadata]
 class_name = "Clouds"

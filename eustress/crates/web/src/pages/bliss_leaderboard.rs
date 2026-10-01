@@ -16,7 +16,6 @@ use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
 
-const API_URL: &str = "https://api.eustress.dev";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderRow {
@@ -76,7 +75,7 @@ pub fn BlissLeaderboardPage() -> impl IntoView {
         let window = days.get();
         loading.set(true);
         spawn_local(async move {
-            let url = format!("{}/api/ledger/leaderboard?days={}", API_URL, window);
+            let url = format!("{}/api/ledger/leaderboard?days={}", crate::state::api_base(), window);
             match gloo_net::http::Request::get(&url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<Leaderboard>().await {
                     Ok(data) => {

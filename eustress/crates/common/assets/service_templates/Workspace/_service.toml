@@ -8,7 +8,7 @@ description = "Root container for all game entities and physics simulation"
 can_have_children = true
 
 [properties]
-gravity = 196.2
+gravity = [0.0, -9.80665, 0.0]
 fallen_parts_destroy_height = -500.0
 global_wind = [0.0, 0.0, 0.0]
 streaming_enabled = false

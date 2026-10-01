@@ -81,7 +81,7 @@ fn fmt_thousands(n: f64) -> String {
 #[cfg(not(feature = "ssr"))]
 async fn refresh_bliss_kpis(kpi: RwSignal<BlissKpi>) {
     // Economics: treasury, live emission, supply, distributed, drip rate.
-    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/payouts/rate")
+    if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/payouts/rate", crate::state::api_base()))
         .send().await
     {
         if let Ok(data) = resp.json::<serde_json::Value>().await {
@@ -108,7 +108,7 @@ async fn refresh_bliss_kpis(kpi: RwSignal<BlissKpi>) {
     }
 
     // Community: contributor count.
-    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/community/stats")
+    if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/community/stats", crate::state::api_base()))
         .send().await
     {
         if let Ok(data) = resp.json::<serde_json::Value>().await {
@@ -118,7 +118,7 @@ async fn refresh_bliss_kpis(kpi: RwSignal<BlissKpi>) {
     }
 
     // Nodes: live active-node count from heartbeats.
-    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/node/stats")
+    if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/node/stats", crate::state::api_base()))
         .send().await
     {
         if let Ok(data) = resp.json::<serde_json::Value>().await {
@@ -252,7 +252,7 @@ pub fn BlissPage() -> impl IntoView {
                                                     if let Some(token) = token {
                                                         leptos::task::spawn_local(async move {
                                                             let resp = gloo_net::http::Request::post(
-                                                                "https://api.eustress.dev/api/stripe/connect/onboard"
+                                                                &format!("{}/api/stripe/connect/onboard", crate::state::api_base())
                                                             )
                                                             .header("Authorization", &format!("Bearer {}", token))
                                                             .header("Content-Type", "application/json")
@@ -457,7 +457,7 @@ pub fn BlissPage() -> impl IntoView {
 
                         leptos::task::spawn_local(async move {
                             let mut req = gloo_net::http::Request::post(
-                                "https://api.eustress.dev/api/stripe/checkout"
+                                &format!("{}/api/stripe/checkout", crate::state::api_base())
                             ).header("Content-Type", "application/json");
 
                             if let Some(ref t) = token {

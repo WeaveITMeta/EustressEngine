@@ -1,0 +1,29 @@
+# Clouds: the fair-weather cloud layer, scattered cumulus over about a third
+# of the sky. Auto-created with each Space in Lighting/ folder.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+#
+# With no Clouds object a Space has no clouds. Delete this file for a clear
+# sky; the Space repair does not bring it back.
+# See common/assets/class_schema/Clouds for what each key means.
+
+[metadata]
+class_name = "Clouds"
+archivable = true
+
+[clouds]
+enabled = true
+cover = 0.3
+density = 0.45
+color = [255, 255, 255]
+shadow_color = [102, 102, 128]
+layer_type = "Cumulus"
+softness = 0.6
+spread = 1.0
+altitude = 1400.0
+thickness = 900.0
+coverage_mode = "Full"
+coverage_bias = 0.5
+wind_speed = 6.0
+wind_direction = 45.0
+animation_speed = 1.0
+time_of_day_tinting = true

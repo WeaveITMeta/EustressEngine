@@ -1,0 +1,10 @@
+<!-- Terrain Mirror: a dashed centre line with a mound on the left and its
+     reflection on the right. Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Mirror axis -->
+  <path d="M12 3v18" stroke-dasharray="1.5 4"/>
+  <!-- Source mound: long gentle outer slope, steep inner face, so the reflection reads -->
+  <path d="M2.5 15C5 14 6 9 8 9C9 9 9.25 11.5 9.25 15Z"/>
+  <!-- Mirrored mound -->
+  <path d="M21.5 15C19 14 18 9 16 9C15 9 14.75 11.5 14.75 15Z"/>
+</svg>

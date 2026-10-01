@@ -268,7 +268,7 @@ impl Default for ParticleSimulation {
             wall_friction: 0.05,
             collide_with_parts: true,
             push_parts: true,
-            gravity: [0.0, -9.80665, 0.0],
+            gravity: [0.0, -crate::units::STANDARD_GRAVITY, 0.0],
             electric_field: [0.0; 3],
             magnetic_field: [0.0; 3],
             applied_voltage: 0.0,

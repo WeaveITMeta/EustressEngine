@@ -1,0 +1,16 @@
+    callback on-cancel();
+    callback on-confirm();
+    in property <[string]> connector-options: [];
+    in property <[string]> domain-options: [];
+    in property <[string]> type-options: [];
+    in property <bool> is-edit: false;
+    in property <string> error: "";
+    in property <string> target: "";
+    in-out property <bool> bound: false;
+    in-out property <string> connector: "";
+    in-out property <string> domain: "instance";
+    in-out property <string> field: "";
+    in-out property <string> param-name: "";
+    in-out property <string> param-type: "String";
+    in-out property <string> param-value: "";
+    in-out property <string> refresh: "";

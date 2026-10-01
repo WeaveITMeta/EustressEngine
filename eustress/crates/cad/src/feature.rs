@@ -162,6 +162,9 @@ pub enum Feature {
     Pattern {
         #[serde(rename = "pattern_kind")]
         kind: PatternKind,
+        /// The features whose geometry is copied; empty copies every body,
+        /// as Mirror does.
+        #[serde(default)]
         features: Vec<String>,
         count: CountSpec,
         /// For linear: direction + spacing. For circular: axis + angle.

@@ -707,9 +707,15 @@ fn resolve_shared_universe(
     args: &Value,
     state: &Arc<Mutex<ServerState>>,
 ) -> Option<PathBuf> {
+    // Only an absolute path names the Universe here. Tools such as
+    // `new_space` and `list_spaces` also accept a bare Universe name, which
+    // they resolve against the current Universe's parent themselves; taken
+    // as a path, a name is relative to this process's working directory, and
+    // `new_space {universe: "Games"}` created `Games/Spaces/<name>` inside
+    // whatever folder the server was started from.
     if let Some(u) = args.get("universe").and_then(|v| v.as_str()) {
         let t = u.trim();
-        if !t.is_empty() {
+        if !t.is_empty() && std::path::Path::new(t).is_absolute() {
             return Some(PathBuf::from(t));
         }
     }

@@ -66,8 +66,10 @@ use crate::classes::ClassName;
 use crate::instance_create::{entity_name_is_available, uuid_bytes_to_hex, uuid_hex_to_bytes};
 use crate::realism::particle_sim::class::FieldTable;
 use crate::terrain::layer_instances::{layers_dir, LayerComponent, TerrainScatter, TerrainWaterBody};
-use crate::terrain::material::TerrainMaterial;
+use crate::terrain::material::{material_cell_weights, TerrainMaterial, MATERIAL_SLOT_NONE};
 use crate::terrain::scatter::{ScatterKind, TreeType};
+use crate::terrain::water_bodies::CellGrid;
+use crate::terrain::{TerrainConfig, TerrainData};
 
 /// How far the depression fill must raise a sample, metres, for it to count
 /// as under a lake. The fill lifts filled flats by a millimetre per sample so
@@ -104,9 +106,6 @@ const MAX_QUANTILE_SAMPLES: usize = 1 << 16;
 /// Height above sea level, metres, up to which beach grass grows on Sand.
 /// Higher Sand is desert.
 const SHORE_BAND_M: f64 = 8.0;
-/// Streaming radius of the tree layers, metres. Trees are entities; at the
-/// Trees kind's own 1500 m a dense forest would stream tens of thousands.
-const TREE_RADIUS_M: f64 = 600.0;
 /// Folder names tried for one layer before giving up: `Name`, `Name-2`, ...
 const MAX_NAME_TRIES: usize = 1000;
 
@@ -164,7 +163,8 @@ struct ScatterDefault {
     band: Band,
     align_to_normal: bool,
     collide: bool,
-    /// Streaming radius, 0 for the kind's own.
+    /// Streaming radius, 0 for the kind's own (trees: the Workspace
+    /// RenderDistance).
     radius: f64,
 }
 
@@ -208,7 +208,7 @@ const SCATTER_DEFAULTS: [ScatterDefault; 8] = [
         band: Band::Lowland,
         align_to_normal: false,
         collide: true,
-        radius: TREE_RADIUS_M,
+        radius: 0.0,
     },
     ScatterDefault {
         name: "ConiferForest",
@@ -221,7 +221,7 @@ const SCATTER_DEFAULTS: [ScatterDefault; 8] = [
         band: Band::Highland,
         align_to_normal: false,
         collide: true,
-        radius: TREE_RADIUS_M,
+        radius: 0.0,
     },
     ScatterDefault {
         name: "ConiferWoodland",
@@ -234,7 +234,7 @@ const SCATTER_DEFAULTS: [ScatterDefault; 8] = [
         band: Band::Highland,
         align_to_normal: false,
         collide: true,
-        radius: TREE_RADIUS_M,
+        radius: 0.0,
     },
     ScatterDefault {
         name: "ScreeRock",
@@ -288,8 +288,56 @@ pub fn plan_default_layers(world: &WorldOutput, grid: &ExportGrid) -> Result<Vec
     // The export lays generated-world metres `g` at engine `g - N * S`.
     let origin = -(f64::from(grid.half_extent) * f64::from(grid.chunk_size));
     let lakes = find_lakes(&stitched.heights, stitched.width, stitched.depth, stitched.cell);
-    layers.extend(lakes.iter().enumerate().map(|(index, lake)| lake_layer(index, lake, stitched.cell, origin)));
+    layers.extend(lakes.iter().enumerate().map(|(index, lake)| lake_layer(index, lake, stitched.cell, (origin, origin))));
     Ok(layers)
+}
+
+/// The default layers [`plan_default_layers`] would plan, read off terrain
+/// `data` over `config` as it stands rather than off the world a generation
+/// made: its raster's heights and each cell's strongest material (Grass
+/// without a material layer), with the world seed `seed` and `sea_level`.
+/// What "Regenerate layers from seed" writes, so the seed's scatter and lakes
+/// come back over ground edited since. Empty without a raster.
+pub fn plan_layers_for_terrain(config: &TerrainConfig, data: &TerrainData, seed: u64, sea_level: f64) -> Vec<DefaultLayer> {
+    let Some(grid) = CellGrid::of(config, data) else { return Vec::new() };
+    let heights: Vec<f32> = data.height_cache.iter().map(|h| config.world_height(*h)).collect();
+    let grass = TerrainMaterial::Grass.to_u8();
+    let materials: Vec<u8> = if data.has_material_layer() {
+        data.material_cache
+            .iter()
+            .map(|cell| {
+                material_cell_weights(*cell)
+                    .into_iter()
+                    .filter(|(slot, weight)| *slot != MATERIAL_SLOT_NONE && *weight > 0.0)
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map_or(grass, |(slot, _)| slot)
+            })
+            .collect()
+    } else {
+        vec![grass; heights.len()]
+    };
+    let stitched = StitchedWorld { width: grid.width, depth: grid.height, cell: f64::from(grid.step.x), heights, materials };
+    let line = conifer_line(&stitched, sea_level, f64::from(config.height_scale));
+    let mut layers = scatter_layers(seed, sea_level, line);
+    let origin = (f64::from(grid.origin.x), f64::from(grid.origin.y));
+    let lakes = find_lakes(&stitched.heights, stitched.width, stitched.depth, stitched.cell);
+    layers.extend(lakes.iter().enumerate().map(|(index, lake)| lake_layer(index, lake, stitched.cell, origin)));
+    layers
+}
+
+/// Write [`plan_layers_for_terrain`]'s layers into
+/// `<space_root>/Workspace/Terrain/Layers` in place of every layer an export
+/// or an earlier regeneration wrote (see the module docs); layers made any
+/// other way are left alone.
+pub fn regenerate_default_layers(
+    space_root: &Path,
+    config: &TerrainConfig,
+    data: &TerrainData,
+    seed: u64,
+    sea_level: f64,
+) -> Result<DefaultLayersSummary, String> {
+    let planned = plan_layers_for_terrain(config, data, seed, sea_level);
+    replace_generated_layers(&layers_dir(space_root), seed, &planned)
 }
 
 fn scatter_layers(seed: u64, sea_level: f64, conifer_line: f64) -> Vec<DefaultLayer> {
@@ -437,8 +485,8 @@ pub fn find_lakes(heights: &[f32], width: usize, depth: usize, cell_m: f64) -> V
 }
 
 /// The water body of lake number `index` (from 0) on a grid of samples
-/// `cell` metres apart whose first sample sits at engine `(origin, origin)`.
-fn lake_layer(index: usize, lake: &Lake, cell: f64, origin: f64) -> DefaultLayer {
+/// `cell` metres apart whose first sample sits at engine XZ `origin`.
+fn lake_layer(index: usize, lake: &Lake, cell: f64, origin: (f64, f64)) -> DefaultLayer {
     let (di, dj) = lake.deepest;
     let (lo_i, lo_j, hi_i, hi_j) = lake.bounds;
     let margin = LAKE_FOOTPRINT_MARGIN_SAMPLES * cell;
@@ -450,7 +498,7 @@ fn lake_layer(index: usize, lake: &Lake, cell: f64, origin: f64) -> DefaultLayer
     DefaultLayer {
         name: format!("Lake{:02}", index + 1),
         class_name: ClassName::TerrainWaterBody,
-        position: [round_to(origin + di as f64 * cell, 100.0), level, round_to(origin + dj as f64 * cell, 100.0)],
+        position: [round_to(origin.0 + di as f64 * cell, 100.0), level, round_to(origin.1 + dj as f64 * cell, 100.0)],
         component: LayerComponent::WaterBody(TerrainWaterBody {
             enabled: true,
             order: 0,
@@ -716,7 +764,7 @@ mod tests {
     use super::*;
     use crate::instance_create::{fresh_uuid_for_create, is_valid_uuid};
     use crate::terrain::layer_instances::{layer_id, read_layer_instances, LayerInstanceFile};
-    use crate::terrain::scatter::place_chunk;
+    use crate::terrain::scatter::{place_chunk, ScatterWater};
     use crate::terrain::toml_loader;
     use crate::terrain::volume::TerrainVolume;
     use crate::terrain::water_bodies::flood_fill_water;
@@ -749,6 +797,39 @@ mod tests {
             }
         }
         (heights, width, depth)
+    }
+
+    #[test]
+    fn layers_regenerate_from_the_terrain_as_it_stands() {
+        let config = TerrainConfig {
+            chunk_size: 64.0,
+            chunk_resolution: 32,
+            chunks_x: 1,
+            chunks_z: 1,
+            height_scale: 50.0,
+            ..TerrainConfig::default()
+        };
+        // Ground at 10 m with a bowl 3 m deep and 30 m across the radius at
+        // the origin.
+        let mut data = TerrainData::procedural();
+        data.resize_cache(&config);
+        let grid = CellGrid::of(&config, &data).expect("a raster");
+        for z in 0..grid.height {
+            for x in 0..grid.width {
+                let bowl = (1.0 - grid.world(x, z).length() / 30.0).max(0.0) * 3.0;
+                data.height_cache[z * grid.width + x] = config.normalized_height(10.0 - bowl);
+            }
+        }
+        let layers = plan_layers_for_terrain(&config, &data, 7, 0.0);
+        let scatter = layers.iter().filter(|layer| layer.class_name == ClassName::TerrainScatter).count();
+        assert_eq!(scatter, SCATTER_DEFAULTS.len(), "every scatter rule comes back");
+        let lakes: Vec<&DefaultLayer> = layers.iter().filter(|layer| layer.class_name == ClassName::TerrainWaterBody).collect();
+        assert_eq!(lakes.len(), 1, "the bowl holds one lake");
+        let [x, y, z] = lakes[0].position;
+        assert!(x.abs() < 3.0 && z.abs() < 3.0, "the lake stands on the bowl's floor, at ({x}, {z})");
+        assert!(y > 7.0 && y < 10.0, "its water stands below the rim, at {y}");
+        assert_eq!(plan_layers_for_terrain(&config, &data, 7, 0.0), layers, "the same terrain plans the same layers");
+        assert!(plan_layers_for_terrain(&config, &TerrainData::procedural(), 7, 0.0).is_empty(), "no raster, no layers");
     }
 
     #[test]
@@ -968,7 +1049,7 @@ mod tests {
         let place = |name: &str| {
             let file = layers[name];
             let layer = scatter(name).layer(layer_id(Some(file.uuid.as_str()), Entity::PLACEHOLDER), &file.transform);
-            place_chunk(&layer, IVec2::new(0, -1), &config, &data, &TerrainVolume::default(), None)
+            place_chunk(&layer, IVec2::new(0, -1), &config, &data, &TerrainVolume::default(), None, &ScatterWater::default())
         };
         assert!(!place("MeadowGrass").is_empty(), "meadow grass on the Grass region");
         assert!(place("BeachGrass").is_empty(), "no beach 14 m and more above the sea");

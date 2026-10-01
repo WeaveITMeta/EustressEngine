@@ -66,21 +66,16 @@
 //!   included, first removes the layers an earlier export wrote; the other
 //!   layers in the folder stay.
 //!
-//! ## Load trigger — INTEGRATOR NOTE
+//! ## Loading it back
 //!
-//! The engine currently has NO code path that reads this format on Space
-//! open: `load_terrain_toml` / `load_chunks_from_disk` /
-//! `chunk_matmap_path` have zero callers, so an exported
-//! `Workspace/Terrain/` directory is inert until one of these lands:
-//! (a) in-session, spawn it the way `handle_import_terrain` (engine
-//! `ui/spawn_events.rs`) does — `TerrainTomlFile::to_terrain_config()`,
-//! then `TerrainData::procedural()` + `resize_cache(&config)` +
-//! `load_chunks_from_disk(terrain_dir, &config, &mut data)`, then
-//! `spawn_terrain(...)`; or (b) an engine-side once-per-Space latch
-//! mirroring `terrain_voxel_load.rs`. CAUTION: `sync_terrain_class_to_system`
-//! (engine `terrain_plugin.rs`) despawns `TerrainRoot` and respawns pure
-//! procedural data on `Added<Terrain>` — a disk-load hook must run after
-//! (or suppress) it, or the loaded R16 terrain is clobbered.
+//! `terrain::disk::hydrate_terrain_from_disk` reads this format:
+//! `_terrain.toml` through `TerrainTomlFile::to_terrain_config()`, a raster
+//! sized with `resize_cache`, the chunks through `load_chunks_from_disk`, and
+//! the `volume/*.vbk` bricks. Studio runs it when a Space opens (the engine's
+//! `terrain_disk_load`), after an export (`ui/spawn_events.rs`) and when a
+//! Terrain instance is added to a Space without terrain
+//! (`sync_terrain_class_to_system`, which never replaces a terrain already
+//! loaded); the Player runs it when it opens a Space.
 //!
 //! Determinism: same [`WorldOutput`] in, byte-identical files out — fixed
 //! templates (no timestamps), fixed chunk order (`cz` outer `-N..=N`, `cx`
@@ -99,6 +94,8 @@ use crate::terrain::toml_loader::{chunk_r16_path, save_chunk_r16, LEGACY_SPLATMA
 use crate::terrain::material::{canonical_material_cell, material_cell, MaterialCell};
 #[cfg(feature = "image")]
 use crate::terrain::toml_loader::{chunk_matmap_path, encode_material_tile_png};
+#[cfg(any(feature = "image", test))]
+use crate::terrain::voxel_water::seabed_material;
 
 /// Samples per chunk side written to disk (`[terrain] chunk_resolution`).
 /// 64 is the loader default and keeps every R16 at exactly 8 KiB
@@ -298,10 +295,11 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     // out-of-range chunks are bounds-dropped by the loader anyway, so a
     // failed removal is non-fatal.) The previous terrain's volume bricks go
     // too, or its caves would be carved into the new ground on load, and so
-    // do its material maps, legacy splatmaps included.
+    // do its material maps, legacy splatmaps included, and its water.
     clear_stale_files(&chunks_dir, "r16");
     clear_stale_material_maps(&terrain_dir);
     clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
+    clear_stale_water(&terrain_dir);
 
     let mut summary = ExportSummary::default();
 
@@ -330,18 +328,28 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     let coords = cache_pixel_coords(&grid);
     let res = grid.chunk_resolution as usize;
     let half = grid.half_extent as i64;
+    // World heights of the whole raster, row by row, sampled once: the
+    // chunks, the seabeds and the sea all read them.
+    let w = coords.len();
+    let mut world_heights = Vec::with_capacity(w * w);
+    for gz in 0..w {
+        for gx in 0..w {
+            world_heights.push(sampler.height_at(coords[gx], coords[gz]));
+        }
+    }
+    let sea_level = spec.sea_level as f32;
 
     let mut heights = vec![0.0f32; res * res];
     for cz in -half..=half {
         for cx in -half..=half {
             for z in 0..res {
-                let gz = coords[((cz + half) as usize) * res + z];
+                let gz = ((cz + half) as usize) * res + z;
                 for x in 0..res {
-                    let gx = coords[((cx + half) as usize) * res + x];
+                    let gx = ((cx + half) as usize) * res + x;
                     // Measured up from the band floor. save_chunk_r16 clamps
                     // to [0,1] and quantises exactly like the loader's
                     // inverse expects.
-                    heights[z * res + x] = (sampler.height_at(gx, gz) - floor) / grid.height_scale;
+                    heights[z * res + x] = (world_heights[gz * w + gx] - floor) / grid.height_scale;
                 }
             }
             let r16_path = chunk_r16_path(&terrain_dir, cx as i32, cz as i32);
@@ -351,7 +359,7 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
 
             #[cfg(feature = "image")]
             {
-                let cells = chunk_material_cells(&sampler, &coords, cx, cz, half, res);
+                let cells = chunk_material_cells(&sampler, &coords, &world_heights, sea_level, cx, cz, half, res);
                 let png = encode_material_tile_png(&cells, grid.chunk_resolution)
                     .map_err(|e| format!("export: chunk x{cx}_z{cz}: {e}"))?;
                 let png_path = chunk_matmap_path(&terrain_dir, cx as i32, cz as i32);
@@ -361,6 +369,16 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
                 summary.bytes_written += png.len() as u64;
             }
         }
+    }
+
+    // ── The sea ──
+    // Real water over every pixel below sea level that the sea reaches from
+    // the map's edge; sealed basins below it stay dry.
+    if let Some(water) = sea_water(&world_heights, w, sea_level) {
+        crate::terrain::voxel_water::save_voxel_water(&terrain_dir, Some(&water), false)
+            .map_err(|e| format!("export: the sea's water: {e}"))?;
+        let path = crate::terrain::voxel_water::water_file_path(&terrain_dir);
+        summary.bytes_written += fs::metadata(&path).map_or(0, |meta| meta.len());
     }
 
     // ── Default layers ──
@@ -379,10 +397,10 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
 
 /// A dead-flat terrain plate — the ground a builder starts on.
 ///
-/// Written in EXACTLY the format [`export_to_space`] writes and the engine's
-/// `hydrate_terrain_from_disk` reads, so the plate persists across a Space
-/// reload and every brush / LOD / streaming path treats it like any other
-/// terrain. Unlike the worldgen pipeline (hydrology + erosion + climate +
+/// Written in EXACTLY the format [`export_to_space`] writes and
+/// `terrain::disk::hydrate_terrain_from_disk` reads, so the plate persists
+/// across a Space reload and every brush / LOD / streaming path treats it
+/// like any other terrain. Unlike the worldgen pipeline (hydrology + erosion + climate +
 /// materials), nothing is simulated here: the heights are a constant, so the
 /// write returns in well under a second at the sizes the ribbon offers.
 ///
@@ -521,8 +539,8 @@ impl FlatSpec {
 ///
 /// Deterministic: same spec in, byte-identical files out. Clears stale
 /// `.r16`/`.png` a previous, larger export left behind (legacy splatmaps
-/// included), and the previous terrain's `.vbk` volume bricks, first, so
-/// the directory afterwards contains EXACTLY this plate.
+/// included), and the previous terrain's `.vbk` volume bricks and water,
+/// first, so the directory afterwards contains EXACTLY this plate.
 pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<ExportSummary, String> {
     let grid = spec.grid()?;
 
@@ -543,6 +561,7 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
     clear_stale_files(&chunks_dir, "r16");
     clear_stale_material_maps(&terrain_dir);
     clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
+    clear_stale_water(&terrain_dir);
     // A generated world's default layers go with its ground: its lakes would
     // otherwise flood their whole footprints on the flat plate. Layers the
     // user made stay.
@@ -621,6 +640,58 @@ fn cache_pixel_coords(grid: &ExportGrid) -> Vec<f64> {
     let w = grid.cache_samples_per_axis() as usize;
     let pitch = grid.total_extent_m() / (w - 1) as f64;
     (0..w).map(|p| p as f64 * pitch).collect()
+}
+
+/// The sea as the terrain's water: every pixel of the `w x w` raster whose
+/// world height in `heights` (row by row) lies below `sea_level`, joined to
+/// the raster's edge through the four pixels beside each by pixels below it
+/// too, stands at `sea_level`. Every other pixel is dry, sealed basins below
+/// sea level included. `None` when no pixel is under the sea.
+fn sea_water(heights: &[f32], w: usize, sea_level: f32) -> Option<crate::terrain::voxel_water::TerrainVoxelWater> {
+    if w < 2 || heights.len() != w * w || !sea_level.is_finite() {
+        return None;
+    }
+    let below = |i: usize| heights[i] < sea_level;
+    let mut levels = vec![f32::NAN; w * w];
+    let mut stack: Vec<usize> = Vec::new();
+    let flood = |i: usize, levels: &mut Vec<f32>, stack: &mut Vec<usize>| {
+        if below(i) && levels[i].is_nan() {
+            levels[i] = sea_level;
+            stack.push(i);
+        }
+    };
+    for k in 0..w {
+        for i in [k, (w - 1) * w + k, k * w, k * w + w - 1] {
+            flood(i, &mut levels, &mut stack);
+        }
+    }
+    while let Some(i) = stack.pop() {
+        let (x, z) = (i % w, i / w);
+        if x > 0 {
+            flood(i - 1, &mut levels, &mut stack);
+        }
+        if x + 1 < w {
+            flood(i + 1, &mut levels, &mut stack);
+        }
+        if z > 0 {
+            flood(i - w, &mut levels, &mut stack);
+        }
+        if z + 1 < w {
+            flood(i + w, &mut levels, &mut stack);
+        }
+    }
+    levels.iter().any(|level| level.is_finite()).then(|| crate::terrain::voxel_water::TerrainVoxelWater {
+        levels,
+        width: w as u32,
+        height: w as u32,
+        ..Default::default()
+    })
+}
+
+/// Remove the previous terrain's `water.bin` (best-effort, like
+/// [`clear_stale_files`]), or its water would stand over the new ground.
+fn clear_stale_water(terrain_dir: &Path) {
+    let _ = fs::remove_file(crate::terrain::voxel_water::water_file_path(terrain_dir));
 }
 
 /// Remove `*.{ext}` files from `dir` (best-effort; see call site).
@@ -897,10 +968,20 @@ const MATERIAL_KERNEL: [[u32; 3]; 3] = [[1, 2, 1], [2, 4, 2], [1, 2, 1]];
 /// global, so adjacent chunks blend identically at their border), via
 /// [`kernel_material_cell`]. The ids are the region's own
 /// `TerrainMaterial` discriminants, so no material collapses onto another.
+///
+/// Water is real water, never a ground material: a sample the region paints
+/// Water that lies below `sea_level` (`heights` are the raster's world
+/// heights, row by row) takes the seabed material its depth gives
+/// ([`seabed_material`]), and [`sea_water`] puts the sea over it. River
+/// channels above sea level keep their Water paint until flowing water can
+/// fill them.
 #[cfg(feature = "image")]
+#[allow(clippy::too_many_arguments)]
 fn chunk_material_cells(
     sampler: &WorldSampler<'_>,
     coords: &[f64],
+    heights: &[f32],
+    sea_level: f32,
     cx: i64,
     cz: i64,
     half: i64,
@@ -920,7 +1001,12 @@ fn chunk_material_cells(
                 let qz = (gp_z as i64 + dz as i64 - 1).clamp(0, (w - 1) as i64) as usize;
                 for (dx, &k) in row.iter().enumerate() {
                     let qx = (gp_x as i64 + dx as i64 - 1).clamp(0, (w - 1) as i64) as usize;
-                    let slot = TerrainMaterial::from_u8_or_default(sampler.material_at(coords[qx], coords[qz])).to_u8();
+                    let mut material = TerrainMaterial::from_u8_or_default(sampler.material_at(coords[qx], coords[qz]));
+                    let depth = sea_level - heights[qz * w + qx];
+                    if material == TerrainMaterial::Water && depth > 0.0 {
+                        material = seabed_material(depth);
+                    }
+                    let slot = material.to_u8();
                     match weights[..len].iter_mut().find(|(s, _)| *s == slot) {
                         Some(entry) => entry.1 += k,
                         None => {
@@ -1345,7 +1431,13 @@ mod tests {
                         for (dx, k) in row.iter().enumerate() {
                             let qz = (gz as i64 + dz as i64 - 1).clamp(0, w as i64 - 1) as usize;
                             let qx = (gx as i64 + dx as i64 - 1).clamp(0, w as i64 - 1) as usize;
-                            *counts.entry(sampler.material_at(coords[qx], coords[qz])).or_default() += k;
+                            // Water under the sea is seabed.
+                            let mut id = sampler.material_at(coords[qx], coords[qz]);
+                            let depth = world.spec.sea_level as f32 - sampler.height_at(coords[qx], coords[qz]);
+                            if id == TerrainMaterial::Water.to_u8() && depth > 0.0 {
+                                id = seabed_material(depth).to_u8();
+                            }
+                            *counts.entry(id).or_default() += k;
                         }
                     }
                     let mut ranked: Vec<(u8, u32)> = counts.into_iter().collect();
@@ -1379,6 +1471,76 @@ mod tests {
             }
         }
         assert_eq!(summary.matmaps_written, (grid.chunks_per_axis() * grid.chunks_per_axis()) as usize);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_sea_fills_what_reaches_the_edge_and_leaves_sealed_basins_dry() {
+        // 6 x 6: a sea along the west edge, a sealed pit in the east, land
+        // between. Heights in metres, sea level 0.
+        #[rustfmt::skip]
+        let heights: Vec<f32> = vec![
+            -3.0, -1.0, 2.0, 2.0,  2.0, 2.0,
+            -3.0, -1.0, 2.0, 2.0,  2.0, 2.0,
+            -3.0, -2.0, 2.0, 2.0,  2.0, 2.0,
+            -3.0, -1.0, 2.0, 2.0, -4.0, 2.0,
+            -3.0, -1.0, 2.0, 2.0,  2.0, 2.0,
+            -3.0, -1.0, 2.0, 2.0,  2.0, 2.0,
+        ];
+        let water = sea_water(&heights, 6, 0.0).expect("the west is sea");
+        assert_eq!((water.width, water.height), (6, 6));
+        for (i, level) in water.levels.iter().enumerate() {
+            let sea = i % 6 < 2;
+            assert_eq!(level.is_finite(), sea, "pixel {i} (height {})", heights[i]);
+            if sea {
+                assert_eq!(*level, 0.0, "the sea stands at sea level");
+            }
+        }
+        assert!(sea_water(&vec![1.0; 36], 6, 0.0).is_none(), "no ground below the sea, no water");
+        assert!(sea_water(&heights, 5, 0.0).is_none(), "a raster of the wrong size is refused");
+
+        assert_eq!(seabed_material(1.0), TerrainMaterial::Sand);
+        assert_eq!(seabed_material(10.0), TerrainMaterial::Mud);
+        assert_eq!(seabed_material(40.0), TerrainMaterial::Slate);
+    }
+
+    #[test]
+    fn a_generated_sea_loads_as_water_over_its_seabed() {
+        let world = test_world(3, 1, 256.0, 65, TerrainMaterial::Water.to_u8());
+        let root = temp_dir("sea");
+        export_to_space(&world, &root).unwrap();
+        let terrain = root.join("Workspace").join("Terrain");
+        let hydrated = crate::terrain::disk::hydrate_terrain_from_disk(&terrain).expect("the world hydrates");
+        let (config, data) = (&hydrated.config, &hydrated.data);
+        let sea = world.spec.sea_level as f32;
+        let w = data.cache_width as usize;
+        let edge_below = (0..w).any(|k| {
+            [k, (w - 1) * w + k, k * w, k * w + w - 1].iter().any(|&i| config.world_height(data.height_cache[i]) < sea - 0.01)
+        });
+        let Some(water) = hydrated.water.as_ref() else {
+            assert!(!edge_below, "ground below the sea at the edge must load with water over it");
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        };
+        assert_eq!((water.width, water.height), (data.cache_width, data.cache_height), "the water fits the raster");
+        for (i, level) in water.levels.iter().enumerate().filter(|(_, level)| level.is_finite()) {
+            assert_eq!(*level, sea, "pixel {i}");
+            // The R16 quantum of slack.
+            assert!(config.world_height(data.height_cache[i]) < sea + 0.01, "pixel {i} is under the sea");
+        }
+        // The deepest pixel's ground is seabed, not Water paint.
+        #[cfg(feature = "image")]
+        {
+            let deepest = (0..data.height_cache.len())
+                .min_by(|a, b| data.height_cache[*a].total_cmp(&data.height_cache[*b]))
+                .expect("a raster");
+            let depth = sea - config.world_height(data.height_cache[deepest]);
+            if depth > 1.0 {
+                let primary = data.material_cache[deepest][0];
+                let seabeds = [TerrainMaterial::Sand, TerrainMaterial::Mud, TerrainMaterial::Slate].map(TerrainMaterial::to_u8);
+                assert!(seabeds.contains(&primary), "the seabed {depth} m down is slot {primary}, not Water paint");
+            }
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -9,6 +9,7 @@ use wasm_bindgen::JsCast;
 use crate::api::{ApiClient};
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
+use super::review_panel::ReviewPanel;
 
 // -----------------------------------------------------------------------------
 // Data Types
@@ -21,6 +22,12 @@ pub enum SpaceStatus {
     Draft,
     Archived,
     UnderReview,
+    /// Review decided against listing it.
+    NotListed,
+    /// Review asked for changes before it can be listed.
+    ChangesRequested,
+    /// Passed review, and the author keeps it private.
+    Private,
 }
 
 impl SpaceStatus {
@@ -30,16 +37,43 @@ impl SpaceStatus {
             Self::Draft => "draft",
             Self::Archived => "archived",
             Self::UnderReview => "review",
+            Self::NotListed => "not_listed",
+            Self::ChangesRequested => "changes_requested",
+            Self::Private => "private",
         }
     }
-    
+
     fn display_name(&self) -> &'static str {
         match self {
             Self::Published => "Published",
             Self::Draft => "Draft",
             Self::Archived => "Archived",
             Self::UnderReview => "Under Review",
+            Self::NotListed => "Not listed",
+            Self::ChangesRequested => "Changes requested",
+            Self::Private => "Private",
         }
+    }
+
+    /// The status the API reports for a project. Held and quarantined cases
+    /// both arrive as `in_review` and are not told apart here.
+    fn from_api(status: &str) -> Self {
+        match status {
+            "published" => Self::Published,
+            "draft" | "rejected" => Self::Draft,
+            "archived" => Self::Archived,
+            "not_listed" => Self::NotListed,
+            "changes_requested" => Self::ChangesRequested,
+            "approved_private" => Self::Private,
+            "in_review" | "appeal_in_review" | "unreviewed" | "review"
+            | "pending" | "classifying" | "held" | "appealed" | "quarantined" => Self::UnderReview,
+            _ => Self::Draft,
+        }
+    }
+
+    /// Whether the review panel has something to say about this project.
+    fn has_review(&self) -> bool {
+        matches!(self, Self::UnderReview | Self::NotListed | Self::ChangesRequested | Self::Private)
     }
 }
 
@@ -103,7 +137,11 @@ pub fn ProjectsPage() -> impl IntoView {
     let sort_by = RwSignal::new("updated".to_string());
     let view_mode = RwSignal::new("grid".to_string()); // "grid" or "list"
     let active_menu = RwSignal::new(None::<String>); // Track which context menu is open
-    
+    // The project whose review panel is open. A review email links to
+    // /projects?review=<id>, which opens it.
+    let review_open = RwSignal::new(review_id_from_query(&current_query()));
+    let panel_api = app_state.api_url.clone();
+
     // API data state
     let spaces = RwSignal::new(Vec::<Place>::new());
     let is_loading = RwSignal::new(true);
@@ -119,17 +157,9 @@ pub fn ProjectsPage() -> impl IntoView {
             match client.get::<ProjectsResponse>("/api/projects").await {
                 Ok(response) => {
                     let places: Vec<Place> = response.projects.into_iter().map(|p| {
-                        // The API reports the moderation state for anything not yet
-                        // listed; every waiting state reads as "under review" here,
-                        // and a reject goes back to draft for the author to fix.
-                        let status = match p.status.as_str() {
-                            "published" => SpaceStatus::Published,
-                            "draft" | "rejected" => SpaceStatus::Draft,
-                            "archived" => SpaceStatus::Archived,
-                            "pending" | "classifying" | "held" | "appealed" | "quarantined"
-                            | "changes_requested" | "unreviewed" | "review" => SpaceStatus::UnderReview,
-                            _ => SpaceStatus::Draft,
-                        };
+                        // The API reports the review state for anything not yet
+                        // listed (see SpaceStatus::from_api).
+                        let status = SpaceStatus::from_api(&p.status);
                         Place {
                             id: p.id,
                             name: p.name,
@@ -274,7 +304,12 @@ pub fn ProjectsPage() -> impl IntoView {
                             class:active=move || filter_status.get() == "draft"
                             on:click=move |_| filter_status.set("draft".to_string())
                         >"Drafts"</button>
-                        <button 
+                        <button
+                            class="chip"
+                            class:active=move || filter_status.get() == "review"
+                            on:click=move |_| filter_status.set("review".to_string())
+                        >"In review"</button>
+                        <button
                             class="chip"
                             class:active=move || filter_status.get() == "archived"
                             on:click=move |_| filter_status.set("archived".to_string())
@@ -333,7 +368,7 @@ pub fn ProjectsPage() -> impl IntoView {
                             key=|place| place.id.clone()
                             children=move |place| {
                                 let place_id = place.id.clone();
-                                view! { <PlaceCard place=place active_menu=active_menu place_id=place_id /> }
+                                view! { <PlaceCard place=place active_menu=active_menu place_id=place_id review_open=review_open /> }
                             }
                         />
                     </div>
@@ -428,9 +463,43 @@ pub fn ProjectsPage() -> impl IntoView {
                 </div>
             </section>
 
+            // What review decided about a project, and the appeal
+            {move || review_open.get().map(|id| view! {
+                <ReviewPanel
+                    sim_id=id
+                    api_url=panel_api.clone()
+                    on_close=move || review_open.set(None)
+                />
+            })}
+
             <Footer />
         </div>
     }
+}
+
+/// The query string of the page in front of the visitor. The prerender has no
+/// page.
+#[cfg(not(feature = "ssr"))]
+fn current_query() -> String {
+    web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+}
+
+#[cfg(feature = "ssr")]
+fn current_query() -> String {
+    String::new()
+}
+
+/// The project id in `?review=<id>`. Only a plausible id passes, since it goes
+/// into an API path: lowercase hex and dashes, 1 to 64 characters.
+fn review_id_from_query(search: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "review")
+        .map(|(_, value)| value)
+        .filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-'))
+        .map(str::to_string)
 }
 
 // -----------------------------------------------------------------------------
@@ -442,6 +511,7 @@ fn PlaceCard(
     place: Place,
     active_menu: RwSignal<Option<String>>,
     place_id: String,
+    review_open: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let play_url = format!("/play/{}", place.id);
     let play_url2 = play_url.clone();
@@ -549,6 +619,15 @@ fn PlaceCard(
                         <img src="/assets/icons/edit.svg" alt="Edit" />
                         "Edit"
                     </a>
+                    {place.status.has_review().then(|| {
+                        let id = place.id.clone();
+                        view! {
+                            <button class="action-btn secondary" on:click=move |_| review_open.set(Some(id.clone()))>
+                                <img src="/assets/icons/shield.svg" alt="" />
+                                "Review"
+                            </button>
+                        }
+                    })}
                 </div>
             </div>
         </div>
@@ -580,6 +659,9 @@ pub struct ApiKeyData {
     pub name: String,
     pub key_prefix: String,
     pub key_type: String,
+    /// "test" or "live", for a commerce key.
+    #[serde(default)]
+    pub mode: String,
     pub created_at: String,
     pub last_used: Option<String>,
     pub usage_count: u64,
@@ -609,8 +691,11 @@ pub fn ApiKeysSection() -> impl IntoView {
     let show_create_modal = RwSignal::new(false);
     let new_key_name = RwSignal::new(String::new());
     let new_key_type = RwSignal::new("datastore".to_string());
+    // A commerce key is a test key or a live key, as in `eustress commerce`.
+    let new_key_mode = RwSignal::new("test".to_string());
     let newly_created_key = RwSignal::new(None::<String>);
     let copied_key_id = RwSignal::new(None::<String>);
+    let key_error = RwSignal::new(None::<String>);
     
     // Fetch API keys on mount
     let api_url = app_state.api_url.clone();
@@ -636,17 +721,20 @@ pub fn ApiKeysSection() -> impl IntoView {
         let api_url = api_url_stored.get_value();
         let name = new_key_name.get();
         let key_type = new_key_type.get();
-        
+        let mode = new_key_mode.get();
+
         wasm_bindgen_futures::spawn_local(async move {
             let client = ApiClient::new(&api_url);
             let body = serde_json::json!({
                 "name": name,
-                "key_type": key_type
+                "key_type": key_type,
+                "mode": mode
             });
-            
+
             match client.post::<CreateKeyResponse, _>("/api/keys", &body).await {
                 Ok(response) => {
                     newly_created_key.set(Some(response.key.clone()));
+                    key_error.set(None);
                     // Refresh keys list
                     if let Ok(keys_response) = client.get::<ApiKeysResponse>("/api/keys").await {
                         api_keys.set(keys_response.keys);
@@ -654,7 +742,29 @@ pub fn ApiKeysSection() -> impl IntoView {
                 }
                 Err(e) => {
                     log::error!("Failed to create API key: {:?}", e);
+                    key_error.set(Some(format!("The key was not created: {e}")));
                 }
+            }
+        });
+    };
+
+    // Revoke: the key stops working at once, everywhere it is used.
+    let revoke_key = move |key_id: String, key_name: String| {
+        let sure = web_sys::window()
+            .and_then(|w| w.confirm_with_message(&format!("Revoke \u{201c}{key_name}\u{201d}? Anything using it stops working.")).ok())
+            .unwrap_or(false);
+        if !sure {
+            return;
+        }
+        let api_url = api_url_stored.get_value();
+        wasm_bindgen_futures::spawn_local(async move {
+            let client = ApiClient::new(&api_url);
+            match client.delete::<serde_json::Value>(&format!("/api/keys/{key_id}")).await {
+                Ok(_) => {
+                    api_keys.update(|keys| keys.retain(|k| k.id != key_id));
+                    key_error.set(None);
+                }
+                Err(e) => key_error.set(Some(format!("The key was not revoked: {e}"))),
             }
         });
     };
@@ -684,7 +794,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                     </svg>
                     <div>
                         <h2>"API Keys"</h2>
-                        <p>"Manage your API keys for DataStoreService, HttpService, and AI Training"</p>
+                        <p>"Manage your API keys for DataStoreService, HttpService, AI Training, and selling (eustress commerce)"</p>
                     </div>
                 </div>
                 <button 
@@ -703,6 +813,8 @@ pub fn ApiKeysSection() -> impl IntoView {
                 </button>
             </div>
             
+            {move || key_error.get().map(|e| view! { <p class="keys-error" role="alert">{e}</p> })}
+
             <Show when=move || is_loading.get()>
                 <div class="keys-loading">
                     <div class="spinner"></div>
@@ -733,15 +845,22 @@ pub fn ApiKeysSection() -> impl IntoView {
                         each=move || api_keys.get()
                         key=|key| key.id.clone()
                         children=move |key| {
-                            let key_id = key.id.clone();
-                            let key_id2 = key.id.clone();
                             let key_prefix = key.key_prefix.clone();
+                            let on_revoke = {
+                                let (id, name) = (key.id.clone(), key.name.clone());
+                                move |_| revoke_key(id.clone(), name.clone())
+                            };
+                            let type_label = if key.key_type == "commerce" && !key.mode.is_empty() {
+                                format!("commerce \u{00b7} {}", key.mode)
+                            } else {
+                                key.key_type.clone()
+                            };
                             view! {
                                 <div class="key-row">
                                     <span class="col-name">{key.name.clone()}</span>
                                     <span class="col-type">
-                                        <span class="key-type-badge" class:datastore=key.key_type == "datastore" class:http=key.key_type == "http" class:ai=key.key_type == "ai">
-                                            {key.key_type.clone()}
+                                        <span class="key-type-badge" class:datastore=key.key_type == "datastore" class:http=key.key_type == "http" class:ai=key.key_type == "ai" class:commerce=key.key_type == "commerce">
+                                            {type_label}
                                         </span>
                                     </span>
                                     <span class="col-key">
@@ -750,9 +869,10 @@ pub fn ApiKeysSection() -> impl IntoView {
                                     <span class="col-usage">{format_number(key.usage_count)}</span>
                                     <span class="col-created">{key.created_at.clone()}</span>
                                     <span class="col-actions">
-                                        <button 
+                                        <button
                                             class="action-icon"
                                             title="Revoke Key"
+                                            on:click=on_revoke
                                         >
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                                 <polyline points="3 6 5 6 21 6"/>
@@ -873,8 +993,44 @@ pub fn ApiKeysSection() -> impl IntoView {
                                             <span>"AI Training"</span>
                                             <small>"Spatial data export"</small>
                                         </button>
+                                        <button
+                                            class="type-option"
+                                            class:selected=move || new_key_type.get() == "commerce"
+                                            on:click=move |_| new_key_type.set("commerce".to_string())
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.41 0l8.59-8.59a1 1 0 0 0 0-1.41Z"/>
+                                                <circle cx="7" cy="7" r="1.5"/>
+                                            </svg>
+                                            <span>"Commerce"</span>
+                                            <small>"Sell products (eustress commerce)"</small>
+                                        </button>
                                     </div>
                                 </div>
+
+                                <Show when=move || new_key_type.get() == "commerce">
+                                    <div class="form-group">
+                                        <label>"Mode"</label>
+                                        <div class="key-type-options">
+                                            <button
+                                                class="type-option"
+                                                class:selected=move || new_key_mode.get() == "test"
+                                                on:click=move |_| new_key_mode.set("test".to_string())
+                                            >
+                                                <span>"Test"</span>
+                                                <small>"Drafts and test purchases; moves no Tickets"</small>
+                                            </button>
+                                            <button
+                                                class="type-option"
+                                                class:selected=move || new_key_mode.get() == "live"
+                                                on:click=move |_| new_key_mode.set("live".to_string())
+                                            >
+                                                <span>"Live"</span>
+                                                <small>"Real sales, prices and refunds"</small>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </Show>
                             </div>
                             
                             <div class="modal-footer">

@@ -7,11 +7,13 @@
 //! meshes, streaming and editor write-back. None of that can move into
 //! `eustress-common` without dragging Slint, `worlddb` and `radiance` with it.
 //!
-//! What this reads is the subset a *movement* Space is made of: `Part`
-//! instances with a transform, a size, a colour and collision. That is enough
-//! for the Client to open a real Space from the real on-disk format and play
-//! it, which is the thing that was impossible before — `space_fetch` unpacked
-//! an archive and nothing consumed the result.
+//! What this reads is the subset a *movement* Space is made of: BaseParts
+//! (`Part`, `SpawnLocation`, `Seat`, `WedgePart`, ...) with a transform, a
+//! size, a shape, a colour, a material preset, transparency and collision.
+//! That is enough for the Client to open a real
+//! Space from the real on-disk format and play it, which is the thing that was
+//! impossible before — `space_fetch` unpacked an archive and nothing consumed
+//! the result.
 //!
 //! Anything outside the subset is **skipped and counted**, never guessed at.
 //! [`SpaceGeometry::skipped`] reports what was ignored so a Space that quietly
@@ -28,7 +30,22 @@
 //! * A flat `<Name>.instance.toml` beside a directory is the same thing in
 //!   one file. When both forms exist for one name the folder form wins, which
 //!   is what the engine loader does — otherwise the entity spawns twice.
-//! * `[transform] scale` is **the part's size in metres**, not a multiplier.
+//! * `[transform] scale` is **the part's size**, not a multiplier, in the unit
+//!   `[metadata] unit` names (metres when it names none). The reader converts
+//!   position and size to metres, as Studio's loader does.
+//! * A Part's shape is **the name of its `[asset] mesh`**, one of the engine's
+//!   primitives in `engine/assets/parts/` (`parts/ball.glb`, `parts/wedge.glb`,
+//!   ...). There is no separate shape property. A Part with no `[asset]` is a
+//!   block, as it is in the engine loader.
+//!
+//! ## Drawn as Studio draws it
+//!
+//! [`primitive_mesh`] builds each primitive at unit size with the extents,
+//! orientation and tessellation of the engine's GLB, [`primitive_collider`]
+//! gives it the collider Studio gives it, and [`part_material`] is Studio's
+//! material for a part with no `.mat.toml` of its own. Custom meshes (drawn
+//! as blocks at their size), the `.mat.toml` material library and every class
+//! that is not a BasePart are outside the subset.
 //!
 //! ## The colour trap
 //!
@@ -41,8 +58,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use serde::Deserialize;
+
+use crate::classes::{Material as MaterialPreset, PartType};
+use crate::datamodel::{is_base_part, DataModel, DmValue, InstanceId};
 
 /// One `Part` read out of a Space.
 #[derive(Debug, Clone)]
@@ -54,9 +76,24 @@ pub struct SpacePart {
     pub transform: Transform,
     pub color: Color,
     pub material: String,
+    /// The primitive the part is drawn as, named by its `[asset] mesh`.
+    pub shape: PartType,
+    /// The `[asset] mesh` when it names a custom mesh rather than one of the
+    /// engine's primitives. Such a part is drawn as a block at its size, the
+    /// engine's own fallback for a mesh it cannot load.
+    pub custom_mesh: Option<String>,
     pub anchored: bool,
     pub can_collide: bool,
     pub transparency: f32,
+    pub reflectance: f32,
+    /// The nearest `Climbable` attribute on the part or on a Model or Folder
+    /// above it, if any.
+    pub climbable: Option<bool>,
+    /// Inside a Model that holds a `Humanoid` or an `AnimationController`: a
+    /// character's or an NPC's part, which characters do not climb unless an
+    /// attribute says so. The tree reader leaves it to the tree's apply step,
+    /// which knows every rig in the tree at once.
+    pub in_character: bool,
 }
 
 /// Everything the shared reader understood, plus an honest account of what it
@@ -64,9 +101,9 @@ pub struct SpacePart {
 #[derive(Debug, Clone, Default)]
 pub struct SpaceGeometry {
     pub parts: Vec<SpacePart>,
-    /// Instance files skipped, keyed by `class_name`, with counts. A movement
-    /// Space should be all `Part`; anything else here is content the Client is
-    /// silently not showing.
+    /// Instance files skipped, keyed by `class_name`, with counts: everything
+    /// that is not a BasePart. A movement Space is all parts; a class here is
+    /// content the Client is not showing.
     pub skipped: BTreeMap<String, usize>,
     /// Files that failed to parse, with the reason. Never silently dropped:
     /// a Space that half-loads must be distinguishable from one that loaded.
@@ -77,6 +114,116 @@ impl SpaceGeometry {
     pub fn skipped_total(&self) -> usize {
         self.skipped.values().sum()
     }
+
+    /// Parts drawn as blocks because their mesh is a custom one.
+    pub fn custom_mesh_parts(&self) -> usize {
+        self.parts.iter().filter(|p| p.custom_mesh.is_some()).count()
+    }
+
+    /// Where a character's feet go on the Space's first SpawnLocation: on top
+    /// of the pad, a little above it, by the rule Studio's Play uses.
+    pub fn spawn_point(&self) -> Option<Vec3> {
+        let pad = self.parts.iter().find(|p| p.class_name == "SpawnLocation")?;
+        Some(crate::services::player::spawn_feet_on(&pad.transform))
+    }
+}
+
+/// Where a character's feet go on the first SpawnLocation under the tree's
+/// Workspace, by the rule `SpaceGeometry::spawn_point` uses for files.
+pub fn tree_spawn_point(dm: &DataModel) -> Option<Vec3> {
+    let ws = dm.find_service("Workspace")?;
+    dm.descendants(ws)
+        .into_iter()
+        .filter(|&id| dm.class_of(id) == Some("SpawnLocation"))
+        .find_map(|id| SpacePart::from_tree(dm, id))
+        .map(|pad| crate::services::player::spawn_feet_on(&pad.transform))
+}
+
+// ── The same part in the DataModel tree ────────────────────────────────────
+
+impl SpacePart {
+    /// The part an instance in the tree describes, read as Studio's apply
+    /// step reads it. A property the instance lacks takes a Part's default. A
+    /// WedgePart or CornerWedgePart is always its own shape, a `MeshId` naming
+    /// one of the engine's primitives sets the shape, and any other `MeshId`
+    /// is a custom mesh drawn as a block. The pose is cleaned as the reader
+    /// cleans it. `None` for anything that is not a BasePart, and for the
+    /// Terrain, which is not drawn as a part.
+    pub fn from_tree(dm: &DataModel, id: InstanceId) -> Option<SpacePart> {
+        let inst = dm.get(id)?;
+        let class = inst.class_name.as_str();
+        if !is_base_part(class) || class == "Terrain" {
+            return None;
+        }
+        let get = |k: &str| inst.props.get(k);
+        let number = |k: &str, default: f32| get(k).and_then(DmValue::as_number).map_or(default, |n| n as f32);
+        let flag = |k: &str, default: bool| get(k).and_then(DmValue::as_bool).unwrap_or(default);
+
+        let named = match class {
+            "WedgePart" => PartType::Wedge,
+            "CornerWedgePart" => PartType::CornerWedge,
+            _ => get("Shape")
+                .and_then(DmValue::as_enum_name)
+                .and_then(PartType::from_str)
+                .unwrap_or(PartType::Block),
+        };
+        let mesh_id = get("MeshId").and_then(DmValue::as_str).map(str::trim).filter(|m| !m.is_empty());
+        let (shape, custom_mesh) = match mesh_id {
+            Some(mesh) => match primitive_shape(mesh) {
+                Some(shape) => (shape, None),
+                None => (PartType::Block, Some(mesh.to_owned())),
+            },
+            None => (named, None),
+        };
+
+        let size = get("Size").and_then(DmValue::as_vector3).map_or(Vec3::new(4.0, 1.0, 2.0), |v| v.to_vec3());
+        let pose = get("CFrame").and_then(DmValue::as_cframe).unwrap_or_default().to_transform();
+        let r = pose.rotation;
+        Some(SpacePart {
+            name: inst.name.clone(),
+            class_name: inst.class_name.clone(),
+            transform: clean_pose(pose.translation.to_array(), [r.x, r.y, r.z, r.w], size.to_array()),
+            color: get("Color")
+                .and_then(DmValue::as_color3)
+                .map_or(Color::srgb_u8(163, 162, 165), |c| Color::srgb(c.r as f32, c.g as f32, c.b as f32)),
+            material: get("Material").and_then(DmValue::as_enum_name).unwrap_or("Plastic").to_owned(),
+            shape,
+            custom_mesh,
+            anchored: flag("Anchored", false),
+            can_collide: flag("CanCollide", true),
+            transparency: number("Transparency", 0.0).clamp(0.0, 1.0),
+            reflectance: number("Reflectance", 0.0),
+            climbable: nearest_climbable(dm, id),
+            in_character: false,
+        })
+    }
+}
+
+/// The nearest `Climbable` attribute on an instance or above it.
+fn nearest_climbable(dm: &DataModel, id: InstanceId) -> Option<bool> {
+    let mut at = Some(id);
+    // Bounded, as the tree's own ancestry walks are.
+    for _ in 0..4096 {
+        let here = at?;
+        let set = dm.get_attribute(here, crate::attributes::CLIMBABLE_ATTRIBUTE).and_then(|v| v.as_bool());
+        if set.is_some() {
+            return set;
+        }
+        at = dm.parent(here);
+    }
+    None
+}
+
+/// A shape's name in the tree's `PartType` enum.
+pub fn shape_name(shape: PartType) -> &'static str {
+    match shape {
+        PartType::Block => "Block",
+        PartType::Ball => "Ball",
+        PartType::Cylinder => "Cylinder",
+        PartType::Wedge => "Wedge",
+        PartType::CornerWedge => "CornerWedge",
+        PartType::Cone => "Cone",
+    }
 }
 
 // ── Wire types ─────────────────────────────────────────────────────────────
@@ -86,9 +233,46 @@ struct InstanceFile {
     #[serde(default)]
     metadata: Metadata,
     #[serde(default)]
+    asset: Option<AssetBlock>,
+    #[serde(default)]
     transform: TransformBlock,
     #[serde(default)]
     properties: Properties,
+    #[serde(default)]
+    attributes: toml::Table,
+}
+
+impl InstanceFile {
+    fn class(&self) -> &str {
+        self.metadata.class_name.as_deref().unwrap_or("Part")
+    }
+
+    /// Its own `Climbable` attribute, if it sets one.
+    fn climbable(&self) -> Option<bool> {
+        self.attributes.get(crate::attributes::CLIMBABLE_ATTRIBUTE).and_then(toml::Value::as_bool)
+    }
+
+    /// A `Humanoid` or an `AnimationController`: what makes its parent a
+    /// character.
+    fn is_rig(&self) -> bool {
+        matches!(self.class(), "Humanoid" | "AnimationController")
+    }
+}
+
+/// What a folder hands down to everything inside it, and whether the folder
+/// is itself a Model, the only thing a rig makes a character.
+#[derive(Debug, Clone, Copy, Default)]
+struct Inherited {
+    climbable: Option<bool>,
+    in_character: bool,
+    is_model: bool,
+}
+
+/// `[asset]`: the mesh a part draws, and so, for a primitive, its shape.
+#[derive(Debug, Deserialize, Default)]
+struct AssetBlock {
+    #[serde(default)]
+    mesh: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -97,6 +281,9 @@ struct Metadata {
     class_name: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// The unit the file's lengths are in (`"m"`, `"ft"`, `"studs"`, ...).
+    #[serde(default)]
+    unit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +323,8 @@ struct Properties {
     #[serde(default)]
     transparency: f32,
     #[serde(default)]
+    reflectance: f32,
+    #[serde(default)]
     material: Option<String>,
 }
 
@@ -144,7 +333,7 @@ fn yes() -> bool {
 }
 
 /// Decode the colour array under the engine's own rule.
-fn decode_color(raw: &[toml::Value]) -> Color {
+pub fn decode_color(raw: &[toml::Value]) -> Color {
     if raw.len() < 3 {
         return Color::srgb(0.6, 0.6, 0.6);
     }
@@ -161,12 +350,45 @@ fn decode_color(raw: &[toml::Value]) -> Color {
     Color::srgba(f(0) / div, f(1) / div, f(2) / div, a)
 }
 
-fn to_transform(t: &TransformBlock) -> Transform {
+/// A part's transform from the numbers in its file, which are in the unit its
+/// `[metadata] unit` names: position and size converted to metres, then
+/// cleaned by [`clean_pose`]. Studio's loader converts exactly this way with
+/// `units_v1` on (the engine's default), and reads every file in metres
+/// without it, so this does too. A missing or unknown unit is metres.
+pub fn authored_pose(position: [f32; 3], rotation: [f32; 4], size: [f32; 3], unit: Option<&str>) -> Transform {
+    #[cfg(feature = "units_v1")]
+    let (position, size) = match unit.and_then(crate::units::Unit::from_symbol) {
+        Some(u) => (
+            crate::units::authored_to_engine_vec3_f32(position, u),
+            crate::units::authored_to_engine_vec3_f32(size, u),
+        ),
+        None => (position, size),
+    };
+    #[cfg(not(feature = "units_v1"))]
+    let _ = unit;
+    clean_pose(position, rotation, size)
+}
+
+/// A pose and size as a part's transform (`scale` is the size), cleaned the
+/// way the engine loader cleans them, since Avian panics on a non-finite
+/// position or rotation and on a collider whose extent is zero or negative.
+/// A non-finite position component becomes 0, a zero-length or non-finite
+/// rotation becomes the identity, and each size becomes its absolute value,
+/// at least one micrometre.
+pub fn clean_pose(position: [f32; 3], rotation: [f32; 4], size: [f32; 3]) -> Transform {
+    let finite_or = |v: f32, or: f32| if v.is_finite() { v } else { or };
+    let [x, y, z, w] = rotation;
+    let q = Quat::from_xyzw(x, y, z, w);
+    let rotation = if rotation.iter().all(|c| c.is_finite()) && q.length_squared() >= 1e-8 {
+        q.normalize()
+    } else {
+        Quat::IDENTITY
+    };
+    const MIN_SIZE: f32 = 1.0e-6;
     Transform {
-        translation: Vec3::from_array(t.position),
-        rotation: Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3])
-            .normalize(),
-        scale: Vec3::from_array(t.scale),
+        translation: Vec3::from_array(position.map(|v| finite_or(v, 0.0))),
+        rotation,
+        scale: Vec3::from_array(size.map(|v| finite_or(v, MIN_SIZE).abs().max(MIN_SIZE))),
     }
 }
 
@@ -186,7 +408,7 @@ pub fn read_space_parts(space_root: &Path) -> Result<SpaceGeometry, String> {
         ));
     }
     let mut out = SpaceGeometry::default();
-    walk(&workspace, Transform::IDENTITY, &mut out);
+    walk(&workspace, Transform::IDENTITY, Inherited::default(), &mut out);
     Ok(out)
 }
 
@@ -203,7 +425,7 @@ fn compose(parent: &Transform, child: &Transform) -> Transform {
     }
 }
 
-fn walk(dir: &Path, parent: Transform, out: &mut SpaceGeometry) {
+fn walk(dir: &Path, parent: Transform, inherited: Inherited, out: &mut SpaceGeometry) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         out.errors.push(format!("unreadable directory: {}", dir.display()));
         return;
@@ -231,44 +453,67 @@ fn walk(dir: &Path, parent: Transform, out: &mut SpaceGeometry) {
         .filter_map(|d| d.file_name()?.to_str().map(str::to_owned))
         .collect();
 
-    for f in flat {
-        let stem = f
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.trim_end_matches(".instance.toml").to_owned())
-            .unwrap_or_default();
-        if dir_names.iter().any(|d| *d == stem) {
-            continue;
+    // Every direct child is parsed before any of it is read: a Humanoid or an
+    // AnimationController among them makes this a character, and that is a
+    // fact about all of its parts.
+    let flat: Vec<(String, PathBuf, Option<InstanceFile>)> = flat
+        .into_iter()
+        .filter_map(|f| {
+            let stem = f
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.trim_end_matches(".instance.toml").to_owned())
+                .unwrap_or_default();
+            if dir_names.iter().any(|d| *d == stem) {
+                return None;
+            }
+            let file = parse(&f, out);
+            Some((stem, f, file))
+        })
+        .collect();
+    let dirs: Vec<(String, PathBuf, Option<InstanceFile>)> = dirs
+        .into_iter()
+        .map(|d| {
+            let name = d.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_owned();
+            let inst = d.join("_instance.toml");
+            let file = inst.is_file().then(|| parse(&inst, out)).flatten();
+            (name, d, file)
+        })
+        .collect();
+    let rigged = inherited.is_model
+        && flat.iter().chain(&dirs).any(|(_, _, f)| f.as_ref().is_some_and(InstanceFile::is_rig));
+    let here = Inherited {
+        climbable: inherited.climbable,
+        in_character: inherited.in_character || rigged,
+        is_model: false,
+    };
+
+    for (stem, path, file) in &flat {
+        if let Some(file) = file {
+            ingest(file, path, stem, &parent, here, out);
         }
-        ingest(&f, &stem, &parent, out);
     }
 
-    for d in dirs {
-        let name = d
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_owned();
-        let inst = d.join("_instance.toml");
-        let here = if inst.is_file() {
-            ingest(&inst, &name, &parent, out).unwrap_or(parent)
-        } else {
+    for (name, d, file) in dirs {
+        let (world, inner) = match &file {
+            Some(file) => (
+                ingest(file, &d.join("_instance.toml"), &name, &parent, here, out),
+                Inherited {
+                    climbable: file.climbable().or(here.climbable),
+                    is_model: file.class() == "Model",
+                    ..here
+                },
+            ),
             // A plain directory is a folder: no transform of its own, but its
             // children still nest under whatever contains it.
-            parent
+            None => (parent, here),
         };
-        walk(&d, here, out);
+        walk(&d, world, inner, out);
     }
 }
 
-/// Parse one instance file. Returns the composed world transform so children
-/// can nest under it.
-fn ingest(
-    path: &Path,
-    fallback_name: &str,
-    parent: &Transform,
-    out: &mut SpaceGeometry,
-) -> Option<Transform> {
+/// Read one instance file, recording why when it cannot be read.
+fn parse(path: &Path, out: &mut SpaceGeometry) -> Option<InstanceFile> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -276,22 +521,47 @@ fn ingest(
             return None;
         }
     };
-    let file: InstanceFile = match toml::from_str(&text) {
-        Ok(f) => f,
+    match toml::from_str(&text) {
+        Ok(f) => Some(f),
         Err(e) => {
             out.errors.push(format!("{}: {e}", path.display()));
-            return None;
+            None
         }
-    };
+    }
+}
 
-    let world = compose(parent, &to_transform(&file.transform));
-    let class = file.metadata.class_name.clone().unwrap_or_else(|| "Part".into());
+/// Take in one parsed instance file. Returns the composed world transform so
+/// children can nest under it.
+fn ingest(
+    file: &InstanceFile,
+    path: &Path,
+    fallback_name: &str,
+    parent: &Transform,
+    inherited: Inherited,
+    out: &mut SpaceGeometry,
+) -> Transform {
+    let unit = file.metadata.unit.as_deref();
+    if let Some(symbol) = unit.filter(|s| crate::units::Unit::from_symbol(s).is_none()) {
+        out.errors.push(format!("{}: unknown unit {symbol:?}, read as metres", path.display()));
+    }
+    let t = &file.transform;
+    let world = compose(parent, &authored_pose(t.position, t.rotation, t.scale, unit));
+    let class = file.class().to_owned();
 
-    if class != "Part" {
+    // Every BasePart draws as a part (a SpawnLocation, a Seat, a WedgePart,
+    // ...), as in the engine loader; the Terrain is drawn by the terrain.
+    if !is_base_part(&class) || class == "Terrain" {
         *out.skipped.entry(class).or_insert(0) += 1;
-        return Some(world);
+        return world;
     }
 
+    let (shape, custom_mesh) = match file.asset.as_ref().and_then(|a| a.mesh.as_deref()) {
+        None => (PartType::Block, None),
+        Some(mesh) => match primitive_shape(mesh) {
+            Some(shape) => (shape, None),
+            None => (PartType::Block, Some(mesh.to_owned())),
+        },
+    };
     let p = &file.properties;
     out.parts.push(SpacePart {
         name: file.metadata.name.clone().unwrap_or_else(|| fallback_name.to_owned()),
@@ -299,11 +569,176 @@ fn ingest(
         transform: world,
         color: p.color.as_deref().map(decode_color).unwrap_or(Color::srgb(0.6, 0.6, 0.6)),
         material: p.material.clone().unwrap_or_else(|| "Plastic".into()),
+        shape,
+        custom_mesh,
         anchored: p.anchored,
         can_collide: p.can_collide,
         transparency: p.transparency,
+        reflectance: p.reflectance,
+        climbable: file.climbable().or(inherited.climbable),
+        in_character: inherited.in_character,
     });
-    Some(world)
+    world
+}
+
+// ── Shapes, meshes and materials ───────────────────────────────────────────
+
+/// The engine's primitive meshes by the shape each one is. ORDER MATTERS, as
+/// in the engine loader's `PRIMITIVE_MESHES`: the first hint found in the
+/// file name wins, and `corner_wedge` contains `wedge`.
+const PRIMITIVE_HINTS: &[(&str, PartType)] = &[
+    ("corner_wedge", PartType::CornerWedge),
+    ("block", PartType::Block),
+    ("ball", PartType::Ball),
+    ("cylinder", PartType::Cylinder),
+    ("wedge", PartType::Wedge),
+    ("cone", PartType::Cone),
+];
+
+/// The primitive an `[asset] mesh` names, read as the engine loader reads it:
+/// by the file name alone, ignoring case. `None` is a custom mesh.
+pub fn primitive_shape(mesh: &str) -> Option<PartType> {
+    let lower = mesh.to_lowercase();
+    let file = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    PRIMITIVE_HINTS
+        .iter()
+        .find(|(hint, _)| file.contains(hint))
+        .map(|&(_, shape)| shape)
+}
+
+/// A unit mesh of `shape`, filling the cube from -0.5 to 0.5 exactly as the
+/// engine's `engine/assets/parts/<shape>.glb` does, with the same orientation
+/// and tessellation. A part's size scales it through `Transform.scale`.
+///
+/// Cylinders and cones stand on the Y axis, with a cone's tip at +Y. The wedge
+/// keeps its full face on the bottom and the back (-Z) and slopes down toward
+/// +Z. The corner wedge is the tetrahedron whose right-angled corner sits at
+/// (-0.5, -0.5, -0.5).
+pub fn primitive_mesh(shape: PartType) -> Mesh {
+    match shape {
+        PartType::Block => Mesh::from(Cuboid::new(1.0, 1.0, 1.0)),
+        PartType::Ball => Sphere::new(0.5).mesh().uv(32, 16),
+        PartType::Cylinder => Cylinder::new(0.5, 1.0).mesh().resolution(32).build(),
+        PartType::Cone => Cone::new(0.5, 1.0).mesh().resolution(32).build(),
+        PartType::Wedge => faceted_mesh(&WEDGE_CORNERS, WEDGE_FACES),
+        PartType::CornerWedge => faceted_mesh(&CORNER_WEDGE_CORNERS, CORNER_WEDGE_FACES),
+    }
+}
+
+/// Bottom back left, bottom back right, bottom front right, bottom front
+/// left, top back left, top back right.
+const WEDGE_CORNERS: [Vec3; 6] = [
+    Vec3::new(-0.5, -0.5, -0.5),
+    Vec3::new(0.5, -0.5, -0.5),
+    Vec3::new(0.5, -0.5, 0.5),
+    Vec3::new(-0.5, -0.5, 0.5),
+    Vec3::new(-0.5, 0.5, -0.5),
+    Vec3::new(0.5, 0.5, -0.5),
+];
+/// Bottom, back, left, right, slope; each counter-clockwise from outside.
+const WEDGE_FACES: &[&[usize]] = &[
+    &[0, 1, 2, 3],
+    &[0, 4, 5, 1],
+    &[0, 3, 4],
+    &[1, 5, 2],
+    &[4, 3, 2, 5],
+];
+
+/// The right-angled corner, then the corners along +X, +Z and +Y from it.
+const CORNER_WEDGE_CORNERS: [Vec3; 4] = [
+    Vec3::new(-0.5, -0.5, -0.5),
+    Vec3::new(0.5, -0.5, -0.5),
+    Vec3::new(-0.5, -0.5, 0.5),
+    Vec3::new(-0.5, 0.5, -0.5),
+];
+/// Bottom, back, left, slope; each counter-clockwise from outside.
+const CORNER_WEDGE_FACES: &[&[usize]] = &[&[0, 1, 2], &[0, 3, 1], &[0, 2, 3], &[1, 3, 2]];
+
+/// A flat-shaded mesh from convex faces. Each face lists its corners
+/// counter-clockwise seen from outside and gets its own copy of them, so its
+/// normal stays sharp at every edge.
+fn faceted_mesh(corners: &[Vec3], faces: &[&[usize]]) -> Mesh {
+    const UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+    let (mut positions, mut normals, mut uvs, mut indices) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for face in faces {
+        let p: Vec<Vec3> = face.iter().map(|&i| corners[i]).collect();
+        let normal = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
+        let base = positions.len() as u32;
+        for (k, corner) in p.iter().enumerate() {
+            positions.push(corner.to_array());
+            normals.push(normal.to_array());
+            uvs.push(UV[k % 4]);
+        }
+        for k in 1..p.len() as u32 - 1 {
+            indices.extend([base, base + k, base + k + 1]);
+        }
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+/// The unit collider Studio gives each shape (`safe_collider_from` in the
+/// engine loader), which Avian scales by the part's `Transform.scale`. Studio
+/// collides a cone as a cylinder and both wedges as boxes, and so does this,
+/// so a body meets the same surfaces in Studio and the Player.
+#[cfg(feature = "physics")]
+pub fn primitive_collider(shape: PartType) -> avian3d::prelude::Collider {
+    use avian3d::prelude::Collider;
+    match shape {
+        PartType::Ball => Collider::sphere(0.5),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(0.5, 1.0),
+        PartType::Block | PartType::Wedge | PartType::CornerWedge => {
+            Collider::cuboid(1.0, 1.0, 1.0)
+        }
+    }
+}
+
+/// Studio's material for a part with no `.mat.toml` of its own
+/// (`resolve_material` in the engine's material loader): the preset's
+/// roughness, metallic and reflectance, alpha of 1 minus the transparency,
+/// transmission for glass and a glow for neon.
+pub fn part_material(part: &SpacePart) -> StandardMaterial {
+    let preset = MaterialPreset::from_string(&part.material);
+    let (roughness, metallic, preset_reflectance) = preset.pbr_params();
+    let alpha = 1.0 - part.transparency;
+    let mut material = StandardMaterial {
+        base_color: part.color.with_alpha(alpha),
+        alpha_mode: if alpha < 1.0 { AlphaMode::Blend } else { AlphaMode::Opaque },
+        perceptual_roughness: roughness,
+        metallic,
+        reflectance: if part.reflectance > 0.0 { part.reflectance } else { preset_reflectance },
+        ..default()
+    };
+    match preset {
+        MaterialPreset::Glass => {
+            material.specular_transmission = 0.9;
+            material.diffuse_transmission = 0.3;
+            material.thickness = 0.5;
+            material.ior = 1.5;
+        }
+        MaterialPreset::Neon => material.emissive = LinearRgba::from(part.color) * 2.0,
+        _ => {}
+    }
+    material
+}
+
+/// What makes two parts' materials identical, so they can share one: the
+/// preset, the colour, the transparency and the reflectance.
+pub type LookKey = (&'static str, [u32; 4], u32, u32);
+
+/// A part's [`LookKey`].
+pub fn look_key(part: &SpacePart) -> LookKey {
+    let c = part.color.to_srgba();
+    (
+        MaterialPreset::from_string(&part.material).as_str(),
+        [c.red, c.green, c.blue, c.alpha].map(f32::to_bits),
+        part.transparency.to_bits(),
+        part.reflectance.to_bits(),
+    )
 }
 
 // ── Spawning ───────────────────────────────────────────────────────────────
@@ -314,13 +749,15 @@ fn ingest(
 #[derive(Component, Debug)]
 pub struct SpawnedFromSpace;
 
-/// Spawn every part in `geo` as a box with a matching collider.
+/// Spawn every part in `geo` as its shape, at its size, with Studio's
+/// collider and material for it.
 ///
 /// Lives in `common` rather than in a shell so that "the Client sees what
 /// Studio sees" is a property of one function instead of two implementations
-/// agreeing by inspection.
+/// agreeing by inspection. Parts share one mesh per shape and one material
+/// per distinct look.
 ///
-/// ## The collider is a UNIT cube, and that is not a mistake
+/// ## The collider is UNIT-sized, and that is not a mistake
 ///
 /// Avian applies the entity's `Transform.scale` to its collider — see
 /// `update_collider_scale` in avian3d-0.7.0 `collision/collider/backend.rs:460`,
@@ -344,42 +781,93 @@ pub fn spawn_space_parts(
     materials: &mut Assets<StandardMaterial>,
     geo: &SpaceGeometry,
 ) -> usize {
-    use avian3d::prelude::{Collider, RigidBody};
+    use avian3d::prelude::RigidBody;
 
-    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    // One mesh per shape, indexed by the `PartType` discriminant.
+    let mut shape_meshes: [Option<Handle<Mesh>>; 6] = Default::default();
+    // One material per distinct look.
+    let mut looks: std::collections::HashMap<LookKey, Handle<StandardMaterial>> =
+        std::collections::HashMap::new();
     let mut n = 0;
 
     for p in &geo.parts {
-        let s = p.transform.scale;
         // A zero or negative extent produces a degenerate collider that Avian
-        // reports as NaN contacts rather than rejecting.
-        if !s.is_finite() || s.min_element() <= 1e-4 {
+        // reports as NaN contacts rather than rejecting. `read_space_parts`
+        // never yields one; this guards geometry built any other way.
+        let s = p.transform.scale;
+        if !s.is_finite() || s.min_element() <= 0.0 {
             continue;
         }
+        let mesh = shape_meshes[p.shape as usize]
+            .get_or_insert_with(|| meshes.add(primitive_mesh(p.shape)))
+            .clone();
+        let material = looks.entry(look_key(p)).or_insert_with(|| materials.add(part_material(p))).clone();
 
         let mut e = commands.spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: p.color,
-                perceptual_roughness: 0.85,
-                alpha_mode: if p.transparency > 0.0 {
-                    AlphaMode::Blend
-                } else {
-                    AlphaMode::Opaque
-                },
-                ..default()
-            })),
-            *&p.transform,
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            p.transform,
             Name::new(p.name.clone()),
             SpawnedFromSpace,
         ));
 
         if p.can_collide {
-            e.insert((Collider::cuboid(1.0, 1.0, 1.0), RigidBody::Static));
+            e.insert((primitive_collider(p.shape), RigidBody::Static));
+            // Every part here is Static, so what the climb rules would read
+            // off an unanchored part's body, or off a part's attributes and
+            // class in Studio, is recorded on the entity instead.
+            if let Some(mark) = climb_mark(p) {
+                e.insert(mark);
+            }
         }
         n += 1;
     }
     n
+}
+
+/// The Models some Player's `Character` points at: the avatar runtime draws
+/// and moves those.
+pub fn character_models(g: &DataModel) -> std::collections::HashSet<InstanceId> {
+    let Some(players) = g.find_service("Players") else { return Default::default() };
+    g.children(players)
+        .iter()
+        .filter_map(|&p| g.get_prop(p, "Character").and_then(|v| v.as_instance()))
+        .collect()
+}
+
+/// The Models holding a `Humanoid` or an `AnimationController`: NPCs and other
+/// characters, whose parts characters do not climb by default. Only a Model is
+/// a character, so a rig left loose in Workspace or a Folder marks nothing.
+pub fn rigged_models(g: &DataModel) -> std::collections::HashSet<InstanceId> {
+    let Some(workspace) = g.find_service("Workspace") else { return Default::default() };
+    g.descendants(workspace)
+        .into_iter()
+        .filter(|&d| matches!(g.class_of(d), Some("Humanoid" | "AnimationController")))
+        .filter_map(|d| g.parent(d))
+        .filter(|&m| g.class_of(m) == Some("Model"))
+        .collect()
+}
+
+/// Whether an instance is inside one of `models`.
+pub fn inside_any(g: &DataModel, id: InstanceId, models: &std::collections::HashSet<InstanceId>) -> bool {
+    let mut at = g.parent(id);
+    // Bounded, as the tree's own ancestry walks are.
+    for _ in 0..4096 {
+        let Some(here) = at else { return false };
+        if models.contains(&here) {
+            return true;
+        }
+        at = g.parent(here);
+    }
+    false
+}
+
+/// The climb mark for a part, from what the Space says about it. See
+/// [`crate::avatar::climbable`].
+#[cfg(feature = "physics")]
+pub fn climb_mark(p: &SpacePart) -> Option<crate::avatar::climbable::Climbable> {
+    use crate::avatar::climbable::{loader_mark, INVISIBLE_TRANSPARENCY};
+    loader_mark(p.climbable, p.in_character, !p.anchored, p.transparency >= INVISIBLE_TRANSPARENCY)
 }
 
 #[cfg(test)]
@@ -444,6 +932,327 @@ mod tests {
         // +90° about Y maps -Z to -X.
         assert!((w.translation.x - 8.0).abs() < 1e-4, "got {:?}", w.translation);
         assert!(w.translation.z.abs() < 1e-4);
+    }
+
+    #[test]
+    fn mesh_names_map_to_shapes_as_in_the_engine() {
+        for (mesh, shape) in [
+            ("parts/block.glb", PartType::Block),
+            ("parts/ball.glb", PartType::Ball),
+            ("parts/cylinder.glb", PartType::Cylinder),
+            ("parts/wedge.glb", PartType::Wedge),
+            ("parts/corner_wedge.glb", PartType::CornerWedge),
+            ("parts/cone.glb", PartType::Cone),
+            // `corner_wedge` contains `wedge`, and case and separators vary.
+            ("PARTS\\Corner_Wedge.GLB", PartType::CornerWedge),
+        ] {
+            assert_eq!(primitive_shape(mesh), Some(shape), "{mesh}");
+        }
+        assert_eq!(primitive_shape("meshes/Paddle.glb"), None);
+    }
+
+    /// The two hand-built meshes against the engine's GLBs, whose vertex data
+    /// gives these corners, face normals and triangle counts. Matching the
+    /// outward normals also proves every face is wound to face out.
+    #[test]
+    fn wedges_match_the_engine_glbs() {
+        use bevy::mesh::VertexAttributeValues;
+        let (h, t) = (std::f32::consts::FRAC_1_SQRT_2, 1.0 / 3f32.sqrt());
+        let wedge_corners = [
+            [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, -0.5],
+            [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5],
+        ];
+        let wedge_normals = [
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, h, h],
+        ];
+        let corner_corners = [
+            [-0.5, -0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [-0.5, 0.5, -0.5],
+            [0.5, -0.5, -0.5],
+        ];
+        let corner_normals = [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [t, t, t]];
+        let cases: [(PartType, &[[f32; 3]], &[[f32; 3]], usize); 2] = [
+            (PartType::Wedge, &wedge_corners, &wedge_normals, 8),
+            (PartType::CornerWedge, &corner_corners, &corner_normals, 4),
+        ];
+        for (shape, corners, face_normals, triangles) in cases {
+            let mesh = primitive_mesh(shape);
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("{shape:?}: no positions");
+            };
+            let Some(VertexAttributeValues::Float32x3(normals)) =
+                mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+            else {
+                panic!("{shape:?}: no normals");
+            };
+            let Some(Indices::U32(indices)) = mesh.indices() else {
+                panic!("{shape:?}: no indices")
+            };
+
+            let key = |p: &[f32; 3]| p.map(|c| (c * 2.0).round() as i32);
+            let mut got: Vec<_> = positions.iter().map(key).collect();
+            got.sort();
+            got.dedup();
+            let mut want: Vec<_> = corners.iter().map(key).collect();
+            want.sort();
+            assert_eq!(got, want, "{shape:?}: corners");
+            assert_eq!(indices.len() / 3, triangles, "{shape:?}: triangle count");
+
+            for tri in indices.chunks(3) {
+                let [a, b, c] =
+                    [tri[0], tri[1], tri[2]].map(|i| Vec3::from_array(positions[i as usize]));
+                let n = Vec3::from_array(normals[tri[0] as usize]);
+                assert!(
+                    (b - a).cross(c - a).normalize().dot(n) > 0.999,
+                    "{shape:?}: winding disagrees with normal"
+                );
+                assert!(
+                    face_normals.iter().any(|f| Vec3::from_array(*f).dot(n) > 0.999),
+                    "{shape:?}: normal {n} is not one of the engine mesh's"
+                );
+            }
+            for f in face_normals {
+                let f = Vec3::from_array(*f);
+                assert!(
+                    normals.iter().any(|n| Vec3::from_array(*n).dot(f) > 0.999),
+                    "{shape:?}: face {f} missing"
+                );
+            }
+        }
+    }
+
+    /// What decides whether characters climb a part, read from a Space: an
+    /// NPC's parts are a character's, a `Climbable` attribute on a Model or a
+    /// Folder reaches everything inside it, and the nearest one wins.
+    #[test]
+    fn a_spaces_characters_and_climbable_attributes_reach_its_parts() {
+        let root =
+            std::env::temp_dir().join(format!("eustress_space_read_climb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("Workspace");
+        for dir in ["Npc", "Statue", "Map/Tower"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        }
+        let file = |class: &str, name: &str, attributes: &str| {
+            format!(
+                "[metadata]\nclass_name = \"{class}\"\nname = \"{name}\"\n\n\
+                 [transform]\nposition = [0.0, 1.0, 0.0]\nscale = [1.0, 2.0, 1.0]\n\n{attributes}"
+            )
+        };
+        let write = |path: &str, text: String| std::fs::write(workspace.join(path), text).unwrap();
+        // A rig left loose in Workspace makes nothing a character.
+        write("Stray.instance.toml", file("Humanoid", "Stray", ""));
+        write("Npc/_instance.toml", file("Model", "Npc", ""));
+        write("Npc/Humanoid.instance.toml", file("Humanoid", "Humanoid", ""));
+        write("Npc/Torso.instance.toml", file("Part", "Torso", ""));
+        write("Statue/_instance.toml", file("Model", "Statue", "[attributes]\nClimbable = true\n"));
+        write("Statue/Humanoid.instance.toml", file("Humanoid", "Humanoid", ""));
+        write("Statue/Plinth.instance.toml", file("Part", "Plinth", ""));
+        write("Map/_instance.toml", file("Folder", "Map", "[attributes]\nClimbable = false\n"));
+        write("Map/Trim.instance.toml", file("Part", "Trim", ""));
+        write("Map/Tower/_instance.toml", file("Model", "Tower", "[attributes]\nClimbable = true\n"));
+        write("Map/Tower/Wall.instance.toml", file("Part", "Wall", ""));
+        write("Block.instance.toml", file("Part", "Block", "[properties]\nanchored = true\n"));
+        write("Crate.instance.toml", file("Part", "Crate", ""));
+
+        let geo = read_space_parts(&root).expect("space reads");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(geo.errors.is_empty(), "{:?}", geo.errors);
+        let get = |name: &str| geo.parts.iter().find(|p| p.name == name).expect(name);
+
+        assert!(get("Torso").in_character, "an NPC's part is a character's");
+        assert_eq!(get("Torso").climbable, None);
+        assert!(get("Plinth").in_character);
+        assert_eq!(get("Plinth").climbable, Some(true), "the statue's own attribute reaches its parts");
+        assert_eq!(get("Trim").climbable, Some(false), "a folder's attribute reaches its parts");
+        assert!(!get("Trim").in_character);
+        assert_eq!(get("Wall").climbable, Some(true), "the nearest attribute wins");
+        assert_eq!(get("Block").climbable, None);
+        assert!(!get("Block").in_character);
+
+        #[cfg(feature = "physics")]
+        {
+            use crate::avatar::climbable::Climbable;
+            assert_eq!(climb_mark(get("Torso")), Some(Climbable(false)));
+            assert_eq!(climb_mark(get("Plinth")), Some(Climbable(true)));
+            assert_eq!(climb_mark(get("Trim")), Some(Climbable(false)));
+            assert_eq!(climb_mark(get("Block")), None, "an ordinary anchored part needs no mark");
+            assert_eq!(climb_mark(get("Crate")), Some(Climbable(false)), "a loose part is never a climbing surface");
+        }
+    }
+
+    /// Shape, custom meshes and the new properties, read from files in the
+    /// on-disk format.
+    #[test]
+    fn a_parts_shape_comes_from_its_asset_mesh() {
+        let root =
+            std::env::temp_dir().join(format!("eustress_space_read_shapes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("Workspace");
+        std::fs::create_dir_all(workspace.join("Ramp")).unwrap();
+        let part = |name: &str, asset: &str| {
+            format!(
+                "[metadata]\nclass_name = \"Part\"\nname = \"{name}\"\n\n{asset}\
+                 [transform]\nposition = [0.0, 1.0, 0.0]\n\
+                 rotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 2.0, 6.0]\n\n\
+                 [properties]\ncolor = [0.2, 0.4, 0.8, 1.0]\ntransparency = 0.25\n\
+                 reflectance = 0.1\nmaterial = \"Neon\"\n"
+            )
+        };
+        std::fs::write(
+            workspace.join("Ramp/_instance.toml"),
+            part("Ramp", "[asset]\nmesh = \"parts/wedge.glb\"\n\n"),
+        )
+        .unwrap();
+        std::fs::write(workspace.join("Plate.instance.toml"), part("Plate", "")).unwrap();
+        std::fs::write(
+            workspace.join("Car.instance.toml"),
+            part("Car", "[asset]\nmesh = \"meshes/Car.glb\"\n\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("Spawn.instance.toml"),
+            "[metadata]\nclass_name = \"SpawnLocation\"\nname = \"Spawn\"\n\n\
+             [transform]\nposition = [3.0, 1.0, -2.0]\nscale = [4.0, 1.0, 4.0]\n",
+        )
+        .unwrap();
+
+        let geo = read_space_parts(&root).expect("space reads");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(geo.errors.is_empty(), "{:?}", geo.errors);
+        let get = |name: &str| geo.parts.iter().find(|p| p.name == name).expect(name);
+
+        let ramp = get("Ramp");
+        assert_eq!(ramp.shape, PartType::Wedge);
+        assert_eq!(ramp.custom_mesh, None);
+        assert_eq!(ramp.transform.scale, Vec3::new(4.0, 2.0, 6.0));
+        assert!((ramp.transparency - 0.25).abs() < 1e-6 && (ramp.reflectance - 0.1).abs() < 1e-6);
+        assert_eq!(get("Plate").shape, PartType::Block, "a Part with no [asset] is a block");
+        assert_eq!(get("Car").shape, PartType::Block);
+        assert_eq!(get("Car").custom_mesh.as_deref(), Some("meshes/Car.glb"));
+        assert_eq!(geo.custom_mesh_parts(), 1);
+        assert_eq!(get("Spawn").class_name, "SpawnLocation", "every BasePart draws");
+        let feet = geo.spawn_point().expect("the SpawnLocation is the spawn");
+        assert!((feet - Vec3::new(3.0, 1.6, -2.0)).length() < 1e-5, "on top of the pad, got {feet}");
+    }
+
+    #[test]
+    fn materials_follow_studios_presets() {
+        let part = |material: &str, transparency: f32, reflectance: f32| SpacePart {
+            name: "p".into(),
+            class_name: "Part".into(),
+            transform: Transform::IDENTITY,
+            color: Color::srgb(1.0, 0.5, 0.0),
+            material: material.into(),
+            shape: PartType::Block,
+            custom_mesh: None,
+            anchored: true,
+            can_collide: true,
+            transparency,
+            reflectance,
+            climbable: None,
+            in_character: false,
+        };
+        let see_through = part_material(&part("Plastic", 0.25, 0.0));
+        assert!((see_through.base_color.alpha() - 0.75).abs() < 1e-6);
+        assert!(matches!(see_through.alpha_mode, AlphaMode::Blend));
+        assert!(matches!(part_material(&part("Plastic", 0.0, 0.0)).alpha_mode, AlphaMode::Opaque));
+        assert_eq!(part_material(&part("Metal", 0.0, 0.0)).metallic, 1.0);
+        assert!(part_material(&part("Neon", 0.0, 0.0)).emissive.red > 1.0, "neon glows");
+        assert!((part_material(&part("Plastic", 0.0, 0.3)).reflectance - 0.3).abs() < 1e-6);
+        assert!(part_material(&part("Glass", 0.0, 0.0)).specular_transmission > 0.0);
+    }
+
+    #[test]
+    fn bad_transforms_are_cleaned_as_the_engine_cleans_them() {
+        let t = clean_pose([f32::NAN, 2.0, f32::INFINITY], [0.0, 0.0, 0.0, 0.0], [-3.0, 0.0, f32::NAN]);
+        assert_eq!(t.translation, Vec3::new(0.0, 2.0, 0.0));
+        assert_eq!(t.rotation, Quat::IDENTITY);
+        assert_eq!(t.scale, Vec3::new(3.0, 1.0e-6, 1.0e-6));
+    }
+
+    /// An imported file's numbers are in the unit it declares; the Player
+    /// converts them to metres as Studio does, so the two draw the same size.
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn declared_units_convert_to_metres() {
+        let t = authored_pose([10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 4.0, 1.0], Some("ft"));
+        assert!((t.translation.x - 3.048).abs() < 1e-5, "10 ft is 3.048 m, got {}", t.translation.x);
+        assert!((t.scale - Vec3::new(0.6096, 1.2192, 0.3048)).length() < 1e-5, "got {}", t.scale);
+        let studs = authored_pose([0.0; 3], [0.0, 0.0, 0.0, 1.0], [196.8, 1.0, 1.0], Some("studs"));
+        assert!((studs.scale.x - 9.815).abs() < 1e-3, "196.8 studs is 9.815 m, got {}", studs.scale.x);
+        let metres = authored_pose([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0], [1.0; 3], None);
+        assert_eq!(metres.translation, Vec3::new(1.0, 2.0, 3.0), "no unit is metres");
+    }
+
+    #[test]
+    fn parts_read_from_the_tree_as_studio_reads_them() {
+        use crate::datamodel::EnumItem;
+        use crate::scripting::{CFrame, Color3, Vector3};
+
+        let mut dm = DataModel::new();
+        let ball = dm.create("Part");
+        dm.set_prop(ball, "Shape", DmValue::Enum(EnumItem::new("PartType", "Ball"))).unwrap();
+        dm.set_prop(ball, "CFrame", DmValue::CFrame(CFrame::new(1.0, 2.0, 3.0))).unwrap();
+        dm.set_prop(ball, "Size", DmValue::Vector3(Vector3::new(2.0, 2.0, 2.0))).unwrap();
+        dm.set_prop(ball, "Color", DmValue::Color3(Color3::new(1.0, 0.5, 0.0))).unwrap();
+        dm.set_prop(ball, "Transparency", DmValue::Number(0.25)).unwrap();
+        dm.set_prop(ball, "Material", DmValue::Enum(EnumItem::new("Material", "Neon"))).unwrap();
+        dm.set_prop(ball, "Anchored", DmValue::Bool(true)).unwrap();
+        let wedge = dm.create("WedgePart");
+        let meshed = dm.create("MeshPart");
+        dm.set_prop(meshed, "MeshId", DmValue::String("parts/cylinder.glb".into())).unwrap();
+        let custom = dm.create("MeshPart");
+        dm.set_prop(custom, "MeshId", DmValue::String("meshes/Car.glb".into())).unwrap();
+        let folder = dm.create("Folder");
+
+        let b = SpacePart::from_tree(&dm, ball).expect("a Part reads");
+        assert_eq!(b.shape, PartType::Ball);
+        assert_eq!(b.transform.translation, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(b.transform.scale, Vec3::splat(2.0));
+        assert_eq!(b.material, "Neon");
+        assert!((b.transparency - 0.25).abs() < 1e-6 && b.anchored && b.can_collide);
+        let c = b.color.to_srgba();
+        assert!((c.red - 1.0).abs() < 1e-6 && (c.green - 0.5).abs() < 1e-6);
+        assert_eq!(SpacePart::from_tree(&dm, wedge).unwrap().shape, PartType::Wedge, "the class is the shape");
+        assert_eq!(
+            SpacePart::from_tree(&dm, meshed).unwrap().shape,
+            PartType::Cylinder,
+            "a MeshId naming a primitive sets the shape"
+        );
+        let car = SpacePart::from_tree(&dm, custom).unwrap();
+        assert_eq!((car.shape, car.custom_mesh.as_deref()), (PartType::Block, Some("meshes/Car.glb")));
+        assert!(SpacePart::from_tree(&dm, folder).is_none(), "only BaseParts are parts");
+    }
+
+    #[test]
+    fn the_tree_spawns_on_top_of_its_workspace_pad() {
+        use crate::scripting::{CFrame, Vector3};
+
+        let mut dm = DataModel::new();
+        let pad = |dm: &mut DataModel, x: f64| {
+            let id = dm.create("SpawnLocation");
+            dm.set_prop(id, "CFrame", DmValue::CFrame(CFrame::new(x, 1.0, -2.0))).unwrap();
+            dm.set_prop(id, "Size", DmValue::Vector3(Vector3::new(6.0, 1.0, 6.0))).unwrap();
+            id
+        };
+        assert_eq!(tree_spawn_point(&dm), None, "no Workspace, no spawn");
+        let ws = dm.get_service("Workspace").expect("Workspace is a service");
+        let stored = pad(&mut dm, 50.0);
+        let storage = dm.get_service("ReplicatedStorage").expect("ReplicatedStorage is a service");
+        dm.set_parent(stored, Some(storage)).unwrap();
+        assert_eq!(tree_spawn_point(&dm), None, "a pad outside the Workspace is not a spawn");
+        let placed = pad(&mut dm, 3.0);
+        dm.set_parent(placed, Some(ws)).unwrap();
+        let feet = tree_spawn_point(&dm).expect("the Workspace pad is the spawn");
+        assert!((feet - Vec3::new(3.0, 1.6, -2.0)).length() < 1e-5, "on top of the pad, got {feet}");
     }
 
     #[test]

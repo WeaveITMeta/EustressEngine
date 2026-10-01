@@ -20,6 +20,9 @@
 //! - **Join key.** A session is requested at `/join/<key>`. A wrong key is
 //!   refused with HTTP 403 before any connection state exists. The key
 //!   `open` is honoured only from a loopback address.
+//! - **Probe.** `/probe/<key>` takes the same key and only echoes: datagrams
+//!   and up to four streams, for two minutes, never more than arrived. It
+//!   measures the path to a host (a tunnel's datagram size) without a session.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -30,7 +33,7 @@ use wtransport::endpoint::IncomingSession;
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
 
-use crate::join_link::{key_from_path, JoinLink, OPEN_KEY};
+use crate::join_link::{key_from_path, probe_key_from_path, JoinLink, OPEN_KEY};
 use crate::session::{link_pair, ConnId, LinkCommand, LinkEnds, LinkEvent, NetLink, HOST_CONN};
 use crate::wire::MAX_FRAME_BYTES;
 
@@ -42,6 +45,20 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a closing connection waits for its last frames to reach the peer.
 const CLOSE_GRACE: Duration = Duration::from_millis(250);
+/// Largest UDP payload a connection sends, and the largest each end tells
+/// its peer it accepts (the `max_udp_payload_size` transport parameter, which
+/// is what a browser's QUIC stack follows). Cloudflare Tunnel carries UDP
+/// payloads up to about 1,280 bytes on its private network routes, so path
+/// MTU discovery stops here and no packet outgrows the path; every datagram
+/// the session sends (see `repl::motion::MAX_MOTION_DATAGRAM`) fits. A
+/// browser pads its first packets to its own size before it learns this, so
+/// the probe page's measurement of that size must stay at or below it.
+const MAX_UDP_PAYLOAD: u16 = 1250;
+/// How long one probe session may run.
+const PROBE_LIFETIME: Duration = Duration::from_secs(120);
+/// Streams one probe may have echoed, and bytes per stream.
+const PROBE_STREAMS: usize = 4;
+const PROBE_STREAM_BYTES: usize = 4 * 1024 * 1024;
 
 /// How a host listens.
 #[derive(Debug, Clone)]
@@ -95,10 +112,31 @@ pub fn remove_host_file(workspace: &std::path::Path, port: u16) {
     let _ = std::fs::remove_file(host_file_path(workspace, port));
 }
 
-/// The join link a host on this machine left for `port`, if any.
+/// How often a running host writes its file again ([`write_host_file`]).
+pub const HOST_FILE_REFRESH: Duration = Duration::from_secs(10);
+/// How long a host file stays current without being written again. A host
+/// that stopped without removing its file (its Studio was killed) leaves one
+/// that goes stale after this.
+pub const HOST_FILE_FRESH: Duration = Duration::from_secs(30);
+
+/// The join link a host on this machine left for `port`, if that host is
+/// still running: a file older than [`HOST_FILE_FRESH`] is left behind by one
+/// that is gone, and its pin would fail the join.
 pub fn read_host_file(workspace: &std::path::Path, port: u16) -> Option<JoinLink> {
-    let text = std::fs::read_to_string(host_file_path(workspace, port)).ok()?;
+    let path = host_file_path(workspace, port);
+    let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().unwrap_or_default();
+    if age > HOST_FILE_FRESH {
+        tracing::info!("net: ignoring {}: its host stopped {} s ago", path.display(), age.as_secs());
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
     JoinLink::parse(&text).ok().filter(|l| l.port == port)
+}
+
+/// The first 8 hex digits of a certificate pin, as the logs show it: enough
+/// to tell two hosting sessions apart, and the same on host and Player.
+pub fn pin_prefix(pin: &[u8; 32]) -> String {
+    pin[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Start listening. Returns at once; the link reports
@@ -159,6 +197,22 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| format!("could not start the network runtime: {e}"))
 }
 
+/// The QUIC transport both ends use: quinn's defaults, which wtransport
+/// starts from too, with the keep-alive, the idle timeout, and packets
+/// capped at [`MAX_UDP_PAYLOAD`].
+fn quic_transport() -> std::sync::Arc<wtransport::quinn::TransportConfig> {
+    use wtransport::quinn::{IdleTimeout, MtuDiscoveryConfig, TransportConfig};
+    let mut transport = TransportConfig::default();
+    transport.keep_alive_interval(Some(KEEP_ALIVE));
+    transport.max_idle_timeout(IdleTimeout::try_from(IDLE_TIMEOUT).ok());
+    // QUIC's minimum, which every path must carry, and where discovery starts.
+    transport.initial_mtu(1200);
+    let mut mtu = MtuDiscoveryConfig::default();
+    mtu.upper_bound(MAX_UDP_PAYLOAD);
+    transport.mtu_discovery_config(Some(mtu));
+    std::sync::Arc::new(transport)
+}
+
 fn certificate_pin(identity: &Identity) -> [u8; 32] {
     let digest = identity.certificate_chain().as_slice()[0].hash();
     *AsRef::<[u8; 32]>::as_ref(&digest)
@@ -200,7 +254,7 @@ async fn host_main(options: HostOptions, identity: Identity, pin: [u8; 32], ends
     let ip: IpAddr = if options.lan { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
     let bind = SocketAddr::new(ip, options.port);
 
-    let config = match ServerConfig::builder()
+    let mut config = match ServerConfig::builder()
         .with_bind_address(bind)
         .with_identity(identity)
         .keep_alive_interval(Some(KEEP_ALIVE))
@@ -212,6 +266,10 @@ async fn host_main(options: HostOptions, identity: Identity, pin: [u8; 32], ends
             return;
         }
     };
+    config.quic_config_mut().transport_config(quic_transport());
+    // A browser's QUIC stack sizes its packets by what the host advertises,
+    // so it keeps under the tunnel's limit too.
+    let _ = config.quic_endpoint_config_mut().max_udp_payload_size(MAX_UDP_PAYLOAD);
     let endpoint = match Endpoint::server(config) {
         Ok(e) => e,
         Err(e) => {
@@ -222,7 +280,11 @@ async fn host_main(options: HostOptions, identity: Identity, pin: [u8; 32], ends
         }
     };
     let port = endpoint.local_addr().map(|a| a.port()).unwrap_or(options.port);
-    tracing::info!("net: hosting on {ip}:{port}{}", if options.lan { " (local network)" } else { " (this machine only)" });
+    tracing::info!(
+        "net: hosting on {ip}:{port}{}, certificate pin {}",
+        if options.lan { " (local network)" } else { " (this machine only)" },
+        pin_prefix(&pin)
+    );
     let _ = events.send(LinkEvent::Listening { port, cert_sha256: pin });
 
     let mut commands = forward_commands(commands);
@@ -293,7 +355,12 @@ async fn serve_player(
 ) {
     let Ok(request) = incoming.await else { return };
     let remote = request.remote_address();
-    let allowed = match key_from_path(request.path()) {
+    let path = request.path().to_string();
+    let (key, probe) = match probe_key_from_path(&path) {
+        Some(k) => (Some(k), true),
+        None => (key_from_path(&path), false),
+    };
+    let allowed = match key {
         Some(k) if constant_time_eq(k.as_bytes(), join_key.as_bytes()) => true,
         Some(OPEN_KEY) => remote.ip().is_loopback(),
         _ => false,
@@ -302,6 +369,9 @@ async fn serve_player(
         tracing::warn!("net: refused a session from {remote}: wrong join key");
         request.forbidden().await;
         return;
+    }
+    if probe {
+        return serve_probe(request, remote).await;
     }
     let Ok(connection) = request.accept().await else { return };
     let (send, recv) = match tokio::time::timeout(CONNECT_TIMEOUT, connection.accept_bi()).await {
@@ -323,6 +393,50 @@ async fn serve_player(
     let _ = gone.send(conn);
 }
 
+/// Echo a probe, for up to [`PROBE_LIFETIME`]: each datagram back as it
+/// came, and each stream back byte for byte. A probe measures the path to
+/// the host (whether datagrams get through a tunnel, and how large), behind
+/// the same key as a join; the session never sees it. An echo is never
+/// larger than what arrived, so a probe amplifies nothing.
+async fn serve_probe(request: wtransport::endpoint::SessionRequest, remote: SocketAddr) {
+    let Ok(connection) = request.accept().await else { return };
+    tracing::info!("net: probe session from {remote}");
+    let life = tokio::time::sleep(PROBE_LIFETIME);
+    tokio::pin!(life);
+    let mut streams = 0usize;
+    loop {
+        tokio::select! {
+            _ = &mut life => break,
+            d = connection.receive_datagram() => match d {
+                Ok(d) => {
+                    let _ = connection.send_datagram(d.payload());
+                }
+                Err(_) => break,
+            },
+            s = connection.accept_bi() => match s {
+                Ok((mut send, mut recv)) if streams < PROBE_STREAMS => {
+                    streams += 1;
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 16 * 1024];
+                        let mut total = 0usize;
+                        while let Ok(Some(n)) = recv.read(&mut buf).await {
+                            total += n;
+                            if total > PROBE_STREAM_BYTES || send.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        let _ = send.finish().await;
+                    });
+                }
+                // Past the stream limit: dropped unanswered.
+                Ok(_) => {}
+                Err(_) => break,
+            },
+        }
+    }
+    connection.close(VarInt::from_u32(0), b"probe done");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Player
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,10 +453,12 @@ async fn join_main(link: JoinLink, ends: LinkEnds) {
         // Loopback only; `start_join` refuses anything else without a pin.
         None => builder.with_no_cert_validation(),
     };
-    let config = match builder.keep_alive_interval(Some(KEEP_ALIVE)).max_idle_timeout(Some(IDLE_TIMEOUT)) {
+    let mut config = match builder.keep_alive_interval(Some(KEEP_ALIVE)).max_idle_timeout(Some(IDLE_TIMEOUT)) {
         Ok(b) => b.build(),
         Err(_) => return fail("invalid idle timeout".into()),
     };
+    config.quic_config_mut().transport_config(quic_transport());
+    let _ = config.quic_endpoint_config_mut().max_udp_payload_size(MAX_UDP_PAYLOAD);
     let endpoint = match Endpoint::client(config) {
         Ok(e) => e,
         Err(e) => return fail(format!("could not open a network socket: {e}")),
@@ -350,8 +466,20 @@ async fn join_main(link: JoinLink, ends: LinkEnds) {
 
     let url = link.webtransport_url();
     let target = format!("{}:{}", link.host, link.port);
+    match &link.pin {
+        Some(pin) => tracing::info!("net: joining {target}, certificate pin {}", pin_prefix(pin)),
+        None => tracing::info!("net: joining {target} with no pin (this machine only)"),
+    }
     let connection = match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(url)).await {
         Ok(Ok(c)) => c,
+        // wtransport reports a certificate that does not match the pin as an
+        // unknown issuer: the host there is another hosting session.
+        Ok(Err(e)) if e.to_string().contains("UnknownIssuer") => {
+            return fail(format!(
+                "this link is from an earlier hosting session: the host at {target} is not the one it names. \
+                 Copy the current link from the host's Output."
+            ))
+        }
         Ok(Err(e)) => {
             return fail(format!(
                 "could not reach the host at {target}: {e}. Check the address, that the host is running, \
@@ -502,6 +630,26 @@ mod tests {
         let link = JoinLink { host: "192.168.1.9".into(), port: 7777, key: Some("abcdef".into()), pin: None };
         let err = start_join(&link).err().expect("should refuse");
         assert!(err.contains("certificate pin"));
+    }
+
+    /// A Player on this machine takes a host's file only while that host
+    /// keeps writing it: one left by a killed Studio names a pin no host
+    /// holds any more.
+    #[test]
+    fn a_host_file_its_host_stopped_writing_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("eustress-hostfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let link = JoinLink { host: "127.0.0.1".into(), port: 7788, key: Some(new_join_key()), pin: Some([7; 32]) };
+        write_host_file(&dir, &link);
+        assert_eq!(read_host_file(&dir, 7788).and_then(|l| l.pin), Some([7; 32]), "a running host's file is read");
+        assert!(read_host_file(&dir, 7789).is_none(), "another port's host");
+        let stale = std::time::SystemTime::now() - HOST_FILE_FRESH - Duration::from_secs(5);
+        std::fs::File::options().write(true).open(host_file_path(&dir, 7788)).unwrap().set_modified(stale).unwrap();
+        assert!(read_host_file(&dir, 7788).is_none(), "a stopped host's file is ignored");
+        write_host_file(&dir, &link);
+        assert!(read_host_file(&dir, 7788).is_some(), "writing it again makes it current");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(pin_prefix(&[0xab; 32]), "abababab");
     }
 
     #[test]

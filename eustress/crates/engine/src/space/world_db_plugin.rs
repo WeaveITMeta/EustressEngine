@@ -385,8 +385,8 @@ const MIRROR_PER_FRAME_BUDGET: usize = 2_048;
 /// tree (or are missing from it), overwrites the tree key and drops the
 /// matching `#bin` bincode cache (which `active_db::get_instance` reads
 /// before the base key). Only small text files are considered — `.toml`
-/// entity defs plus `.rune`/`.luau`/`.soul`/`.md` script sources (a DB-primary
-/// `FjallSource` load reads script bodies from the tree). The large GLB/asset
+/// entity defs plus the script sources a DB-primary `FjallSource` load reads
+/// from the tree, the kinds [`super::representation::tree_tracks`] names. The large GLB/asset
 /// bytes the tree also holds are skipped, so this stays cheap. Unchanged
 /// files are left alone, so the change-stream and `#bin` caches aren't
 /// churned. Mirrors the out-of-band `reseed-space-subtree` bin, run
@@ -495,14 +495,18 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
                             subdirs.push(path);
                             continue;
                         }
-                        // `.toml` = entity/instance definitions;
-                        // `.rune`/`.luau`/`.soul`/`.md` = script sources a
-                        // DB-primary (FjallSource) load reads from the tree. All
-                        // small text files — the large GLB/image asset bytes the
-                        // tree also holds are still skipped.
-                        match path.extension().and_then(|e| e.to_str()) {
-                            Some("toml" | "rune" | "luau" | "soul" | "md") => files.push(path),
-                            _ => {}
+                        // Definitions and script sources, the small text
+                        // files a DB-primary (FjallSource) load reads from
+                        // the tree. The GLB/image asset bytes the tree also
+                        // holds are skipped; `tree_tracks` is the one list,
+                        // shared with readers that must know which tree
+                        // copies this keeps current.
+                        if path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(super::representation::tree_tracks)
+                        {
+                            files.push(path);
                         }
                     }
                     (subdirs, files)
@@ -614,8 +618,10 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     // Three guards, because a wrong prune is destructive in a way a missed
     // reconcile is not:
     //
-    //   1. Only .toml keys are considered. Binary caches, voxel chunks and
-    //      instance cores are not disk-backed this way and are never touched.
+    //   1. Only the kinds `tree_tracks` names are considered: definitions
+    //      and script sources, the same set the pass above brings in. Binary
+    //      caches, asset bytes, voxel chunks and instance cores are not
+    //      disk-backed this way and are never touched.
     //   2. A key is pruned only when its PARENT DIRECTORY EXISTS and the file
     //      within it does not. If the whole directory is gone the subtree is
     //      left alone, so an unmounted drive, a half-finished sync or a Space
@@ -628,7 +634,7 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     if let Ok(keys) = db.iter_tree_keys() {
         let candidates: Vec<String> = keys
             .filter_map(|k| k.ok())
-            .filter(|k| k.ends_with(".toml"))
+            .filter(|k| super::representation::tree_tracks(k))
             .collect();
         for rel in candidates {
             let disk = space_root.join(&rel);
@@ -844,6 +850,46 @@ pub fn open_world_db_on_space_change(
         "WorldDb open/seed decision running (DataStore reset pending open)"
     );
 
+    // A revert waiting for this Space (`checkpoint::request_restore`) runs
+    // here, with the Space's database closed and before it opens: the
+    // snapshot's checkpoint is swapped in, then its files come back from git.
+    if super::checkpoint::restore_pending(&space_root.0) {
+        match super::checkpoint::run_pending_restore(&space_root.0) {
+            Ok(summary) => {
+                let missing = summary.as_ref().map_or(0, |s| s.missing.len());
+                info!(
+                    target: "eustress_engine::world_db",
+                    ?summary,
+                    "revert applied before the database opened"
+                );
+                let message = if missing == 0 {
+                    "Reverted to the snapshot.".to_string()
+                } else {
+                    format!(
+                        "Reverted to the snapshot. {missing} file copies it named were not in its commit and were left out."
+                    )
+                };
+                crate::notifications::notify_from_background(
+                    crate::notifications::NotificationLevel::Info,
+                    message,
+                );
+            }
+            Err(e) => {
+                error!(
+                    target: "eustress_engine::world_db",
+                    error = %e,
+                    "revert failed and was withdrawn; the Space opens as it was"
+                );
+                crate::notifications::notify_from_background(
+                    crate::notifications::NotificationLevel::Error,
+                    format!(
+                        "Revert failed: {e}. Nothing changed; the Space opened as it was."
+                    ),
+                );
+            }
+        }
+    }
+
     let world_db_dir = space_root.0.join("world.fjalldb");
     if let Err(e) = std::fs::create_dir_all(&world_db_dir) {
         warn!(
@@ -938,6 +984,12 @@ pub fn open_world_db_on_space_change(
                     .name("eustress-space-open".into())
                     .spawn(move || {
                         let db = db_for_worker.as_ref();
+                        // A Space written under the legacy pose rule moves to
+                        // ParentPose before anything reads its tree
+                        // (`rule_migration`): each rewritten file goes to disk
+                        // and into the tree together, and space.toml names the
+                        // rule last.
+                        super::rule_migration::migrate_logged(&root, Some(db));
                         let reconcile = || {
                             // Guarded separately from `space-open` so the
                             // log names the reconcile, not just "the load".

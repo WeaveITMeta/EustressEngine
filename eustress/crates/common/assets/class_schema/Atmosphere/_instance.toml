@@ -5,18 +5,20 @@
 # reads as [5.802, 13.558, 33.1] for Rayleigh and 4.44 for Mie.
 
 [atmosphere]
+# Off, the Space renders as one with no Atmosphere object: the engine's sky.
+enabled = true
 # --- Artistic controls ---
 # Scales the whole medium. 0.5 is Earth-normal: higher is hazier and fades the
-# horizon sooner.
-density = 0.395
+# horizon sooner. (Roblox's default is 0.395; an import carries its own.)
+density = 0.5
 # Stretches (+) or compresses (-) the vertical density profile.
 offset = 0.0
 # Tints the sky by shifting Rayleigh scattering per channel. Normalised
 # internally, so this changes hue without thickening the atmosphere.
-color = [173, 215, 255]
+color = [198, 220, 255]
 # Becomes the planet's ground albedo, which feeds multiscattering and so sets
 # how bright and what colour the horizon reads.
-decay_color = [105, 123, 142]
+decay_color = [112, 129, 162]
 # Biases Mie scattering forward, which is what a halo around the sun is.
 glare = 0.0
 # Multiplies the aerosol (Mie) term only — the term that reads as haze.

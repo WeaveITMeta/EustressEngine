@@ -118,13 +118,11 @@ fn bake_for_migration(
     })?;
 
     // Identify the uuid. If absent / invalid, mint one via the path-based
-    // seed (IDENTITY.md §3.1) and prepare to write it back.
+    // seed (IDENTITY.md §3.1) and prepare to write it back. Both the read
+    // and the stamp go through the metadata table in whichever spelling
+    // the file uses (see `metadata_key`).
     let (uuid_hex, rewritten_toml) = {
-        let on_disk = doc
-            .get("metadata")
-            .and_then(|m| m.get("uuid"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let on_disk = metadata_uuid(&doc);
         let valid = on_disk
             .as_deref()
             .map(is_valid_uuid)
@@ -139,18 +137,9 @@ fn bake_for_migration(
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let u = derive_uuid_for_import(rel_path, now_nanos);
-            // Stamp back into the doc.
-            let table = doc.as_table_mut().ok_or_else(|| {
-                eustress_worlddb::Error::Other(format!(
-                    "TOML root is not a table at {rel_path}",
-                ))
+            stamp_uuid(&mut doc, &u).map_err(|e| {
+                eustress_worlddb::Error::Other(format!("{e} at {rel_path}"))
             })?;
-            let meta = table
-                .entry("metadata".to_string())
-                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-            if let Some(t) = meta.as_table_mut() {
-                t.insert("uuid".to_string(), toml::Value::String(u.clone()));
-            }
             let serialised = toml::to_string_pretty(&doc).map_err(|e| {
                 eustress_worlddb::Error::Other(format!(
                     "bake_for_migration serialise at {rel_path}: {e}",
@@ -160,20 +149,16 @@ fn bake_for_migration(
         }
     };
 
-    // Now parse the (possibly-rewritten) TOML into the typed
-    // `InstanceDefinition` so we can call `instance_to_arch`. Use the
-    // rewritten body when we stamped a uuid; otherwise re-deserialize
-    // from the original (saves one toml::to_string round-trip).
-    let canonical_raw = if let Some(ref bytes) = rewritten_toml {
-        std::str::from_utf8(bytes).map_err(|e| {
-            eustress_worlddb::Error::Other(format!(
-                "bake_for_migration utf-8 (rewritten) at {rel_path}: {e}",
-            ))
-        })?
-    } else {
-        raw
-    };
-    let def: InstanceDefinition = toml::from_str(canonical_raw).map_err(|e| {
+    // Now parse the (possibly-stamped) document into the typed
+    // `InstanceDefinition` so we can call `instance_to_arch`. The typed
+    // fields are snake_case, so parse a key-normalised copy, the same
+    // normalisation the loader's heal applies: a file written as
+    // `[Metadata] ClassName = ...` keeps its class instead of failing the
+    // parse or falling back to the default class. The file written back
+    // (`rewritten_toml`) keeps the author's spelling.
+    let mut typed = doc.clone();
+    eustress_common::class_schema::normalise_keys(&mut typed);
+    let def: InstanceDefinition = typed.try_into().map_err(|e| {
         eustress_worlddb::Error::Other(format!(
             "bake_for_migration parse InstanceDefinition at {rel_path}: {e}",
         ))
@@ -189,6 +174,60 @@ fn bake_for_migration(
         rewritten_toml,
         uuid_hex,
     })
+}
+
+/// The key of the document's metadata table, in whichever spelling the file
+/// uses: `metadata`, or the older PascalCase `Metadata`. Stamping into a
+/// hardcoded `metadata` gave a `[Metadata]` file a SECOND table holding only
+/// the uuid; the loader then read that one, found no class, and loaded the
+/// entity as a Folder, and a later typed write saved it as a Part. When a
+/// file already holds both spellings, the lowercase one is preferred, which
+/// is the table this function used to create.
+fn metadata_key(doc: &toml::Value) -> Option<String> {
+    let table = doc.as_table()?;
+    if table.get("metadata").is_some_and(toml::Value::is_table) {
+        return Some("metadata".to_string());
+    }
+    table
+        .iter()
+        .find(|(k, v)| k.eq_ignore_ascii_case("metadata") && v.is_table())
+        .map(|(k, _)| k.clone())
+}
+
+/// The uuid the file already carries, under `uuid` or `Uuid`. Reading only
+/// the lowercase spelling made a `[Metadata]` file look uuid-less, so the
+/// migration minted a new identity for an entity that had one.
+fn metadata_uuid(doc: &toml::Value) -> Option<String> {
+    let key = metadata_key(doc)?;
+    doc.get(&key)?
+        .as_table()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("uuid"))
+        .and_then(|(_, v)| v.as_str())
+        .map(str::to_owned)
+}
+
+/// Write `uuid` into the file's own metadata table, creating `[metadata]`
+/// only when there is none. Any existing uuid key, in either spelling, is
+/// replaced, so the table never holds two.
+fn stamp_uuid(doc: &mut toml::Value, uuid: &str) -> Result<(), String> {
+    let key = metadata_key(doc).unwrap_or_else(|| "metadata".to_string());
+    let table = doc.as_table_mut().ok_or("TOML root is not a table")?;
+    let meta = table
+        .entry(key)
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .ok_or("metadata is not a table")?;
+    let stale: Vec<String> = meta
+        .keys()
+        .filter(|k| k.eq_ignore_ascii_case("uuid"))
+        .cloned()
+        .collect();
+    for k in stale {
+        meta.remove(&k);
+    }
+    meta.insert("uuid".to_string(), toml::Value::String(uuid.to_string()));
+    Ok(())
 }
 
 /// Compile-time check the import-only helper is referenced. (Avoids a
@@ -282,5 +321,74 @@ fn run_uuid_migration_if_needed(space_root: &Path, db: &dyn WorldDb) {
                 "UUID migration failed; will retry next open (resumable from checkpoint)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod uuid_stamp_tests {
+    use super::*;
+
+    const UUID: &str = "0123456789abcdef0011223344556677";
+
+    /// The metadata tables of a document, in any spelling.
+    fn metadata_tables(doc: &toml::Value) -> Vec<(String, toml::value::Table)> {
+        doc.as_table()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("metadata"))
+            .map(|(k, v)| (k.clone(), v.as_table().unwrap().clone()))
+            .collect()
+    }
+
+    /// A PascalCase file with no uuid: the stamp lands in `[Metadata]`, no
+    /// second table appears, and the class survives into the bake.
+    #[test]
+    fn a_pascal_case_file_is_stamped_in_place_and_keeps_its_class() {
+        let src = "[Metadata]\nClassName = \"Model\"\nName = \"Car\"\n";
+        let baked = bake_for_migration("Workspace/Car/_instance.toml", src.as_bytes()).unwrap();
+        assert_eq!(baked.class_name, "Model", "not the default class");
+
+        let written = String::from_utf8(baked.rewritten_toml.expect("a uuid was minted")).unwrap();
+        let doc: toml::Value = written.parse().unwrap();
+        let tables = metadata_tables(&doc);
+        assert_eq!(tables.len(), 1, "one metadata table, not two: {written}");
+        let (key, table) = &tables[0];
+        assert_eq!(key, "Metadata", "the author's spelling is kept");
+        assert_eq!(table.get("ClassName").and_then(|v| v.as_str()), Some("Model"));
+        assert_eq!(table.get("uuid").and_then(|v| v.as_str()), Some(baked.uuid_hex.as_str()));
+    }
+
+    /// A PascalCase file that already has a valid `Uuid` keeps that identity
+    /// and is not rewritten.
+    #[test]
+    fn an_existing_pascal_case_uuid_is_preserved() {
+        let src = format!("[Metadata]\nClassName = \"Part\"\nUuid = \"{UUID}\"\n");
+        let baked = bake_for_migration("Workspace/Brick/_instance.toml", src.as_bytes()).unwrap();
+        assert_eq!(baked.uuid_hex, UUID);
+        assert!(baked.rewritten_toml.is_none());
+        assert_eq!(baked.class_name, "Part");
+    }
+
+    /// No metadata at all: `[metadata]` is created. An invalid uuid in
+    /// either spelling is replaced, leaving exactly one uuid key.
+    #[test]
+    fn stamp_creates_or_replaces_without_duplicating() {
+        let mut bare: toml::Value = "[transform]\nposition = [0.0, 0.0, 0.0]\n".parse().unwrap();
+        stamp_uuid(&mut bare, UUID).unwrap();
+        assert_eq!(metadata_uuid(&bare).as_deref(), Some(UUID));
+        assert_eq!(metadata_tables(&bare)[0].0, "metadata");
+
+        let mut stale: toml::Value = "[metadata]\nclass_name = \"Part\"\nUuid = \"not-a-uuid\"\n"
+            .parse()
+            .unwrap();
+        stamp_uuid(&mut stale, UUID).unwrap();
+        let (_, table) = &metadata_tables(&stale)[0];
+        let uuid_keys: Vec<&str> = table
+            .keys()
+            .map(String::as_str)
+            .filter(|k| k.eq_ignore_ascii_case("uuid"))
+            .collect();
+        assert_eq!(uuid_keys, vec!["uuid"]);
+        assert_eq!(metadata_uuid(&stale).as_deref(), Some(UUID));
     }
 }

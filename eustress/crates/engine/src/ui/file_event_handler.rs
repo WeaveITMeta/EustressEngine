@@ -301,31 +301,94 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
 /// <timestamp>` message authored under the logged-in user when present.
 /// The commit runs on a background thread so the editor doesn't hitch
 /// while git touches the disk.
-pub(crate) fn do_save_space(world: &mut World) {
+/// Whether [`flush_space`] writes the terrain.
+///
+/// Studio's Save and an agent snapshot write it. Hosting (F9) does not: it
+/// serves the last saved terrain and never writes terrain on the user's
+/// behalf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushTerrain {
+    Save,
+    Skip,
+}
+
+/// What [`flush_space`] wrote, for the caller that commits it.
+pub(crate) struct SpaceFlush {
+    /// The open Space, or `None` before one is loaded.
+    pub space_path: Option<PathBuf>,
+    /// Parts and services written, unchanged, and failed.
+    pub report: space_ops::SaveReport,
+    /// Terrain edits that are not on disk: ones a save could not write, or,
+    /// under [`FlushTerrain::Skip`], ones the flush left in memory.
+    pub terrain_unsaved: bool,
+    /// The logged-in user, read on the main thread so a commit made later on
+    /// another thread is attributed to them even if a logout races it.
+    pub identity: Option<crate::editor_settings::GitIdentity>,
+}
+
+/// Write the open Space's live state to storage and mark it saved.
+///
+/// The one path that writes a Space. Studio's Save, an agent snapshot and
+/// hosting all flush through it, so they cannot drift apart. It makes no git
+/// commit and shows no message: each caller adds what belongs to it.
+///
+/// Main thread, exclusive `World`. Every write happens under
+/// [`crate::editor_settings::GIT_COMMIT_LOCK`], so no commit's `git add` can
+/// stage a half-written file. Waiting for the lock waits out at most one
+/// commit already in flight.
+///
+/// `Err` says why nothing was written.
+pub(crate) fn flush_space(world: &mut World, terrain: FlushTerrain) -> Result<SpaceFlush, String> {
     let space_path = world
         .get_resource::<crate::space::SpaceRoot>()
         .map(|r| r.0.clone());
 
-    if let Some(ref sr) = space_path {
-        // A migrated `.eustress` world keeps `simulation.toml` inside
-        // `world.fjalldb/`, not on disk — writing it here would
-        // resurrect a loose file the conversion deliberately removed.
-        if !crate::space::space_ops::space_is_migrated(sr) {
-            let sim_toml = sr.join("simulation.toml");
-            if !sim_toml.exists() {
-                if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
-                    warn!("Could not write simulation.toml: {}", e);
+    // A revert rewrites the Space's files when it reopens. Writing them now
+    // would put edits into files the restore is about to replace.
+    if space_path.as_deref().is_some_and(|sr| crate::space::checkpoint::restore_pending(sr)) {
+        return Err("a snapshot revert is waiting for this Space to reopen. Reopen the Space to \
+                    apply it"
+            .to_string());
+    }
+
+    // Whether the Space held unsaved edits going in, read before the writes
+    // below reset it. A skipped terrain answers with this when it has no disk
+    // baseline to compare against. The same definition the autosave uses.
+    let sequence = world.get_resource::<crate::undo::UndoStack>().map(|u| u.sequence());
+    let unsaved_before = match (world.get_resource::<crate::ui::StudioState>(), sequence) {
+        (Some(state), Some(sequence)) => state.has_unsaved_changes || state.saved_undo_sequence != sequence,
+        _ => true,
+    };
+
+    let (report, terrain_unsaved) = {
+        let _commit_guard = crate::editor_settings::GIT_COMMIT_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        if let Some(ref sr) = space_path {
+            // A migrated `.eustress` world keeps `simulation.toml` inside
+            // `world.fjalldb/`, not on disk — writing it here would
+            // resurrect a loose file the conversion deliberately removed.
+            if !crate::space::space_ops::space_is_migrated(sr) {
+                let sim_toml = sr.join("simulation.toml");
+                if !sim_toml.exists() {
+                    if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
+                        warn!("Could not write simulation.toml: {}", e);
+                    }
                 }
             }
         }
-    }
 
-    space_ops::save_space(world);
-    // A manual Save repeats the unsaved-terrain warning autosave keeps quiet.
-    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
-        state.terrain_unsaved_warned = false;
-    }
-    let terrain_unsaved = save_terrain_to_disk(world);
+        let report = space_ops::save_space(world);
+        let terrain_unsaved = match terrain {
+            FlushTerrain::Save => save_terrain_to_disk(world),
+            // Nothing is written, but terrain edits still in memory keep the
+            // Space unsaved. Reporting them saved would clear the title
+            // asterisk and the exit prompt with those edits unwritten.
+            FlushTerrain::Skip => terrain_changed_since_save(world, unsaved_before),
+        };
+        (report, terrain_unsaved)
+    };
 
     // The title asterisk and the exit prompt count edits since this point.
     // Terrain edits that did not reach storage keep the Space unsaved: the
@@ -338,15 +401,39 @@ pub(crate) fn do_save_space(world: &mut World) {
     if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
         state.saved_undo_sequence = if terrain_unsaved { sequence.wrapping_sub(1) } else { sequence };
         state.has_unsaved_changes = terrain_unsaved;
-        state.snapshot_status = format!("Snapshot {}", chrono::Local::now().format("%H:%M"));
     }
 
-    // Snapshot the identity on the main thread so the background commit
-    // attributes to the logged-in user even if a logout races with the
-    // commit.
     let identity = world
         .get_resource::<crate::auth::AuthState>()
         .and_then(|auth| crate::editor_settings::git_identity_from_auth(auth));
+
+    Ok(SpaceFlush { space_path, report, terrain_unsaved, identity })
+}
+
+pub(crate) fn do_save_space(world: &mut World) {
+    // A manual Save repeats the unsaved-terrain warning autosave keeps quiet.
+    // Re-armed before the flush, whose terrain save is what warns.
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        state.terrain_unsaved_warned = false;
+    }
+    let SpaceFlush { space_path, report, terrain_unsaved, identity } = match flush_space(world, FlushTerrain::Save) {
+        Ok(flush) => flush,
+        Err(reason) => {
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Space not saved: {reason}"));
+            }
+            return;
+        }
+    };
+    info!(
+        "Manual save: {} written, {} unchanged, {} failed",
+        report.written, report.unchanged, report.errors
+    );
+
+    // Only a flush that is committed claims a snapshot in the status bar.
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        state.snapshot_status = format!("Snapshot {}", chrono::Local::now().format("%H:%M"));
+    }
 
     // Kick the git commit off-thread — the same pattern autosave uses.
     // Skip silently when there's no SpaceRoot (e.g. brand-new session
@@ -389,21 +476,34 @@ pub(crate) fn do_save_space(world: &mut World) {
 }
 
 /// Persist the active terrain to `Workspace/Terrain/`: heights to
-/// `chunks/*.r16`, the material map to `matmap/*.png` and the volumetric
-/// edits (caves, overhangs) to `volume/*.vbk`, the files
-/// `hydrate_terrain_from_disk` reads back on open. Brush, road, Part to
-/// Terrain and volume edits live only in memory until this runs.
+/// `chunks/*.r16`, the material map to `matmap/*.png`, the volumetric
+/// edits (caves, overhangs) to `volume/*.vbk` and the water to `water.bin`,
+/// the files `hydrate_terrain_from_disk` reads back on open. Brush, road,
+/// Part to Terrain, volume and water edits live only in memory until this
+/// runs.
 ///
-/// Save is not a hot path, so both raster layers are written for the full
-/// `±chunks_x` by `±chunks_z` span rather than a dirty subset, which cannot
-/// miss a chunk whose remesh flag was already cleared. Writing the matmaps
-/// removes the legacy `splatmap/*.png` files a Space from an older build
-/// had, which the loader converted on open. A terrain with no material
-/// layer writes heights only and leaves any material files on disk alone.
-/// Every brick is written and brick files the volume no longer has are
-/// deleted, so an undone or cleared edit cannot come back on reload.
+/// Only what changed since the disk last matched memory is written (see
+/// [`TerrainSaveBaseline`]): the chunks `TerrainDirtyChunks`' surface log
+/// stamped since then get their R16 and matmap, the bricks its brick log
+/// stamped are written or their files deleted, and `water.bin` is written
+/// when the water changed. Nothing changed writes nothing, so a Save of a
+/// Space whose terrain was not touched costs one comparison. Every terrain
+/// writer marks `TerrainDirtyChunks` (its meshes would go stale otherwise),
+/// and a raster or volume that changed while its log shows nothing (a writer
+/// that did not mark) falls back to writing every chunk or brick, so nothing
+/// is dropped. A root without a baseline (terrain made in this session, not
+/// read from `Workspace/Terrain`) writes everything, every brick file the
+/// volume no longer has deleted.
+/// Writing a matmap removes the legacy `splatmap/*.png` of its chunk, which
+/// the loader converted on open. A terrain with no material layer writes
+/// heights only and leaves any material files on disk alone. A deleted brick
+/// cannot come back on reload; the water file likewise goes once no water is
+/// left, unless it is one the load could not read
+/// (`voxel_water::UnreadWaterFile`).
 /// A failed write is toasted, because the Space-saved toast that follows
-/// would otherwise tell the user their sculpting or paint reached disk.
+/// would otherwise tell the user their sculpting or paint reached disk, and
+/// leaves the baseline where it was, so the next save writes everything
+/// changed since the last complete one again.
 ///
 /// R16 samples are normalized to the config's height band and clamped to
 /// it, so when a cached height lies outside the band (a raster of raw world
@@ -419,17 +519,19 @@ pub(crate) fn do_save_space(world: &mut World) {
 /// ([`terrain_changed_since_save`]). Nothing is written while a Space loads,
 /// when the root has no height raster (procedural terrain: its R16 files
 /// would be zeros and its empty volume would delete every brick on disk) or
-/// in a migrated Space, whose terrain is read from the world database on
-/// open, never from `Workspace/Terrain`.
+/// for imported terrain (a migrated Space's, or one built from the
+/// importer's voxel chunk files), which every open builds again from its
+/// voxel records, never from `Workspace/Terrain`.
 ///
 /// Returns `true` when terrain edits did not reach storage: a write failed,
-/// or a migrated Space holds edits it cannot save yet (warned once until the
+/// or imported terrain holds edits it cannot save yet (warned once until the
 /// next manual Save or Space switch). Callers keep the Space marked unsaved
 /// then, so the title asterisk and the exit prompt still ask.
 pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
+    use eustress_common::terrain::voxel_water::{save_voxel_water, water_file_path, UnreadWaterFile, WaterSave};
     use eustress_common::terrain::{
         rebase_height_band, toml_loader, HeightBand, TerrainConfig, TerrainData, TerrainEditRecorder,
-        TerrainRoot, TerrainVolume,
+        TerrainRoot, TerrainVolume, TerrainVoxelWater,
     };
 
     /// Put back the band and raster a band move replaced.
@@ -450,12 +552,13 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
     {
         return false;
     }
-    // A migrated Space's terrain is read from its world database on every
-    // open (`terrain_voxel_load`); neither the disk loader nor the class
-    // sync reads `Workspace/Terrain` there, so a copy written here would be
-    // loose files nothing loads. Its edits cannot be saved yet, which the
-    // user must hear rather than be told the Space saved.
-    if space_ops::space_is_migrated(&space_root) {
+    // Imported terrain (a migrated Space's, or one the voxel loader built
+    // from the importer's chunk files) is built again from its voxel records
+    // on every open (`terrain_voxel_load`), so a copy written here would be
+    // loose files nothing loads; the disk format cannot even say its surface
+    // is sparse. Its edits cannot be saved yet, which the user must hear
+    // rather than be told the Space saved.
+    if space_ops::space_is_migrated(&space_root) || root_is_voxel_sourced(world) {
         let root = world.query_filtered::<Entity, With<TerrainRoot>>().iter(world).next();
         let edited = root.is_some_and(|root| {
             world
@@ -469,7 +572,7 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
             .get_resource::<crate::ui::StudioState>()
             .is_some_and(|state| state.terrain_unsaved_warned);
         if !warned {
-            warn!("Terrain: migrated Space, terrain edits are not saved to the world database yet");
+            warn!("Terrain: imported terrain, its edits are not saved yet");
             if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
                 n.warning("Terrain edits in this Space are not saved yet: they will be lost when it is reopened.");
             }
@@ -479,19 +582,24 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
         }
         return true;
     }
-    {
-        let mut query = world.query_filtered::<&TerrainData, With<TerrainRoot>>();
+    let root = {
+        let mut query = world.query_filtered::<(Entity, &TerrainData), With<TerrainRoot>>();
         match query.single(world) {
             // Procedural terrain has no raster (the brush refuses to edit
             // one), so an R16 write would be all zeros and the empty volume
             // would delete every .vbk brick on disk.
-            Ok(data) if data.height_cache.is_empty() => return false,
-            Ok(_) => {}
+            Ok((_, data)) if data.height_cache.is_empty() => return false,
+            Ok((root, _)) => root,
             // No active terrain this Space, nothing to persist.
             Err(_) => return false,
         }
-    }
+    };
     let terrain_dir = space_root.join("Workspace").join("Terrain");
+    // Nothing changed since the disk last matched: nothing to write.
+    let plan = plan_terrain_save(world, root, Some(&terrain_dir));
+    if plan.is_empty() {
+        return false;
+    }
     let mut failures: Vec<String> = Vec::new();
 
     // Ahead of the band move, so this early return can never follow a
@@ -502,6 +610,39 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
             n.warning(format!("Terrain was not saved (could not create {}: {e})", terrain_dir.display()));
         }
         return true;
+    }
+
+    // The terrain's file is gone from disk: its folder was moved or deleted
+    // under a terrain that stayed alive in memory, or it was never written.
+    // The heightmaps written below are unreadable without it, and the next
+    // open finds no terrain at all, so it is written first, from the terrain
+    // as it is in memory (the plan above wrote everything for the same
+    // reason). Never over a file that is there: what a Space's own file says
+    // about its palette and streaming wins.
+    let toml_path = terrain_dir.join("_terrain.toml");
+    if !toml_path.exists() {
+        let ocean = world
+            .get_resource::<eustress_common::terrain::WaterConfig>()
+            .map(|ocean| toml_loader::TerrainTomlWater {
+                enabled: ocean.enabled,
+                sea_level: ocean.sea_level,
+                ..toml_loader::TerrainTomlWater::default()
+            })
+            .unwrap_or_default();
+        let text = {
+            let mut query = world.query_filtered::<&eustress_common::terrain::TerrainConfig, With<TerrainRoot>>();
+            query.iter(world).next().map(|config| toml_loader::render_terrain_toml(config, &ocean))
+        };
+        match text {
+            Some(text) => match crate::space::gui_loader::write_atomic(&toml_path, text.as_bytes()) {
+                Ok(()) => info!("💾 Terrain: wrote the missing {:?} from the terrain in memory", toml_path),
+                Err(e) => {
+                    warn!("save_terrain_to_disk: could not write {:?}: {}", toml_path, e);
+                    failures.push(format!("_terrain.toml: {e}"));
+                }
+            },
+            None => failures.push("_terrain.toml: no terrain to describe".to_string()),
+        }
     }
 
     // A band move stages every chunk in the new band first, commits the toml
@@ -515,7 +656,9 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
         let Ok((root, mut config, mut data)) = query.single_mut(world) else {
             return false;
         };
-        match config.band_covering(&data) {
+        // Only a save that writes heights can have to move their band.
+        let wanted = if plan.chunks.is_nothing() { None } else { config.band_covering(&data) };
+        match wanted {
             None => None,
             Some(wanted) => {
                 // The band the toml will read back, found without writing
@@ -601,10 +744,14 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
     };
     let volume = volume.unwrap_or(TerrainVolume::empty());
 
-    let chunk_positions = terrain_chunk_positions(config);
+    let chunk_positions = match &plan.chunks {
+        SavePart::Nothing => Vec::new(),
+        SavePart::These(chunks) => chunks.clone(),
+        SavePart::All => terrain_chunk_positions(config),
+    };
 
     // A committed band move already wrote every chunk.
-    if !heights_committed {
+    if !heights_committed && !chunk_positions.is_empty() {
         match toml_loader::save_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
             Ok(saved) => info!("💾 Terrain: saved {} chunk heightmaps to {:?}", saved, terrain_dir),
             Err(e) => {
@@ -614,22 +761,29 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
         }
     }
 
-    if data.material_cache.is_empty() {
-        info!("Terrain: no material layer, saved heights only");
-    } else {
-        // eustress-common built without its `image` feature has no PNG
-        // encoder; this call then returns an Err naming that, and it is
-        // reported like any other failure instead of dropping the paint.
-        match toml_loader::save_material_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
-            Ok(saved) => info!("Terrain: saved {} chunk material maps to {:?}", saved, terrain_dir),
-            Err(e) => {
-                warn!("save_terrain_to_disk: material paint: {}", e);
-                failures.push(format!("material paint: {e}"));
+    if !chunk_positions.is_empty() {
+        if data.material_cache.is_empty() {
+            info!("Terrain: no material layer, saved heights only");
+        } else {
+            // eustress-common built without its `image` feature has no PNG
+            // encoder; this call then returns an Err naming that, and it is
+            // reported like any other failure instead of dropping the paint.
+            match toml_loader::save_material_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
+                Ok(saved) => info!("Terrain: saved {} chunk material maps to {:?}", saved, terrain_dir),
+                Err(e) => {
+                    warn!("save_terrain_to_disk: material paint: {}", e);
+                    failures.push(format!("material paint: {e}"));
+                }
             }
         }
     }
 
-    match eustress_common::terrain::save_volume_bricks(&terrain_dir, config, volume) {
+    let bricks_saved = match &plan.bricks {
+        SavePart::Nothing => Ok(eustress_common::terrain::VolumeSaveReport::default()),
+        SavePart::These(coords) => eustress_common::terrain::save_volume_bricks_at(&terrain_dir, config, volume, coords),
+        SavePart::All => eustress_common::terrain::save_volume_bricks(&terrain_dir, config, volume),
+    };
+    match bricks_saved {
         Ok(report) if report.written > 0 || report.removed > 0 => info!(
             "Terrain: saved {} volume bricks and removed {} stale ones in {:?}",
             report.written, report.removed, terrain_dir
@@ -641,15 +795,44 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
         }
     }
 
+    if plan.water {
+        let water_saved = {
+            let mut query = world.query_filtered::<(Option<&TerrainVoxelWater>, Has<UnreadWaterFile>), With<TerrainRoot>>();
+            let Ok((water, unread)) = query.get(world, root) else {
+                return false;
+            };
+            save_voxel_water(&terrain_dir, water, unread)
+        };
+        match water_saved {
+            Ok(WaterSave::Written) => {
+                info!("Terrain: saved its water to {:?}", water_file_path(&terrain_dir));
+                // The unreadable file is replaced, so there is nothing left to keep.
+                world.entity_mut(root).remove::<UnreadWaterFile>();
+            }
+            Ok(WaterSave::Removed) => {}
+            Ok(WaterSave::Kept) => info!("Terrain: no water to save; kept the water file the load could not read"),
+            Err(e) => {
+                warn!("save_terrain_to_disk: water: {}", e);
+                failures.push(format!("water: {e}"));
+            }
+        }
+    }
+
     if failures.is_empty() {
-        // A band move above stamped the raster with this same tick, and a
-        // tick equal to the saved one is not newer, so the save does not
-        // count as a change of its own.
+        // Disk matches memory again. A band move above stamped the raster
+        // with this same tick, and a tick equal to the baseline's is not
+        // newer, so the save does not count as a change of its own.
         let tick = world.change_tick();
-        world.insert_resource(TerrainSavedTick(Some(tick)));
+        world.insert_resource(TerrainSaveBaseline {
+            root: Some(root),
+            tick: Some(tick),
+            surface_seq: plan.surface_seq,
+            brick_seq: plan.brick_seq,
+        });
         false
     } else {
-        // The tick stays, so the next autosave tries again.
+        // The baseline stays, so the next save writes everything changed
+        // since the last complete one again.
         if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
             n.warning(format!("Terrain was not fully saved ({})", failures.join("; ")));
         }
@@ -657,34 +840,219 @@ pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
     }
 }
 
-/// Every chunk of the terrain's `±chunks_x` by `±chunks_z` grid.
-fn terrain_chunk_positions(config: &eustress_common::terrain::TerrainConfig) -> Vec<IVec2> {
-    (-(config.chunks_x as i32)..=config.chunks_x as i32)
-        .flat_map(|gx| (-(config.chunks_z as i32)..=config.chunks_z as i32).map(move |gz| IVec2::new(gx, gz)))
-        .collect()
+/// Whether the Space's terrain root was built by the voxel loader from an
+/// import's voxel records rather than read from `Workspace/Terrain`.
+#[cfg(feature = "world-db")]
+fn root_is_voxel_sourced(world: &mut World) -> bool {
+    use eustress_common::terrain::TerrainRoot;
+    world
+        .query_filtered::<(), (With<TerrainRoot>, With<crate::terrain_voxel_load::VoxelSourcedTerrain>)>()
+        .iter(world)
+        .next()
+        .is_some()
 }
 
-/// World change tick at the end of the last `save_terrain_to_disk` that wrote
-/// everything. `None` until the first full save of this session.
-#[derive(Resource, Default)]
-pub(crate) struct TerrainSavedTick(pub Option<bevy::ecs::change_detection::Tick>);
+/// Without the world database there is no voxel loader, so no root is
+/// voxel-sourced.
+#[cfg(not(feature = "world-db"))]
+fn root_is_voxel_sourced(_world: &mut World) -> bool {
+    false
+}
 
-/// True when the terrain root's raster or volume changed after the last full
-/// save, so autosave skips the whole-terrain rewrite for edits that never
-/// touched terrain. Before any full save this session, `fallback` (the
-/// global unsaved marker) decides.
-pub(crate) fn terrain_changed_since_save(world: &mut World, fallback: bool) -> bool {
-    use eustress_common::terrain::{TerrainData, TerrainRoot, TerrainVolume};
-    let Some(saved) = world.get_resource::<TerrainSavedTick>().and_then(|t| t.0) else {
-        return fallback;
+/// Every chunk of the terrain's grid.
+fn terrain_chunk_positions(config: &eustress_common::terrain::TerrainConfig) -> Vec<IVec2> {
+    config.grid_chunks().collect()
+}
+
+/// When the terrain on disk last matched the one in memory: the root that
+/// was, the world change tick then, and `TerrainDirtyChunks`' surface and
+/// brick sequence numbers then. Set when a terrain is read from
+/// `Workspace/Terrain` ([`baseline_disk_terrain`]) and after every save that
+/// wrote everything that had changed; a save with a failed write leaves it.
+/// A root other than `root` has no baseline, and its save writes everything.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub(crate) struct TerrainSaveBaseline {
+    pub root: Option<Entity>,
+    pub tick: Option<bevy::ecs::change_detection::Tick>,
+    pub surface_seq: u64,
+    pub brick_seq: u64,
+}
+
+/// Which chunks or bricks a terrain save writes.
+#[derive(Clone, Debug, PartialEq)]
+enum SavePart<T> {
+    Nothing,
+    These(Vec<T>),
+    All,
+}
+
+impl<T> SavePart<T> {
+    fn is_nothing(&self) -> bool {
+        matches!(self, SavePart::Nothing)
+    }
+}
+
+/// What a terrain save writes, worked out by [`plan_terrain_save`], and the
+/// log positions its baseline moves to when every write succeeds.
+#[derive(Clone, Debug)]
+struct TerrainSavePlan {
+    /// Chunks whose R16 and matmap are written.
+    chunks: SavePart<IVec2>,
+    /// Bricks written, or whose files are deleted.
+    bricks: SavePart<IVec3>,
+    /// `water.bin` is written (or deleted).
+    water: bool,
+    surface_seq: u64,
+    brick_seq: u64,
+}
+
+impl TerrainSavePlan {
+    fn is_empty(&self) -> bool {
+        self.chunks.is_nothing() && self.bricks.is_nothing() && !self.water
+    }
+}
+
+/// What a save of terrain root `root` must write (see
+/// [`save_terrain_to_disk`]): everything for a root without a baseline;
+/// otherwise the chunks and bricks `TerrainDirtyChunks` stamped since the
+/// baseline, every chunk (or brick) when the raster (or volume) changed
+/// since then with nothing stamped, and the water when it changed, or when
+/// the root has none and `terrain_dir` still holds a `water.bin` it could
+/// read.
+fn plan_terrain_save(world: &mut World, root: Entity, terrain_dir: Option<&std::path::Path>) -> TerrainSavePlan {
+    use eustress_common::terrain::voxel_water::{water_file_path, UnreadWaterFile};
+    use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainVolume, TerrainVoxelWater};
+
+    let baseline = world.get_resource::<TerrainSaveBaseline>().copied().unwrap_or_default();
+    let (surface_seq, brick_seq, surface, bricks) = match world.get_resource::<TerrainDirtyChunks>() {
+        Some(dirty) => (
+            dirty.surface_seq(),
+            dirty.brick_seq(),
+            Some(dirty.surface_changes_since(baseline.surface_seq)),
+            Some(dirty.brick_changes_since(baseline.brick_seq)),
+        ),
+        None => (0, 0, None, None),
     };
+    let everything = TerrainSavePlan { chunks: SavePart::All, bricks: SavePart::All, water: true, surface_seq, brick_seq };
+    // A terrain whose file is gone from disk matches nothing on it, whatever
+    // the baseline says: the folder it was read from can have been moved or
+    // deleted under it. Everything is written, the file first.
+    if terrain_dir.is_some_and(|dir| !dir.join("_terrain.toml").exists()) {
+        return everything;
+    }
+    let (Some(tick), Some(surface), Some(bricks)) = (baseline.tick.filter(|_| baseline.root == Some(root)), surface, bricks)
+    else {
+        return everything;
+    };
+
     let now = world.change_tick();
-    let mut query = world.query_filtered::<(Ref<TerrainData>, Option<Ref<TerrainVolume>>), With<TerrainRoot>>();
-    let Ok((data, volume)) = query.single(world) else {
+    let mut query = world.query::<(
+        &TerrainConfig,
+        Ref<TerrainData>,
+        Option<Ref<TerrainVolume>>,
+        Option<Ref<TerrainVoxelWater>>,
+        Has<UnreadWaterFile>,
+    )>();
+    let Ok((config, data, volume, water, unread)) = query.get(world, root) else {
+        return everything;
+    };
+    let chunks = if surface.all {
+        SavePart::All
+    } else if !surface.chunks.is_empty() {
+        SavePart::These(surface.chunks.into_iter().filter(|chunk| config.contains_chunk(*chunk)).collect())
+    } else if data.last_changed().is_newer_than(tick, now) {
+        SavePart::All
+    } else {
+        SavePart::Nothing
+    };
+    let bricks = if !bricks.bricks.is_empty() {
+        SavePart::These(bricks.bricks)
+    } else if volume.is_some_and(|volume| volume.last_changed().is_newer_than(tick, now)) {
+        SavePart::All
+    } else {
+        SavePart::Nothing
+    };
+    let water = match water {
+        Some(water) => water.last_changed().is_newer_than(tick, now),
+        None => !unread && terrain_dir.is_some_and(|dir| water_file_path(dir).exists()),
+    };
+    TerrainSavePlan { chunks, bricks, water, surface_seq, brick_seq }
+}
+
+/// A terrain read from `Workspace/Terrain` matches the disk as it arrives:
+/// take the baseline its saves write from (see [`TerrainSaveBaseline`]).
+pub(crate) fn baseline_disk_terrain(
+    added: Query<Entity, Added<crate::terrain_disk_load::DiskSourcedTerrain>>,
+    dirty: Option<Res<eustress_common::terrain::TerrainDirtyChunks>>,
+    ticks: bevy::ecs::system::SystemChangeTick,
+    mut baseline: ResMut<TerrainSaveBaseline>,
+) {
+    for root in &added {
+        *baseline = TerrainSaveBaseline {
+            root: Some(root),
+            tick: Some(ticks.this_run()),
+            surface_seq: dirty.as_deref().map_or(0, |dirty| dirty.surface_seq()),
+            brick_seq: dirty.as_deref().map_or(0, |dirty| dirty.brick_seq()),
+        };
+    }
+}
+
+/// True when the terrain in memory differs from what is on disk: its raster,
+/// volume or water changed since the baseline (see
+/// [`TerrainSaveBaseline`]), so autosave skips the terrain for edits that
+/// never touched it. A root without a baseline answers `fallback` (the
+/// global unsaved marker); no terrain root answers false.
+pub(crate) fn terrain_changed_since_save(world: &mut World, fallback: bool) -> bool {
+    use eustress_common::terrain::TerrainRoot;
+    let Some(root) = world.query_filtered::<Entity, With<TerrainRoot>>().iter(world).next() else {
         return false;
     };
-    data.last_changed().is_newer_than(saved, now)
-        || volume.is_some_and(|volume| volume.last_changed().is_newer_than(saved, now))
+    let has_baseline = world.get_resource::<TerrainSaveBaseline>().is_some_and(|b| b.root == Some(root) && b.tick.is_some());
+    if !has_baseline {
+        return fallback;
+    }
+    let terrain_dir = world
+        .get_resource::<crate::space::SpaceRoot>()
+        .map(|space| space.0.join("Workspace").join("Terrain"));
+    !plan_terrain_save(world, root, terrain_dir.as_deref()).is_empty()
+}
+
+/// A copy of the live terrain for the host's world export (see
+/// `eustress_common::terrain::disk::TerrainSnapshot`): clones only, no
+/// encoding, so it is cheap on the main thread; the export encodes it on a
+/// worker into the files a save would write. `None` when there is nothing
+/// to host that way: no Space or terrain root, a Space still loading,
+/// imported terrain (a migrated Space's, or one built from the importer's
+/// voxel chunk files: it reaches Players through those files, since
+/// `_terrain.toml` cannot say a surface is sparse), procedural terrain with
+/// no raster, or no `_terrain.toml` to carry the settings.
+pub(crate) fn terrain_snapshot(world: &mut World) -> Option<eustress_common::terrain::disk::TerrainSnapshot> {
+    use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainRoot, TerrainVolume, TerrainVoxelWater};
+    let space_root = world.get_resource::<crate::space::SpaceRoot>()?.0.clone();
+    if world
+        .get_resource::<crate::space::file_loader::LoadInProgress>()
+        .is_some_and(|l| l.active)
+        || space_ops::space_is_migrated(&space_root)
+        || root_is_voxel_sourced(world)
+    {
+        return None;
+    }
+    let toml_text = std::fs::read_to_string(space_root.join("Workspace").join("Terrain").join("_terrain.toml")).ok()?;
+    let mut query = world.query_filtered::<
+        (&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&TerrainVoxelWater>),
+        With<TerrainRoot>,
+    >();
+    let (config, data, volume, water) = query.single(world).ok()?;
+    if data.height_cache.is_empty() {
+        return None;
+    }
+    Some(eustress_common::terrain::disk::TerrainSnapshot {
+        config: config.clone(),
+        data: data.clone(),
+        volume: volume.cloned().unwrap_or_default(),
+        water: water.cloned(),
+        toml_text,
+    })
 }
 
 /// Prompt for a new Space folder name + parent, copy the current Space
@@ -1075,7 +1443,8 @@ pub fn auto_save_system(
     }
 }
 
-const PUBLISH_API: &str = "https://api.eustress.dev";
+// The API publishing and review go to (`eustress_common::api_base`).
+use eustress_common::api_base::api_base;
 
 type ProgressHandle = std::sync::Arc<std::sync::Mutex<PublishProgress>>;
 
@@ -1113,6 +1482,7 @@ fn execute_publish_upload(
         description: request.description.trim().to_string(),
         genre: if request.genre.trim().is_empty() { "All".to_string() } else { request.genre.trim().to_string() },
         is_public: request.is_public,
+        open_source: request.open_source,
     };
     let published = publish(plan, token, &listing, request.space_only, &|stage: &str, percent: f32| {
         set_progress(progress, stage, percent)
@@ -1140,7 +1510,7 @@ fn execute_publish_upload(
 
         let resp = ureq::put(&format!(
             "{}/api/simulations/{}/website-manifest",
-            PUBLISH_API, sim_id
+            api_base(), sim_id
         ))
             .set("Authorization", &format!("Bearer {}", token))
             .set("Content-Type", "application/json")
@@ -1181,7 +1551,7 @@ fn execute_publish_upload(
                     "jpg" => "image/jpeg",
                     _ => "image/webp",
                 };
-                let _ = ureq::put(&format!("{}/api/simulations/{}/thumbnail", PUBLISH_API, sim_id))
+                let _ = ureq::put(&format!("{}/api/simulations/{}/thumbnail", api_base(), sim_id))
                     .set("Authorization", &format!("Bearer {}", token))
                     .set("Content-Type", content_type)
                     .send_bytes(&thumb_bytes);
@@ -1255,7 +1625,7 @@ fn submit_for_review(
         if bytes.is_empty() {
             continue;
         }
-        match ureq::put(&format!("{}/api/simulations/{}/captures/{}", PUBLISH_API, sim_id, n))
+        match ureq::put(&format!("{}/api/simulations/{}/captures/{}", api_base(), sim_id, n))
             .set("Authorization", &auth)
             .set("Content-Type", "image/png")
             .send_bytes(&bytes)
@@ -1278,50 +1648,41 @@ fn submit_for_review(
     }
     let dossier_json = serde_json::to_string(dossier).map_err(|e| format!("dossier serialize: {}", e))?;
     let _ = std::fs::write(universe_root.join(".eustress").join("moderation-dossier.json"), &dossier_json);
-    ureq::put(&format!("{}/api/simulations/{}/dossier", PUBLISH_API, sim_id))
+    ureq::put(&format!("{}/api/simulations/{}/dossier", api_base(), sim_id))
         .set("Authorization", &auth)
         .set("Content-Type", "application/json")
         .send_string(&dossier_json)
         .map_err(|e| format!("dossier upload: {}", e))?;
 
-    ureq::post(&format!("{}/api/simulations/{}/submit", PUBLISH_API, sim_id))
+    ureq::post(&format!("{}/api/simulations/{}/submit", api_base(), sim_id))
         .set("Authorization", &auth)
         .call()
         .map_err(|e| format!("submit: {}", e))?;
 
-    // Poll briefly. Triage is sub-second; the judge takes a few seconds; the
-    // agent can take longer, and "pending" is an honest answer for that.
+    // Poll briefly. Triage is sub-second and the judge takes a few seconds;
+    // anything longer (a person, an appeal) reaches Studio later through
+    // `refresh_listing_review`, which picks up the review.toml written here.
     set_progress(progress, "Under review...", 98.0);
-    let mut last: Option<serde_json::Value> = None;
+    let is_public = dossier.listing.is_public;
+    let mut review = None;
     for _ in 0..12 {
         std::thread::sleep(std::time::Duration::from_millis(1500));
-        let Ok(resp) = ureq::get(&format!("{}/api/simulations/{}/moderation", PUBLISH_API, sim_id))
-            .set("Authorization", &auth)
-            .call()
-        else {
-            continue;
-        };
-        let Ok(body) = resp.into_json::<serde_json::Value>() else { continue };
-        let status = body["status"].as_str().unwrap_or("pending").to_string();
-        last = Some(body);
-        if !matches!(status.as_str(), "pending" | "classifying") {
+        let Ok(r) = crate::moderation_dossier::fetch_review(api_base(), sim_id, token, is_public) else { continue };
+        let waiting = r.status == "in_review";
+        review = Some(r);
+        if !waiting {
             break;
         }
     }
-    let body = last.unwrap_or(serde_json::json!({}));
-    let status = body["status"].as_str().unwrap_or("pending");
-    let rating = body["rating"].as_str().unwrap_or("");
-    let edit = body["suggested_edit"].as_str().unwrap_or("");
-    let summary = match status {
-        "approved" if dossier.listing.is_public => format!("Published {}: listed in the Gallery ({})", sim_id, rating),
-        "approved" => format!("Published {}: approved, private", sim_id),
-        "rejected" => format!("Published {}: not listed. {}", sim_id, if edit.is_empty() { "See the review notes in your projects." } else { edit }),
-        "changes_requested" => format!("Published {}: changes requested before listing. {}", sim_id, edit),
-        "held" | "appealed" => format!("Published {}: held for human review", sim_id),
-        "quarantined" => format!("Published {}: under legal review", sim_id),
-        _ => format!("Published {}: review pending", sim_id),
-    };
-    Ok(summary)
+    // Every status here is an author status: held and quarantined both read
+    // as "Review pending", with nothing about why.
+    let review = review.unwrap_or_else(|| {
+        crate::moderation_dossier::ListingReview::from_api(sim_id, &serde_json::json!({}), is_public)
+    });
+    if let Err(e) = review.save(universe_root) {
+        tracing::warn!("listing review: {}", e);
+    }
+    Ok(format!("Published {}: {}", sim_id, review.summary()))
 }
 
 fn prepare_publish_manifests(project_root: &Path, request: &PublishRequest) -> Result<(), String> {
@@ -1898,6 +2259,16 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         }
     }
 
+    // The scaffold's fair-weather Clouds goes too. A place's clouds are the
+    // Clouds objects it carries (Roblox parents them under Terrain), and a
+    // place with none has a clear sky, as it does in Roblox.
+    let scaffold_clouds = fresh_space_root.join("Lighting").join("Clouds.instance.toml");
+    if scaffold_clouds.is_file() {
+        if let Err(e) = std::fs::remove_file(&scaffold_clouds) {
+            warn!("Roblox import: could not clear the scaffold's Clouds {:?}: {}", scaffold_clouds, e);
+        }
+    }
+
     // 5. GUARD (defense-in-depth): refuse to materialise into a Space whose
     //    `Workspace` already holds user entities. The freshly-scaffolded
     //    Space was cleared of demo content above, so this never fires on
@@ -2346,5 +2717,94 @@ fn unique_dest_path(dir: &Path, name: &str) -> PathBuf {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     dir.join(format!("{}-{:x}{}", stem, ts, ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eustress_common::terrain::{
+        TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainRoot, TerrainVolume, TerrainVoxelWater, VolumeEdit,
+    };
+
+    /// A world holding one raster terrain root and an empty dirty-chunk log.
+    fn terrain_world() -> (World, Entity) {
+        let mut world = World::new();
+        let config = TerrainConfig { chunk_size: 32.0, chunk_resolution: 16, chunks_x: 2, chunks_z: 2, ..TerrainConfig::default() };
+        let mut data = TerrainData::procedural();
+        data.resize_cache(&config);
+        let root = world.spawn((TerrainRoot, config, data, TerrainVolume::default())).id();
+        world.insert_resource(TerrainDirtyChunks::default());
+        (world, root)
+    }
+
+    /// Take the baseline now, as a load or a complete save does.
+    fn take_baseline(world: &mut World, root: Entity) {
+        world.increment_change_tick();
+        let dirty = world.resource::<TerrainDirtyChunks>();
+        let (surface_seq, brick_seq) = (dirty.surface_seq(), dirty.brick_seq());
+        let tick = world.change_tick();
+        world.insert_resource(TerrainSaveBaseline { root: Some(root), tick: Some(tick), surface_seq, brick_seq });
+    }
+
+    #[test]
+    fn a_save_plans_only_what_changed_since_the_disk_matched() {
+        let (mut world, root) = terrain_world();
+        let plan = plan_terrain_save(&mut world, root, None);
+        assert_eq!((plan.chunks.clone(), plan.bricks.clone(), plan.water), (SavePart::All, SavePart::All, true), "no baseline: everything");
+
+        take_baseline(&mut world, root);
+        assert!(plan_terrain_save(&mut world, root, None).is_empty(), "nothing changed, nothing to write");
+
+        // A marked raster edit writes its chunk alone.
+        let config = world.get::<TerrainConfig>(root).unwrap().clone();
+        world.resource_mut::<TerrainDirtyChunks>().mark_world_rect(&config, Vec2::new(4.0, 4.0), Vec2::new(6.0, 6.0));
+        let plan = plan_terrain_save(&mut world, root, None);
+        assert_eq!(plan.chunks, SavePart::These(vec![IVec2::new(0, 0)]));
+        assert!(plan.bricks.is_nothing() && !plan.water);
+
+        // A marked volume edit writes its bricks alone.
+        take_baseline(&mut world, root);
+        let edit = VolumeEdit { min: Vec3::ZERO, max: Vec3::ONE, bricks: vec![IVec3::new(0, 0, 0)] };
+        world.resource_mut::<TerrainDirtyChunks>().mark_volume_edit(&config, &edit);
+        let plan = plan_terrain_save(&mut world, root, None);
+        assert_eq!(plan.bricks, SavePart::These(vec![IVec3::new(0, 0, 0)]));
+
+        // A raster changed with nothing marked writes every chunk, so a
+        // writer that forgot to mark loses nothing.
+        take_baseline(&mut world, root);
+        world.increment_change_tick();
+        world.get_mut::<TerrainData>(root).unwrap().height_cache[0] = 0.5;
+        assert_eq!(plan_terrain_save(&mut world, root, None).chunks, SavePart::All);
+
+        // New water is written.
+        take_baseline(&mut world, root);
+        world.increment_change_tick();
+        world.entity_mut(root).insert(TerrainVoxelWater::default());
+        let plan = plan_terrain_save(&mut world, root, None);
+        assert!(plan.water && plan.chunks.is_nothing() && plan.bricks.is_nothing());
+
+        // Another root has no baseline.
+        let other = world.spawn((TerrainRoot, config, TerrainData::procedural())).id();
+        assert_eq!(plan_terrain_save(&mut world, other, None).chunks, SavePart::All);
+    }
+
+    #[test]
+    fn a_terrain_whose_file_is_gone_from_disk_is_written_whole() {
+        let (mut world, root) = terrain_world();
+        take_baseline(&mut world, root);
+        let dir = std::env::temp_dir().join(format!("eustress_terrain_save_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The disk matched when the baseline was taken, but the file the
+        // loader keys on is not there: the folder was moved from under it.
+        let plan = plan_terrain_save(&mut world, root, Some(&dir));
+        assert_eq!((plan.chunks.clone(), plan.bricks.clone(), plan.water), (SavePart::All, SavePart::All, true));
+
+        // With the file back, the baseline decides again.
+        std::fs::write(dir.join("_terrain.toml"), "[terrain]\n").unwrap();
+        assert!(plan_terrain_save(&mut world, root, Some(&dir)).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

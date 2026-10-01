@@ -180,7 +180,9 @@ pub fn moon_disc_params(
     let radiance = Vec3::new(tint.red, tint.green, tint.blue) * air * peak;
     MoonDiscParams {
         moon: toward_moon.extend(radius.sin()),
-        sun: sky_light.sun_direction.extend(earthshine),
+        // What shades the disc: the sun, or for a moon placed opposite the
+        // sun the light that shows its Phase (`Moon::lit_from`).
+        sun: sky_light.moon_lit_from.extend(earthshine),
         north: disc_north(toward_moon, sun.latitude).extend(night),
         radiance: radiance.extend(moon.glow_intensity.max(0.0) * HALO_GAIN * night),
     }

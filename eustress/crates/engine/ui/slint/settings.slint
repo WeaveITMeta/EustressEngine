@@ -1,14 +1,82 @@
 // ============================================================================
-// Eustress Engine - Settings Dialog
-// Application settings (General, Graphics, Audio, Soul)
+// Eustress Engine - Settings
 // ============================================================================
+// Studio preferences on the shared dialog chrome (dialog_kit.slint): a
+// sidebar of pages, each page a stack of SettingsGroups. Every control here
+// is wired: main.slint binds the dialog's properties to the root, and the
+// grid, snap, Graphics, Audio and Auto-save controls talk to the engine
+// through the `Preferences` global (engine/src/preferences.rs).
+//
+// `active-tab` numbering, stored by main.slint in `settings-active-tab`:
+// 0 General, 1 Graphics, 2 Audio, 3 AI keys (Soul), 4 Notifications,
+// 5 Appearance (themes).
 
-import { VerticalBox, HorizontalBox, ScrollView, CheckBox, ComboBox, Slider, LineEdit, TabWidget } from "std-widgets.slint";
+import { ScrollView, LineEdit, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import {
+    DialogScrim, DialogCard, DialogFooter, KitButton, KitSwitch, KitDivider,
+    KitSegmented, SettingsGroup, SettingRow, NavItem, KitNotice, KitSectionLabel,
+} from "dialog_kit.slint";
 
-// One row in the Settings > Theme picker — pushed from Rust (ThemeRegistry).
-// swatch-bg/swatch-accent are the theme's own background-primary/accent-eustress
-// so each card previews the palette it applies.
+// The grid, snap, Graphics, Audio and Auto-save preferences. Rust owns every value: it
+// loads them from the editor settings, pushes them here, and applies and
+// saves each change. A control never writes a value itself; it asks with
+// `set` (apply and save) or, while a slider moves, `preview` (apply only;
+// the release sends `set`). Keys are the EditorSettings field names.
+export global Preferences {
+    // Editing. Snap is the same setting as the Home tab's Snap button.
+    in property <bool> show-grid: true;
+    in property <bool> snap: true;
+    // Graphics
+    in property <int> quality: 2; // 0 Low, 1 Medium, 2 High, 3 Ultra
+    in property <bool> vsync: false;
+    in property <bool> shadows: true;
+    in property <bool> anti-aliasing: true;
+    in property <int> max-fps: 120; // 0 is unlimited
+    // Audio, 0 to 100
+    in-out property <float> master-volume: 100;
+    in-out property <float> effects-volume: 100;
+    in-out property <float> music-volume: 100;
+    // Auto-save
+    in property <bool> auto-save: true;
+    in property <int> auto-save-minutes: 5;
+
+    callback set(string, string);
+    callback preview(string, string);
+    // Graphics and Audio back to their defaults (Reset to defaults).
+    callback reset();
+}
+
+// A volume slider and its percentage. Moving it previews the level live;
+// letting go saves it.
+component VolumeSlider inherits HorizontalLayout {
+    in property <string> key;
+    in-out property <float> value;
+
+    spacing: 10px;
+    Slider {
+        width: 180px;
+        minimum: 0;
+        maximum: 100;
+        value <=> root.value;
+        changed(v) => { Preferences.preview(root.key, round(v)); }
+        released(v) => { Preferences.set(root.key, round(v)); }
+    }
+    Text {
+        width: 40px;
+        text: round(root.value) + "%";
+        color: Theme.text-primary;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+// One row in the Settings > Appearance picker, pushed from Rust
+// (ThemeRegistry). swatch-bg/swatch-accent are the theme's own
+// background-primary/accent-eustress, so each card previews the palette it
+// applies.
 export struct ThemeEntry {
     id: string,
     name: string,
@@ -18,62 +86,172 @@ export struct ThemeEntry {
     builtin: bool,
 }
 
-component SettingsSection inherits Rectangle {
-    in property <string> title: "";
-    height: 28px;
-    background: transparent;
+// A page's heading: its name and one line on what it holds.
+component PageTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
 
-    Rectangle {
-        x: 0px; y: 6px;
-        width: 3px; height: 16px;
-        border-radius: 1.5px;
-        background: Theme.accent-blue;
-    }
+    spacing: 3px;
+    padding-bottom: 4px;
 
     Text {
-        x: 10px;
         text: root.title;
         color: Theme.text-primary;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
+        font-size: Theme.font-lg;
+        font-weight: 600;
+    }
+    Text {
+        text: root.subtitle;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
     }
 }
 
-component SettingsHint inherits Rectangle {
-    in property <string> text: "";
-    background: transparent;
-    // Height follows the wrapped text instead of being pinned at one line.
-    // With a fixed 16px height, any hint long enough to wrap painted outside
-    // its own box and over the control next to it, which is what made the
-    // API key hints collide with their input fields.
-    height: hint-text.preferred-height;
-    hint-text := Text {
-        text: root.text;
-        color: Theme.text-disabled;
-        font-size: 10px;
+// A password field with its label above, for the AI keys page.
+component KeyField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    in-out property <string> value;
+
+    spacing: 5px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+
+    Text {
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    LineEdit {
+        text <=> root.value;
+        input-type: password;
+        placeholder-text: "Paste a key";
+        font-size: 12px;
+    }
+    Text {
+        text: root.hint;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
         wrap: word-wrap;
-        width: parent.width;
+    }
+}
+
+// One theme in the Appearance grid: a miniature of the palette, its name,
+// and the selection outline in cyan when it is the active one.
+component ThemeCard inherits Rectangle {
+    in property <ThemeEntry> entry;
+    in property <bool> active;
+    callback picked();
+
+    height: 118px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.button-hover : Theme.background-secondary.with-alpha(0.6);
+    border-width: root.active ? 2px : 1px;
+    border-color: root.active ? Theme.accent-cyan : Theme.border-color;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        // The miniature: the theme's background with a ribbon strip, a
+        // panel and an accent button.
+        Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-sm;
+            background: root.entry.swatch-bg;
+            border-width: 1px;
+            border-color: Theme.border-highlight;
+            clip: true;
+
+            Rectangle {
+                y: 0;
+                height: 10px;
+                background: root.entry.swatch-bg.brighter(0.4);
+            }
+            Rectangle {
+                x: 8px;
+                y: 16px;
+                width: parent.width * 0.3;
+                height: parent.height - 24px;
+                border-radius: 2px;
+                background: root.entry.swatch-bg.brighter(0.6);
+            }
+            Rectangle {
+                x: parent.width * 0.3 + 16px;
+                y: 18px;
+                width: parent.width * 0.4;
+                height: 5px;
+                border-radius: 2px;
+                background: root.entry.swatch-bg.brighter(1.2);
+            }
+            Rectangle {
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                width: 36px;
+                height: 12px;
+                border-radius: 3px;
+                background: root.entry.swatch-accent;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.entry.name;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.active: VerticalLayout {
+                alignment: center;
+                Image {
+                    width: 13px;
+                    height: 13px;
+                    source: @image-url("../../assets/icons/ui/check.svg");
+                    colorize: Theme.accent-cyan;
+                }
+            }
+            Text {
+                text: root.entry.builtin ? "Built-in" : "Yours";
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.entry.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-xs;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
     }
 }
 
 export component SettingsDialog inherits Rectangle {
-    // Properties
-    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul, 4=Notifications, 5=Theme
+    // Which page is showing. See the header for the numbering.
+    in-out property <int> active-tab: 0;
 
-    // Theme settings — data-driven list of loaded TOML themes (built-ins +
-    // user Themes folder), pushed from Rust. Clicking a card fires
-    // `select-theme(id)` → Rust swaps the whole palette live + persists.
-    // `rescan-themes` re-reads the user folder (the v1 "marketplace").
+    // Appearance: themes from the ThemeRegistry. Clicking a card applies it
+    // at once and saves the choice; Rescan re-reads the user Themes folder.
     in property <[ThemeEntry]> available-themes: [];
     in-out property <string> active-theme-id: "modern";
     callback select-theme(string);
     callback rescan-themes();
 
-    // Notifications settings (wired to Bevy NotificationSettings resource)
+    // Notifications
     in-out property <bool> notifications-enabled: true;
-    // Privacy — anonymous ribbon-tool usage counting (see usage_telemetry.rs).
+    // Privacy: anonymous tool-click counts. Persisted in EditorSettings.
     in-out property <bool> usage-telemetry-enabled: true;
     in-out property <bool> notifications-show-dismiss: true;
     in-out property <bool> notifications-mute-file: false;
@@ -87,904 +265,596 @@ export component SettingsDialog inherits Rectangle {
     in-out property <bool> notifications-mute-warning: false;
     callback on-notifications-changed();
 
-    // General settings
-    in-out property <bool> auto-save: true;
-    in-out property <int> auto-save-interval: 5; // minutes
-    in-out property <bool> show-grid: true;
-    in-out property <bool> snap-to-grid: true;
-    in-out property <float> grid-size: 1.0;
-    in-out property <bool> dark-theme: true;
+    // General: the Properties panel's help links.
     in-out property <bool> show-help-icons: true;
     in-out property <bool> help-opens-in-tab: false;
 
-    // Graphics settings
-    in-out property <string> render-quality: "High";
-    in-out property <bool> vsync: true;
-    in-out property <bool> shadows: true;
-    in-out property <bool> anti-aliasing: true;
-    in-out property <int> max-fps: 60;
-
-    // Audio settings
-    in-out property <float> master-volume: 1.0;
-    in-out property <float> sfx-volume: 1.0;
-    in-out property <float> music-volume: 0.5;
-
-    // Soul settings
+    // AI keys (Soul)
     in-out property <string> soul-api-key: "";
-    // Shown only once Test Connection has accepted the stored key.
+    // Set by Rust after the key is validated.
     in property <bool> soul-api-key-valid: false;
     in property <string> soul-error-message: "";
-    // Test Connection: one line per provider, and whether a test is running.
+    // "Test connection": one line per provider, and whether it is running.
     in property <string> soul-test-status: "";
     in property <bool> soul-test-running: false;
-    // xAI (Grok) key — global-only, no per-space override, so no
-    // corresponding "use global key" toggle like the Anthropic key has.
+    // Keys for the other Workshop providers, BYOK like Anthropic's.
     in-out property <string> soul-xai-api-key: "";
     in-out property <string> soul-openai-api-key: "";
 
-    // Callbacks
     callback on-close();
     callback on-save();
     callback on-reset-defaults();
     callback on-help-icons-changed(bool);
     callback on-help-opens-in-tab-changed(bool);
     callback on-test-soul-connection();
+    // Keyboard: the shortcut editor is its own dialog.
+    callback open-keybindings();
+
+    // The page to draw; anything out of range shows General.
+    property <int> page: root.active-tab >= 0 && root.active-tab <= 5 ? root.active-tab : 0;
+
+    // Max FPS choices, and the one showing (-1 when the cap is another
+    // number, set by EUSTRESS_MAX_FPS).
+    property <[int]> fps-caps: [60, 120, 144, 240, 0];
+    property <int> fps-index: Preferences.max-fps == 60 ? 0
+        : Preferences.max-fps == 120 ? 1
+        : Preferences.max-fps == 144 ? 2
+        : Preferences.max-fps == 240 ? 3
+        : Preferences.max-fps == 0 ? 4 : -1;
 
     width: 100%;
     height: 100%;
-    background: Theme.modal-backdrop;
 
-    // Block all keyboard events from leaking to Explorer/viewport behind modal.
-    // TextInput/LineEdit children will take focus when clicked, receiving keys normally.
-    // This FocusScope only captures keys when no child input has focus.
-    settings-keys := FocusScope {
-        width: 0px; height: 0px;
-        key-pressed(event) => {
-            if event.text == Key.Escape { root.on-close(); return accept; }
-            return accept;
-        }
-        key-released(event) => { return accept; }
-    }
+    DialogScrim {
+        dismiss => { root.on-close(); }
 
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => { return accept; }
-    }
-
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 600px;
-        height: min(parent.height - 80px, 520px);
-        background: Theme.background-secondary;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.shadow-color;
-
-        // Absorb all clicks on the dialog so they don't bleed through
-        // to the backdrop (which closes) or the viewport behind
-        TouchArea {
-            scroll-event(event) => { return accept; }
-        }
-
-        TouchArea {
-            scroll-event(event) => { return accept; }
-        }
-
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Settings";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+        // Esc closes; every other key stays inside the dialog instead of
+        // reaching the Explorer or the viewport behind it. Text fields take
+        // their own keys when they have focus.
+        FocusScope {
+            width: 0px;
+            height: 0px;
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.on-close();
                 }
-
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: close-button danger hover tint (no red-surface token)
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
-                    }
-
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.accent-red : Theme.text-secondary;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
+                return accept;
             }
+            key-released(event) => { return accept; }
+        }
 
-            // ── Tab bar ──
-            Rectangle {
-                height: 36px;
-                background: Theme.tab-inactive;
+        DialogCard {
+            width: min(parent.width - 48px, 760px);
+            height: min(parent.height - 64px, 580px);
+            icon: @image-url("../../assets/icons/ui/settings.svg");
+            title: "Settings";
+            subtitle: "Studio preferences, saved on this computer";
+            close => { root.on-close(); }
 
-                HorizontalLayout {
-                    padding-left: 12px;
-                    spacing: 4px;
-                    alignment: start;
-
-                    for tab-def[i] in [
-                        { name: "General" },
-                        { name: "Graphics" },
-                        { name: "Audio" },
-                        { name: "Soul" },
-                        { name: "Notifications" },
-                        { name: "Theme" },
-                    ] : Rectangle {
-                        width: stab-t.preferred-width + 24px;
-                        height: 36px;
-
-                        Rectangle {
-                            y: parent.height - 2px;
-                            height: 2px;
-                            width: parent.width;
-                            background: root.active-tab == i ? Theme.accent-blue : transparent;
-                        }
-
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-tab = i; }
-                        }
-
-                        stab-t := Text {
-                            text: tab-def.name;
-                            color: root.active-tab == i ? Theme.text-primary : Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: root.active-tab == i ? 600 : 400;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content ──
-            Rectangle {
+            HorizontalLayout {
                 vertical-stretch: 1;
+                padding: 0;
+                spacing: 0;
 
-                // Theme tab — data-driven list of loaded TOML themes. Clicking
-                // a card applies INSTANTLY (no Apply button): active-theme-id
-                // updates locally for the highlight ring, and select-theme(id)
-                // fires the Rust round-trip that swaps the whole palette live +
-                // persists the choice. "Rescan" re-reads the user Themes folder.
-                if root.active-tab == 5: ScrollView {
+                // ── Sidebar ──
+                Rectangle {
+                    width: 188px;
+                    background: Theme.background-primary.with-alpha(0.5);
+
                     VerticalLayout {
-                        padding: 20px;
-                        spacing: 12px;
+                        padding: 10px;
+                        spacing: 2px;
                         alignment: start;
 
-                        HorizontalLayout {
-                            SettingsSection { title: "APPEARANCE"; horizontal-stretch: 1; }
-                            // Rescan the %LOCALAPPDATA%/Eustress/Themes folder
-                            Rectangle {
-                                width: 78px; height: 24px;
-                                border-radius: Theme.radius-sm;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                background: rescan-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                                rescan-ta := TouchArea { clicked => { root.rescan-themes(); } }
-                                Text {
-                                    text: "Rescan";
-                                    color: Theme.text-secondary;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%; height: 100%;
+                        NavItem {
+                            text: "General";
+                            icon: @image-url("../../assets/icons/ui/settings.svg");
+                            selected: root.page == 0;
+                            clicked => { root.active-tab = 0; }
+                        }
+                        NavItem {
+                            text: "Graphics";
+                            icon: @image-url("../../assets/icons/ui/screen.svg");
+                            selected: root.page == 1;
+                            clicked => { root.active-tab = 1; }
+                        }
+                        NavItem {
+                            text: "Audio";
+                            icon: @image-url("../../assets/icons/ui/audio.svg");
+                            selected: root.page == 2;
+                            clicked => { root.active-tab = 2; }
+                        }
+                        NavItem {
+                            text: "Appearance";
+                            icon: @image-url("../../assets/icons/ui/palette.svg");
+                            selected: root.page == 5;
+                            clicked => { root.active-tab = 5; }
+                        }
+                        NavItem {
+                            text: "AI keys";
+                            icon: @image-url("../../assets/icons/ui/brain.svg");
+                            selected: root.page == 3;
+                            clicked => { root.active-tab = 3; }
+                        }
+                        NavItem {
+                            text: "Notifications";
+                            icon: @image-url("../../assets/icons/ui/bell.svg");
+                            selected: root.page == 4;
+                            clicked => { root.active-tab = 4; }
+                        }
+
+                        Rectangle { height: 6px; }
+                        KitDivider { }
+                        Rectangle { height: 6px; }
+
+                        NavItem {
+                            text: "Keyboard shortcuts";
+                            icon: @image-url("../../assets/icons/ui/keyboard.svg");
+                            clicked => { root.open-keybindings(); }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 1px;
+                    background: Theme.ribbon-separator;
+                }
+
+                // ── Page ──
+                page-scroll := ScrollView {
+                    horizontal-stretch: 1;
+
+                    VerticalLayout {
+                        width: page-scroll.visible-width;
+                        padding: 20px;
+                        spacing: 18px;
+                        alignment: start;
+
+                        if root.page == 0: VerticalLayout {
+                            spacing: 18px;
+
+                            PageTitle {
+                                title: "General";
+                                subtitle: "How the editor behaves while you build.";
+                            }
+
+                            SettingsGroup {
+                                title: "EDITING";
+                                note: "Snap increments are on the Home tab, beside the Snap button.";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Show grid";
+                                    description: "The ground grid in the viewport.";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.show-grid;
+                                        toggled(on) => { Preferences.set("show_grid", on ? "1" : "0"); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Snap to grid";
+                                    description: "Moves and rotations land on the snap increments.";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.snap;
+                                        toggled(on) => { Preferences.set("snap_enabled", on ? "1" : "0"); }
+                                    }
+                                }
+                            }
+
+                            SettingsGroup {
+                                title: "AUTO-SAVE";
+                                note: "Each auto-save writes the Space and commits it to the Space's own git history, so any one can be restored.";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Auto-save";
+                                    description: "Saves the open Space while you work. Skipped in Play and when nothing changed.";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.auto-save;
+                                        toggled(on) => { Preferences.set("auto_save_enabled", on ? "1" : "0"); }
+                                    }
+                                }
+                                if Preferences.auto-save: SettingRow {
+                                    label: "Every";
+                                    description: "Time between auto-saves.";
+                                    KitSegmented {
+                                        managed: true;
+                                        options: ["1 min", "2 min", "5 min", "10 min", "15 min"];
+                                        current-index: Preferences.auto-save-minutes == 1 ? 0
+                                            : Preferences.auto-save-minutes == 2 ? 1
+                                            : Preferences.auto-save-minutes == 5 ? 2
+                                            : Preferences.auto-save-minutes == 10 ? 3
+                                            : Preferences.auto-save-minutes == 15 ? 4 : -1;
+                                        selected(i) => {
+                                            Preferences.set("auto_save_interval",
+                                                i == 0 ? "60" : i == 1 ? "120" : i == 2 ? "300" : i == 3 ? "600" : "900");
+                                        }
+                                    }
+                                }
+                            }
+
+                            SettingsGroup {
+                                title: "PROPERTIES PANEL";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Help icons";
+                                    description: "A ? beside every documented property.";
+                                    KitSwitch {
+                                        checked <=> root.show-help-icons;
+                                        toggled(on) => { root.on-help-icons-changed(on); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Open help in a Studio tab";
+                                    description: "Otherwise help opens in your web browser.";
+                                    KitSwitch {
+                                        checked <=> root.help-opens-in-tab;
+                                        toggled(on) => { root.on-help-opens-in-tab-changed(on); }
+                                    }
                                 }
                             }
                         }
 
-                        // Theme cards — one per loaded theme (built-ins + user
-                        // folder). The outer ScrollView handles overflow.
-                        VerticalLayout {
-                            spacing: 10px;
-                            for entry in root.available-themes: Rectangle {
-                                height: 76px;
-                                border-radius: Theme.radius-md;
-                                border-width: entry.id == root.active-theme-id ? 2px : 1px;
-                                border-color: entry.id == root.active-theme-id ? entry.swatch-accent : Theme.border-color;
-                                background: entry.swatch-bg;
+                        if root.page == 1: VerticalLayout {
+                            spacing: 18px;
 
-                                card-ta := TouchArea {
-                                    clicked => {
+                            PageTitle {
+                                title: "Graphics";
+                                subtitle: "How the viewport draws. Changes apply at once.";
+                            }
+
+                            SettingsGroup {
+                                title: "QUALITY";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Shadow quality";
+                                    description: "Shadow sharpness and how far from the camera they reach. Low is fastest on large Spaces.";
+                                    KitSegmented {
+                                        managed: true;
+                                        options: ["Low", "Medium", "High", "Ultra"];
+                                        current-index: Preferences.quality;
+                                        selected(i) => { Preferences.set("render_quality", i); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Shadows";
+                                    description: "Lights cast shadows. Turn off for the most speed.";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.shadows;
+                                        toggled(on) => { Preferences.set("shadows_enabled", on ? "1" : "0"); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Anti-aliasing";
+                                    description: "Smooths jagged edges (SMAA).";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.anti-aliasing;
+                                        toggled(on) => { Preferences.set("anti_aliasing", on ? "1" : "0"); }
+                                    }
+                                }
+                            }
+
+                            SettingsGroup {
+                                title: "DISPLAY";
+                                SettingRow {
+                                    divider: false;
+                                    label: "V-Sync";
+                                    description: "Match the monitor's refresh. Stops tearing and adds a little input delay.";
+                                    KitSwitch {
+                                        managed: true;
+                                        checked: Preferences.vsync;
+                                        toggled(on) => { Preferences.set("vsync", on ? "1" : "0"); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Frame rate while editing";
+                                    description: "The most frames per second Studio draws while you build. Play always runs uncapped.";
+                                    KitSegmented {
+                                        managed: true;
+                                        options: ["60", "120", "144", "240", "Unlimited"];
+                                        current-index: root.fps-index;
+                                        selected(i) => { Preferences.set("max_fps", root.fps-caps[i]); }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.page == 2: VerticalLayout {
+                            spacing: 18px;
+
+                            PageTitle {
+                                title: "Audio";
+                                subtitle: "Studio's volume, in Edit and in Play. Sounds already playing follow the sliders.";
+                            }
+
+                            SettingsGroup {
+                                title: "VOLUME";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Master";
+                                    description: "Every sound.";
+                                    VolumeSlider {
+                                        key: "master_volume";
+                                        value <=> Preferences.master-volume;
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Effects";
+                                    description: "Sounds in the SFX, Voice and UI groups. In Play, one-shot sounds.";
+                                    VolumeSlider {
+                                        key: "effects_volume";
+                                        value <=> Preferences.effects-volume;
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Music";
+                                    description: "Sounds in the Music and Ambient groups. In Play, looping sounds.";
+                                    VolumeSlider {
+                                        key: "music_volume";
+                                        value <=> Preferences.music-volume;
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.page == 5: VerticalLayout {
+                            spacing: 18px;
+
+                            HorizontalLayout {
+                                spacing: 12px;
+                                PageTitle {
+                                    horizontal-stretch: 1;
+                                    title: "Appearance";
+                                    subtitle: "Pick a theme. It applies at once, no restart.";
+                                }
+                                VerticalLayout {
+                                    alignment: start;
+                                    KitButton {
+                                        text: "Rescan";
+                                        has-icon: true;
+                                        icon: @image-url("../../assets/icons/ui/refresh.svg");
+                                        clicked => { root.rescan-themes(); }
+                                    }
+                                }
+                            }
+
+                            theme-grid := Rectangle {
+                                property <int> cols: 2;
+                                property <length> gap: 10px;
+                                property <length> cell: (self.width - self.gap) / self.cols;
+                                height: ceil(root.available-themes.length / self.cols) * (118px + self.gap);
+
+                                for entry[i] in root.available-themes: ThemeCard {
+                                    x: mod(i, theme-grid.cols) * (theme-grid.cell + theme-grid.gap);
+                                    y: floor(i / theme-grid.cols) * (118px + theme-grid.gap);
+                                    width: theme-grid.cell;
+                                    entry: entry;
+                                    active: entry.id == root.active-theme-id;
+                                    picked => {
                                         root.active-theme-id = entry.id;
                                         root.select-theme(entry.id);
                                     }
                                 }
-
-                                // Accent chip
-                                Rectangle {
-                                    x: 12px; y: 12px;
-                                    width: 20px; height: 20px;
-                                    border-radius: 10px;
-                                    background: entry.swatch-accent;
-                                }
-                                // Name
-                                Text {
-                                    x: 42px; y: 12px;
-                                    text: entry.name;
-                                    color: Theme.text-primary;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                }
-                                // Active check
-                                if entry.id == root.active-theme-id: Text {
-                                    x: parent.width - 24px; y: 12px;
-                                    text: "✓";
-                                    color: entry.swatch-accent;
-                                    font-size: 14px;
-                                    font-weight: 700;
-                                }
-                                // Built-in / user badge
-                                Text {
-                                    x: 42px; y: 32px;
-                                    text: entry.builtin ? "Built-in" : "User theme";
-                                    color: Theme.text-disabled;
-                                    font-size: 9px;
-                                }
-                                // Description
-                                Text {
-                                    x: 12px; y: parent.height - 20px;
-                                    width: parent.width - 24px;
-                                    text: entry.description;
-                                    color: Theme.text-secondary;
-                                    font-size: 9px;
-                                    overflow: elide;
-                                }
                             }
-                        }
-
-                        SettingsHint {
-                            text: "Themes are TOML files. Drop your own into %LOCALAPPDATA%/Eustress/Themes and press Rescan. Switches instantly — no restart needed.";
-                        }
-                    }
-                }
-
-                // General tab
-                if root.active-tab == 0: ScrollView {
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-
-                        SettingsSection { title: "AUTO-SAVE"; }
-
-                        CheckBox {
-                            text: "Enable auto-save";
-                            checked <=> root.auto-save;
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 148px;
-                                    text: "Interval (minutes)";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Slider {
-                                    width: 150px;
-                                    minimum: 1;
-                                    maximum: 30;
-                                    value: root.auto-save-interval;
-                                }
-                                Text {
-                                    text: root.auto-save-interval;
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "GRID & SNAPPING"; }
-
-                        CheckBox {
-                            text: "Show grid";
-                            checked <=> root.show-grid;
-                        }
-
-                        CheckBox {
-                            text: "Snap to grid";
-                            checked <=> root.snap-to-grid;
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 148px;
-                                    text: "Grid Size";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                ComboBox {
-                                    width: 100px;
-                                    model: ["0.25", "0.5", "1.0", "2.0", "4.0"];
-                                    current-value: "1.0";
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "APPEARANCE"; }
-
-                        CheckBox {
-                            text: "Dark theme";
-                            checked <=> root.dark-theme;
-                        }
-
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "PROPERTIES PANEL"; }
-
-                        CheckBox {
-                            text: "Show Help Icons (? next to documented properties)";
-                            checked <=> root.show-help-icons;
-                            toggled => { root.on-help-icons-changed(root.show-help-icons); }
-                        }
-
-                        CheckBox {
-                            text: "Open Help links in Tabbed Viewer";
-                            checked <=> root.help-opens-in-tab;
-                            toggled => { root.on-help-opens-in-tab-changed(root.help-opens-in-tab); }
-                        }
-                    }
-                }
-
-                // Graphics tab
-                if root.active-tab == 1: ScrollView {
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-
-                        SettingsSection { title: "RENDER QUALITY"; }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 148px;
-                                    text: "Preset";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                ComboBox {
-                                    width: 200px;
-                                    model: ["Low", "Medium", "High", "Ultra"];
-                                    current-value <=> root.render-quality;
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "DISPLAY"; }
-
-                        CheckBox {
-                            text: "V-Sync";
-                            checked <=> root.vsync;
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 148px;
-                                    text: "Max FPS";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Slider {
-                                    width: 150px;
-                                    minimum: 30;
-                                    maximum: 240;
-                                    value: root.max-fps;
-                                }
-                                Text {
-                                    text: root.max-fps;
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "EFFECTS"; }
-
-                        CheckBox {
-                            text: "Shadows";
-                            checked <=> root.shadows;
-                        }
-
-                        CheckBox {
-                            text: "Anti-aliasing";
-                            checked <=> root.anti-aliasing;
-                        }
-                    }
-                }
-
-                // Audio tab
-                if root.active-tab == 2: ScrollView {
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-
-                        SettingsSection { title: "VOLUME"; }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 80px;
-                                    text: "Master";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Slider {
-                                    horizontal-stretch: 1;
-                                    minimum: 0;
-                                    maximum: 1;
-                                    value <=> root.master-volume;
-                                }
-                                Text {
-                                    width: 40px;
-                                    text: round(root.master-volume * 100) + "%";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 80px;
-                                    text: "Effects";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Slider {
-                                    horizontal-stretch: 1;
-                                    minimum: 0;
-                                    maximum: 1;
-                                    value <=> root.sfx-volume;
-                                }
-                                Text {
-                                    width: 40px;
-                                    text: round(root.sfx-volume * 100) + "%";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 80px;
-                                    text: "Music";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Slider {
-                                    horizontal-stretch: 1;
-                                    minimum: 0;
-                                    maximum: 1;
-                                    value <=> root.music-volume;
-                                }
-                                Text {
-                                    width: 40px;
-                                    text: round(root.music-volume * 100) + "%";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Soul tab (Claude API configuration)
-                if root.active-tab == 3: ScrollView {
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
-
-                        SettingsSection { title: "API CONFIGURATION"; }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            height: 28px;
 
                             Text {
-                                width: 148px;
-                                text: "API Key";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
+                                text: "Themes are TOML files. Put your own in %LOCALAPPDATA%/Eustress/Themes, then press Rescan.";
+                                color: Theme.text-disabled;
+                                font-size: Theme.font-xs;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.page == 3: VerticalLayout {
+                            spacing: 18px;
+
+                            PageTitle {
+                                title: "AI keys";
+                                subtitle: "Bring your own keys for Soul and the Workshop. They are stored on this computer and never sent to Eustress.";
                             }
 
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    text <=> root.soul-api-key;
-                                    input-type: password;
-                                    font-size: 12px;
+                            SettingsGroup {
+                                title: "PROVIDERS";
+                                note: "Pick the model in the Workshop panel, next to its Mode pill.";
+                                KeyField {
+                                    label: "Anthropic (Claude)";
+                                    hint: "Used by Soul, the Workshop and the UI Builder's Claude mode.";
+                                    value <=> root.soul-api-key;
+                                }
+                                KitDivider { }
+                                KeyField {
+                                    label: "xAI (Grok)";
+                                    hint: "Used when the Workshop's model is an xAI model.";
+                                    value <=> root.soul-xai-api-key;
+                                }
+                                KitDivider { }
+                                KeyField {
+                                    label: "OpenAI";
+                                    hint: "Used when the Workshop's model is an OpenAI model.";
+                                    value <=> root.soul-openai-api-key;
                                 }
                             }
-                        }
 
-                        SettingsHint { text: "Your BYOK (Bring Your Own Key) Anthropic API key. Stored locally, never transmitted to Eustress servers."; }
-
-                        if root.soul-api-key-valid: HorizontalBox {
-                            spacing: 4px;
-                            height: 16px;
-                            alignment: start;
-                            Text { text: "✓"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
-                            Text { text: "API key validated"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
-                        }
-
-                        Rectangle { height: 12px; }
-                        SettingsSection { title: "XAI (GROK) API KEY"; }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            height: 28px;
-
-                            Text {
-                                width: 148px;
-                                text: "API Key";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
+                            if root.soul-api-key-valid: KitNotice {
+                                kind: "success";
+                                text: "Anthropic key validated.";
                             }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    text <=> root.soul-xai-api-key;
-                                    input-type: password;
-                                    font-size: 12px;
-                                }
-                            }
-                        }
-
-                        SettingsHint { text: "Your BYOK xAI (Grok) API key, used when Workshop's model picker is set to an xAI model. Stored locally, never transmitted to Eustress servers."; }
-
-                        Rectangle { height: 12px; }
-                        SettingsSection { title: "OPENAI API KEY"; }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            height: 28px;
-
-                            Text {
-                                width: 148px;
-                                text: "API Key";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 26px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    text <=> root.soul-openai-api-key;
-                                    input-type: password;
-                                    font-size: 12px;
-                                }
-                            }
-                        }
-
-                        SettingsHint { text: "Your BYOK OpenAI API key, used when Workshop's model picker is set to an OpenAI model. Stored locally, never transmitted to Eustress servers."; }
-
-                        // Model selection: Workshop panel toolbar, next to
-                        // the Mode pill — not here, to keep a single writer
-                        // to GlobalSoulSettings::workshop_model.
-
-                        if root.soul-error-message != "": Rectangle {
-                            height: 28px;
-                            background: Theme.dialog-background;
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: Theme.border-error;
-
-                            Text {
-                                x: 10px;
+                            if root.soul-error-message != "": KitNotice {
+                                kind: "error";
                                 text: root.soul-error-message;
-                                color: Theme.text-error;
-                                font-size: 10px;
-                                vertical-alignment: center;
                             }
-                        }
 
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "ACTIONS"; }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            height: 32px;
-
-                            Rectangle {
-                                width: 120px; height: 28px;
-                                border-radius: 4px;
-                                background: test-soul-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                                border-width: 1px;
-                                border-color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.border-color;
-
-                                test-soul-ta := TouchArea {
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: start;
+                                KitButton {
+                                    text: root.soul-test-running ? "Testing..." : "Test connection";
+                                    has-icon: true;
+                                    icon: @image-url("../../assets/icons/ui/plug.svg");
                                     enabled: !root.soul-test-running;
-                                    mouse-cursor: root.soul-test-running ? default : pointer;
                                     clicked => { root.on-test-soul-connection(); }
                                 }
-
-                                Text {
-                                    text: root.soul-test-running ? "Testing..." : "Test Connection";
-                                    color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Tests the keys typed above, saved or not.";
+                                        color: Theme.text-disabled;
+                                        font-size: Theme.font-xs;
+                                    }
                                 }
+                            }
+                            // One line per provider: OK, rejected, unreachable or not set.
+                            if root.soul-test-status != "": KitNotice {
+                                kind: "info";
+                                text: root.soul-test-status;
                             }
                         }
 
-                        // One line per provider: OK, rejected, unreachable,
-                        // or not set. Tests the keys typed above, saved or not.
-                        if root.soul-test-status != "": SettingsHint { text: root.soul-test-status; }
-                    }
-                }
+                        if root.page == 4: VerticalLayout {
+                            spacing: 18px;
 
-                // Notifications tab
-                if root.active-tab == 4: ScrollView {
-                    VerticalLayout {
-                        padding: 20px;
-                        spacing: 4px;
-                        alignment: start;
+                            PageTitle {
+                                title: "Notifications";
+                                subtitle: "Which toasts Studio shows, and what it may count.";
+                            }
 
-                        SettingsSection { title: "GENERAL"; }
-                        CheckBox {
-                            text: "Enable notifications";
-                            checked <=> root.notifications-enabled;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Show dismiss (X) button on toasts";
-                            checked <=> root.notifications-show-dismiss;
-                            toggled => { root.on-notifications-changed(); }
-                        }
+                            SettingsGroup {
+                                title: "TOASTS";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Show notifications";
+                                    KitSwitch {
+                                        checked <=> root.notifications-enabled;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Dismiss button on toasts";
+                                    KitSwitch {
+                                        checked <=> root.notifications-show-dismiss;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                            }
 
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "PRIVACY"; }
-                        CheckBox {
-                            text: "Send anonymous usage statistics";
-                            checked <=> root.usage-telemetry-enabled;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        Text {
-                            text: "Counts which tools you click so we build the most-wanted ones first. Never your scene content, files, or personal data.";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            wrap: word-wrap;
-                        }
+                            SettingsGroup {
+                                title: "PRIVACY";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Send anonymous usage statistics";
+                                    description: "Counts which tools you click, so the most-wanted ones get built first. Never your scenes, files or personal data.";
+                                    KitSwitch {
+                                        checked <=> root.usage-telemetry-enabled;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                            }
 
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "MUTE BY LEVEL"; }
-                        CheckBox {
-                            text: "Mute Info";
-                            checked <=> root.notifications-mute-info;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Mute Warnings";
-                            checked <=> root.notifications-mute-warning;
-                            toggled => { root.on-notifications-changed(); }
-                        }
+                            SettingsGroup {
+                                title: "MUTE BY LEVEL";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Mute info";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-info;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Mute warnings";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-warning;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                            }
 
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "MUTE BY CATEGORY"; }
-                        CheckBox {
-                            text: "File (save / load / rename)";
-                            checked <=> root.notifications-mute-file;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Script (build / compile / run)";
-                            checked <=> root.notifications-mute-script;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Editor (selection / transform)";
-                            checked <=> root.notifications-mute-editor;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Simulation (play mode)";
-                            checked <=> root.notifications-mute-simulation;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Network (replication / auth)";
-                            checked <=> root.notifications-mute-network;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "Task (imports / exports / background)";
-                            checked <=> root.notifications-mute-task;
-                            toggled => { root.on-notifications-changed(); }
-                        }
-                        CheckBox {
-                            text: "General";
-                            checked <=> root.notifications-mute-general;
-                            toggled => { root.on-notifications-changed(); }
+                            SettingsGroup {
+                                title: "MUTE BY CATEGORY";
+                                SettingRow {
+                                    divider: false;
+                                    label: "File";
+                                    description: "Save, load and rename.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-file;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Script";
+                                    description: "Build, compile and run.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-script;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Editor";
+                                    description: "Selection and transforms.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-editor;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Simulation";
+                                    description: "Play mode.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-simulation;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Network";
+                                    description: "Replication and sign-in.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-network;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Task";
+                                    description: "Imports, exports and background jobs.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-task;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "General";
+                                    description: "Everything else.";
+                                    KitSwitch {
+                                        checked <=> root.notifications-mute-general;
+                                        toggled => { root.on-notifications-changed(); }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // ── Footer ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.tab-inactive;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    padding-top: 10px;
-                    padding-bottom: 10px;
-                    spacing: 10px;
-                    alignment: center;
-
-                    Rectangle {
-                        width: 100px; height: 32px;
-                        border-radius: 5px;
-                        background: reset-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-
-                        reset-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-reset-defaults(); }
-                        }
-
-                        Text {
-                            text: "Reset Defaults";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+            DialogFooter {
+                pack-end: false;
+                KitButton {
+                    text: "Reset to defaults";
+                    kind: "ghost";
+                    clicked => {
+                        root.on-reset-defaults();
+                        Preferences.reset();
                     }
-
-                    Rectangle {
-                        width: 80px; height: 32px;
-                        border-radius: 5px;
-                        background: cancel-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-
-                        cancel-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-
-                        Text {
-                            text: "Cancel";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Rectangle {
-                        width: 80px; height: 32px;
-                        border-radius: 5px;
-                        background: save-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: green Save CTA surface (no green button-surface token)
-                        border-width: 1px;
-                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;  // theme-exempt: green Save CTA border (no green button-surface token)
-
-                        save-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-save(); }
-                        }
-
-                        Text {
-                            text: "Save";
-                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;  // theme-exempt: green Save CTA label (no green button-text token)
-                            font-size: 12px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                KitButton {
+                    text: "Cancel";
+                    clicked => { root.on-close(); }
+                }
+                KitButton {
+                    text: "Save";
+                    kind: "primary";
+                    clicked => { root.on-save(); }
                 }
             }
         }

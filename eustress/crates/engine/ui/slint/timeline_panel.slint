@@ -15,6 +15,7 @@
 // - Hover on a marker shows its label + tooltip
 
 import { Theme } from "theme.slint";
+import { DockTabs } from "output.slint";
 
 // ─── Data shapes ───────────────────────────────────────────────────────────
 
@@ -182,87 +183,28 @@ export component TimelinePanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // ── Toolbar: tab buttons + legend + search + filter ──
+        // ── Toolbar: the dock's tabs, then the time range ──
         Rectangle {
-            height: 30px;
+            height: 28px;
             background: Theme.header-background;
 
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
             HorizontalLayout {
-                padding-left: 2px;
-                padding-right: 4px;
-                padding-top: 2px;
-                spacing: 1px;
+                padding-left: 4px;
+                padding-right: 8px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 3px;
 
-                // Output / Timeline tab buttons — styled to match
-                // Explorer/Assets/Universes/Toolbox panel tabs.
-                Rectangle {
-                    width: 72px;
-                    background: root.panel-mode == "output" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-
-                    tl-output-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "output";
-                            root.set-panel-mode("output");
-                        }
-                    }
-
-                    Text {
-                        text: "Output";
-                        color: root.panel-mode == "output" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    width: 80px;
-                    background: root.panel-mode == "timeline" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-
-                    tl-timeline-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "timeline";
-                            root.set-panel-mode("timeline");
-                        }
-                    }
-
-                    Text {
-                        text: "Timeline";
-                        color: root.panel-mode == "timeline" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Data Grid — Data Platform bottom-panel tab (right of Timeline).
-                Rectangle {
-                    width: 84px;
-                    background: root.panel-mode == "datagrid" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-
-                    tl-datagrid-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "datagrid";
-                            root.set-panel-mode("datagrid");
-                        }
-                    }
-
-                    Text {
-                        text: "Data Grid";
-                        color: root.panel-mode == "datagrid" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                DockTabs {
+                    mode <=> root.panel-mode;
+                    set-mode(mode) => { root.set-panel-mode(mode); }
                 }
 
                 // Separator
@@ -270,9 +212,9 @@ export component TimelinePanel inherits Rectangle {
                     width: 9px;
                     Rectangle {
                         x: 4px;
-                        y: 6px;
+                        y: (parent.height - self.height) / 2;
                         width: 1px;
-                        height: 18px;
+                        height: 14px;
                         background: Theme.border-color;
                     }
                 }

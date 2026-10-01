@@ -6,9 +6,6 @@ use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 
-/// Backend API URL
-const API_URL: &str = "https://api.eustress.dev";
-
 /// Poll interval for favorite updates (5 minutes)
 const POLL_INTERVAL_SECS: f32 = 300.0;
 

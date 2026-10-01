@@ -151,8 +151,9 @@ pub enum MethodName {
     /// user's window). On-demand: powers the off-screen camera up only for
     /// the capture.
     AiCameraCapture,
-    /// Read PhysicsService: gravity, time scale, substeps, and every physics
-    /// domain's flag alongside whether that domain is actually running.
+    /// Read the physics settings: the Workspace's live gravity, PhysicsService
+    /// time scale and substeps, and every physics domain's flag alongside
+    /// whether that domain is actually running.
     PhysicsGet,
     /// Apply a partial update to PhysicsService. Validated all or nothing,
     /// applied live, and saved to the Space exactly like a properties panel
@@ -262,6 +263,48 @@ pub enum MethodName {
     PublishStatus,
     /// Start a publish of the open Space/Universe.
     PublishSubmit,
+    // Snapshots (see `snapshots.rs`): restore points of the open Space.
+    /// Save the Space and record it as a snapshot.
+    SnapshotSave,
+    /// The Space's snapshots, newest first.
+    SnapshotList,
+    /// Files changed since a snapshot.
+    SnapshotDiff,
+    /// Return the Space to a snapshot, after a safety snapshot.
+    SnapshotRevert,
+    /// Withdraw a revert waiting for the Space to reopen.
+    SnapshotCancelRevert,
+    // Terrain (see `terrain.rs`). Reads answer for the ground the user sees,
+    // layers included; each edit is one undo step through the terrain command
+    // path the editor and scripts share; generation only queues.
+    /// Whether the Space has a terrain: its grid, height range, material
+    /// histogram, volume, layers, water, and meshing or generation state.
+    TerrainStats,
+    /// Height, material, normal and hole flag at world XZ points or over a
+    /// grid.
+    TerrainQuery,
+    /// A ray against the terrain alone: the heightfield plus caves and
+    /// overhangs.
+    TerrainRaycast,
+    /// Roblox-style ReadVoxels over a world box: materials and occupancies.
+    TerrainReadVoxels,
+    /// Queue a procedural world from one of the Terrain ribbon's presets.
+    TerrainGenerate,
+    /// Queue a flat plate, the Terrain ribbon's Generate > Flat.
+    TerrainFlat,
+    /// Raise, lower, flatten or smooth the ground with a round brush.
+    TerrainSculpt,
+    /// Paint a material onto the surface with a round brush.
+    TerrainPaint,
+    /// Fill a ball, block, cylinder or region with a material or water, or
+    /// carve it to air.
+    TerrainFill,
+    /// Replace one material with another inside a world box.
+    TerrainReplaceMaterial,
+    /// Create a terrain layer instance under Workspace/Terrain/Layers.
+    TerrainLayerCreate,
+    /// Delete the terrain's files and entities, like the ribbon's Clear.
+    TerrainClear,
     Unknown(String),
 }
 
@@ -316,12 +359,29 @@ where
         "ui.click" => MethodName::UiClick,
         "publish.status" => MethodName::PublishStatus,
         "publish.submit" => MethodName::PublishSubmit,
+        "snapshot.save" => MethodName::SnapshotSave,
+        "snapshot.list" => MethodName::SnapshotList,
+        "snapshot.diff" => MethodName::SnapshotDiff,
+        "snapshot.revert" => MethodName::SnapshotRevert,
+        "snapshot.cancel_revert" => MethodName::SnapshotCancelRevert,
         "engine.shutdown" => MethodName::EngineShutdown,
         "sim.run" => MethodName::SimRun,
         "sim.pause" => MethodName::SimPause,
         "sim.stop" => MethodName::SimStop,
         "sim.set" => MethodName::SimSet,
         "sim.state" => MethodName::SimState,
+        "terrain.stats" => MethodName::TerrainStats,
+        "terrain.query" => MethodName::TerrainQuery,
+        "terrain.raycast" => MethodName::TerrainRaycast,
+        "terrain.read_voxels" => MethodName::TerrainReadVoxels,
+        "terrain.generate" => MethodName::TerrainGenerate,
+        "terrain.flat" => MethodName::TerrainFlat,
+        "terrain.sculpt" => MethodName::TerrainSculpt,
+        "terrain.paint" => MethodName::TerrainPaint,
+        "terrain.fill" => MethodName::TerrainFill,
+        "terrain.replace_material" => MethodName::TerrainReplaceMaterial,
+        "terrain.layer_create" => MethodName::TerrainLayerCreate,
+        "terrain.clear" => MethodName::TerrainClear,
         _ => MethodName::Unknown(s),
     })
 }
@@ -694,7 +754,6 @@ pub mod handlers {
             let now = chrono::Utc::now().to_rfc3339();
 
             let def = InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string() }),
                 transform: TransformData {
@@ -2625,30 +2684,26 @@ pub mod handlers {
     /// deliberately-driven test surface (`requires_approval` is handled at
     /// the MCP-tool layer), so the handler does not gate them here.
     pub fn action_invoke(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
-        let name = req
-            .params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let action: crate::keybindings::Action =
-            match serde_json::from_value(serde_json::Value::String(name.to_string())) {
-                Ok(a) => a,
-                Err(_) => {
-                    return BridgeResponse::error(
-                        req.id.clone(),
-                        BridgeError::internal(format!(
-                            "unknown action '{}' — use the Action enum variant name. The \
-                             accepted set is the WHOLE enum, not a safe subset: alongside \
-                             Copy/Cut/Paste/Duplicate/Group/Ungroup/SelectAll/Undo/Redo/\
-                             SaveScene/MoveTool/ScaleTool it includes irreversible actions \
-                             (Delete) and outward-facing ones (PublishSpace, PublishUniverse).",
-                            name
-                        )),
-                    );
-                }
-            };
+        // The one parse the permission gate also runs
+        // (`eustress_tools::capability::capability_of_call`), so the action
+        // run here is the one the gate judged. Nothing else reads the
+        // `action` field on a path that runs an action.
+        let Some(action) = eustress_common::editor_action::parse_action(&req.params) else {
+            // Nothing runs here, so the caller sees what it sent, raw.
+            let sent = req.params.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal(format!(
+                    "unknown action '{sent}'. Use the Action enum variant name, exactly. The \
+                     accepted set is the WHOLE enum, not a safe subset: alongside \
+                     Copy/Cut/Paste/Duplicate/Group/Ungroup/SelectAll/Undo/Redo/\
+                     SaveScene/MoveTool/ScaleTool it includes irreversible actions \
+                     (Delete) and outward-facing ones (PublishSpace, PublishUniverse)."
+                )),
+            );
+        };
         world.write_message(crate::ui::MenuActionEvent::new(action));
-        BridgeResponse::ok(req.id.clone(), serde_json::json!({ "invoked": name }))
+        BridgeResponse::ok(req.id.clone(), serde_json::json!({ "invoked": format!("{action:?}") }))
     }
 
     /// `viewport.capture` — screenshot the primary window (3D viewport +

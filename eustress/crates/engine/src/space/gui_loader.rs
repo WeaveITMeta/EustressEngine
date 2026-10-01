@@ -351,7 +351,11 @@ fn default_viewport_light_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
 /// uses the weight to pick the right variant when multiple are registered.
 pub fn font_weight_from_name(name: &str) -> i32 {
     let lower = name.to_lowercase();
-    if lower.contains("bold") { 700 }
+    // Black / Heavy faces, and the single-weight display faces (Fredoka One,
+    // Luckiest Guy, Bangers) are heavy type: bold is the nearest the
+    // overlay's default font can draw.
+    let heavy = ["bold", "black", "heavy", "fredoka", "luckiest", "bangers"];
+    if heavy.iter().any(|w| lower.contains(w)) { 700 }
     else if lower.contains("light") || lower.contains("thin") { 300 }
     else { 400 }
 }
@@ -894,7 +898,7 @@ pub fn spawn_gui_element(
     };
 
     let entity = match gui_type {
-        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name),
+        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name, gui.visible),
         "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "Frame" => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
@@ -999,6 +1003,7 @@ fn spawn_screen_gui_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
+    visible: bool,
 ) -> Entity {
     // Read the service before `loaded_from` moves into the spawn bundle.
     let is_screen_overlay = loaded_from.service == "StarterGui";
@@ -1022,6 +1027,29 @@ fn spawn_screen_gui_element(
             BackgroundColor(Color::NONE),
         ));
     }
+    // The overlay draws a GUI element only under an entity carrying a
+    // "screengui" GuiElementDisplay, and hides the subtree when it is not
+    // visible (Enabled = false). The cold-load path attaches this in
+    // file_loader.rs; without it here, a ScreenGui made by Insert, the file
+    // watcher or the UI Builder painted nothing until the Space reopened.
+    ec.insert(GuiElementDisplay {
+        x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+        position_udim2: [0.0; 4], size_udim2: [0.0; 4],
+        anchor_point: [0.0, 0.0],
+        z_order: 0, visible, clip_children: false,
+        scroll_x: 0.0, scroll_y: 0.0,
+        bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
+        corner_radius: 0.0,
+        text: String::new(), text_color: [1.0; 4],
+        font: String::new(),
+        font_size: 14.0, font_weight: 400,
+        text_align: "Center".to_string(), text_y_align: "Center".to_string(),
+        text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+        text_scaled: false,
+        image_path: String::new(),
+        class_type: "screengui".to_string(),
+        mouse_filter: "ignore".to_string(),
+    });
     ec.id()
 }
 

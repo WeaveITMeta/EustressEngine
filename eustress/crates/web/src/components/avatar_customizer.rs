@@ -61,7 +61,7 @@ pub fn AvatarCustomizer() -> impl IntoView {
     let saving = RwSignal::new(false);
     let animation = RwSignal::new("Idle".to_string());
     spawn_local(async move {
-        match ApiClient::new("https://api.eustress.dev")
+        match ApiClient::new(crate::state::api_base())
             .get::<AvatarResponse>("/api/avatar")
             .await
         {
@@ -143,7 +143,7 @@ pub fn AvatarCustomizer() -> impl IntoView {
         saving.set(true);
         status.set(String::new());
         spawn_local(async move {
-            let result = ApiClient::new("https://api.eustress.dev")
+            let result = ApiClient::new(crate::state::api_base())
                 .put::<AvatarResponse, _>("/api/avatar", &descriptor)
                 .await;
             match result {

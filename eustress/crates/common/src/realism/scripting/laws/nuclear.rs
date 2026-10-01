@@ -2,14 +2,15 @@
 //!
 //! Exposed to scripts under `eustress::realism::nuclear::*`. Each binding is a
 //! thin f64 wrapper around the f32 kernel laws in
-//! `crate::realism::nuclear::{decay, shielding, criticality}`, because Rune
-//! works in f64 while the realism kernel is f32.
+//! `crate::realism::nuclear::{decay, shielding, criticality, kinetics}`,
+//! because Rune works in f64 while the realism kernel is f32.
 //!
-//! Only all-scalar-parameter, scalar-return functions are bound. The tuple-
-//! returning `decay::bateman_two_step` is intentionally not exposed here.
+//! Scalar laws are bound as functions. Point kinetics carries two coupled
+//! state values, so it is bound as the `PointKinetics` type, which steps
+//! them together. The tuple-returning `decay::bateman_two_step` is not bound.
 
 use rune::{ContextError, Module};
-use crate::realism::nuclear::{decay, shielding, criticality};
+use crate::realism::nuclear::{decay, shielding, criticality, kinetics};
 
 // --- decay -----------------------------------------------------------------
 
@@ -209,6 +210,146 @@ fn reactor_period(reactivity: f64, beta: f64, neutron_lifetime: f64, decay_const
     ) as f64
 }
 
+// --- kinetics --------------------------------------------------------------
+
+#[rune::function]
+fn equilibrium_precursors(n: f64, beta: f64, generation_time: f64, decay_constant: f64) -> f64 {
+    kinetics::equilibrium_precursors(
+        n as f32,
+        beta as f32,
+        generation_time as f32,
+        decay_constant as f32,
+    ) as f64
+}
+
+#[rune::function]
+fn temperature_feedback(coefficient: f64, temperature: f64, reference_temperature: f64) -> f64 {
+    kinetics::temperature_feedback(
+        coefficient as f32,
+        temperature as f32,
+        reference_temperature as f32,
+    ) as f64
+}
+
+#[rune::function]
+fn rod_worth_linear(total_worth: f64, insertion: f64, reference_insertion: f64) -> f64 {
+    kinetics::rod_worth_linear(total_worth as f32, insertion as f32, reference_insertion as f32) as f64
+}
+
+#[rune::function]
+fn rod_worth_s_curve(insertion: f64) -> f64 {
+    kinetics::rod_worth_s_curve(insertion as f32) as f64
+}
+
+#[rune::function]
+fn prompt_jump_ratio(reactivity: f64, beta: f64) -> f64 {
+    kinetics::prompt_jump_ratio(reactivity as f32, beta as f32) as f64
+}
+
+#[rune::function]
+fn decay_heat_fraction(time_since_shutdown: f64, operating_time: f64) -> f64 {
+    kinetics::decay_heat_fraction(time_since_shutdown as f32, operating_time as f32) as f64
+}
+
+/// A point-kinetics core: neutron population and precursor concentration,
+/// with the three constants that set their dynamics.
+///
+/// Rune keeps nothing between frames, so a script stores `population` and
+/// `precursors` where it keeps other state (sim values or attributes),
+/// rebuilds the core each frame and steps it:
+///
+/// ```rune
+/// use eustress::{get_sim_value, set_sim_value};
+/// use eustress::realism::nuclear;
+///
+/// pub fn on_update(dt) {
+///     // Starts at population 1.0 with its precursors in equilibrium.
+///     let core = nuclear::PointKinetics::new(0.0065, 0.000025, 0.08);
+///     if get_sim_value("core.running") > 0.5 {
+///         core.population = get_sim_value("core.population");
+///         core.precursors = get_sim_value("core.precursors");
+///     }
+///     core.step(get_sim_value("core.reactivity"), dt);
+///     set_sim_value("core.population", core.population);
+///     set_sim_value("core.precursors", core.precursors);
+///     set_sim_value("core.running", 1.0);
+/// }
+/// ```
+#[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress::realism::nuclear)]
+pub struct PointKinetics {
+    /// Neutron population, 1.0 at the reference power.
+    #[rune(get, set)]
+    pub population: f64,
+    /// Delayed-neutron precursor concentration.
+    #[rune(get, set)]
+    pub precursors: f64,
+    /// Effective delayed-neutron fraction β.
+    #[rune(get, set)]
+    pub beta: f64,
+    /// Prompt-neutron generation time Λ, in seconds.
+    #[rune(get, set)]
+    pub generation_time: f64,
+    /// One-group precursor decay constant λ, per second.
+    #[rune(get, set)]
+    pub decay_constant: f64,
+}
+
+impl PointKinetics {
+    /// A core at the reference power (population 1.0) with its precursors in
+    /// equilibrium, so it holds steady at zero reactivity.
+    #[rune::function(path = Self::new)]
+    pub fn new(beta: f64, generation_time: f64, decay_constant: f64) -> Self {
+        let precursors = kinetics::equilibrium_precursors(
+            1.0,
+            beta as f32,
+            generation_time as f32,
+            decay_constant as f32,
+        ) as f64;
+        Self { population: 1.0, precursors, beta, generation_time, decay_constant }
+    }
+
+    /// Advance `dt` seconds at `reactivity` (Δk/k). Stable at any step.
+    #[rune::function(instance)]
+    pub fn step(&mut self, reactivity: f64, dt: f64) {
+        let (n, c) = kinetics::step_implicit(
+            self.population as f32,
+            self.precursors as f32,
+            reactivity as f32,
+            self.beta as f32,
+            self.generation_time as f32,
+            self.decay_constant as f32,
+            dt as f32,
+        );
+        self.population = n as f64;
+        self.precursors = c as f64;
+    }
+
+    /// Set the precursors to equilibrium with the current population.
+    #[rune::function(instance)]
+    pub fn equilibrate(&mut self) {
+        self.precursors = kinetics::equilibrium_precursors(
+            self.population as f32,
+            self.beta as f32,
+            self.generation_time as f32,
+            self.decay_constant as f32,
+        ) as f64;
+    }
+
+    /// dn/dt at `reactivity`, for the current state.
+    #[rune::function(instance)]
+    pub fn population_rate(&self, reactivity: f64) -> f64 {
+        kinetics::population_rate(
+            self.population as f32,
+            self.precursors as f32,
+            reactivity as f32,
+            self.beta as f32,
+            self.generation_time as f32,
+            self.decay_constant as f32,
+        ) as f64
+    }
+}
+
 /// Build the `eustress::realism::nuclear` Rune module.
 pub fn create_module() -> Result<Module, ContextError> {
     let mut m = Module::with_crate_item("eustress", ["realism", "nuclear"])?;
@@ -248,5 +389,17 @@ pub fn create_module() -> Result<Module, ContextError> {
     m.function_meta(fast_nonleakage)?;
     m.function_meta(doubling_time)?;
     m.function_meta(reactor_period)?;
+    // kinetics
+    m.function_meta(equilibrium_precursors)?;
+    m.function_meta(temperature_feedback)?;
+    m.function_meta(rod_worth_linear)?;
+    m.function_meta(rod_worth_s_curve)?;
+    m.function_meta(prompt_jump_ratio)?;
+    m.function_meta(decay_heat_fraction)?;
+    m.ty::<PointKinetics>()?;
+    m.function_meta(PointKinetics::new)?;
+    m.function_meta(PointKinetics::step)?;
+    m.function_meta(PointKinetics::equilibrate)?;
+    m.function_meta(PointKinetics::population_rate)?;
     Ok(m)
 }

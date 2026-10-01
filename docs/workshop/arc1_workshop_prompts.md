@@ -10,9 +10,10 @@ Each phase builds on the previous one.  Do not skip phases.
 ## Pre-flight Checklist
 
 Before starting any phase, confirm:
-- [ ] Engine is running with an `ArcReactorCore` entity loaded in the active space
+- [ ] Universe1/Space1 is open, with the `Workspace/ArcReactor/ArcReactorCore` part and the
+      `arc_reactor_core`, `arc_reactor_core_controller` and `arc_reactor_experiment_runner`
+      SoulScripts in SoulService, and Play is running
 - [ ] Simulation mode is active in the Workshop
-- [ ] `arc_reactor_experiment_runner.rune` is attached as a SoulScript on the reactor entity
 - [ ] Recording output folder exists: `docs/arc1/data/`
 - [ ] The reactor is in steady state: `arc1.neutron_population ≈ 1.0`, `arc1.is_scrammed = 0`
 
@@ -41,13 +42,13 @@ Steps:
    seconds (use control_simulation action=play, time_scale=10, then pause).
    Re-read all watchpoints.
 
-3. Call execute_rune on the reactor's SoulScript with command "begin_session"
-   and session_id "baseline_001".  This starts the data recorder.
+3. Start a session: set_sim_value("arc1.cmd.session_id_hash", 1.0), then
+   set_sim_value("arc1.cmd.begin_session", 1.0).  Name it "baseline_001" in your notes.
 
 4. Let the simulation run for 30 simulation seconds at 10× speed.
 
-5. Call execute_rune with command "end_session".  This saves
-   docs/arc1/data/baseline_001.json.
+5. End it: set_sim_value("arc1.cmd.end_session", 1.0).  Save the readings you
+   took to docs/arc1/data/baseline_001.json.
 
 6. Summarise: at nominal 50%/50% rod insertion and 70% coolant flow, what is
    the exact electrical output and what is the power balance?  Is the battery
@@ -67,8 +68,8 @@ Steps:
 1. Confirm baseline: read arc1.electrical_output_w and arc1.load_demand_watts.
    The output should be approximately 420W and load ≈ 280W.
 
-2. Begin a recording session: execute_rune command="begin_session"
-   session_id="load_step_up_001".
+2. Begin a recording session: set_sim_value("arc1.cmd.begin_session", 1.0)
+   (notes name: "load_step_up_001").
 
 3. Apply the disturbance: set_sim_value("arc1.cmd.set_load_watts", 1000.0)
 
@@ -78,7 +79,7 @@ Steps:
      arc1.electrical_output_w, arc1.rod_bank_a_pct, arc1.coolant_flow_pct
    Record each snapshot in a table: [sim_time | n | T_core | P_elec | rod_A | flow]
 
-5. End the session: execute_rune command="end_session".
+5. End the session: set_sim_value("arc1.cmd.end_session", 1.0).
 
 6. Observe and report:
    a) How many seconds did it take for P_elec to reach 1000W (settling time)?
@@ -106,7 +107,7 @@ Steps:
    manually set: set_sim_value("arc1.cmd.set_load_watts", 1000.0) and wait
    for steady state (30s at 10× speed).
 
-2. Begin recording: execute_rune command="begin_session" session_id="load_step_down_001".
+2. Begin recording: set_sim_value("arc1.cmd.begin_session", 1.0) (notes name: "load_step_down_001").
 
 3. Apply the disturbance: set_sim_value("arc1.cmd.set_load_watts", 200.0)
 
@@ -218,8 +219,7 @@ Steps:
 
 2. Sweep te_efficiency over [0.05, 0.08, 0.11, 0.14, 0.17, 0.20, 0.22]:
    For each value:
-   - set_sim_value("arc1.te_efficiency", VALUE)  (note: this requires a new
-     MCP tool or you can set via entity property update_entity)
+   - set_sim_value("arc1.te_efficiency", VALUE)
    - Wait 5 simulation seconds.
    - Record [te_eff | stirling_eff | total_eff | P_th | P_elec]
 
@@ -353,8 +353,9 @@ For each experiment:
    where K = steady-state gain = ΔP / Δrod, L = dead time.
    Estimate K from the 1-E sweep data.
 
-6. Compare the Ziegler-Nichols gains against the current PID constants in
-   nuclear/constants.rs:
+6. Compare the Ziegler-Nichols gains against the current PID gains in the
+   arc_reactor_core script (`reactivity_gains()` in
+   SoulService/arc_reactor_core/arc_reactor_core.rune):
      PID_REACTIVITY_KP = 0.08, KI = 0.012, KD = 0.04
    Are the current gains over- or under-damped?  What do you recommend?
 
@@ -406,13 +407,12 @@ Read the following files first:
 - docs/arc1/pid_tuning_report.md             (from 2-B)
 - docs/arc1/safety_envelope.toml             (from 2-C)
 
-Then write the implementation of the deterministic control law into:
-  eustress/crates/common/src/realism/nuclear/control_law.rs
-
-The law must implement the `ReactorControlLaw` trait with these methods:
-  fn compute_rod_insertion(&self, load_w: f32, eta_total: f32) -> f32
-  fn compute_coolant_flow(&self, p_thermal: f32, t_core: f32) -> f32
-  fn safety_check(&self, state: &ReactorState) -> ControlAction
+Then put the fitted law into the arc_reactor_core script
+(SoulService/arc_reactor_core/arc_reactor_core.rune).  Its deterministic mode
+(control mode 2) already runs this shape of law from the LAW_* constants: replace
+them with your fitted values.  To try values without editing the script, write
+arc1.law.a_rod, b_rod, c_flow, d_flow, kp_trim, rod_min_pct, rod_max_pct and
+flow_min_pct with set_sim_value, then set arc1.law.fitted = 1.
 
 Rules to implement:
 1. FEEDFORWARD: compute rod_pct and flow_pct from the fitted coefficients A,B,C,D
@@ -424,11 +424,10 @@ The control law should be STATELESS (no integrators, no history).
 Given (load_W, T_core, n, η) it always returns the same (rod_pct, flow_pct).
 This is the key property that makes it deterministic and verifiable.
 
-After writing the code, update nuclear/mod.rs to offer both:
-  ReactorControlMode::Regulation    (PID — for learning phases)
-  ReactorControlMode::DeterministicLaw  (new — for production)
-
-Add a watchpoint arc1.control_mode so the Workshop can observe which mode is active.
+Both modes stay available through arc1.cmd.set_control_mode:
+  1 = Regulation         (PID, for learning phases)
+  2 = DeterministicLaw   (for production)
+arc1.control_mode shows which mode is active.
 ```
 
 ---
@@ -462,8 +461,8 @@ at least as well as the PID across the same scenarios.
    phase of data collection with Prompt 1-E repeated at finer resolution).
 
 6. Final decision: recommend either:
-   a) "Promote DeterministicLaw to default mode" — update ArcReactorAIController
-      default in components.rs
+   a) "Promote DeterministicLaw to default mode": change the mode initialize()
+      starts in, in the arc_reactor_core script
    b) "Keep PID as default, DeterministicLaw as optional" — document why
 ```
 
@@ -490,6 +489,9 @@ All readable via `get_sim_value("arc1.<name>")`:
 | `total_efficiency` | frac | η_TE + η_St(1−η_TE) |
 | `decay_heat_watts` | W | Post-SCRAM decay power |
 | `is_scrammed` | bool | 1.0 if reactor is shut down |
+| `precursor_concentration` | | Delayed-neutron precursors |
+| `control_mode` | | 0 standby, 1 regulation, 2 deterministic law, 3 power follow, 4 shutdown |
+| `n_deviation`, `t_margin`, `is_stable` | | Quick stats from the experiment runner |
 
 Writable operator commands:
 
@@ -497,6 +499,10 @@ Writable operator commands:
 |--------------------|--------|
 | `arc1.cmd.set_load_watts` | Change load demand |
 | `arc1.cmd.set_neutron_sp` | Change neutron setpoint |
-| `arc1.cmd.set_control_mode` | 0=Standby, 1=Regulation(PID), 2=DeterministicLaw |
+| `arc1.cmd.set_control_mode` | 0=Standby, 1=Regulation(PID), 2=DeterministicLaw, 3=PowerFollow |
 | `arc1.manual_scram` | Write 1.0 to trigger immediate SCRAM |
 | `arc1.ai_override_enabled` | Write 0.0 to disable AI (manual mode) |
+| `arc1.cmd.restart` | Write 1.0 to clear a SCRAM and resume regulation |
+| `arc1.cmd.begin_session` / `arc1.cmd.end_session` | Write 1.0 to bracket a recording session |
+
+Every state value above is also writable: `set_sim_value("arc1.coolant_flow_pct", 30.0)` runs the coolant at 30 %.

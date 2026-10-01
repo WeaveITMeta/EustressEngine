@@ -11,7 +11,6 @@ use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
 
-const API_URL: &str = "https://api.eustress.dev";
 
 // API response types
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -62,7 +61,7 @@ struct LeaderboardResponse {
 
 /// Fetch stats from Cloudflare Worker
 async fn fetch_stats() -> StatsResponse {
-    match gloo_net::http::Request::get(&format!("{}/api/community/stats", API_URL))
+    match gloo_net::http::Request::get(&format!("{}/api/community/stats", crate::state::api_base()))
         .send().await
     {
         Ok(resp) if resp.ok() => {
@@ -92,7 +91,7 @@ fn trigger_search(
 
     spawn_local(async move {
         match gloo_net::http::Request::get(
-            &format!("{}/api/community/search?q={}&limit=10", API_URL, encoded)
+            &format!("{}/api/community/search?q={}&limit=10", crate::state::api_base(), encoded)
         ).send().await {
             Ok(resp) if resp.ok() => {
                 if let Ok(data) = resp.json::<SearchResponse>().await {
@@ -182,7 +181,7 @@ pub fn CommunityPage() -> impl IntoView {
 
         // Fetch leaderboard
         if let Ok(resp) = gloo_net::http::Request::get(
-            &format!("{}/api/community/leaderboard", API_URL)
+            &format!("{}/api/community/leaderboard", crate::state::api_base())
         ).send().await {
             if let Ok(data) = resp.json::<LeaderboardResponse>().await {
                 // Set featured creator (random from top 20, rotates weekly)

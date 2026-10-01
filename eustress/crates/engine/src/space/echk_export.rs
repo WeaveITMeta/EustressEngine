@@ -111,6 +111,141 @@ pub struct ExportStats {
     pub large_space: bool,
     /// Paths left out, with the reason.
     pub skipped: Vec<String>,
+    /// Exported files that contain a webhook URL (see [`WEBHOOK_MARKERS`]).
+    /// Paths only: the URLs are credentials and are never logged.
+    pub webhook_paths: Vec<String>,
+    /// Server Scripts outside the server-only services whose code players do
+    /// not receive (see [`withhold_server_code`]).
+    pub server_code_withheld: usize,
+    /// Large Space: each streamed core's stored id and the record key it was
+    /// published at. A core's entity names a synthetic path; replication
+    /// identifies it by this key, the one players load it from.
+    pub core_keys: Vec<(u64, String)>,
+    /// Files published from disk instead of the tree's copy: kinds the tree
+    /// holds only as first imported (meshes, textures, audio, terrain), whose
+    /// file on disk had changed since.
+    pub from_disk: usize,
+    /// Terrain files published from the host's memory in place of the saved
+    /// ones (see [`replace_terrain`]).
+    pub live_terrain: usize,
+}
+
+/// Services players never receive, as in Roblox, where neither replicates to
+/// a client: only the host runs or reads them. They are also where a game
+/// keeps what must stay private, webhook URLs included.
+pub const SERVER_ONLY_SERVICES: &[&str] = &["ServerScriptService", "ServerStorage"];
+
+/// Which of a Space's records an export takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// What every player receives: everything but [`SERVER_ONLY_SERVICES`],
+    /// plus the Universe's shared assets.
+    Players,
+    /// Only [`SERVER_ONLY_SERVICES`]: what a host has besides.
+    Server,
+}
+
+/// Whether a Space-relative path lies in a server-only service.
+pub fn is_server_only(path: &str) -> bool {
+    path.split('/').next().is_some_and(|top| SERVER_ONLY_SERVICES.contains(&top))
+}
+
+/// URL prefixes that are credentials on their own: anyone holding one can
+/// post to the channel behind it.
+pub const WEBHOOK_MARKERS: &[&str] = &[
+    "discord.com/api/webhooks/",
+    "discordapp.com/api/webhooks/",
+    "canary.discord.com/api/webhooks/",
+    "ptb.discord.com/api/webhooks/",
+    "hooks.slack.com/services/",
+];
+
+/// Whether a file's bytes contain a webhook URL.
+fn contains_webhook(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    WEBHOOK_MARKERS.iter().any(|m| text.contains(m))
+}
+
+/// Roblox never sends a server Script's code to a player, wherever the Script
+/// sits: in Workspace, or in a ReplicatedStorage template cloned at runtime,
+/// only the instance replicates. Splits `records` (none of them in a
+/// server-only service) into what players receive and the code only the host
+/// and a Share Source world keep.
+///
+/// A server Script is a `LuauScript` folder whose `[script] run_context` is
+/// anything but `Client`. Its instance stays with players so paths and clones
+/// still resolve; its `.luau`/`.lua` files move to the second list; an inline
+/// `source` is blanked for players and kept as the folder's `script.luau`,
+/// which Play reads when the inline source is empty. No path lands in both
+/// lists, so a world made of both has one version of every file.
+fn withhold_server_code(records: Vec<Record>, stats: &mut ExportStats) -> (Vec<Record>, Vec<Record>) {
+    let mut server_dirs: HashSet<String> = HashSet::new();
+    let mut inline: HashMap<String, String> = HashMap::new();
+    for (path, bytes) in &records {
+        let Some(folder) = path.strip_suffix("/_instance.toml") else { continue };
+        let text = String::from_utf8_lossy(bytes);
+        if !text.contains("Script") {
+            continue;
+        }
+        let Ok(doc) = text.parse::<toml::Value>() else { continue };
+        let class = doc.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).unwrap_or("");
+        if !matches!(class, "LuauScript" | "Script") {
+            continue;
+        }
+        let script = doc.get("script");
+        let run_context = script.and_then(|s| s.get("run_context")).and_then(|r| r.as_str()).unwrap_or("Legacy");
+        if run_context.eq_ignore_ascii_case("Client") {
+            continue;
+        }
+        server_dirs.insert(folder.to_string());
+        if let Some(source) = script.and_then(|s| s.get("source")).and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+            inline.insert(folder.to_string(), source.to_string());
+        }
+    }
+    stats.server_code_withheld = server_dirs.len();
+    if server_dirs.is_empty() {
+        return (records, Vec::new());
+    }
+
+    let mut players = Vec::with_capacity(records.len());
+    let mut server = Vec::new();
+    let mut has_code_file: HashSet<String> = HashSet::new();
+    for (path, bytes) in records {
+        let Some(slash) = path.rfind('/') else {
+            players.push((path, bytes));
+            continue;
+        };
+        let in_server_dir = server_dirs.contains(&path[..slash]);
+        let file = &path[slash + 1..];
+        if in_server_dir && (file.ends_with(".luau") || file.ends_with(".lua")) {
+            has_code_file.insert(path[..slash].to_string());
+            server.push((path, bytes));
+        } else if in_server_dir && file == "_instance.toml" && inline.contains_key(&path[..slash]) {
+            let blanked = blank_inline_source(&bytes);
+            players.push((path, blanked));
+        } else {
+            players.push((path, bytes));
+        }
+    }
+    for (folder, source) in inline {
+        if has_code_file.contains(&folder) {
+            // Play prefers the inline source; with it blanked, the folder's
+            // own file is the code the copy runs.
+            stats.skipped.push(format!("{folder}: inline source withheld from players; the source world keeps the folder's script file"));
+            continue;
+        }
+        server.push((format!("{folder}/script.luau"), source.into_bytes()));
+    }
+    (players, server)
+}
+
+/// An `_instance.toml` with its `[script] source` emptied.
+fn blank_inline_source(bytes: &[u8]) -> Vec<u8> {
+    let Ok(mut doc) = String::from_utf8_lossy(bytes).parse::<toml::Value>() else { return Vec::new() };
+    if let Some(script) = doc.get_mut("script").and_then(|s| s.as_table_mut()) {
+        script.insert("source".to_string(), toml::Value::String(String::new()));
+    }
+    toml::to_string(&doc).map(String::into_bytes).unwrap_or_default()
 }
 
 /// Where one Space's content comes from.
@@ -128,6 +263,10 @@ pub struct SpaceInput {
     /// The Space's folder, for a [`SpaceSource::Db`] Space: files found there
     /// that the tree lacks are published too (see the module doc).
     pub folder: Option<PathBuf>,
+    /// The terrain's files encoded from memory, when the caller has them: a
+    /// host plays on its live terrain, saved or not. They replace the saved
+    /// terrain files ([`replace_terrain`]).
+    pub terrain: Option<Vec<Record>>,
 }
 
 /// A baked world on disk: the manifest plus where each chunk lives.
@@ -170,11 +309,16 @@ pub fn export_world(
     assets_root: Option<&Path>,
     out_root: &Path,
     big_space_threshold: usize,
+    audience: Audience,
 ) -> Result<ExportedWorld, String> {
     let mut manifest = WorldManifest::new(universe, env!("CARGO_PKG_VERSION"), eustress_worlddb::bake::DEFAULT_CHUNK_SIZE);
     manifest.start_space = start_space.to_string();
     let mut files = HashMap::new();
     let mut all_stats = Vec::new();
+    let part = match audience {
+        Audience::Players => "spaces",
+        Audience::Server => "server",
+    };
 
     for space in spaces {
         let (mut records, mut stats) = match &space.source {
@@ -185,26 +329,45 @@ pub fn export_world(
             (SpaceSource::Db(_), Some(folder)) => add_disk_only_files(&mut records, folder, &mut stats)?,
             _ => 0,
         };
+        if let Some(live) = space.terrain {
+            stats.live_terrain = replace_terrain(&mut records, live);
+        }
+        let before = records.len();
+        // Players get everything but the server-only services, and of the
+        // rest, every server Script's instance but not its code.
+        let (server_side, rest): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|(path, _)| is_server_only(path));
+        let (for_players, withheld_code) = withhold_server_code(rest, &mut stats);
+        let mut records = match audience {
+            Audience::Players => for_players,
+            Audience::Server => server_side.into_iter().chain(withheld_code).collect(),
+        };
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+        stats.files = records.len();
+        stats.webhook_paths = records.iter().filter(|(_, bytes)| contains_webhook(bytes)).map(|(p, _)| p.clone()).collect();
         info!(
-            "echk export: {}: {} files, {} entities ({} #bin overlays, {} cores written back, {} standalone cores, {} baked copies dropped, {} files only on disk){}",
+            "echk export ({part}): {}: {} files ({} left to the other part, code of {} server Scripts kept from players), {} entities ({} #bin overlays, {} cores written back, {} standalone cores, {} baked copies dropped, {} files only on disk, {} live terrain files){}",
             space.name,
             stats.files,
+            before.saturating_sub(records.len()),
+            stats.server_code_withheld,
             stats.entities,
             stats.bin_overlays,
             stats.cores_written_back,
             stats.standalone_cores,
             stats.baked_copies_dropped,
             disk_only,
+            stats.live_terrain,
             if stats.large_space { ", streaming Space" } else { "" }
         );
-        let dir = out_root.join("spaces").join(&space.name);
+        let dir = out_root.join(part).join(&space.name);
         let baked = bake_space(records, &dir)?;
         let chunks = split_oversized(baked, &dir, &mut files)?;
         manifest.spaces.push(SpaceManifest { name: space.name.clone(), chunks });
         all_stats.push((space.name, stats));
     }
 
-    if let Some(root) = assets_root {
+    // The shared assets are for players; a host has them locally.
+    if let Some(root) = assets_root.filter(|_| audience == Audience::Players) {
         let records = collect_assets(root)?;
         if !records.is_empty() {
             let dir = out_root.join("assets");
@@ -280,14 +443,14 @@ pub fn collect_from_db(db: &dyn WorldDb, big_space_threshold: usize) -> Result<(
             continue;
         }
         stats.entities += 1;
-        let baked = db
-            .path_to_uuid(key)
-            .ok()
-            .flatten()
-            .map(|uuid| super::bake_cores::stored_id_from_uuid(&uuid))
-            .and_then(|sid| cores.remove(&sid));
+        let sid = db.path_to_uuid(key).ok().flatten().map(|uuid| super::bake_cores::stored_id_from_uuid(&uuid));
+        let baked = sid.and_then(|sid| cores.remove(&sid));
 
         if stats.large_space {
+            if let (Some(sid), Some(_)) = (sid, &baked) {
+                // The loader streams this core; players load it from `key`.
+                stats.core_keys.push((sid, key.clone()));
+            }
             if let Some(core_bytes) = &baked {
                 if streams_from_db(key, bytes, &direct_parents) {
                     match core_at_tree_path(key, bytes, core_bytes, &files, &mut world_cache) {
@@ -317,6 +480,7 @@ pub fn collect_from_db(db: &dyn WorldDb, big_space_threshold: usize) -> Result<(
     for (sid, core_bytes) in &cores {
         match standalone_core(db, *sid, core_bytes) {
             Ok(record) => {
+                stats.core_keys.push((*sid, record.0.clone()));
                 out.push(record);
                 stats.standalone_cores += 1;
                 stats.entities += 1;
@@ -342,18 +506,77 @@ pub fn collect_from_disk(space_root: &Path) -> Result<(Vec<Record>, ExportStats)
     Ok((out, stats))
 }
 
-/// Add the files in `folder` whose paths `records` lacks, `.toml` documents
-/// excepted (see the module doc). Returns how many were added.
+/// A file a terrain save writes, under `Workspace/Terrain`: the heightfield's
+/// description, its chunks, material maps, voxel bricks and water. The rest
+/// of the folder (the Terrain instance, its layers, its materials) is kept
+/// like any other instance's files.
+fn saved_terrain_file(path: &str) -> bool {
+    use eustress_common::terrain::{
+        disk::TERRAIN_DIR_IN_SPACE, toml_loader::MATMAP_DIR, volume::VOLUME_DIR_NAME, voxel_water::WATER_FILE_NAME,
+    };
+    let Some(rest) = path.strip_prefix(TERRAIN_DIR_IN_SPACE).and_then(|r| r.strip_prefix('/')) else { return false };
+    rest == "_terrain.toml"
+        || rest == WATER_FILE_NAME
+        || ["chunks", MATMAP_DIR, VOLUME_DIR_NAME].iter().any(|dir| rest.strip_prefix(dir).is_some_and(|r| r.starts_with('/')))
+}
+
+/// Put a live terrain's files in place of the saved ones, as a save would
+/// leave the folder: every saved terrain file goes, so a brick carved away or
+/// a material layer removed since the save leaves nothing behind; a chunk's
+/// legacy splatmap goes where its matmap is written; then the live set joins.
+/// Returns how many files joined.
+pub fn replace_terrain(records: &mut Vec<Record>, live: Vec<Record>) -> usize {
+    use eustress_common::terrain::{
+        disk::TERRAIN_DIR_IN_SPACE,
+        toml_loader::{LEGACY_SPLATMAP_DIR, MATMAP_DIR},
+    };
+    let matmap = format!("{TERRAIN_DIR_IN_SPACE}/{MATMAP_DIR}/");
+    let splatmap = format!("{TERRAIN_DIR_IN_SPACE}/{LEGACY_SPLATMAP_DIR}/");
+    {
+        let converted: std::collections::HashSet<&str> =
+            live.iter().filter_map(|(path, _)| path.strip_prefix(matmap.as_str())).collect();
+        records.retain(|(path, _)| {
+            !saved_terrain_file(path) && !path.strip_prefix(splatmap.as_str()).is_some_and(|name| converted.contains(name))
+        });
+    }
+    let joined = live.len();
+    records.extend(live);
+    joined
+}
+
+/// Bring `records`, the tree's copy of a Space, up to what its `folder` holds.
+///
+/// - A file the tree keeps in step with disk (the kinds
+///   [`super::representation::tree_tracks`] names: TOML, scripts, Markdown)
+///   is published as the tree holds it.
+/// - Any other file the tree has (a mesh, texture, sound, terrain raster or
+///   water) is held there only as first imported, so the file on disk, when
+///   there is one, replaces it (counted in [`ExportStats::from_disk`]). With
+///   no file on disk (a migrated Space) the tree's copy stays.
+/// - A file only on disk joins, `.toml` documents excepted (see the module
+///   doc).
+///
+/// Returns how many files joined.
 pub fn add_disk_only_files(records: &mut Vec<Record>, folder: &Path, stats: &mut ExportStats) -> Result<usize, String> {
     if !folder.is_dir() {
         return Ok(0);
     }
-    let known: HashSet<String> = records.iter().map(|(p, _)| p.clone()).collect();
+    let known: HashMap<String, usize> = records.iter().enumerate().map(|(i, (p, _))| (p.clone(), i)).collect();
     let mut found = Vec::new();
     walk_paths(folder, folder, &mut found)?;
     let mut added = 0;
     for (rel, path) in found {
-        if rel.ends_with(".toml") || known.contains(&rel) {
+        if let Some(&i) = known.get(&rel) {
+            if !super::representation::tree_tracks(&rel) {
+                let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+                if records[i].1 != bytes {
+                    records[i].1 = bytes;
+                    stats.from_disk += 1;
+                }
+            }
+            continue;
+        }
+        if rel.ends_with(".toml") {
             continue;
         }
         if !is_safe_record_path(&rel) {
@@ -482,6 +705,7 @@ fn streams_from_db(key: &str, text: &[u8], direct_parents: &HashSet<String>) -> 
         &def.metadata.class_name,
         direct_parents.contains(key),
         representation::toml_mentions_custom_mesh(text),
+        key,
     )
 }
 
@@ -889,6 +1113,54 @@ impl WorldDb for RecordView {
 mod tests {
     use super::*;
 
+    /// A host serves its live terrain as a save would leave the folder: the
+    /// kinds a terrain save writes are replaced (stale ones dropped), a
+    /// converted chunk's legacy splatmap goes, and the rest of the folder
+    /// stays.
+    #[test]
+    fn the_live_terrain_replaces_only_what_a_terrain_save_writes() {
+        let rec = |p: &str, b: &[u8]| (p.to_string(), b.to_vec());
+        let mut records = vec![
+            rec("Workspace/Terrain/_terrain.toml", b"old"),
+            rec("Workspace/Terrain/chunks/x0_z0.r16", b"old"),
+            rec("Workspace/Terrain/chunks/x9_z9.r16", b"stale"),
+            rec("Workspace/Terrain/matmap/x9_z9.png", b"stale"),
+            rec("Workspace/Terrain/volume/b0_0_0.vbk", b"stale"),
+            rec("Workspace/Terrain/water.bin", b"stale"),
+            rec("Workspace/Terrain/splatmap/x0_z0.png", b"converted"),
+            rec("Workspace/Terrain/splatmap/x5_z5.png", b"keep"),
+            rec("Workspace/Terrain/_instance.toml", b"keep"),
+            rec("Workspace/Terrain/Layers/Hill/_instance.toml", b"keep"),
+            rec("Workspace/Terrain/materials/Grass.mat.toml", b"keep"),
+            rec("Workspace/Terrain/chunksmith/_instance.toml", b"keep"),
+            rec("Workspace/Terrainia/chunks/x0_z0.r16", b"keep"),
+            rec("Workspace/Part/_instance.toml", b"keep"),
+        ];
+        let live = vec![
+            rec("Workspace/Terrain/_terrain.toml", b"new"),
+            rec("Workspace/Terrain/chunks/x0_z0.r16", b"new"),
+            rec("Workspace/Terrain/matmap/x0_z0.png", b"new"),
+        ];
+        assert_eq!(replace_terrain(&mut records, live), 3);
+        records.sort();
+        let got: Vec<(&str, &[u8])> = records.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Workspace/Part/_instance.toml", &b"keep"[..]),
+                ("Workspace/Terrain/Layers/Hill/_instance.toml", b"keep"),
+                ("Workspace/Terrain/_instance.toml", b"keep"),
+                ("Workspace/Terrain/_terrain.toml", b"new"),
+                ("Workspace/Terrain/chunks/x0_z0.r16", b"new"),
+                ("Workspace/Terrain/chunksmith/_instance.toml", b"keep"),
+                ("Workspace/Terrain/materials/Grass.mat.toml", b"keep"),
+                ("Workspace/Terrain/matmap/x0_z0.png", b"new"),
+                ("Workspace/Terrain/splatmap/x5_z5.png", b"keep"),
+                ("Workspace/Terrainia/chunks/x0_z0.r16", b"keep"),
+            ]
+        );
+    }
+
     #[test]
     fn hierarchy_keys_match_the_bake_rules() {
         assert_eq!(parent_key("Workspace/A/_instance.toml"), None);
@@ -945,6 +1217,51 @@ mod tests {
         assert_eq!(doc["properties"]["destructible"].as_bool(), Some(true), "a core default overwrote the text");
         assert_eq!(doc["properties"]["physics"]["mass"].as_float(), Some(12.0), "a nested table the core lacks was lost");
         assert!(doc["properties"].get("respect_gltf_materials").is_none());
+    }
+
+    #[test]
+    fn server_script_code_stays_off_players() {
+        let script = |run_context: &str, source: &str| {
+            format!(
+                "[metadata]\nclass_name = \"LuauScript\"\nname = \"S\"\n\n[script]\nenabled = true\nrun_context = \"{run_context}\"\nsource = \"{source}\"\n"
+            )
+            .into_bytes()
+        };
+        let records: Vec<Record> = vec![
+            ("Workspace/Car/Chassis/_instance.toml".into(), script("Server", "")),
+            ("Workspace/Car/Chassis/script.luau".into(), b"print('drive')".to_vec()),
+            ("Workspace/Car/Hud/_instance.toml".into(), script("Client", "")),
+            ("Workspace/Car/Hud/script.luau".into(), b"print('hud')".to_vec()),
+            ("Workspace/Door/_instance.toml".into(), script("Legacy", "print('inline')")),
+            ("Workspace/Car/_instance.toml".into(), b"[metadata]\nclass_name = \"Model\"\n".to_vec()),
+        ];
+        let mut stats = ExportStats::default();
+        let (players, server) = withhold_server_code(records, &mut stats);
+        let paths = |v: &[Record]| v.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+
+        assert_eq!(stats.server_code_withheld, 2);
+        assert!(paths(&players).contains(&"Workspace/Car/Chassis/_instance.toml".to_string()), "the instance must stay");
+        assert!(!paths(&players).contains(&"Workspace/Car/Chassis/script.luau".to_string()), "server code reached players");
+        assert!(paths(&players).contains(&"Workspace/Car/Hud/script.luau".to_string()), "client code must reach players");
+        let door = players.iter().find(|(p, _)| p == "Workspace/Door/_instance.toml").unwrap();
+        assert!(!String::from_utf8_lossy(&door.1).contains("inline"), "inline server source reached players");
+
+        assert_eq!(paths(&server), vec!["Workspace/Car/Chassis/script.luau".to_string(), "Workspace/Door/script.luau".to_string()]);
+        let door_code = server.iter().find(|(p, _)| p == "Workspace/Door/script.luau").unwrap();
+        assert_eq!(door_code.1, b"print('inline')");
+        let players_paths: HashSet<String> = paths(&players).into_iter().collect();
+        assert!(paths(&server).iter().all(|p| !players_paths.contains(p)), "a path landed in both worlds");
+    }
+
+    #[test]
+    fn server_only_services_and_webhooks_are_recognised() {
+        assert!(is_server_only("ServerScriptService/Main/Main.luau"));
+        assert!(is_server_only("ServerStorage/Cars/Sedan/_instance.toml"));
+        assert!(!is_server_only("ReplicatedStorage/ServerStorage/_instance.toml"), "only the top folder decides");
+        assert!(!is_server_only("Workspace/Car/_instance.toml"));
+        assert!(contains_webhook(b"local url = \"https://discord.com/api/webhooks/1/abc\""));
+        assert!(contains_webhook(b"https://hooks.slack.com/services/T0/B0/x"));
+        assert!(!contains_webhook(b"print(\"https://discord.com/invite/abc\")"));
     }
 
     #[test]
@@ -1008,19 +1325,52 @@ mod tests {
             std::fs::write(p, bytes).unwrap();
         };
         put("assets/meshes/wheel.glb", b"disk mesh");
-        put("Workspace/Car/mesh.glb", b"disk copy");
+        put("Workspace/Car/Drive.luau", b"disk copy");
         put("Workspace/Deleted/_instance.toml", b"[metadata]\nclass_name = \"Part\"\n");
         put(".eustress/cache.bin", b"hidden");
         put("world.fjalldb/journal", b"db");
 
-        let mut records: Vec<Record> = vec![("Workspace/Car/mesh.glb".into(), b"tree copy".to_vec())];
+        let mut records: Vec<Record> = vec![("Workspace/Car/Drive.luau".into(), b"tree copy".to_vec())];
         let mut stats = ExportStats::default();
         let added = add_disk_only_files(&mut records, &dir, &mut stats).unwrap();
 
         assert_eq!(added, 1);
         let paths: Vec<&str> = records.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(paths, vec!["Workspace/Car/mesh.glb", "assets/meshes/wheel.glb"]);
-        assert_eq!(records[0].1, b"tree copy", "the tree's copy wins");
+        assert_eq!(paths, vec!["Workspace/Car/Drive.luau", "assets/meshes/wheel.glb"]);
+        assert_eq!(records[0].1, b"tree copy", "the tree keeps scripts in step with disk: its copy wins");
+        assert_eq!(stats.from_disk, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_the_tree_does_not_track_publish_from_disk() {
+        let dir = scratch("untracked");
+        let put = |rel: &str, bytes: &[u8]| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        };
+        // Edited on disk after the first import: the tree still has the old bytes.
+        put("Workspace/Terrain/water.bin", b"edited water");
+        put("Workspace/Car/mesh.glb", b"edited mesh");
+        put("Workspace/Terrain/chunks/0_0.r16", b"same heights");
+
+        let mut records: Vec<Record> = vec![
+            ("Workspace/Car/mesh.glb".into(), b"first import".to_vec()),
+            ("Workspace/Terrain/chunks/0_0.r16".into(), b"same heights".to_vec()),
+            // Held only in the tree (a migrated Space): nothing on disk replaces it.
+            ("Workspace/Terrain/volume/0_0_0.vbk".into(), b"tree only".to_vec()),
+            ("Workspace/Terrain/water.bin".into(), b"first import".to_vec()),
+        ];
+        let mut stats = ExportStats::default();
+        let added = add_disk_only_files(&mut records, &dir, &mut stats).unwrap();
+
+        assert_eq!(added, 0);
+        let bytes = |p: &str| records.iter().find(|(r, _)| r == p).map(|(_, b)| b.clone()).unwrap();
+        assert_eq!(bytes("Workspace/Terrain/water.bin"), b"edited water");
+        assert_eq!(bytes("Workspace/Car/mesh.glb"), b"edited mesh");
+        assert_eq!(bytes("Workspace/Terrain/volume/0_0_0.vbk"), b"tree only");
+        assert_eq!(stats.from_disk, 2, "the unchanged raster is not counted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1031,5 +1381,19 @@ mod tests {
         assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(view.get_file("b").unwrap(), Some(vec![2]));
         assert!(view.put_file("c", &[]).is_err());
+    }
+
+    /// A Space's `space.toml`, its pose rule included, is published exactly
+    /// as the database holds it, so a player reads the world by the same rule.
+    #[test]
+    fn the_space_toml_is_published_as_the_database_holds_it() {
+        let space_toml = b"[space]\nname = \"Garage\"\ntransform_rule = \"parent_pose\"\n".to_vec();
+        let view = RecordView::new(vec![
+            ("space.toml".into(), space_toml.clone()),
+            ("Workspace/Pad/_instance.toml".into(), b"[metadata]\nclass_name = \"Part\"\n".to_vec()),
+        ]);
+        let (records, _) = collect_from_db(&view, usize::MAX).unwrap();
+        let published = records.iter().find(|(path, _)| path == "space.toml").map(|(_, bytes)| bytes.clone());
+        assert_eq!(published, Some(space_toml));
     }
 }

@@ -5,6 +5,7 @@ members = [
     "crates/common/bevy-camera-controller",
     "crates/common/eustress-networking",
     "crates/runtime",
+    "crates/play-runtime",
     "crates/engine",
     "crates/client",
     "crates/server",

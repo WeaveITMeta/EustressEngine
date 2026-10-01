@@ -1,6 +1,6 @@
-# SurfaceLight — Light emitted from a specific face of the parent part
-# Per LIGHTING_AUDIT.md §4.4 (Option A) — emissive quad child + child PointLight.
-# The Face enum selects which of the parent BasePart's six faces emits.
+# SurfaceLight: cone of light out of one face of its parent part, from the
+# face's centre. Same shape as common/assets/class_schema/SurfaceLight (the
+# template Insert uses), written with described values.
 
 [metadata]
 class_name = "SurfaceLight"
@@ -8,11 +8,10 @@ archivable = true
 parent_required = true
 
 [Light]
-Brightness = { type = "float", value = 1.0, min = 0.0, max = 1000000.0, description = "Unitless brightness — scaled by AREA_LIGHT_BRIGHTNESS_SCALE for the emitter child" }
-Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Surface emissive + emitter color" }
-Range      = { type = "float", value = 60.0, min = 0.1, max = 10000.0, description = "Emitter falloff distance in meters" }
-Face       = { type = "enum",  value = "Front", options = ["Top", "Bottom", "Front", "Back", "Left", "Right"], description = "Which face of the parent BasePart emits the light" }
-Shadows    = { type = "bool",  value = true, description = "Cast dynamic shadows from the emitter child" }
-
-[Appearance]
-Texture = { type = "asset", value = "", description = "Face emission cookie texture" }
+Brightness = { type = "float", value = 1.0, min = 0.0, max = 100.0, description = "Brightness dial: 1 is a normal lamp, the same on screen by day and by night" }
+Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Light hue" }
+Range      = { type = "float", value = 16.0, min = 0.1, max = 10000.0, description = "Reach in metres: the light fades to nothing here" }
+Angle      = { type = "float", value = 90.0, min = 1.0, max = 180.0, description = "Full apex angle of the cone in degrees (180 lights the whole half-space)" }
+Face       = { type = "enum",  value = "Front", options = ["Top", "Bottom", "Front", "Back", "Left", "Right"], description = "Face of the parent part that emits" }
+Shadows    = { type = "bool",  value = false, description = "Cast dynamic shadows" }
+Enabled    = { type = "bool",  value = true, description = "Emit light" }

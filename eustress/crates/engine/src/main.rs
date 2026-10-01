@@ -137,6 +137,30 @@ fn prune_engine_logs(dir: &std::path::Path) {
     }
 }
 
+/// `LogPlugin`'s filter: Bevy's default, plus
+/// `bevy_ecs::schedule::executor=warn` under the `exec_spans` performance
+/// switch (`eustress_common::utils::perf_on`).
+///
+/// `bevy_ecs`'s `trace` feature is on in every build so the per-system
+/// profiler can attach without a rebuild. With it, the single-threaded
+/// executor creates an info-level `check_conditions` span, with a formatted
+/// system name, for every system on every run, and the render world runs
+/// `Core3d` on that executor once per shadow view: about 2,700 spans a frame
+/// on a scene with 62 shadow views. Nothing reads them. Log lines carry the
+/// enclosing `system` span, which has a different target and stays, as do
+/// the profiler's spans. A target directive like this one also outranks a
+/// plain `RUST_LOG=info`, which Bevy adds on top of this filter.
+fn log_filter() -> String {
+    let mut filter = bevy::log::DEFAULT_FILTER.to_string();
+    if eustress_common::utils::perf_on("exec_spans") {
+        if !filter.is_empty() && !filter.ends_with(',') {
+            filter.push(',');
+        }
+        filter.push_str("bevy_ecs::schedule::executor=warn");
+    }
+    filter
+}
+
 /// The `LogPlugin::fmt_layer` hook — console output PLUS a log file.
 ///
 /// Release builds set `windows_subsystem = "windows"`, which detaches the
@@ -244,15 +268,17 @@ fn main() {
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
+                // Size, position and maximized state come from
+                // `window_placement`: maximized on first launch, then
+                // wherever the user left it, fitted to the work area.
+                primary_window: Some(eustress_engine::window_placement::startup_window(Window {
                     title: window_title,
-                    resolution: bevy::window::WindowResolution::new(1600, 900),
                     present_mode: bevy::window::PresentMode::AutoNoVsync,
                     mode: bevy::window::WindowMode::Windowed,
                     decorations: true,
                     resizable: true,
                     ..default()
-                }),
+                })),
                 close_when_requested: false,
                 ..default()
             })
@@ -272,32 +298,14 @@ fn main() {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: {
-                    // Prefer the exe-adjacent `assets/` (the packaged/release
-                    // layout — assets ship next to the binary). Falls back to
-                    // the dev source tree (`crates/engine/assets`, resolved
-                    // via CARGO_MANIFEST_DIR — same pattern as the `bundled`
-                    // asset source registered above) so `cargo run` keeps
-                    // resolving exactly as it does today. A bare relative
-                    // "assets" only resolves when the process CWD happens to
-                    // be the crate dir; launching the built .exe directly (or
-                    // a packaged build) resolves it against the exe's own
-                    // dir instead, where no assets/ exists — every
-                    // asset-loaded entity (part meshes, Gaussian-splat
-                    // clouds) then silently fails to load while procedural
-                    // content (terrain) keeps working, which reads as
-                    // "missing geometry" with no error pointing at the cause.
-                    let exe_adjacent = std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|d| d.join("assets")));
-                    match exe_adjacent {
-                        Some(p) if p.is_dir() => p.to_string_lossy().to_string(),
-                        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .join("assets")
-                            .to_string_lossy()
-                            .to_string(),
-                    }
-                },
+                // The engine's own assets: next to the executable in a
+                // package, else the source tree's `crates/engine/assets`, so
+                // the built .exe finds its part meshes and splat clouds from
+                // any working directory. The default source itself is
+                // registered in `app_core::register_asset_sources` (these
+                // assets, then common's); this root names the same first
+                // folder.
+                file_path: eustress_engine::engine_assets_dir().to_string_lossy().to_string(),
                 // Allow loading assets via ABSOLUTE paths. Bevy 0.16+ defaults
                 // this to `Forbid`, which silently rejects every
                 // `asset_server.load(<absolute path>)` — exactly how
@@ -330,10 +338,12 @@ fn main() {
             // usual stderr layer plus a second one over a log file, so the
             // diagnostics the engine already prints survive a release build
             // where `windows_subsystem = "windows"` hides the console.
-            // `filter`/`level` stay at their defaults.
+            // `level` stays at its default; `filter` is Bevy's default plus
+            // one directive (see `log_filter`).
             .set(bevy::log::LogPlugin {
                 custom_layer: profiler::custom_layer,
                 fmt_layer: engine_log_fmt_layer,
+                filter: log_filter(),
                 ..default()
             })
         )
@@ -594,6 +604,9 @@ fn main() {
         // Timeline → Slint sync. Separate plugin so the timeline
         // feature iterates without touching the 8k-line slint_ui.rs.
         .add_plugins(timeline_slint_sync::TimelineSlintSyncPlugin)
+        // A script's purchase prompt in Play: Studio asks before its test
+        // purchase. Without this plugin (the headless engine) it buys unasked.
+        .add_plugins(ui::purchase_prompt::PurchasePromptUiPlugin)
         // Timeline animation (Phase 2+) — keyframed + procedural
         // tracks playback via AnimationClock.
         .add_plugins(timeline_animation::TimelineAnimationPlugin)
@@ -659,6 +672,8 @@ fn main() {
         .add_plugins(eustress_geo::GeoPlugin)
         // Window focus
         .add_plugins(WindowFocusPlugin)
+        // Window placement: restore the last size and position, save changes
+        .add_plugins(eustress_engine::window_placement::WindowPlacementPlugin)
         // (UniverseRegistryPlugin now comes in with add_core_sim_plugins.)
         // Startup
         .add_plugins(StartupPlugin)

@@ -7,7 +7,7 @@ and engineering through built-in kernel laws — so nothing ever needs to be
 
 **Guiding principle:** Every law in this stack is **dimensionally correct**,
 **derivable from first principles**, and **composable** with every other law
-in the same codebase.  The V-Cell battery, the ARC-1 reactor, a rocket engine,
+in the same codebase.  The V-Cell battery, a fission reactor, a rocket engine,
 a living cell, and a structural beam can all run in the same simulation, exchange
 heat, exchange charge, exchange force — and never contradict each other.
 
@@ -48,7 +48,7 @@ heat, exchange charge, exchange force — and never contradict each other.
 | Deformation | `deformation/` | Vertex-level stress/thermal/impact deformation; fracture mesh; GPU deform |
 | Thermal conduction | `thermal_conduction.rs` | Fourier's law between ECS entity pairs; auto proximity detection |
 | Quantum statistics | `quantum/` | Bose-Einstein, Fermi-Dirac distributions; condensates; partition functions |
-| Nuclear kinetics | `nuclear/` | Point kinetics (dn/dt, dC/dt), Doppler feedback, decay heat, 3-loop PID, deterministic control law (feedforward + P-trim) |
+| Nuclear kinetics | `nuclear/kinetics.rs` | Point kinetics (dn/dt, dC/dt) with a closed-form implicit step, temperature feedback, rod worth (linear and S-curve), prompt jump, Way-Wigner decay heat; Rune: `nuclear::PointKinetics` |
 | Simulation infra | `simulation/` | Clock (10⁹× compression), WatchPoints, Breakpoints, Recorder, LOD |
 | Visualizers | `visualizers/` | Property overlays, vector fields, heat maps, stress indicators |
 
@@ -85,7 +85,7 @@ PHYSICS
   Statistical mechanics   ████████░░░░░░░░ ⚠️  PARTIAL (particles + quantum stats)
   Quantum mechanics       ████░░░░░░░░░░░░ ⚠️  PARTIAL (statistics only, no Schrödinger)
   Plasma physics          ████████████████ ✅ SOLID ✨ (Debye, MHD, Lawson, fusion gain, ECS state)
-  Nuclear physics         ████████████████ ✅ SOLID ✨ (fission + PID + decay chains + shielding + criticality)
+  Nuclear physics         ████████████████ ✅ SOLID ✨ (point kinetics + decay heat + decay chains + shielding + criticality)
   Special relativity      ░░░░░░░░░░░░░░░░ ❌ MISSING
   Condensed matter        ████░░░░░░░░░░░░ ⚠️  PARTIAL (material properties, no band theory)
 
@@ -392,7 +392,7 @@ B.3 — `electrical/components.rs`
 B.4 — `electrical/circuit.rs` system
 : Node-voltage method for small circuits (<64 nodes)
 : Per-frame integration of capacitor voltage, inductor current
-: Compatible with battery (VCellBatteryComponent) as a source
+: Compatible with a battery cell as a source
 
 *Why critical: motors, electromagnets, sensors, PCBs, power grids, plasma heating*
 
@@ -439,14 +439,14 @@ C.4 — `chemistry/components.rs`
 
 **Target: `control/`**
 
-Generalizes the nuclear PID into a universal control toolkit.
+One control toolkit for every domain.
 
 D.1 — `control/pid.rs`
 : `PidController { kp, ki, kd, setpoint, integral, prev_error, output_min, output_max, anti_windup_limit }`
 : `pid_step(controller, measured, dt) -> f32`
 : `pid_with_feedforward(controller, measured, feedforward, dt) -> f32`
 : `gain_schedule(pid, operating_point, schedule: &[(f32, f32, f32, f32)]) -> PidController`
-: *Note: promote and generalize existing nuclear PidState*
+: *Note: `PidController` is the one PID for every domain*
 
 D.2 — `control/state_space.rs`
 : `StateSpaceModel { A, B, C, D: MatN }` — continuous-time

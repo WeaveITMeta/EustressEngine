@@ -37,19 +37,20 @@
 //!
 //! ## PD controllers (`AlignPosition` / `AlignOrientation`)
 //!
-//! Roblox's align movers are critically-damped PD controllers. We
-//! reproduce that:
+//! Roblox's align movers are critically-damped PD controllers whose
+//! Responsiveness is mass-normalised: a heavy part and a light one move
+//! alike. We reproduce that with accelerations:
 //!
 //! ```text
-//! force  = P * (target_pos - pos) - D * linear_velocity      (clamped to max_force)
-//! torque = P * angle_error_axis   - D * angular_velocity      (clamped to max_torque)
+//! linear  = P * (target_pos - pos) - D * linear_velocity - gravity   (mass × it within max_force)
+//! angular = P * angle_error_axis   - D * angular_velocity            (inertia × it within max_torque)
 //! ```
 //!
 //! `P` is derived from `responsiveness` (Roblox's stiffness knob) and `D`
-//! from a critical-damping estimate. When `rigidity_enabled` is set the
-//! gains go very high (Roblox treats rigid mode as an effectively
-//! infinitely-stiff constraint) — we cap `P`/`D` at a large finite value
-//! and let the `max_force`/`max_torque` clamp keep it stable.
+//! for critical damping. The gravity term holds a part at its goal rather
+//! than sagging below it. When `rigidity_enabled` is set the gains are as
+//! stiff as a controller sampled once per fixed step stays stable (Roblox
+//! treats rigid mode as an effectively infinitely-stiff constraint).
 //!
 //! ## Avian / Eustress name collision
 //!
@@ -68,8 +69,8 @@
 use bevy::prelude::*;
 
 use avian3d::prelude::{
-    AngularVelocity as AvAngularVelocity, Forces, LinearVelocity as AvLinearVelocity,
-    ReadRigidBodyForces, RigidBody, WriteRigidBodyForces,
+    AngularVelocity as AvAngularVelocity, ComputedAngularInertia, ComputedMass, Forces, Gravity, GravityScale,
+    LinearVelocity as AvLinearVelocity, ReadRigidBodyForces, RigidBody, WriteRigidBodyForces,
 };
 
 use eustress_common::classes::{
@@ -86,12 +87,6 @@ use crate::play_mode::PlayModeState;
 // ─────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────
-
-/// Maximum gain used when a PD mover is in "rigidity" mode. Roblox treats
-/// rigid alignment as an effectively infinite-stiffness constraint; a
-/// large finite value plus the `max_force`/`max_torque` clamp keeps the
-/// XPBD solver stable while still snapping hard to the target.
-const RIGID_GAIN: f32 = 1.0e6;
 
 /// Walk up the [`ChildOf`] chain from `start` and return the first
 /// ancestor (including `start` itself) that is an Avian rigid body.
@@ -302,38 +297,51 @@ pub fn apply_torque_movers(
 /// `AlignPosition` mover → PD-drive the parent body toward a target
 /// world position.
 ///
-/// `force = P·(target − pos) − D·velocity`, clamped to `max_force`. Pose
-/// and velocity are read from the [`Forces`] item (Avian's physics-space
-/// `Position` / `LinearVelocity`), not a separate `&Transform` —
-/// combining `&LinearVelocity` with `Forces` would be a borrow conflict.
+/// An acceleration, `P·(target − pos) − D·velocity − gravity`, as Roblox's
+/// Responsiveness: a part moves the same way whatever it weighs, and the
+/// gravity term lets a held part sit at its goal instead of sagging g/P
+/// below it. `max_force` caps it as a force: mass × acceleration. Pose and
+/// velocity are read from the [`Forces`] item (Avian's physics-space
+/// `Position` / `LinearVelocity`), not a separate `&Transform`; combining
+/// `&LinearVelocity` with `Forces` would be a borrow conflict.
 pub fn apply_align_position_movers(
     movers: Query<(&AlignPosition, &ChildOf)>,
     bodies: Query<(), With<RigidBody>>,
     child_of: Query<&ChildOf>,
-    mut forces_q: Query<Forces>,
+    mut forces_q: Query<(Forces, &ComputedMass, Option<&GravityScale>)>,
+    gravity: Option<Res<Gravity>>,
+    fixed: Res<Time<Fixed>>,
 ) {
     let is_body = |e: Entity| bodies.get(e).is_ok();
+    let gravity = gravity.map_or(Vec3::ZERO, |g| g.0);
+    let step = fixed.timestep().as_secs_f32();
     for (mover, parent) in &movers {
         let Some(body) = resolve_target_body(parent.0, &child_of, &is_body) else {
             continue;
         };
-        let Ok(mut forces) = forces_q.get_mut(body) else {
+        let Ok((mut forces, mass, gravity_scale)) = forces_q.get_mut(body) else {
             continue;
         };
+        let inverse_mass = mass.inverse();
+        if !(inverse_mass > 0.0) {
+            // Infinite mass: nothing a mover does can move it.
+            continue;
+        }
 
-        let (p_gain, d_gain) = pd_gains(mover.responsiveness, mover.rigidity_enabled);
+        let (p_gain, d_gain) = pd_gains(mover.responsiveness, mover.rigidity_enabled, step);
         let pos = forces.position().0;
         let vel = forces.linear_velocity();
         let error = mover.position - pos;
-        // PD force toward the target. `max_velocity` is treated as a soft
+        let weight = gravity * gravity_scale.map_or(1.0, |s| s.0);
+        // PD toward the target. `max_velocity` is treated as a soft
         // damping target: once the body is already moving at/over the
         // ceiling toward the goal, the derivative term dominates and the
         // proportional pull no longer accelerates it further. A precise
         // velocity governor is follow-up work; `max_force` is the hard cap.
-        let mut force = error * p_gain - vel * d_gain;
-        force = clamp_magnitude(force, mover.max_force);
-        if force.is_finite() {
-            forces.apply_force(force);
+        let mut acceleration = error * p_gain - vel * d_gain - weight;
+        acceleration = clamp_magnitude(acceleration, mover.max_force * inverse_mass);
+        if acceleration.is_finite() {
+            forces.apply_linear_acceleration(acceleration);
         }
     }
 }
@@ -341,48 +349,59 @@ pub fn apply_align_position_movers(
 /// `AlignOrientation` mover → PD-drive the parent body toward a target
 /// orientation.
 ///
-/// `torque = P·angle_error_axis − D·angular_velocity`, clamped to
-/// `max_torque`. The orientation error is the shortest-arc rotation from
-/// the current to the target orientation, expressed as an axis-angle
-/// vector (axis × angle), the standard small-rotation torque target.
+/// An angular acceleration, `P·angle_error_axis − D·angular_velocity`,
+/// whose torque (world inertia × it) stays within `max_torque`. The
+/// orientation error is the shortest-arc rotation from the current to the
+/// target orientation, expressed as an axis-angle vector (axis × angle),
+/// the standard small-rotation target.
 pub fn apply_align_orientation_movers(
     movers: Query<(&AlignOrientation, &ChildOf)>,
     bodies: Query<(), With<RigidBody>>,
     child_of: Query<&ChildOf>,
-    mut forces_q: Query<Forces>,
+    mut forces_q: Query<(Forces, &ComputedAngularInertia)>,
+    fixed: Res<Time<Fixed>>,
 ) {
     let is_body = |e: Entity| bodies.get(e).is_ok();
+    let step = fixed.timestep().as_secs_f32();
     for (mover, parent) in &movers {
         let Some(body) = resolve_target_body(parent.0, &child_of, &is_body) else {
             continue;
         };
-        let Ok(mut forces) = forces_q.get_mut(body) else {
+        let Ok((mut forces, inertia)) = forces_q.get_mut(body) else {
             continue;
         };
 
-        let (p_gain, d_gain) = pd_gains(mover.responsiveness, mover.rigidity_enabled);
+        let (p_gain, d_gain) = pd_gains(mover.responsiveness, mover.rigidity_enabled, step);
         let rot = forces.rotation().0;
         let ang = forces.angular_velocity();
         let error_axis = orientation_error(rot, mover.cframe.rotation);
-        let mut torque = error_axis * p_gain - ang * d_gain;
-        torque = clamp_magnitude(torque, mover.max_torque);
-        if torque.is_finite() {
-            forces.apply_torque(torque);
+        // An angular acceleration, mass-normalised as AlignPosition's, and
+        // capped as a torque: the world inertia times it within `max_torque`.
+        let mut acceleration = error_axis * p_gain - ang * d_gain;
+        let torque = inertia.rotated(rot).value().mul_vec3(acceleration).length();
+        if mover.max_torque.is_finite() && mover.max_torque > 0.0 && torque > mover.max_torque {
+            acceleration *= mover.max_torque / torque;
+        }
+        if acceleration.is_finite() {
+            forces.apply_angular_acceleration(acceleration);
         }
     }
 }
 
-/// Derive `(P, D)` PD gains from a Roblox-style `responsiveness` knob.
+/// Derive `(P, D)` PD gains, as accelerations per unit error, from a
+/// Roblox-style `responsiveness` knob.
 ///
 /// Roblox's responsiveness ranges roughly 5..200; higher = stiffer. We
 /// map it directly to the proportional gain and pick the derivative gain
-/// for approximate critical damping (`D ≈ 2·√P`). Rigidity mode pins both
-/// gains very high so the body snaps to target (the `max_*` clamp keeps
-/// it stable).
+/// for critical damping (`D = 2·√P`). Rigidity mode is as stiff as a
+/// controller sampled once per fixed step (`step`, seconds) stays stable:
+/// critically damped at ω = 0.5 / step, so it settles in a few steps
+/// without ringing. A far higher gain rings and then diverges.
 #[inline]
-fn pd_gains(responsiveness: f32, rigidity_enabled: bool) -> (f32, f32) {
+fn pd_gains(responsiveness: f32, rigidity_enabled: bool, step: f32) -> (f32, f32) {
     if rigidity_enabled {
-        return (RIGID_GAIN, 2.0 * RIGID_GAIN.sqrt());
+        let omega = 0.5 / step.max(1.0e-4);
+        return (omega * omega, 2.0 * omega);
     }
     let p = responsiveness.max(0.0);
     let d = 2.0 * p.sqrt();
@@ -597,5 +616,142 @@ impl Plugin for MoversPlugin {
             )
                 .run_if(in_state(PlayModeState::Playing)),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avian3d::prelude::{Collider, ColliderDensity, PhysicsPlugins, Position, Rotation};
+
+    /// A headless physics world stepping one 60 Hz frame per update, the two
+    /// align movers running every fixed step, as in Play.
+    fn physics_world() -> App {
+        let mut app = App::new();
+        bevy::tasks::IoTaskPool::get_or_init(Default::default);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::diagnostic::DiagnosticsPlugin,
+        ));
+        // Avian takes these unconditionally; DefaultPlugins supplies them in
+        // the apps.
+        app.init_resource::<avian3d::spatial_query::SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        app.init_asset::<Mesh>();
+        app.insert_resource(Time::<Fixed>::from_hz(60.0));
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / 60.0)));
+        app.add_plugins(PhysicsPlugins::default());
+        app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+        app.add_systems(FixedUpdate, (apply_align_position_movers, apply_align_orientation_movers));
+        app
+    }
+
+    /// A 4 × 1 × 2 m box at `density`: 19,200 kg of concrete at 2400, 8 kg at 1.
+    fn a_box(app: &mut App, density: f32, at: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((RigidBody::Dynamic, Collider::cuboid(4.0, 1.0, 2.0), ColliderDensity(density), Transform::from_translation(at)))
+            .id()
+    }
+
+    fn hold_at(app: &mut App, body: Entity, goal: Vec3, max_force: f32, rigid: bool) {
+        app.world_mut().spawn((
+            AlignPosition { position: goal, max_force, responsiveness: 10.0, rigidity_enabled: rigid, ..Default::default() },
+            ChildOf(body),
+        ));
+    }
+
+    fn at(app: &App, body: Entity) -> Vec3 {
+        app.world().get::<Position>(body).map_or(Vec3::NAN, |p| p.0)
+    }
+
+    const HEAVY: f32 = 2400.0;
+    const LIGHT: f32 = 1.0;
+
+    /// A 19 t concrete part and an 8 kg one, each told to rise 1 m, move
+    /// alike and come to rest at the goal: Roblox's mass-normalised
+    /// Responsiveness, with gravity held off.
+    #[test]
+    fn a_heavy_and_a_light_part_move_alike_and_hold() {
+        let mut app = physics_world();
+        let heavy = a_box(&mut app, HEAVY, Vec3::new(-5.0, 5.0, 0.0));
+        let light = a_box(&mut app, LIGHT, Vec3::new(5.0, 5.0, 0.0));
+        hold_at(&mut app, heavy, Vec3::new(-5.0, 6.0, 0.0), 1.0e7, false);
+        hold_at(&mut app, light, Vec3::new(5.0, 6.0, 0.0), 1.0e7, false);
+        for frame in 0..240 {
+            app.update();
+            let (h, l) = (at(&app, heavy).y, at(&app, light).y);
+            assert!((h - l).abs() < 0.01, "frame {frame}: heavy at {h}, light at {l}");
+        }
+        for body in [heavy, light] {
+            assert!((at(&app, body).y - 6.0).abs() < 0.02, "held at {:?}", at(&app, body));
+        }
+    }
+
+    /// `max_force` caps it as a force: the default 100 kN holds the 8 kg part
+    /// but cannot hold up 19 t (188 kN of weight).
+    #[test]
+    fn max_force_caps_what_a_heavy_part_gets() {
+        let mut app = physics_world();
+        let heavy = a_box(&mut app, HEAVY, Vec3::new(-5.0, 5.0, 0.0));
+        let light = a_box(&mut app, LIGHT, Vec3::new(5.0, 5.0, 0.0));
+        let default_force = AlignPosition::default().max_force;
+        hold_at(&mut app, heavy, Vec3::new(-5.0, 5.0, 0.0), default_force, false);
+        hold_at(&mut app, light, Vec3::new(5.0, 5.0, 0.0), default_force, false);
+        for _ in 0..120 {
+            app.update();
+        }
+        assert!(at(&app, heavy).y < 4.0, "19 t held by {default_force} N: {:?}", at(&app, heavy));
+        assert!((at(&app, light).y - 5.0).abs() < 0.02, "8 kg: {:?}", at(&app, light));
+    }
+
+    /// Rigidity snaps a 19 t part to its goal within a second without
+    /// ringing past it, where a gain of 1e6 per step rang and diverged.
+    #[test]
+    fn rigid_mode_snaps_a_heavy_part_without_ringing() {
+        let mut app = physics_world();
+        let heavy = a_box(&mut app, HEAVY, Vec3::new(0.0, 5.0, 0.0));
+        hold_at(&mut app, heavy, Vec3::new(0.0, 6.0, 0.0), 1.0e8, true);
+        let mut highest = f32::MIN;
+        for _ in 0..60 {
+            app.update();
+            highest = highest.max(at(&app, heavy).y);
+        }
+        assert!((at(&app, heavy).y - 6.0).abs() < 0.01, "at {:?} after a second", at(&app, heavy));
+        assert!(highest < 6.05, "rang to {highest}");
+    }
+
+    /// AlignOrientation turns a heavy and a light part alike, to the goal.
+    #[test]
+    fn a_heavy_and_a_light_part_turn_alike() {
+        let mut app = physics_world();
+        let turned = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let bodies = [(HEAVY, -5.0), (LIGHT, 5.0)].map(|(density, x)| {
+            let body = a_box(&mut app, density, Vec3::new(x, 5.0, 0.0));
+            app.world_mut().get_mut::<Transform>(body).unwrap().rotation = turned;
+            // Held in place, so only the turn is measured.
+            hold_at(&mut app, body, Vec3::new(x, 5.0, 0.0), 1.0e9, false);
+            app.world_mut().spawn((
+                AlignOrientation { cframe: Transform::IDENTITY, max_torque: 1.0e9, responsiveness: 10.0, ..Default::default() },
+                ChildOf(body),
+            ));
+            body
+        });
+        let angle = |app: &App, body: Entity| {
+            app.world().get::<Rotation>(body).map_or(f32::NAN, |r| r.0.angle_between(Quat::IDENTITY))
+        };
+        for frame in 0..240 {
+            app.update();
+            let (h, l) = (angle(&app, bodies[0]), angle(&app, bodies[1]));
+            assert!((h - l).abs() < 0.01, "frame {frame}: heavy at {h} rad, light at {l} rad");
+        }
+        for body in bodies {
+            assert!(angle(&app, body) < 0.02, "left at {} rad", angle(&app, body));
+        }
     }
 }

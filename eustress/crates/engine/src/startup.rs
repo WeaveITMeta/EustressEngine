@@ -52,6 +52,10 @@ pub struct StartupArgs {
 
     /// Open the first Space found inside a Universe directory
     pub universe_dir: Option<PathBuf>,
+
+    /// `eustress://edit/<id>`: download that gallery listing's world and
+    /// open a copy of it (see `crate::space::gallery_edit`).
+    pub gallery_edit: Option<String>,
 }
 
 impl StartupArgs {
@@ -111,6 +115,13 @@ impl StartupArgs {
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
+                }
+                _ if arg.starts_with("eustress://edit/") => {
+                    // The gallery's Edit button on an open-source listing.
+                    match crate::space::gallery_edit::edit_target(arg) {
+                        Some(id) => result.gallery_edit = Some(id),
+                        None => eprintln!("Warning: not a simulation id: {}", arg),
+                    }
                 }
                 _ => {
                     // Check if it's a file path
@@ -185,8 +196,8 @@ EXAMPLES:
     eustress-engine.exe my_game.eustress                      # Open a scene file
     eustress-engine.exe --play level1.eustress                # Open and immediately play
     eustress-engine.exe --register                            # Register .eustress extension
-    eustress-engine.exe --space "~/Documents/Eustress/ARC-AGI-3/spaces/Puzzle01"
-    eustress-engine.exe --universe "~/Documents/Eustress/ARC-AGI-3"
+    eustress-engine.exe --space "~/Documents/Eustress/Universe1/Spaces/Space1"
+    eustress-engine.exe --universe "~/Documents/Eustress/Universe1"
 
 FILE EXTENSIONS:
     .eustress   Eustress scene file (recommended)

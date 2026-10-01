@@ -117,6 +117,80 @@ pub fn layers_dir(space_root: &Path) -> PathBuf {
     space_root.join("Workspace").join("Terrain").join(LAYERS_FOLDER)
 }
 
+/// What a terrain's data directory, `Workspace/Terrain`, holds beside the
+/// layers' own folder: the file the loader keys on, the heightmaps, material
+/// maps, volume bricks, material files, water and a Terrain instance's own
+/// file.
+const TERRAIN_DATA_ENTRIES: [&str; 8] =
+    ["_terrain.toml", "chunks", "matmap", "materials", "volume", "water.bin", "_instance.toml", LAYERS_FOLDER];
+
+/// The names of `path`'s normal components, in order.
+fn component_names(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `Workspace/Terrain` directory `path` is or sits directly in, `None`
+/// for any other path. Folder names compare ignoring case, as Windows does.
+fn terrain_dir_of(path: &Path) -> Option<PathBuf> {
+    let names = component_names(path);
+    let named = |i: usize, want: &str| names.get(i).is_some_and(|n| n.eq_ignore_ascii_case(want));
+    let n = names.len();
+    let is_dir = |end: usize| end >= 2 && named(end - 2, "Workspace") && named(end - 1, "Terrain");
+    if is_dir(n) {
+        return Some(path.to_path_buf());
+    }
+    // `parent` drops one trailing component, so it is the terrain directory
+    // exactly when the first `n - 1` components end in Workspace/Terrain.
+    if n >= 3 && is_dir(n - 1) {
+        return path.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+/// Whether directory `dir` holds terrain data: a `_terrain.toml`, or any of
+/// the folders a terrain writes. A user's own Folder that happens to be called
+/// Terrain holds none of them.
+fn holds_terrain_data(dir: &Path) -> bool {
+    ["_terrain.toml", "chunks", "matmap", LAYERS_FOLDER, "volume", "water.bin"].iter().any(|entry| dir.join(entry).exists())
+}
+
+/// Whether `path` is a Space's terrain data directory (`Workspace/Terrain`
+/// holding terrain data), or one of the data entries directly in it (see
+/// `TERRAIN_DATA_ENTRIES`). Deleting or cutting one moves the terrain's
+/// heightmaps, material maps and every layer to the trash in one rename,
+/// from under a terrain that is still alive in memory, so no destructive
+/// surface may act on such a path: Clear Terrain is how a terrain goes.
+/// Layer instances sit one level deeper, in `Layers`, and are not protected.
+pub fn is_terrain_data_path(path: &Path) -> bool {
+    let Some(dir) = terrain_dir_of(path) else { return false };
+    let is_dir_itself = dir == path;
+    let is_entry = path
+        .file_name()
+        .map(|name| TERRAIN_DATA_ENTRIES.iter().any(|entry| name.eq_ignore_ascii_case(entry)))
+        .unwrap_or(false);
+    (is_dir_itself || is_entry) && holds_terrain_data(&dir)
+}
+
+/// The directory that owns a new file's folder `dir` when `dir` is the terrain
+/// data directory or lies inside it, `None` otherwise: the `Workspace` folder
+/// the terrain directory sits in. That directory is data, not an instance
+/// (the Space-open loader spawns no entity for it, and puts the layers under
+/// the Workspace beside everything else), so a layer created while Studio runs
+/// belongs to the Workspace too rather than to a Folder made up for `Terrain`
+/// and `Layers`.
+pub fn terrain_data_owner_dir(space_root: &Path, dir: &Path) -> Option<PathBuf> {
+    let rel = dir.strip_prefix(space_root).ok()?;
+    let names = component_names(rel);
+    let is_terrain =
+        names.len() >= 2 && names[0].eq_ignore_ascii_case("Workspace") && names[1].eq_ignore_ascii_case("Terrain");
+    is_terrain.then(|| space_root.join("Workspace"))
+}
+
 /// Ancestors followed when composing a layer's world pose; a deeper chain is
 /// a broken hierarchy, not a real one.
 const MAX_POSE_DEPTH: usize = 64;
@@ -157,6 +231,15 @@ const MATERIALS: &[&str] = &[
     "None", "Grass", "Rock", "Dirt", "Snow", "Sand", "Mud", "Concrete", "Asphalt", "Slate", "Brick", "WoodPlanks",
     "Glacier", "Sandstone", "Basalt", "Ground", "CrackedLava", "Cobblestone", "Ice", "LeafyGrass", "Salt", "Limestone",
     "Pavement", "Water",
+];
+
+/// [`MATERIALS`] without Water, for the rules that key on the ground a
+/// surface shows (Scatter's and MaterialFill's): water is real water over
+/// the ground, never a ground material to paint or to place on.
+const GROUND_MATERIALS: &[&str] = &[
+    "None", "Grass", "Rock", "Dirt", "Snow", "Sand", "Mud", "Concrete", "Asphalt", "Slate", "Brick", "WoodPlanks",
+    "Glacier", "Sandstone", "Basalt", "Ground", "CrackedLava", "Cobblestone", "Ice", "LeafyGrass", "Salt", "Limestone",
+    "Pavement",
 ];
 
 macro_rules! layer_field {
@@ -243,7 +326,7 @@ pub const MATERIAL_FILL_FIELDS: &[FieldSpec] = &[
     ORDER,
     layer_field!("SizeX", "size_x", Float, "Fill", "m", "Footprint's extent along the layer's X axis."),
     layer_field!("SizeZ", "size_z", Float, "Fill", "m", "Footprint's extent along the layer's Z axis."),
-    layer_field!("Material", "material", Choice(MATERIALS), "Fill", "", "Material painted wherever the rules hold. None paints nothing."),
+    layer_field!("Material", "material", Choice(GROUND_MATERIALS), "Fill", "", "Material painted wherever the rules hold. None paints nothing."),
     layer_field!("MinSlope", "min_slope", Float, "Rules", "deg", "Shallowest slope painted, in degrees from horizontal."),
     layer_field!("MaxSlope", "max_slope", Float, "Rules", "deg", "Steepest slope painted, in degrees from horizontal."),
     layer_field!("MinHeight", "min_height", Float, "Rules", "m", "Lowest ground painted."),
@@ -272,7 +355,7 @@ pub const SCATTER_FIELDS: &[FieldSpec] = &[
     layer_field!("Collide", "collide", Bool, "Scatter", "",
         "Give trees a trunk collider and large rocks a round one. Grass, shrubs, small rocks and custom meshes never collide."),
     layer_field!("Seed", "seed", Int, "Scatter", "", "Pattern seed. The same seed and properties place the same instances."),
-    layer_field!("Material", "material", Choice(MATERIALS), "Rules", "",
+    layer_field!("Material", "material", Choice(GROUND_MATERIALS), "Rules", "",
         "Place only where the ground shows this material, thinning out where it blends into another. None places on any material."),
     layer_field!("MinSlope", "min_slope", Float, "Rules", "deg", "Shallowest slope placed on, in degrees from horizontal."),
     layer_field!("MaxSlope", "max_slope", Float, "Rules", "deg", "Steepest slope placed on, in degrees from horizontal."),
@@ -284,7 +367,7 @@ pub const SCATTER_FIELDS: &[FieldSpec] = &[
     layer_field!("SizeZ", "size_z", Float, "Footprint", "m",
         "Footprint's extent along the layer's Z axis. 0 covers the whole terrain along it."),
     layer_field!("Radius", "radius", Float, "Streaming", "m",
-        "How far from the view instances are drawn. 0 uses the Kind's distance: grass 120 m, shrubs 250 m, rocks 450 m, trees and custom meshes 1500 m."),
+        "How far from the view instances are drawn, never past the Workspace RenderDistance. 0 uses the Kind's distance: grass 120 m, shrubs 250 m, rocks 450 m; trees and custom meshes draw to the RenderDistance."),
 ];
 
 /// Every property of `TerrainWaterBody`, in panel order. Enabled and Order
@@ -983,6 +1066,7 @@ impl TerrainScatter {
             seed: self.seed.clamp(0, i64::from(u32::MAX)) as u64,
             footprint,
             radius: if self.radius > 0.0 { self.radius.min(MAX_RADIUS) as f32 } else { self.kind.default_radius() },
+            explicit_radius: self.radius > 0.0,
         }
     }
 }
@@ -1828,10 +1912,61 @@ mod tests {
     }
 
     #[test]
+    fn the_terrain_data_directory_and_its_entries_are_protected_but_layers_are_not() {
+        let root = std::env::temp_dir().join(format!("eustress_terrain_protect_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let terrain = root.join("Workspace").join("Terrain");
+        std::fs::create_dir_all(terrain.join("Layers").join("Lake").join("Point1")).unwrap();
+        std::fs::create_dir_all(terrain.join("chunks")).unwrap();
+        std::fs::write(terrain.join("_terrain.toml"), "[terrain]\n").unwrap();
+
+        assert!(is_terrain_data_path(&terrain), "the data directory itself");
+        for entry in ["_terrain.toml", "chunks", "Layers", "_instance.toml", "matmap"] {
+            assert!(is_terrain_data_path(&terrain.join(entry)), "{entry} is data");
+        }
+        assert!(terrain_dir_of(&root.join("workspace").join("TERRAIN")).is_some(), "folder names compare ignoring case");
+        // A layer, its points and anything deeper are ordinary instances.
+        assert!(!is_terrain_data_path(&terrain.join("Layers").join("Lake")));
+        assert!(!is_terrain_data_path(&terrain.join("Layers").join("Lake").join("_instance.toml")));
+        assert!(!is_terrain_data_path(&terrain.join("Layers").join("Lake").join("Point1")));
+        // Other folders, and a Workspace child of another name.
+        assert!(!is_terrain_data_path(&root.join("Workspace")));
+        assert!(!is_terrain_data_path(&root.join("Workspace").join("Baseplate")));
+        assert!(!is_terrain_data_path(&root.join("Workspace").join("Baseplate").join("_instance.toml")));
+        assert!(!is_terrain_data_path(&terrain.join("notes.txt")), "an unknown file is not terrain data");
+
+        // A user's own Folder called Terrain holds no terrain data.
+        let mine = std::env::temp_dir().join(format!("eustress_terrain_protect_mine_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mine);
+        std::fs::create_dir_all(mine.join("Workspace").join("Terrain").join("Hill")).unwrap();
+        std::fs::write(mine.join("Workspace").join("Terrain").join("_instance.toml"), "[metadata]\n").unwrap();
+        assert!(!is_terrain_data_path(&mine.join("Workspace").join("Terrain")));
+        assert!(!is_terrain_data_path(&mine.join("Workspace").join("Terrain").join("_instance.toml")));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&mine);
+    }
+
+    #[test]
+    fn folders_in_the_terrain_data_directory_belong_to_the_workspace() {
+        let root = Path::new("/spaces/Bench");
+        let workspace = root.join("Workspace");
+        let terrain = workspace.join("Terrain");
+        for dir in [terrain.clone(), terrain.join("Layers"), terrain.join("Layers").join("Lake"), terrain.join("chunks")] {
+            assert_eq!(terrain_data_owner_dir(root, &dir), Some(workspace.clone()), "{dir:?}");
+        }
+        assert_eq!(terrain_data_owner_dir(root, &workspace), None);
+        assert_eq!(terrain_data_owner_dir(root, &workspace.join("Baseplate")), None);
+        assert_eq!(terrain_data_owner_dir(root, &root.join("Lighting").join("Terrain")), None);
+        assert_eq!(terrain_data_owner_dir(root, Path::new("/elsewhere/Workspace/Terrain")), None);
+    }
+
+    #[test]
     fn material_choices_are_none_then_every_built_in() {
         let built_in: Vec<&str> = TerrainMaterial::all().iter().map(|m| m.name()).collect();
         assert_eq!(MATERIALS[0], "None");
         assert_eq!(&MATERIALS[1..], built_in.as_slice());
+        let ground: Vec<&str> = MATERIALS.iter().copied().filter(|name| *name != "Water").collect();
+        assert_eq!(GROUND_MATERIALS, ground.as_slice(), "the ground rules offer every material but Water");
         let mut fill = TerrainMaterialFill::default();
         fill.set_text("Material", "none").expect("None is a choice");
         assert_eq!(fill.material, None);

@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { Theme } from "theme.slint";
+import { DockTabs } from "output.slint";
 import { ScrollView } from "std-widgets.slint";
 
 // One row of the generic grid: a flat list of pre-stringified cells, one per
@@ -71,29 +72,20 @@ export component DataGrid inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // ── Tab strip + selected-Dataset context ──────────────────────────
+        // ── The dock's tabs + selected-Dataset context ────────────────────
         Rectangle {
-            height: 30px;
+            height: 28px;
             background: Theme.header-background;
             Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
             HorizontalLayout {
-                padding-left: 10px;
+                padding-left: 4px;
                 padding-right: 10px;
-                spacing: 14px;
-                Rectangle {
-                    width: 52px;
-                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "output"; root.set-panel-mode("output"); } }
-                    Text { text: "Output"; color: root.panel-mode == "output" ? Theme.text-primary : Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Rectangle {
-                    width: 60px;
-                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "timeline"; root.set-panel-mode("timeline"); } }
-                    Text { text: "Timeline"; color: root.panel-mode == "timeline" ? Theme.text-primary : Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Rectangle {
-                    width: 64px;
-                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "datagrid"; root.set-panel-mode("datagrid"); } }
-                    Text { text: "Data Grid"; color: root.panel-mode == "datagrid" ? Theme.accent-cyan : Theme.text-secondary; font-weight: root.panel-mode == "datagrid" ? 600 : 400; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 3px;
+                DockTabs {
+                    mode <=> root.panel-mode;
+                    set-mode(mode) => { root.set-panel-mode(mode); }
                 }
                 Rectangle { horizontal-stretch: 1; }
 

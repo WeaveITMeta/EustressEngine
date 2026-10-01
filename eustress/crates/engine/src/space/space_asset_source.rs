@@ -209,6 +209,82 @@ impl AssetReader for DynamicSpaceReader {
     }
 }
 
+/// A reader over several folders, tried in order: the first holding a path
+/// answers for it. Studio's default asset source reads its own `assets/`,
+/// then common's shipped assets, so a file that moves into `common/assets`
+/// (the one folder both apps ship) still resolves by the path Studio and
+/// saved Spaces use.
+pub struct LayeredAssetReader {
+    roots: Vec<PathBuf>,
+}
+
+impl LayeredAssetReader {
+    pub fn new(roots: Vec<PathBuf>) -> Self {
+        Self { roots }
+    }
+
+    /// The first root holding `path` reads it; a missing file names the
+    /// first root's path, as a single-folder reader would.
+    async fn read_first(&self, path: &Path) -> Result<VecReader, AssetReaderError> {
+        let mut first_missing: Option<PathBuf> = None;
+        for root in &self.roots {
+            match read_owned(root.join(path)).await {
+                Err(AssetReaderError::NotFound(missing)) => {
+                    first_missing.get_or_insert(missing);
+                }
+                other => return other,
+            }
+        }
+        Err(AssetReaderError::NotFound(first_missing.unwrap_or_else(|| path.to_path_buf())))
+    }
+}
+
+impl AssetReader for LayeredAssetReader {
+    async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        self.read_first(path).await
+    }
+
+    async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+        self.read_first(&meta_path(path)).await
+    }
+
+    async fn read_directory<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<Box<PathStream>, AssetReaderError> {
+        // The first root holding the directory lists it, relative to that
+        // root, without `.meta` sidecars or hidden files.
+        for root in &self.roots {
+            let Ok(read_dir) = async_fs::read_dir(root.join(path)).await else { continue };
+            let root = root.clone();
+            let mapped = read_dir.filter_map(move |entry| {
+                entry.ok().and_then(|dir_entry| {
+                    let p = dir_entry.path();
+                    if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("meta")) {
+                        return None;
+                    }
+                    if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')) {
+                        return None;
+                    }
+                    p.strip_prefix(&root).ok().map(|rel| rel.to_owned())
+                })
+            });
+            let stream: Box<PathStream> = Box::new(mapped);
+            return Ok(stream);
+        }
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    async fn is_directory<'a>(&'a self, path: &'a Path) -> Result<bool, AssetReaderError> {
+        for root in &self.roots {
+            if let Ok(md) = async_fs::metadata(root.join(path)).await {
+                return Ok(md.file_type().is_dir());
+            }
+        }
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+}
+
 /// Bevy system: stamp the global `space://` root whenever
 /// [`SpaceRoot`](crate::space::SpaceRoot) changes.
 ///

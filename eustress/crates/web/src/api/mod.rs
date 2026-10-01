@@ -9,22 +9,28 @@
 // =============================================================================
 
 pub mod auth;
+pub mod commerce;
 pub mod community;
 pub mod friends;
 pub mod gallery;
+pub mod live;
 pub mod marketplace;
 pub mod presence_ws;
 pub mod projects;
 pub mod purchases;
+pub mod releases;
 
 pub use auth::*;
+pub use commerce::*;
 pub use community::*;
 pub use friends::*;
 pub use gallery::*;
+pub use live::*;
 pub use marketplace::*;
 pub use presence_ws::*;
 pub use projects::*;
 pub use purchases::*;
+pub use releases::*;
 
 use gloo_net::http::{Request, RequestBuilder, Response};
 use gloo_storage::Storage;

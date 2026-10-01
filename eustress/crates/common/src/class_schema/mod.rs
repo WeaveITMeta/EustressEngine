@@ -330,9 +330,19 @@ pub fn normalise_keys(value: &mut toml::Value) {
                 .collect();
             table.clear();
             for (key, mut v) in entries {
-                normalise_keys(&mut v);
                 let canonical = pascal_to_snake(&key);
-                table.insert(canonical, v);
+                if !holds_authored_keys(&canonical) {
+                    normalise_keys(&mut v);
+                }
+                // Two spellings of one key (`[Metadata]` and `[metadata]`)
+                // become one, never one replacing the other.
+                let spelled_canonically = key == canonical;
+                match table.get_mut(&canonical) {
+                    Some(existing) => merge_spellings(existing, v, spelled_canonically),
+                    None => {
+                        table.insert(canonical, v);
+                    }
+                }
             }
         }
         toml::Value::Array(items) => {
@@ -342,6 +352,38 @@ pub fn normalise_keys(value: &mut toml::Value) {
         }
         _ => {}
     }
+}
+
+/// Fold a second spelling of one key into the first. Tables merge key by
+/// key; on any other clash the incoming value replaces the one already there
+/// only when it was spelled canonically, so `color` wins over a `Color` that
+/// was converted to it.
+fn merge_spellings(existing: &mut toml::Value, incoming: toml::Value, incoming_wins: bool) {
+    match (existing, incoming) {
+        (toml::Value::Table(into), toml::Value::Table(from)) => {
+            for (key, value) in from {
+                match into.get_mut(&key) {
+                    Some(slot) => merge_spellings(slot, value, incoming_wins),
+                    None => {
+                        into.insert(key, value);
+                    }
+                }
+            }
+        }
+        (slot, incoming) => {
+            if incoming_wins {
+                *slot = incoming;
+            }
+        }
+    }
+}
+
+/// A table whose keys are data, not schema fields: an instance's attributes,
+/// parameters and parameter bindings are keyed by names their author chose
+/// (`MaxHealth`, `hvac.SpawnRate`), and a tagged attribute's one key names its
+/// type (`{ Color3 = [...] }`). They keep every key as written.
+fn holds_authored_keys(key: &str) -> bool {
+    matches!(key, "attributes" | "parameters" | "parameter_bindings")
 }
 
 /// Convert `PascalCase` / `camelCase` → `snake_case`. Already-snake_case
@@ -429,23 +471,136 @@ pub fn get_section_insensitive<'a>(
 /// never overwritten — only absent keys get filled from the template. Tables
 /// recurse; scalars stop at the first level.
 pub fn merge_template_into(target: &mut toml::Value, template: &toml::Value) {
+    merge_into(target, template, false);
+}
+
+/// [`merge_template_into`], knowing whether `target` is an author's table
+/// ([`holds_authored_keys`]). There a default counts as present when the
+/// author spelled its name in any case, with or without underscores, so it
+/// never lands beside the author's own spelling (`Intensity` beside
+/// `intensity`).
+fn merge_into(target: &mut toml::Value, template: &toml::Value, authored: bool) {
     let (Some(target_table), Some(template_table)) =
         (target.as_table_mut(), template.as_table())
     else {
         return;
     };
     for (key, template_value) in template_table {
-        match target_table.get_mut(key) {
-            Some(existing) => {
-                if existing.is_table() && template_value.is_table() {
-                    merge_template_into(existing, template_value);
-                }
+        if let Some(existing) = target_table.get_mut(key) {
+            if existing.is_table() && template_value.is_table() {
+                merge_into(existing, template_value, authored || holds_authored_keys(key));
             }
-            None => {
-                target_table.insert(key.clone(), template_value.clone());
+            continue;
+        }
+        if authored && target_table.keys().any(|k| same_name(k, key)) {
+            continue;
+        }
+        target_table.insert(key.clone(), template_value.clone());
+    }
+}
+
+/// Two names that differ only in case or underscores.
+fn same_name(a: &str, b: &str) -> bool {
+    let flat = |s: &str| s.replace('_', "").to_ascii_lowercase();
+    flat(a) == flat(b)
+}
+
+/// Move `[metadata] tags` to the document's root `tags`, where every reader
+/// takes them, when the root has no `tags` key. The Roblox importer wrote an
+/// instance's CollectionService tags under `[metadata]` until 2026-09-23. The
+/// typed definition has no field there, so the loader never saw them and a
+/// typed write-back (moving the part, editing a property) dropped them. A
+/// root key that is present wins, even an empty one, as in
+/// `datamodel::record::record_tags`. True when anything moved.
+pub fn migrate_legacy_metadata_tags(doc: &mut toml::Value) -> bool {
+    let Some(root) = doc.as_table_mut() else { return false };
+    if root.contains_key("tags") {
+        return false;
+    }
+    let is_list = root
+        .get("metadata")
+        .and_then(|m| m.get("tags"))
+        .is_some_and(|t| t.is_array());
+    if !is_list {
+        return false;
+    }
+    let Some(tags) = root
+        .get_mut("metadata")
+        .and_then(|m| m.as_table_mut())
+        .and_then(|m| m.remove("tags"))
+    else {
+        return false;
+    };
+    root.insert("tags".to_string(), tags);
+    true
+}
+
+/// Move an imported light's values from the Roblox importer's old
+/// `[properties.extras]` `light_*` keys into its `[light]` section, and drop
+/// the keys. Those keys predate the section and hold Roblox's units (the
+/// importer's old ×800 lumens, divided back out here, and lengths in studs,
+/// converted to metres), so they overwrite
+/// whatever `[light]` holds: an earlier heal filled it with the class
+/// template's defaults, not with anything authored. True when anything moved.
+///
+/// Once moved, the section is the only copy, which a Properties edit updates
+/// and every writer (typed or raw) preserves; the extras were dropped by the
+/// typed tool writers, so dragging an imported light lost its values.
+pub fn migrate_legacy_light_extras(doc: &mut toml::Value) -> bool {
+    use crate::plugins::light_classes::{
+        legacy_studs_to_m, normalize_face, LEGACY_EXTRAS_BRIGHTNESS, LEGACY_LIGHT_EXTRAS,
+    };
+    let class = doc
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|c| c.as_str());
+    if !matches!(class, Some("PointLight" | "SpotLight" | "SurfaceLight")) {
+        return false;
+    }
+    let Some(extras) = doc
+        .get("properties")
+        .and_then(|p| p.get("extras"))
+        .and_then(|e| e.as_table())
+    else {
+        return false;
+    };
+    let mut moved = toml::value::Table::new();
+    for (old, new) in LEGACY_LIGHT_EXTRAS {
+        let Some(v) = extras.get(old) else { continue };
+        let value = match new {
+            "brightness" => v
+                .as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .map(|b| toml::Value::Float(b / LEGACY_EXTRAS_BRIGHTNESS as f64)),
+            "range" | "radius" => v
+                .as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .map(|studs| toml::Value::Float(legacy_studs_to_m(studs))),
+            "face" => match v {
+                toml::Value::String(s) => Some(toml::Value::String(normalize_face(s).to_string())),
+                toml::Value::Integer(i) => {
+                    Some(toml::Value::String(normalize_face(&i.to_string()).to_string()))
+                }
+                _ => None,
+            },
+            _ => Some(v.clone()),
+        };
+        if let Some(value) = value {
+            moved.insert(new.to_string(), value);
+        }
+    }
+    let Some(root) = doc.as_table_mut() else { return false };
+    if !moved.is_empty() {
+        let light = root
+            .entry("light".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(light) = light.as_table_mut() {
+            for (k, v) in moved {
+                light.insert(k, v);
             }
         }
     }
+    crate::plugins::light_classes::remove_legacy_light_extras(doc)
 }
 
 /// Result of a single `load_and_heal_instance` call.
@@ -484,6 +639,13 @@ pub fn load_and_heal_instance(
     // PascalCase. Templates are PascalCase so the merge key-compare below
     // works without fuzzy matching.
     normalise_keys(&mut parsed);
+    // Before the template merge, so an imported light's real values land in
+    // `[light]` rather than the template's defaults.
+    migrate_legacy_light_extras(&mut parsed);
+    migrate_legacy_metadata_tags(&mut parsed);
+    // A Sun, Moon, Sky or Atmosphere from the old Lighting templates: their
+    // descriptor sections were never read (see `celestial_sections`).
+    crate::plugins::celestial_sections::drop_legacy_template_sections(&mut parsed);
 
     // After key normalisation every TOML is snake_case in memory,
     // regardless of on-disk case.
@@ -533,9 +695,15 @@ pub fn load_and_heal_instance(
     // Template defaults that were missing from the user's file get
     // baked in permanently so subsequent loads converge on the
     // schema.
+    // A file naming a class the engine does not know loads degraded
+    // (`datamodel::record::class_from_toml`), so it is never rewritten: it
+    // stays exactly as its author wrote it.
+    let unknown_class = class_name
+        .as_deref()
+        .is_some_and(|name| !crate::datamodel::record::is_known_class(name));
     let canonical = toml::to_string_pretty(&parsed)
         .map_err(|e| format!("reserialize {}: {}", path.display(), e))?;
-    let rewrote_disk = canonical.trim() != original.trim();
+    let rewrote_disk = !unknown_class && canonical.trim() != original.trim();
     if rewrote_disk {
         if let Err(e) = std::fs::write(path, &canonical) {
             // Log but don't fail the load — the in-memory value is
@@ -597,6 +765,9 @@ pub fn heal_instance_value(
     registry: &ClassSchemaRegistry,
 ) -> Result<HealResult, String> {
     normalise_keys(&mut parsed);
+    migrate_legacy_light_extras(&mut parsed);
+    migrate_legacy_metadata_tags(&mut parsed);
+    crate::plugins::celestial_sections::drop_legacy_template_sections(&mut parsed);
 
     let class_name: Option<String> = parsed
         .get("metadata")
@@ -816,6 +987,22 @@ mod tests {
     use bevy::prelude::*;
 
     #[test]
+    fn metadata_tags_move_to_the_root_only_when_the_root_has_none() {
+        let mut legacy: toml::Value =
+            "[metadata]\nclass_name = \"Part\"\ntags = [\"car\", \"sfx\"]\n".parse().unwrap();
+        assert!(migrate_legacy_metadata_tags(&mut legacy));
+        let root: Vec<&str> = legacy["tags"].as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
+        assert_eq!(root, vec!["car", "sfx"]);
+        assert!(legacy["metadata"].get("tags").is_none(), "one copy, at the root");
+
+        // A root key that is present wins, even an empty one.
+        let mut both: toml::Value =
+            "tags = []\n[metadata]\ntags = [\"stale\"]\n".parse().unwrap();
+        assert!(!migrate_legacy_metadata_tags(&mut both));
+        assert!(both["tags"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn snakifies_pascal_case_keys() {
         assert_eq!(pascal_to_snake("ClassName"), "class_name");
         assert_eq!(pascal_to_snake("CanCollide"), "can_collide");
@@ -846,6 +1033,34 @@ Color = [163, 162, 165]
         assert!(t.contains_key("metadata"));
         assert!(t.contains_key("properties"));
         assert!(t["metadata"].as_table().unwrap().contains_key("class_name"));
+        assert!(t["properties"].as_table().unwrap().contains_key("can_collide"));
+    }
+
+    #[test]
+    fn normalise_keys_keeps_attribute_and_parameter_names() {
+        let mut v: toml::Value = r#"
+[Attributes]
+MaxHealth = 100
+Tint = { Color3 = [1.0, 0.5, 0.0] }
+
+[Parameters]
+SpawnRate = 2.5
+
+[parameter_bindings."hvac.SpawnRate"]
+connector = "Rates"
+
+[Properties]
+CanCollide = true
+"#
+        .parse()
+        .unwrap();
+        normalise_keys(&mut v);
+        let t = v.as_table().unwrap();
+        let attributes = t["attributes"].as_table().unwrap();
+        assert!(attributes.contains_key("MaxHealth"), "{attributes:?}");
+        assert!(attributes["Tint"].as_table().unwrap().contains_key("Color3"));
+        assert!(t["parameters"].as_table().unwrap().contains_key("SpawnRate"));
+        assert!(t["parameter_bindings"].as_table().unwrap().contains_key("hvac.SpawnRate"));
         assert!(t["properties"].as_table().unwrap().contains_key("can_collide"));
     }
 
@@ -1011,6 +1226,75 @@ Position = [1.0, 2.0, 3.0]
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The heal rewrites a file's schema keys, never its attributes or
+    /// parameters: on disk and in memory they stay exactly as written.
+    #[test]
+    fn load_and_heal_keeps_attribute_names_and_tags_on_disk() {
+        let registry = ClassSchemaRegistry::from_builtin();
+        let tmp = std::env::temp_dir().join(format!("eustress_class_schema_attrs_{}.toml", std::process::id()));
+        std::fs::write(
+            &tmp,
+            r#"[Metadata]
+ClassName = "Part"
+
+[attributes]
+MaxHealth = 100
+tint = { Color3 = [1.0, 0.5, 0.0] }
+
+[parameters]
+SpawnRate = 2.5
+"#,
+        )
+        .unwrap();
+        let written: toml::Value = std::fs::read_to_string(&tmp).unwrap().parse().unwrap();
+
+        let result = load_and_heal_instance(&tmp, &registry).expect("heal must succeed");
+        let healed: toml::Value = std::fs::read_to_string(&tmp).unwrap().parse().unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(result.rewrote_disk, "the PascalCase metadata makes the heal write the file");
+        assert_eq!(healed.get("attributes"), written.get("attributes"), "attributes on disk");
+        assert_eq!(healed.get("parameters"), written.get("parameters"), "parameters on disk");
+        assert_eq!(result.value.get("attributes"), written.get("attributes"), "attributes in memory");
+    }
+
+    #[test]
+    fn merge_never_adds_a_default_beside_an_authors_spelling() {
+        let mut target: toml::Value = "[attributes]\nintensity = 5.0\n".parse().unwrap();
+        let template: toml::Value = "[attributes]\nIntensity = 1000.0\nFalloff = 0.25\n".parse().unwrap();
+        merge_template_into(&mut target, &template);
+        let attributes = target["attributes"].as_table().unwrap();
+        assert_eq!(attributes.get("intensity").and_then(|v| v.as_float()), Some(5.0));
+        assert!(!attributes.contains_key("Intensity"), "{attributes:?}");
+        assert_eq!(attributes.get("Falloff").and_then(|v| v.as_float()), Some(0.25), "a missing default is filled");
+    }
+
+    #[test]
+    fn normalise_keys_merges_two_spellings_of_one_table() {
+        let mut v: toml::Value =
+            "[Metadata]\nClassName = \"Part\"\nName = \"Old\"\n\n[metadata]\nuuid = \"u1\"\nname = \"New\"\n"
+                .parse()
+                .unwrap();
+        normalise_keys(&mut v);
+        let metadata = v["metadata"].as_table().unwrap();
+        assert_eq!(metadata.get("class_name").and_then(|c| c.as_str()), Some("Part"), "{metadata:?}");
+        assert_eq!(metadata.get("uuid").and_then(|c| c.as_str()), Some("u1"));
+        assert_eq!(metadata.get("name").and_then(|c| c.as_str()), Some("New"), "the canonical spelling wins");
+    }
+
+    #[test]
+    fn load_and_heal_never_rewrites_a_file_of_an_unknown_class() {
+        let registry = ClassSchemaRegistry::from_builtin();
+        let tmp = std::env::temp_dir().join(format!("eustress_class_schema_unknown_{}.toml", std::process::id()));
+        let text = "[Metadata]\nClassName = \"Gizmo9000\"\n\n[Config]\nMaxSpeed = 3\n";
+        std::fs::write(&tmp, text).unwrap();
+        let result = load_and_heal_instance(&tmp, &registry).expect("heal must succeed");
+        let after = std::fs::read_to_string(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(!result.rewrote_disk);
+        assert_eq!(after, text, "the file stays as written");
     }
 
     /// End-to-end dispatcher test — construct a real `bevy::App`,

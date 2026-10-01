@@ -33,17 +33,23 @@ use bevy::prelude::*;
 
 use super::height_query::height_at_world;
 use super::layer_instances::{layer_id, TerrainSpline};
-use super::layers::{SplineMode, TerrainBaked};
+use super::layers::{SplineMode, TerrainBaked, ROAD_BED_SINK};
 use super::material::MATERIAL_SLOT_NONE;
 use super::material_slots::TerrainMaterialSlots;
 use super::road::{build_ribbon_mesh, RoadPath, RoadProfile};
 use super::{TerrainConfig, TerrainRoot};
 use crate::classes::Instance;
 
-/// How far the ribbon floats above the carved bed, metres: enough to clear
-/// the terrain mesh without z-fighting, little enough that a wheel does not
-/// feel the step onto the shoulder.
-pub const ROAD_SURFACE_LIFT: f32 = 0.05;
+/// How far the ribbon floats above the carved bed, metres: the bed's sink
+/// under the profile ([`ROAD_BED_SINK`]) and 5 cm more, so the ribbon stands
+/// just over the profile and clears the terrain mesh between raster cells
+/// without z-fighting.
+pub const ROAD_SURFACE_LIFT: f32 = ROAD_BED_SINK + 0.05;
+/// Depth bias of the ribbon's material: pulls it toward the camera by about
+/// a tenth of a percent of its distance (32-bit depth), which settles the
+/// fight with a far terrain mesh simplified under it and never lets the road
+/// show through a hill in front of it.
+const ROAD_SURFACE_DEPTH_BIAS: f32 = 1.0e4;
 /// Thickness of each collision box, metres. Its top face meets the ribbon
 /// and the rest sits in the ground.
 pub const ROAD_SURFACE_THICKNESS: f32 = 0.3;
@@ -258,6 +264,7 @@ fn build_surface(
                 materials.add(StandardMaterial {
                     base_color: Color::srgb(color[0], color[1], color[2]),
                     perceptual_roughness: 0.85,
+                    depth_bias: ROAD_SURFACE_DEPTH_BIAS,
                     ..default()
                 })
             })

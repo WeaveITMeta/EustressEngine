@@ -73,6 +73,11 @@ impl Tags {
     }
 }
 
+/// The attribute that decides whether characters may climb a part and
+/// everything under it, overriding the default rules in the avatar runtime's
+/// `climbable` module.
+pub const CLIMBABLE_ATTRIBUTE: &str = "Climbable";
+
 /// Attributes component for custom key-value data
 #[derive(Component, Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Attributes {
@@ -130,6 +135,11 @@ pub enum AttributeValue {
     NumberRange { min: f64, max: f64 },
     NumberSequence(Vec<NumberSequenceKeypoint>),
     ColorSequence(Vec<ColorSequenceKeypoint>),
+    UDim { scale: f32, offset: f32 },
+    /// A Roblox `EnumItem`: `Enum.Material.Plastic` is `enum_type`
+    /// "Material" and `name` "Plastic". `value` is the item's number where a
+    /// file recorded it, so writing the attribute back loses nothing.
+    EnumItem { enum_type: String, name: String, value: Option<u32> },
 }
 
 impl AttributeValue {
@@ -154,6 +164,8 @@ impl AttributeValue {
             Self::NumberRange { .. } => "NumberRange",
             Self::NumberSequence(_) => "NumberSequence",
             Self::ColorSequence(_) => "ColorSequence",
+            Self::UDim { .. } => "UDim",
+            Self::EnumItem { .. } => "EnumItem",
         }
     }
     
@@ -186,6 +198,8 @@ impl AttributeValue {
             Self::NumberRange { min, max } => format!("NumberRange({:.2}, {:.2})", min, max),
             Self::NumberSequence(kps) => format!("NumberSequence({} keypoints)", kps.len()),
             Self::ColorSequence(kps) => format!("ColorSequence({} keypoints)", kps.len()),
+            Self::UDim { scale, offset } => format!("UDim({}, {})", scale, offset),
+            Self::EnumItem { enum_type, name, .. } => format!("Enum.{}.{}", enum_type, name),
         }
     }
 }

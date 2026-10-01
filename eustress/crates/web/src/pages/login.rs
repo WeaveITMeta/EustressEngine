@@ -111,7 +111,7 @@ pub fn LoginPage() -> impl IntoView {
         });
 
         spawn_local(async move {
-            let result = gloo_net::http::Request::post("https://api.eustress.dev/api/kyc/handoff")
+            let result = gloo_net::http::Request::post(&format!("{}/api/kyc/handoff", crate::state::api_base()))
                 .header("Content-Type", "application/json")
                 .body(payload.to_string())
                 .map_err(|_| ())
@@ -161,7 +161,7 @@ pub fn LoginPage() -> impl IntoView {
                     return;
                 }
 
-                let url = format!("https://api.eustress.dev/api/kyc/session/{}", session);
+                let url = format!("{}/api/kyc/session/{}", crate::state::api_base(), session);
                 let Ok(resp) = gloo_net::http::Request::get(&url).send().await else {
                     continue;
                 };
@@ -240,7 +240,7 @@ pub fn LoginPage() -> impl IntoView {
     // Detect jurisdiction on load — try Cloudflare trace, fallback to API
     spawn_local(async move {
         // Try the API endpoint first (works everywhere, has cf-ipcountry)
-        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/kyc/jurisdiction").send().await {
+        if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/kyc/jurisdiction", crate::state::api_base())).send().await {
             if resp.ok() {
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     if let Some(iso2) = data.get("iso2").and_then(|v| v.as_str()) {
@@ -704,7 +704,7 @@ pub fn LoginPage() -> impl IntoView {
                                         <div class="identity-file-drop">
                                             <input
                                                 type="file"
-                                                accept="image/*,.pdf"
+                                                accept="image/jpeg,image/png"
                                                 class="identity-file-input"
                                                 on:change=move |e| {
                                                     use wasm_bindgen::JsCast;
@@ -772,7 +772,7 @@ pub fn LoginPage() -> impl IntoView {
                                         <div class="identity-file-drop">
                                             <input
                                                 type="file"
-                                                accept="image/*,.pdf"
+                                                accept="image/jpeg,image/png"
                                                 class="identity-file-input"
                                                 on:change=move |e| {
                                                     use wasm_bindgen::JsCast;
@@ -1143,7 +1143,7 @@ async fn upload_id_document(
     form_data.append_with_str("username", username).map_err(|_| "append username".to_string())?;
     form_data.append_with_str("session_id", session_id).map_err(|_| "append session_id".to_string())?;
 
-    let api_url = "https://api.eustress.dev".to_string();
+    let api_url = crate::state::api_base();
 
     let token: Option<String> = {
         use gloo_storage::Storage;
@@ -1184,7 +1184,7 @@ async fn submit_kyc_verification(
     kyc_rejected_signal: RwSignal<bool>,
     reject_reason_signal: RwSignal<String>,
 ) {
-    let api_url = "https://api.eustress.dev";
+    let api_url = crate::state::api_base();
     let url = format!("{}/api/kyc/submit", api_url);
 
     let body = serde_json::json!({
@@ -1238,7 +1238,7 @@ async fn poll_kyc_status(
     kyc_rejected_signal: RwSignal<bool>,
     reject_reason_signal: RwSignal<String>,
 ) {
-    let api_url = "https://api.eustress.dev";
+    let api_url = crate::state::api_base();
     let url = format!("{}/api/kyc/status/{}", api_url, verification_id);
 
     // Poll every 2 seconds, max 60 attempts (2 minutes)

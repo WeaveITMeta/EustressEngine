@@ -33,6 +33,14 @@
 //! at a fixed rate regardless of how fast the body is actually moving. This is
 //! the mechanism by which the website's Height slider is visible **in motion**
 //! and not only in silhouette.
+//!
+//! ## Animators take over
+//!
+//! This graph animates every avatar no `Animator` binds: one with no tree
+//! to animate from, such as the Player's local Space, and every avatar under
+//! `EUSTRESS_LEGACY_MOTION=1`. Once an Animator binds the avatar
+//! (`crate::animation` marks it `AnimatorDriven`), the graph stops and
+//! never touches its bones again.
 
 // Graph types live in the `graph` submodule; only the prelude re-exports them.
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
@@ -42,6 +50,7 @@ use bevy::prelude::*;
 use super::rig::AvatarRig;
 use super::spawn::{AvatarBody, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
+use crate::animation::AnimatorDriven;
 use eustress_avatar_schema::RigDefinition;
 
 /// Authored ground speed of the shipped Mixamo clips, m/s at rate 1.0.
@@ -120,7 +129,7 @@ impl Plugin for AvatarAnimPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (request_clips_on_bind, retarget_and_build_graph, drive_motion_weights)
+            (yield_to_animator, request_clips_on_bind, retarget_and_build_graph, drive_motion_weights)
                 .chain()
                 .in_set(AvatarSystems::Animation),
         )
@@ -308,6 +317,25 @@ fn probe_animation_liveness(
     }
 }
 
+/// An avatar an Animator has bound plays from the Animator from then on: its
+/// graph stops, and nothing here touches its bones again.
+fn yield_to_animator(
+    mut commands: Commands,
+    mut players: Query<&mut AnimationPlayer>,
+    q: Query<(Entity, Option<&AvatarMotionGraph>), (With<SpawnedByAvatarRuntime>, Added<AnimatorDriven>)>,
+) {
+    for (e, graph) in q.iter() {
+        if let Some(g) = graph {
+            if let Ok(mut p) = players.get_mut(g.player) {
+                p.stop_all();
+            }
+        }
+        commands
+            .entity(e)
+            .remove::<(AvatarMotionGraph, AvatarClipsLoading, RootMotionLock, AnimationLivenessProbe)>();
+    }
+}
+
 /// Start loading the four clips for this avatar's body once the rig binds.
 fn request_clips_on_bind(
     mut commands: Commands,
@@ -346,7 +374,7 @@ fn retarget_and_build_graph(
     transforms: Query<&Transform, Without<SpawnedByAvatarRuntime>>,
     mut q: Query<
         (Entity, &mut AvatarClipsLoading, &AvatarRig),
-        (With<SpawnedByAvatarRuntime>, Without<AvatarMotionGraph>),
+        (With<SpawnedByAvatarRuntime>, Without<AvatarMotionGraph>, Without<AnimatorDriven>),
     >,
     policy: Option<Res<super::space_character::SpaceCharacterPolicy>>,
 ) {
@@ -626,9 +654,13 @@ fn drive_motion_weights(
         // Absolute weights are safe here because `ground` is a Blend node:
         // Bevy normalises the children, so these are ratios and cannot sum to
         // a partial pose the way the old flat graph could.
-        let speed = loco.planar_speed;
+        // A NaN speed would survive every clamp below and go into the
+        // graph's blend weights, which accumulate: one bad frame (a
+        // replicated avatar fed a non-finite velocity) would leave the whole
+        // pose NaN for good. Read it as standing still until it is finite.
+        let speed = if loco.planar_speed.is_finite() { loco.planar_speed } else { 0.0 };
         let walk_s = body.motion.walk_speed.max(0.05);
-        let run_s = body.motion.run_speed.max(walk_s + 0.05);
+        let run_s = body.motion.capped_run_and_sprint().0.max(walk_s + 0.05);
 
         let (w_idle, w_walk, w_run) = if speed < 0.08 {
             (1.0, 0.0, 0.0)

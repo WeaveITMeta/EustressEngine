@@ -16,7 +16,6 @@ use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
 
-const API_URL: &str = "https://api.eustress.dev";
 
 /// One day of ledger activity for this account.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -202,7 +201,7 @@ pub fn BlissHistoryPage() -> impl IntoView {
 
         loading.set(true);
         spawn_local(async move {
-            let url = format!("{}/api/ledger/history/{}", API_URL, user_id);
+            let url = format!("{}/api/ledger/history/{}", crate::state::api_base(), user_id);
             match gloo_net::http::Request::get(&url).send().await {
                 Ok(resp) => match resp.json::<LedgerHistory>().await {
                     Ok(data) => {

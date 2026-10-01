@@ -29,6 +29,7 @@
 
 use bevy::prelude::*;
 
+use super::climb::{AvatarClimb, ClimbPhase};
 use super::rig::{AvatarRig, HumanoidBone};
 use super::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
@@ -89,17 +90,16 @@ pub(crate) struct AvatarLifePlugin;
 
 impl Plugin for AvatarLifePlugin {
     fn build(&self, app: &mut App) {
+        // Bone writes compose onto the animated pose.
+        let life = apply_life_to_bones.in_set(AvatarSystems::PostAnim);
+        // After `lock_root_motion`, which pins hips translation — running
+        // before it would have every hips write silently discarded. Without
+        // `model-import` there is no motion graph, so nothing to follow.
+        #[cfg(feature = "model-import")]
+        let life = life.after(super::anim::lock_root_motion);
         app.add_systems(Update, attach_life.in_set(AvatarSystems::Lifecycle))
             .add_systems(Update, tick_life.in_set(AvatarSystems::Animation))
-            // Bone writes compose onto the animated pose.
-            // After `lock_root_motion`, which pins hips translation — running
-            // before it would have every hips write silently discarded.
-            .add_systems(
-                PostUpdate,
-                apply_life_to_bones
-                    .in_set(AvatarSystems::PostAnim)
-                    .after(super::anim::lock_root_motion),
-            );
+            .add_systems(PostUpdate, life);
     }
 }
 
@@ -114,18 +114,37 @@ fn attach_life(
 
 /// Advance the state machine. Pure bookkeeping — no bone access, so it can
 /// live in `Update` alongside the animation driver.
+/// How hard a climb works the body, on the same 0..1 scale as running.
+///
+/// Climbing is work however still the body is: a hang carries the whole
+/// weight on the arms, and a pull-up is the hardest thing the body does, so a
+/// character that has just climbed breathes like one that has just sprinted.
+fn climb_effort(climb: &AvatarClimb) -> f32 {
+    match climb.phase {
+        ClimbPhase::None => 0.0,
+        ClimbPhase::Hanging => 0.45,
+        ClimbPhase::Vaulting => 0.6,
+        ClimbPhase::Shimmy | ClimbPhase::Transfer | ClimbPhase::Lowering => 0.7,
+        ClimbPhase::Mantling => 0.95,
+    }
+}
+
 fn tick_life(
     time: Res<Time>,
-    mut q: Query<(&mut AvatarLife, &AvatarLocomotion, &AvatarIntent, &AvatarBody), With<SpawnedByAvatarRuntime>>,
+    mut q: Query<
+        (&mut AvatarLife, &AvatarLocomotion, &AvatarIntent, &AvatarBody, Option<&AvatarClimb>),
+        With<SpawnedByAvatarRuntime>,
+    >,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
 
-    for (mut life, loco, intent, body) in q.iter_mut() {
+    for (mut life, loco, intent, body, climb) in q.iter_mut() {
         // ── Exertion: fast attack, slow release ────────────────────────────
-        let effort = (loco.speed_norm).clamp(0.0, 1.5) / 1.5;
+        let running = (loco.speed_norm).clamp(0.0, 1.5) / 1.5;
+        let effort = running.max(climb.map_or(0.0, climb_effort));
         let rate = if effort > life.exertion { 1.2 } else { 1.0 / EXERTION_DECAY };
         life.exertion += (effort - life.exertion) * (1.0 - (-rate * dt).exp());
         life.exertion = life.exertion.clamp(0.0, 1.0);
@@ -357,6 +376,20 @@ mod tests {
             a.phase_offset, b.phase_offset,
             "a crowd would breathe in lockstep"
         );
+    }
+
+    /// Climbing counts as work: a hang already outworks an easy walk, and a
+    /// pull-up is as hard as the body goes.
+    #[test]
+    fn climbing_is_exertion_even_standing_still() {
+        let mut c = AvatarClimb::default();
+        assert_eq!(climb_effort(&c), 0.0);
+        c.phase = ClimbPhase::Hanging;
+        let hang = climb_effort(&c);
+        c.phase = ClimbPhase::Mantling;
+        let pull = climb_effort(&c);
+        assert!(hang > 0.3, "hanging is barely effort: {hang}");
+        assert!(pull > hang && pull <= 1.0, "a pull-up must be the hardest part: {pull}");
     }
 
     /// Same seed must give the same state — replay determinism depends on it.

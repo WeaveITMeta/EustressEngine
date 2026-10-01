@@ -10,28 +10,43 @@
 //! importer's `roblox-import/src/terrain.rs` writes), it
 //!
 //! 1. decodes the chunk to per-cell `(eustress_material_id, occupancy)`
-//!    in the 32³ grid, and
+//!    and water occupancy in the 32³ grid, and
 //! 2. for each `(x, z)` column, walks the Y stack and emits the **solid
 //!    spans** (contiguous runs of occupied cells), then
 //! 3. writes the TOP surface of the highest span into a `TerrainData`
-//!    `height_cache` (raw studs) and the surface material's own id, a
-//!    built-in material slot, into the `material_cache`, and
-//! 4. once every chunk is in, carves the air below each column's top
-//!    surface (caves, tunnels, the undersides of overhangs) into the
-//!    terrain's `TerrainVolume` ([`carve_voxel_caves`]).
+//!    `height_cache` (raw world heights) and the surface material's own id,
+//!    a built-in material slot, into the `material_cache`, and
+//! 4. once every chunk is in, finishes the surfaces whose cell above lives
+//!    in the chunk stacked on top ([`VoxelColumns::refine_surface_tops`]),
+//!    builds the water level over every raster cell ([`voxel_water_levels`]),
+//!    gives the columns no chunk holds a height ([`fill_hole_heights`]) and
+//!    carves the air below each column's top surface (caves, tunnels, the
+//!    undersides of overhangs) into the terrain's `TerrainVolume`
+//!    ([`carve_voxel_caves`]).
 //!
 //! It deliberately does NOT read Fjall (that is the engine's job:
 //! `eustress-common` must not depend on `eustress-worlddb`, cycle risk).
-//! The engine-side loader (`engine/src/terrain_voxel_load.rs`) holds the
-//! `WorldDb` handle, reads the chunks, and calls [`fill_terrain_from_chunk`]
-//! and [`VoxelColumns::record_chunk`] here per chunk, then
-//! [`carve_voxel_caves`] over the chunks [`VoxelColumns::cave_chunks`] names.
+//! The build in `super::voxel_import` (`build_from_chunks`) takes the chunk
+//! records, read from the world database by the engine-side loader
+//! (`engine/src/terrain_voxel_load.rs`) or from the importer's
+//! `voxel_chunks` files by the Player, and calls [`fill_terrain_from_chunk`]
+//! and [`VoxelColumns::record_chunk`] here per chunk, then the passes of
+//! step 4 in that order, [`carve_voxel_caves`] last, over the chunks
+//! [`VoxelColumns::cave_chunks`] names.
 //!
 //! ## Surfaces and caves
 //!
 //! The heightfield holds the TOP surface of every column with its material
 //! id in the material map, which is what `generate_chunk_mesh` /
-//! `chunk_spawn_system` consume. Everything under that surface that is not solid, between the
+//! `chunk_spawn_system` consume. The surface sits where the cell fill
+//! crosses one half between the column's highest solid cell and the cell
+//! above it, each cell's fill (`occupancy / 255`, 0 for air and lifted
+//! water) standing at the cell's centre ([`isosurface_offset`]). A full cell
+//! under air ends on its top face; a part-full top cell lowers the surface
+//! and a part-full cell above raises it, by up to half a cell either way,
+//! so an imported slope comes out smooth rather than in whole-cell steps.
+//!
+//! Everything under that surface that is not solid, between the
 //! column's lowest and highest solid cell, becomes a CARVE edit in the
 //! volume: `C = (occupancy / 255 - 0.5) * cell` at the cell's lattice point,
 //! so air (occupancy 0) is carved half a cell deep and solid (255) stays
@@ -45,26 +60,56 @@
 //! the stored voxels end. A floating island over nothing therefore renders
 //! as a pillar.
 //!
+//! ## Holes
+//!
+//! A raster column no chunk gives a solid cell keeps no material
+//! ([`MATERIAL_SLOT_NONE`]). The loader marks the raster sparse
+//! (`TerrainData::sparse_surface`), so meshes and colliders leave those
+//! columns out and the map has no ground where the import has no voxels.
+//! Meshes still read neighbouring heights for their normals, and the water
+//! shader compares its level with the ground under it, so
+//! [`fill_hole_heights`] gives every hole a height: one cell below its water
+//! level where the column holds water, else that of the nearest ground in
+//! its raster row.
+//!
+//! ## Water
+//!
+//! Every cell carries a water occupancy: the record's water plane when it
+//! has one, else the occupancy of a lifted-water cell ([`WATER_MARKER`]).
+//! [`voxel_water_levels`] puts a column's water surface at the fill of its
+//! highest cell holding water, `cell + water / 255` cells up, which is the
+//! top face of a full water cell.
+//!
+//! ## Units
+//!
+//! Cell and chunk INDICES are voxel units: 32 cells a chunk, chunks keyed
+//! the way the importer and worlddb key them. World positions and heights
+//! take the config's cell, [`voxel_cell_size`]: [`ROBLOX_CELL_STUDS`] studs
+//! of the unit the import was authored in, so an import in feet (1 stud =
+//! 1 ft) lays each cell out at 1.2192 m, where the parts converted from the
+//! same unit expect their ground.
+//!
 //! ## Lattice alignment
 //!
 //! [`voxel_terrain_config`] makes the volume lattice cell (`chunk_size /
-//! chunk_resolution`, 128 / 32) exactly [`ROBLOX_CELL_STUDS`], so voxel
+//! chunk_resolution`) exactly the voxel cell ([`voxel_cell_size`]), so voxel
 //! cells and lattice points pair one to one. Every voxel cell is sampled at
 //! its minimum-corner lattice point, the rule the heightfield fill already
 //! uses in X and Z; a face-centred resample would collapse one-cell slabs
-//! and one-cell tunnels to zero thickness. The top surface keeps its
-//! top-face height, so cave walls sit half a cell below the Roblox cell
-//! faces and a roof directly under the top surface comes out half a cell
-//! thicker, never thinner.
+//! and one-cell tunnels to zero thickness. The carve reads the top surface
+//! through `lattice_surface_height`, wherever the isosurface placed it, so
+//! cave walls sit half a cell below the Roblox cell faces and a roof
+//! directly under the top surface keeps at least the thickness of its solid
+//! cells, never less.
 //!
 //! A floor under open air is lifted to its top face instead, so a cave floor
-//! or the ground under an overhang sits flush with the open heightfield
-//! ground beside it rather than half a cell below it, with no step at the
-//! cave mouth. Two places keep the half-cell rule: the foot of a wall (a
-//! lateral neighbour solid at the floor's layer), which keeps a half-cell
-//! gutter there rather than a floor pinched into the wall, and a one-cell
-//! gap, whose floor and roof keep their symmetric crossings so a one-cell
-//! tunnel never collapses.
+//! or the ground under an overhang sits flush with the open ground of full
+//! cells beside it, whose surface is their top face, rather than half a
+//! cell below it, with no step at the cave mouth. Two places keep the
+//! half-cell rule: the foot of a wall (a lateral neighbour solid at the
+//! floor's layer), which keeps a half-cell gutter there rather than a floor
+//! pinched into the wall, and a one-cell gap, whose floor and roof keep
+//! their symmetric crossings so a one-cell tunnel never collapses.
 //!
 //! The raster itself is not quite on the lattice: `TerrainData::sample_height`
 //! spreads the `W` raster columns over the `W + 1` lattice points of the
@@ -79,14 +124,21 @@
 //!
 //! The importer's `encode_eustress_chunk` (spec §6.6) writes, BEFORE LZ4:
 //! ```text
-//! u8  version (== EUSTRESS_CHUNK_VERSION = 1)
+//! u8  version (MIN_EUSTRESS_CHUNK_VERSION..=EUSTRESS_CHUNK_VERSION, 1..=2)
 //! u8  material_count (informational)
-//! u8  flags (bit0 = contains water marker)
-//! [ for each of 32^3 cells, Y-outer/X-middle/Z-inner order: ]
+//! u8  flags (bit0 CHUNK_FLAG_WATER: the chunk holds water;
+//!            bit1 CHUNK_FLAG_WATER_PLANE: a water plane follows, version 2 only)
+//! [ for each of 32^3 cells, Y-outer/Z-middle/X-inner order: ]
 //!     u8 eustress_material_id  (255 = Air, 254 = Water)
 //!     u8 occupancy_q           (0..=255)
+//! [ only with CHUNK_FLAG_WATER_PLANE, for each cell in the same order: ]
+//!     u8 water_occupancy       (0..=255)
 //! ```
-//! Linear cell index is `y*1024 + x*32 + z` (Y outer, X middle, Z inner).
+//! The record's linear cell index is Roblox's `y*1024 + z*32 + x` (Y outer,
+//! Z middle, X inner). The decoder reorders the cells into
+//! [`DecodedChunk`]'s `y*1024 + x*32 + z` (X middle, Z inner), the order
+//! everything downstream reads through [`DecodedChunk::index`]. A version 2
+//! record without the plane decodes exactly like version 1.
 //! On disk / in Fjall the whole record is `lz4_flex::compress_prepend_size`,
 //! so we `decompress_size_prepended` first. (We re-declare the small decode
 //! here rather than depend on the bevy-free importer crate just for it.)
@@ -104,9 +156,9 @@ use super::volume::{
 use super::{TerrainConfig, TerrainData};
 
 // ---------------------------------------------------------------------------
-// Constants — kept in lockstep with roblox-import/src/terrain.rs and
-// worlddb/src/keys.rs (VOXEL_CHUNK_EDGE_STUDS). A mismatch would land
-// columns at the wrong world position, so these are asserted in a test.
+// Constants, kept in lockstep with roblox-import/src/terrain.rs and
+// worlddb/src/keys.rs (VOXEL_CHUNK_EDGE_STUDS). A mismatch would misread
+// records or key chunks wrongly, so these are asserted in a test.
 // ---------------------------------------------------------------------------
 
 /// Cells along one edge of a voxel chunk (Roblox SmoothGrid uses 32).
@@ -115,23 +167,42 @@ pub const CHUNK_EDGE: usize = 32;
 /// Total cells in one 32³ chunk.
 pub const CELLS_PER_CHUNK: usize = CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE; // 32768
 
-/// Roblox terrain cell edge in studs (= meters in Eustress).
+/// Roblox terrain cell edge in studs. Its size in the world depends on the
+/// unit the import was authored in: [`voxel_terrain_config`] takes the cell
+/// in metres (this many studs, each worth the metres of that unit) and
+/// [`voxel_cell_size`] reads it back.
 pub const ROBLOX_CELL_STUDS: f32 = 4.0;
 
-/// One voxel chunk's world edge in studs (`CHUNK_EDGE * ROBLOX_CELL_STUDS`).
-/// MUST equal `eustress_worlddb::keys::VOXEL_CHUNK_EDGE_STUDS` (128.0) so a
-/// region query's chunk coords place columns at the right world position.
+/// One voxel chunk's edge in studs (`CHUNK_EDGE * ROBLOX_CELL_STUDS`).
+/// MUST equal `eustress_worlddb::keys::VOXEL_CHUNK_EDGE_STUDS` (128.0), which
+/// keys region queries in stud-space chunk coordinates. World distances come
+/// from the config's cell ([`voxel_cell_size`]), not from this.
 pub const VOXEL_CHUNK_EDGE_STUDS: f32 = CHUNK_EDGE as f32 * ROBLOX_CELL_STUDS; // 128.0
 
 /// The importer's per-chunk header length, in bytes (version, material
 /// count, flags). Cells start at this offset.
 pub const CHUNK_HEADER_LEN: usize = 3;
 
-/// The Eustress voxel-chunk format version we decode (spec §6.6).
-pub const EUSTRESS_CHUNK_VERSION: u8 = 1;
+/// The newest Eustress voxel-chunk record version this decoder reads, and
+/// the one the importer writes (spec §6.6).
+pub const EUSTRESS_CHUNK_VERSION: u8 = 2;
 
-/// Importer sentinel: a cell lifted into the separate water layer. NOT a
-/// terrain-fill material (so it does not decode to a [`TerrainMaterial`]).
+/// The oldest Eustress voxel-chunk record version this decoder reads.
+pub const MIN_EUSTRESS_CHUNK_VERSION: u8 = 1;
+
+/// Record flags bit: the chunk holds water.
+pub const CHUNK_FLAG_WATER: u8 = 0b01;
+
+/// Record flags bit: a water-occupancy plane, one byte per cell in the
+/// cells' order, follows the cells. Version 2 records only.
+pub const CHUNK_FLAG_WATER_PLANE: u8 = 0b10;
+
+/// First record version that can carry a water plane.
+const FIRST_WATER_PLANE_VERSION: u8 = 2;
+
+/// Importer sentinel: a cell lifted into the separate water layer, its
+/// occupancy the amount of water. NOT a terrain-fill material (so it does
+/// not decode to a [`TerrainMaterial`]).
 pub const WATER_MARKER: u8 = 254;
 
 /// Importer sentinel: air / empty cell.
@@ -146,8 +217,9 @@ pub const SOLID_OCCUPANCY_THRESHOLD: u8 = 127;
 // Decode
 // ---------------------------------------------------------------------------
 
-/// A decoded 32³ voxel chunk: parallel per-cell material + occupancy arrays
-/// in linear `y*1024 + x*32 + z` order. `material[i]` is an EUSTRESS
+/// A decoded 32³ voxel chunk: parallel per-cell material, occupancy and
+/// water arrays in linear `y*1024 + x*32 + z` order (the decoder reorders
+/// the record's Roblox order into it). `material[i]` is an EUSTRESS
 /// material id (or [`AIR_MARKER`] / [`WATER_MARKER`]).
 #[derive(Debug, Clone)]
 pub struct DecodedChunk {
@@ -155,6 +227,9 @@ pub struct DecodedChunk {
     pub material: Vec<u8>,
     /// Per-cell quantised occupancy (0..=255), YXZ order.
     pub occupancy: Vec<u8>,
+    /// Per-cell water occupancy (0..=255), YXZ order: the record's water
+    /// plane, or without one a lifted-water cell's occupancy (0 elsewhere).
+    pub water: Vec<u8>,
 }
 
 impl DecodedChunk {
@@ -167,6 +242,11 @@ impl DecodedChunk {
     /// Material id at local cell `(x, y, z)` (or [`AIR_MARKER`] if OOB).
     #[inline]
     pub fn material_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        // Checked per axis: an X or Z past the edge would otherwise wrap into
+        // the next row or layer rather than fall off the chunk.
+        if x >= CHUNK_EDGE || y >= CHUNK_EDGE || z >= CHUNK_EDGE {
+            return AIR_MARKER;
+        }
         self.material
             .get(Self::index(x, y, z))
             .copied()
@@ -176,8 +256,29 @@ impl DecodedChunk {
     /// Occupancy at local cell `(x, y, z)` (or 0 if OOB).
     #[inline]
     pub fn occupancy_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        if x >= CHUNK_EDGE || y >= CHUNK_EDGE || z >= CHUNK_EDGE {
+            return 0;
+        }
         self.occupancy.get(Self::index(x, y, z)).copied().unwrap_or(0)
     }
+
+    /// Water occupancy at local cell `(x, y, z)` (or 0 if OOB).
+    #[inline]
+    pub fn water_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        if x >= CHUNK_EDGE || y >= CHUNK_EDGE || z >= CHUNK_EDGE {
+            return 0;
+        }
+        self.water.get(Self::index(x, y, z)).copied().unwrap_or(0)
+    }
+}
+
+/// [`DecodedChunk::index`] of the cell at linear index `roblox` of a chunk
+/// record, whose cells run in Roblox order: `y*1024 + z*32 + x`, X inner.
+#[inline]
+fn index_from_roblox_order(roblox: usize) -> usize {
+    let layer = CHUNK_EDGE * CHUNK_EDGE;
+    let (y, rest) = (roblox / layer, roblox % layer);
+    DecodedChunk::index(rest % CHUNK_EDGE, y, rest / CHUNK_EDGE)
 }
 
 /// Why a chunk failed to decode (kept as a string for log routing — the
@@ -196,41 +297,99 @@ impl std::fmt::Display for ChunkDecodeError {
 ///
 /// This mirrors the importer's `encode_eustress_chunk` inverse: LZ4
 /// size-prepended decompress, validate the 3-byte header, then read
-/// `CELLS_PER_CHUNK` `(material, occupancy)` byte pairs. Never panics; any
-/// malformed input is an `Err(ChunkDecodeError)` so the caller can skip the
-/// chunk and keep loading the rest.
+/// `CELLS_PER_CHUNK` `(material, occupancy)` byte pairs and, when the flags
+/// say one follows, the water plane. Never panics; any malformed input is an
+/// `Err(ChunkDecodeError)` so the caller can skip the chunk and keep loading
+/// the rest.
+///
+/// The LZ4 size prefix sizes the decompression buffer, so it is checked
+/// first: a record holds one of two lengths, and a corrupt prefix is refused
+/// before it can ask for a buffer of up to 4 GiB.
 pub fn decode_voxel_chunk(compressed: &[u8]) -> Result<DecodedChunk, ChunkDecodeError> {
+    let cells_end = CHUNK_HEADER_LEN + CELLS_PER_CHUNK * 2;
+    let Some(prefix) = compressed.get(..4) else {
+        return Err(ChunkDecodeError(format!(
+            "chunk record too short for its size prefix: {} byte(s)",
+            compressed.len()
+        )));
+    };
+    let claimed = u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
+    if claimed != cells_end && claimed != cells_end + CELLS_PER_CHUNK {
+        return Err(ChunkDecodeError(format!(
+            "chunk record claims {claimed} byte(s); a record holds {cells_end} or {}",
+            cells_end + CELLS_PER_CHUNK
+        )));
+    }
     let raw = lz4_flex::decompress_size_prepended(compressed)
         .map_err(|e| ChunkDecodeError(format!("lz4 decompress failed: {e}")))?;
     decode_voxel_chunk_raw(&raw)
 }
 
-/// Decode an ALREADY-DECOMPRESSED chunk record (header + cells). Split out
-/// so tests can build a tiny record without the LZ4 layer.
+/// Decode an ALREADY-DECOMPRESSED chunk record (header, cells, and the water
+/// plane when [`CHUNK_FLAG_WATER_PLANE`] is set). Split out so tests can
+/// build a record without the LZ4 layer.
+///
+/// Cells are reordered from the record's Roblox order into
+/// [`DecodedChunk`]'s (see the module docs), the water plane with them.
+/// Rejects a version outside [`MIN_EUSTRESS_CHUNK_VERSION`]`..=`
+/// [`EUSTRESS_CHUNK_VERSION`], a water-plane flag on a version 1 record, and
+/// a length that does not match the flags.
 pub fn decode_voxel_chunk_raw(raw: &[u8]) -> Result<DecodedChunk, ChunkDecodeError> {
-    let expected = CHUNK_HEADER_LEN + CELLS_PER_CHUNK * 2;
-    if raw.len() != expected {
+    if raw.len() < CHUNK_HEADER_LEN {
         return Err(ChunkDecodeError(format!(
-            "chunk record wrong length: {} (expected {expected} = {CHUNK_HEADER_LEN} header + {CELLS_PER_CHUNK}*2 cells)",
+            "chunk record too short for its {CHUNK_HEADER_LEN}-byte header: {} byte(s)",
             raw.len()
         )));
     }
     let version = raw[0];
-    if version != EUSTRESS_CHUNK_VERSION {
+    if !(MIN_EUSTRESS_CHUNK_VERSION..=EUSTRESS_CHUNK_VERSION).contains(&version) {
         return Err(ChunkDecodeError(format!(
-            "unsupported chunk version {version} (expected {EUSTRESS_CHUNK_VERSION})"
+            "unsupported chunk version {version} (expected {MIN_EUSTRESS_CHUNK_VERSION}..={EUSTRESS_CHUNK_VERSION})"
         )));
     }
-    // raw[1] = material_count (informational), raw[2] = flags — both unused
-    // here (the per-cell material id is authoritative).
-    let mut material = Vec::with_capacity(CELLS_PER_CHUNK);
-    let mut occupancy = Vec::with_capacity(CELLS_PER_CHUNK);
-    let cells = &raw[CHUNK_HEADER_LEN..];
-    for pair in cells.chunks_exact(2) {
-        material.push(pair[0]);
-        occupancy.push(pair[1]);
+    // raw[1] = material_count (informational). Of the flags only the plane
+    // bit shapes the record; the per-cell material id and water are
+    // authoritative over CHUNK_FLAG_WATER.
+    let flags = raw[2];
+    let has_plane = (flags & CHUNK_FLAG_WATER_PLANE) != 0;
+    if has_plane && version < FIRST_WATER_PLANE_VERSION {
+        return Err(ChunkDecodeError(format!(
+            "chunk version {version} cannot carry a water plane (flags {flags:#010b})"
+        )));
     }
-    Ok(DecodedChunk { material, occupancy })
+    let cells_end = CHUNK_HEADER_LEN + CELLS_PER_CHUNK * 2;
+    let expected = if has_plane { cells_end + CELLS_PER_CHUNK } else { cells_end };
+    if raw.len() != expected {
+        return Err(ChunkDecodeError(format!(
+            "chunk record wrong length: {} (expected {expected} = {CHUNK_HEADER_LEN} header + {CELLS_PER_CHUNK}*2 cells{})",
+            raw.len(),
+            if has_plane { format!(" + {CELLS_PER_CHUNK} water plane") } else { String::new() }
+        )));
+    }
+
+    let mut material = vec![AIR_MARKER; CELLS_PER_CHUNK];
+    let mut occupancy = vec![0; CELLS_PER_CHUNK];
+    for (roblox, pair) in raw[CHUNK_HEADER_LEN..cells_end].chunks_exact(2).enumerate() {
+        let i = index_from_roblox_order(roblox);
+        material[i] = pair[0];
+        occupancy[i] = pair[1];
+    }
+    let water = if has_plane {
+        let mut water = vec![0; CELLS_PER_CHUNK];
+        for (roblox, &amount) in raw[cells_end..].iter().enumerate() {
+            water[index_from_roblox_order(roblox)] = amount;
+        }
+        water
+    } else {
+        // Without a plane only lifted water holds water, its occupancy the
+        // amount.
+        material
+            .iter()
+            .zip(&occupancy)
+            .map(|(&cell_material, &cell_occupancy)| if cell_material == WATER_MARKER { cell_occupancy } else { 0 })
+            .collect()
+    };
+    Ok(DecodedChunk { material, occupancy, water })
 }
 
 // ---------------------------------------------------------------------------
@@ -336,29 +495,68 @@ pub fn column_top_surface(chunk: &DecodedChunk, x: usize, z: usize) -> Option<(u
 // ---------------------------------------------------------------------------
 
 /// A `TerrainConfig` sized so one voxel chunk maps to one terrain chunk and
-/// stored heights are raw WORLD studs (so `height_scale = 1.0` and
+/// stored heights are raw WORLD heights (so `height_scale = 1.0` and
 /// `height_offset = 0.0`).
 ///
-/// `radius_chunks` is the half-extent (in chunks) the cache should cover
-/// around the origin — derived by the engine loader from the voxel region
-/// bounds. `chunk_resolution = CHUNK_EDGE (32)` so there is one height
-/// sample per voxel cell column; `chunk_size = VOXEL_CHUNK_EDGE_STUDS (128)`
-/// so a chunk's world footprint equals a voxel chunk's.
-pub fn voxel_terrain_config(radius_chunks: u32) -> TerrainConfig {
+/// The chunk grid spans `center_chunk ± (half_x, half_z)` chunks: the load
+/// window the engine loader picks from the imported chunk columns.
+/// `cell_size` is one voxel cell's edge in metres, [`ROBLOX_CELL_STUDS`]
+/// studs of the unit the import was authored in (4 m in metres, 1.2192 m in
+/// feet). `chunk_resolution = CHUNK_EDGE (32)` so there is one height sample
+/// per voxel cell column; `chunk_size = CHUNK_EDGE * cell_size` so a chunk's
+/// world footprint equals a voxel chunk's, which [`voxel_cell_size`] reads
+/// back. The LOD distances and the view distance scale with the cell, so
+/// each LOD band spans as many chunks whatever the unit.
+pub fn voxel_terrain_config(center_chunk: IVec2, half_x: u32, half_z: u32, cell_size: f32) -> TerrainConfig {
+    let scale = cell_size / ROBLOX_CELL_STUDS;
     TerrainConfig {
-        chunk_size: VOXEL_CHUNK_EDGE_STUDS,
+        chunk_size: CHUNK_EDGE as f32 * cell_size,
         chunk_resolution: CHUNK_EDGE as u32,
-        chunks_x: radius_chunks,
-        chunks_z: radius_chunks,
+        chunks_x: half_x,
+        chunks_z: half_z,
+        center_chunk,
         lod_levels: 4,
-        lod_distances: vec![256.0, 512.0, 1024.0, 2048.0],
-        view_distance: 4096.0,
-        // Heights stored as raw studs, so `world_height` must be the
-        // identity: unit scale, zero offset.
+        lod_distances: [256.0_f32, 512.0, 1024.0, 2048.0].iter().map(|distance| distance * scale).collect(),
+        view_distance: 4096.0 * scale,
+        // Heights stored as raw world heights, so `world_height` must be
+        // the identity: unit scale, zero offset.
         height_scale: 1.0,
         height_offset: 0.0,
         seed: 0,
     }
+}
+
+/// Edge of one voxel cell in world units under a config from
+/// [`voxel_terrain_config`]: `chunk_size / CHUNK_EDGE`. Every placement of
+/// voxel cells in the world (positions, surface heights, water levels) goes
+/// through this; the cell and chunk indices themselves stay in voxel units.
+pub fn voxel_cell_size(config: &TerrainConfig) -> f32 {
+    config.chunk_size / CHUNK_EDGE as f32
+}
+
+/// Fill of a cell for surface placement: occupancy / 255 for a terrain
+/// material, 0 for air and lifted water.
+#[inline]
+fn cell_fill(material: u8, occupancy: u8) -> f32 {
+    if material == AIR_MARKER || material == WATER_MARKER {
+        0.0
+    } else {
+        occupancy as f32 / 255.0
+    }
+}
+
+/// Offset, in cells above the top solid cell's floor, where the 0.5 isovalue
+/// crosses between that cell (fill `f_top`, above 0.5) and the cell above it
+/// (fill `f_above`, at most 0.5). Cell centres sit at 0.5 and 1.5, so
+/// full-over-empty gives 1.0 (the cell's top face) and the offset stays
+/// within `0.5..=1.5`. Fills with no span between them (equal, or not
+/// finite) also give the top face, rather than a division by zero.
+pub fn isosurface_offset(f_top: f32, f_above: f32) -> f32 {
+    let span = f_top - f_above;
+    if !span.is_finite() || span <= f32::EPSILON {
+        return 1.0;
+    }
+    0.5 + ((f_top - 0.5) / span).clamp(0.0, 1.0)
 }
 
 /// Fill ONE voxel chunk's TOP-surface heights + materials into a
@@ -369,21 +567,28 @@ pub fn voxel_terrain_config(radius_chunks: u32) -> TerrainConfig {
 /// - `cx, cy, cz` are the voxel chunk's SIGNED coordinates (from the region
 ///   query / Morton key). The terrain grid is 2.5D, so the terrain chunk is
 ///   `(cx, cz)`; `cy` only contributes to the absolute world Y of the
-///   surface (a chunk stacked higher in Y raises its columns' studs).
-/// - For each `(x, z)` column, the highest solid cell's WORLD-Y top (in
-///   studs) goes into `height_cache`, and its material, as the built-in
-///   material slot of the same id, goes into `material_cache` alone. Air
-///   columns are left at height 0 (the cache's init value) and with no
-///   material ([`MATERIAL_SLOT_NONE`], which renders as Grass).
+///   surface (a chunk stacked higher in Y raises its columns).
+/// - For each `(x, z)` column, the WORLD-Y surface over the highest solid
+///   cell goes into `height_cache`, at the isosurface between that cell and
+///   the cell above it (see the module docs), in cells of the config's
+///   [`voxel_cell_size`]. On the chunk's top layer the cell above belongs to
+///   the chunk stacked on this one, so the surface is placed as if that cell
+///   were empty and [`VoxelColumns::refine_surface_tops`] finishes it once
+///   every chunk is in. The top cell's material, as the built-in material
+///   slot of the same id, goes into `material_cache` alone. Air columns
+///   write nothing, so a column no chunk gives a solid cell keeps no
+///   material ([`MATERIAL_SLOT_NONE`]): a hole (see the module docs).
+/// - A chunk off the config's chunk grid writes nothing.
 ///
-/// The height is stored in RAW STUDS and the config uses `height_scale =
-/// 1.0` with `height_offset = 0.0`, so the `TerrainConfig::world_height`
-/// conversion `generate_chunk_mesh` applies is the identity and yields the
-/// correct world Y with no normalization round-trip.
+/// The height is stored as a RAW world height and the config uses
+/// `height_scale = 1.0` with `height_offset = 0.0`, so the
+/// `TerrainConfig::world_height` conversion `generate_chunk_mesh` applies is
+/// the identity and yields the correct world Y with no normalization
+/// round-trip.
 ///
-/// Reuses [`super::toml_loader::write_chunk_to_cache`] for the height write
-/// (the exact `.r16`-path offset math) so the voxel surface lands at the
-/// same cache location the renderer reads back.
+/// Columns land where the config's chunk grid puts chunk `(cx, cz)` in the
+/// raster (`TerrainConfig::chunk_grid_index`), the cells the renderer reads
+/// back for that chunk.
 pub fn fill_terrain_from_chunk(
     data: &mut TerrainData,
     config: &TerrainConfig,
@@ -399,8 +604,9 @@ pub fn fill_terrain_from_chunk(
     ensure_material_sized(data);
 
     let resolution = config.chunk_resolution as usize; // == CHUNK_EDGE
-    // World-Y base of this voxel chunk's cell y==0, in studs.
-    let chunk_base_y = cy as f32 * VOXEL_CHUNK_EDGE_STUDS;
+    let cell_size = voxel_cell_size(config);
+    // Global index of this chunk's cell y == 0 (see `ColumnExtent`).
+    let base = cy.saturating_mul(CHUNK_EDGE as i32);
     let chunk_pos = IVec2::new(cx, cz);
 
     // The heightfield is 2.5D but the voxel grid is 3D: MANY chunks stack at
@@ -419,13 +625,24 @@ pub fn fill_terrain_from_chunk(
     for z in 0..resolution {
         for x in 0..resolution {
             let Some((top_y, mat_id)) = column_top_surface(chunk, x, z) else {
-                continue; // air column — leave any surface below it intact
+                continue; // air column: leave any surface below it intact
             };
-            // World-Y of the TOP of the top cell: base + (cell index + 1)
-            // cells worth of studs (a cell at y occupies [y, y+1) cells → its
-            // top face is (top_y + 1) cells up). Matches the importer's 4-stud
-            // cell so the surface sits on the cell's top face.
-            let world_top = chunk_base_y + (top_y as f32 + 1.0) * ROBLOX_CELL_STUDS;
+            let f_top = cell_fill(mat_id, chunk.occupancy_at(x, top_y, z));
+            // The cell above the top one. Past the chunk's top layer it lives
+            // in the chunk stacked above, which may not have arrived yet, so
+            // it counts as empty here and `refine_surface_tops` finishes the
+            // surface.
+            let f_above = if top_y + 1 < CHUNK_EDGE {
+                cell_fill(chunk.material_at(x, top_y + 1, z), chunk.occupancy_at(x, top_y + 1, z))
+            } else {
+                0.0
+            };
+            // World-Y of the surface: the isosurface's height in cells over
+            // global cell 0, one voxel cell each (a cell at y occupies
+            // [y, y+1) cells, so full over empty lands on the top cell's top
+            // face, `top_y + 1` cells up the chunk).
+            let top = base.saturating_add(top_y as i32);
+            let world_top = (top as f32 + isosurface_offset(f_top, f_above)) * cell_size;
             let Some(px) = cache_pixel(data, config, chunk_pos, x, z) else {
                 continue; // outside the sized cache
             };
@@ -448,9 +665,10 @@ pub fn fill_terrain_from_chunk(
 /// Linear `height_cache` index for one voxel column, or `None` when it falls
 /// outside the sized cache.
 ///
-/// Mirrors `toml_loader::write_chunk_to_cache`'s addressing. Uses checked
-/// conversion rather than `as usize`, so a chunk left of the cache origin is
-/// skipped instead of wrapping to a huge index.
+/// Addresses the raster through the config's chunk grid
+/// (`TerrainConfig::chunk_grid_index`), so a grid centred off the origin
+/// places each chunk where the renderer reads it, and a chunk off the grid
+/// is skipped rather than wrapped to some other index.
 fn cache_pixel(
     data: &TerrainData,
     config: &TerrainConfig,
@@ -460,10 +678,9 @@ fn cache_pixel(
 ) -> Option<usize> {
     let resolution = config.chunk_resolution as usize;
     let cache_width = data.cache_width as usize;
-    let ox = usize::try_from(chunk_pos.x + config.chunks_x as i32).ok()?;
-    let oz = usize::try_from(chunk_pos.y + config.chunks_z as i32).ok()?;
-    let px_x = ox * resolution + x;
-    let px_z = oz * resolution + z;
+    let grid = config.chunk_grid_index(chunk_pos)?;
+    let px_x = grid.x as usize * resolution + x;
+    let px_z = grid.y as usize * resolution + z;
     if px_x >= cache_width || px_z >= data.cache_height as usize {
         return None;
     }
@@ -494,8 +711,110 @@ fn ensure_material_sized(data: &mut TerrainData) {
     }
 }
 
+/// Give every hole of an imported raster a height, once every chunk has been
+/// filled in and [`VoxelColumns::refine_surface_tops`] has run. A hole is a
+/// column no chunk gave a solid cell, whose material stays
+/// [`MATERIAL_SLOT_NONE`]: a sparse-surface terrain draws no ground there,
+/// but its meshes still read neighbouring heights for their normals, and the
+/// water shader compares the water level with the ground under it.
+///
+/// A hole under water (a finite entry of `water_levels`, laid out like
+/// `height_cache` as [`voxel_water_levels`] builds it) sits one voxel cell
+/// ([`voxel_cell_size`]) below its water level. Any other hole takes the
+/// height of the nearest ground column in its raster row, the one before it
+/// on a tie, and a row without ground copies the nearest row that has some,
+/// the one before it on a tie. Materials stay as they are. Linear in the
+/// raster's cells.
+pub fn fill_hole_heights(config: &TerrainConfig, data: &mut TerrainData, water_levels: Option<&[f32]>) {
+    let (width, depth) = (data.cache_width as usize, data.cache_height as usize);
+    let cells = width * depth;
+    if cells == 0 || data.height_cache.len() != cells || data.material_cache.len() != cells {
+        return;
+    }
+    let cell_size = voxel_cell_size(config);
+    let water = water_levels.filter(|levels| levels.len() == cells);
+    let under_water = |i: usize| water.and_then(|levels| levels.get(i).copied()).filter(|level| level.is_finite());
+    let heights = &mut data.height_cache;
+    let materials = &data.material_cache;
+    let is_ground = |i: usize| materials[i][0] != MATERIAL_SLOT_NONE;
+
+    // Each hole of a row with ground takes the nearest ground column in it.
+    let mut ground_before: Vec<Option<usize>> = vec![None; width];
+    let mut row_has_ground = vec![false; depth];
+    for z in 0..depth {
+        let row = z * width;
+        let mut last = None;
+        for (x, before) in ground_before.iter_mut().enumerate() {
+            if is_ground(row + x) {
+                last = Some(x);
+            }
+            *before = last;
+        }
+        if last.is_none() {
+            continue;
+        }
+        row_has_ground[z] = true;
+        let mut after = None;
+        for x in (0..width).rev() {
+            let i = row + x;
+            if is_ground(i) {
+                after = Some(x);
+                continue;
+            }
+            if let Some(level) = under_water(i) {
+                heights[i] = level - cell_size;
+                continue;
+            }
+            let nearest = match (ground_before[x], after) {
+                (Some(before), Some(after)) => {
+                    if x - before <= after - x {
+                        before
+                    } else {
+                        after
+                    }
+                }
+                (Some(side), None) | (None, Some(side)) => side,
+                (None, None) => continue,
+            };
+            heights[i] = heights[row + nearest];
+        }
+    }
+
+    // A row without ground copies the nearest row with some, now filled.
+    let mut source: Vec<Option<usize>> = vec![None; depth];
+    let mut last = None;
+    for z in 0..depth {
+        if row_has_ground[z] {
+            last = Some(z);
+        }
+        source[z] = last;
+    }
+    let mut next = None;
+    for z in (0..depth).rev() {
+        if row_has_ground[z] {
+            next = Some(z);
+            continue;
+        }
+        source[z] = match (source[z], next) {
+            (Some(before), Some(after)) => Some(if z - before <= after - z { before } else { after }),
+            (before, after) => before.or(after),
+        };
+    }
+    for z in (0..depth).filter(|&z| !row_has_ground[z]) {
+        let row = z * width;
+        for x in 0..width {
+            let i = row + x;
+            if let Some(level) = under_water(i) {
+                heights[i] = level - cell_size;
+            } else if let Some(from) = source[z] {
+                heights[i] = heights[from * width + x];
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Caves: the air under each column's top surface, carved into the volume
+// Column extents: where each column is solid and holds water, across chunks
 // ---------------------------------------------------------------------------
 
 /// Where one voxel column is solid, across every chunk stacked on it. Cell
@@ -505,15 +824,19 @@ fn ensure_material_sized(data: &mut TerrainData) {
 pub struct ColumnExtent {
     /// Lowest solid cell.
     pub lowest: i32,
-    /// Highest solid cell. The heightfield surface sits on its top face.
+    /// Highest solid cell. The heightfield surface sits over it, at the
+    /// isosurface it makes with the cell above (see the module docs).
     pub highest: i32,
+    /// Occupancy of the highest solid cell, the fill that places the surface
+    /// over it.
+    pub top_occupancy: u8,
     /// Solid cells in the column.
     pub solid_cells: u32,
 }
 
 impl ColumnExtent {
     /// A column no chunk has put a solid cell in.
-    const NONE: Self = Self { lowest: i32::MAX, highest: i32::MIN, solid_cells: 0 };
+    const NONE: Self = Self { lowest: i32::MAX, highest: i32::MIN, top_occupancy: 0, solid_cells: 0 };
 
     /// Some cell between the lowest and the highest solid cell is not solid:
     /// the column runs through a cave, a tunnel or the space under an
@@ -523,25 +846,51 @@ impl ColumnExtent {
     }
 }
 
+/// Where one voxel column holds water, across every chunk stacked on it, in
+/// the global cells of [`ColumnExtent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaterExtent {
+    /// Highest cell holding water.
+    pub highest: i32,
+    /// Water occupancy of that cell, 1..=255.
+    pub occupancy: u8,
+}
+
+impl WaterExtent {
+    /// A column no chunk has put water in.
+    const NONE: Self = Self { highest: i32::MIN, occupancy: 0 };
+}
+
 /// Column extents of an import, gathered chunk by chunk, in any order, as
-/// the chunks are filled into the heightfield ([`Self::record_chunk`]).
-/// Kept per chunk column (12 KB each) rather than per voxel column, so a
-/// large import does not pay for a map entry per column.
+/// the chunks are filled into the heightfield ([`Self::record_chunk`]):
+/// where each column is solid, where it holds water, and the part-full cells
+/// of every chunk's bottom layer, which finish the surfaces under them
+/// ([`Self::refine_surface_tops`]). Kept per chunk column (16 KB each, 8 KB
+/// more for one holding water) rather than per voxel column, so a large
+/// import does not pay for a map entry per column; a bottom layer takes
+/// 1 KB, and only for a chunk that has a part-full bottom cell.
 #[derive(Debug, Default)]
 pub struct VoxelColumns {
     tiles: HashMap<IVec2, Box<[ColumnExtent; CHUNK_EDGE * CHUNK_EDGE]>>,
+    water: HashMap<IVec2, Box<[WaterExtent; CHUNK_EDGE * CHUNK_EDGE]>>,
+    /// By chunk coordinate: the occupancy of each bottom-layer cell that is
+    /// neither solid nor empty, 0 for every other cell.
+    bottom_fills: HashMap<IVec3, Box<[u8; CHUNK_EDGE * CHUNK_EDGE]>>,
 }
 
 impl VoxelColumns {
-    /// Fold the solid cells of the chunk at `cx, cy, cz` into the extents of
-    /// its columns.
+    /// Fold the chunk at `cx, cy, cz` into the extents of its columns: its
+    /// solid cells, its water, and the part-full cells of its bottom layer.
     pub fn record_chunk(&mut self, cx: i32, cy: i32, cz: i32, chunk: &DecodedChunk) {
         let base = cy.saturating_mul(CHUNK_EDGE as i32);
+        let mut bottom: Option<Box<[u8; CHUNK_EDGE * CHUNK_EDGE]>> = None;
         for z in 0..CHUNK_EDGE {
             for x in 0..CHUNK_EDGE {
+                let column = x + z * CHUNK_EDGE;
                 let mut lowest: Option<usize> = None;
                 let mut highest = 0usize;
                 let mut solid = 0u32;
+                let mut top_water: Option<(usize, u8)> = None;
                 for y in 0..CHUNK_EDGE {
                     if cell_is_solid(chunk.material_at(x, y, z), chunk.occupancy_at(x, y, z)) {
                         if lowest.is_none() {
@@ -550,18 +899,89 @@ impl VoxelColumns {
                         highest = y;
                         solid += 1;
                     }
+                    let water = chunk.water_at(x, y, z);
+                    if water > 0 {
+                        top_water = Some((y, water));
+                    }
+                }
+                // A part-full bottom cell is the cell above the top of the
+                // column in the chunk under this one, when that top is the
+                // chunk's top layer.
+                let (bottom_material, bottom_occupancy) = (chunk.material_at(x, 0, z), chunk.occupancy_at(x, 0, z));
+                if !cell_is_solid(bottom_material, bottom_occupancy) && cell_fill(bottom_material, bottom_occupancy) > 0.0 {
+                    bottom.get_or_insert_with(|| Box::new([0; CHUNK_EDGE * CHUNK_EDGE]))[column] = bottom_occupancy;
+                }
+                if let Some((y, amount)) = top_water {
+                    let tile = self
+                        .water
+                        .entry(IVec2::new(cx, cz))
+                        .or_insert_with(|| Box::new([WaterExtent::NONE; CHUNK_EDGE * CHUNK_EDGE]));
+                    let top = base.saturating_add(y as i32);
+                    if top > tile[column].highest {
+                        tile[column] = WaterExtent { highest: top, occupancy: amount };
+                    }
                 }
                 let Some(lowest) = lowest else { continue };
                 let tile = self
                     .tiles
                     .entry(IVec2::new(cx, cz))
                     .or_insert_with(|| Box::new([ColumnExtent::NONE; CHUNK_EDGE * CHUNK_EDGE]));
-                let extent = &mut tile[x + z * CHUNK_EDGE];
+                let extent = &mut tile[column];
+                let top = base.saturating_add(highest as i32);
+                if top > extent.highest {
+                    extent.highest = top;
+                    extent.top_occupancy = chunk.occupancy_at(x, highest, z);
+                }
                 extent.lowest = extent.lowest.min(base.saturating_add(lowest as i32));
-                extent.highest = extent.highest.max(base.saturating_add(highest as i32));
                 extent.solid_cells = extent.solid_cells.saturating_add(solid);
             }
         }
+        if let Some(bottom) = bottom {
+            self.bottom_fills.insert(IVec3::new(cx, cy, cz), bottom);
+        }
+    }
+
+    /// Finish the surfaces [`fill_terrain_from_chunk`] placed without the
+    /// cell above them: a column whose highest solid cell is the top layer of
+    /// its chunk has that cell in the chunk stacked on it, and when that cell
+    /// is part full (from that chunk's bottom layer) the surface rises to the
+    /// isosurface between the two. Call once every chunk has been filled into
+    /// `data` under `config` and recorded here; any other column keeps the
+    /// height the fill gave it.
+    pub fn refine_surface_tops(&self, data: &mut TerrainData, config: &TerrainConfig) {
+        let edge = CHUNK_EDGE as i32;
+        let cell_size = voxel_cell_size(config);
+        for (tile, extents) in &self.tiles {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    let column = x + z * CHUNK_EDGE;
+                    let extent = extents[column];
+                    if extent.solid_cells == 0 || extent.highest.rem_euclid(edge) != edge - 1 {
+                        continue;
+                    }
+                    let above = IVec3::new(tile.x, extent.highest.div_euclid(edge).saturating_add(1), tile.y);
+                    let f_above = self
+                        .bottom_fills
+                        .get(&above)
+                        .map_or(0.0, |cells| cells[column] as f32 / 255.0);
+                    if f_above <= 0.0 {
+                        continue;
+                    }
+                    let Some(px) = cache_pixel(data, config, *tile, x, z) else { continue };
+                    if !already_has_surface(data, px) {
+                        continue;
+                    }
+                    // The top cell is solid, so its fill is its occupancy.
+                    let f_top = extent.top_occupancy as f32 / 255.0;
+                    data.height_cache[px] = (extent.highest as f32 + isosurface_offset(f_top, f_above)) * cell_size;
+                }
+            }
+        }
+    }
+
+    /// Whether any recorded chunk holds water.
+    pub fn has_water(&self) -> bool {
+        !self.water.is_empty()
     }
 
     /// Extent of global voxel column `column` (`cx * 32 + x`, `cz * 32 + z`),
@@ -627,6 +1047,36 @@ impl VoxelColumns {
     }
 }
 
+/// World Y of the water surface over every raster cell of `data`, laid out
+/// and addressed like `height_cache` (through the pixel mapping
+/// [`fill_terrain_from_chunk`] writes with), `f32::NAN` where the column is
+/// dry. A column's surface sits at the fill of its highest cell holding
+/// water, `(cell + water / 255)` voxel cells ([`voxel_cell_size`]) up: the
+/// top face of a full water cell. Call once every chunk has been recorded in
+/// `columns`, with the `config` and `data` the chunks were filled into.
+pub fn voxel_water_levels(config: &TerrainConfig, data: &TerrainData, columns: &VoxelColumns) -> Vec<f32> {
+    let cell_size = voxel_cell_size(config);
+    let mut levels = vec![f32::NAN; data.height_cache.len()];
+    for (tile, extents) in &columns.water {
+        for z in 0..CHUNK_EDGE {
+            for x in 0..CHUNK_EDGE {
+                let extent = extents[x + z * CHUNK_EDGE];
+                if extent.occupancy == 0 {
+                    continue;
+                }
+                if let Some(px) = cache_pixel(data, config, *tile, x, z) {
+                    levels[px] = (extent.highest as f32 + extent.occupancy as f32 / 255.0) * cell_size;
+                }
+            }
+        }
+    }
+    levels
+}
+
+// ---------------------------------------------------------------------------
+// Caves: the air under each column's top surface, carved into the volume
+// ---------------------------------------------------------------------------
+
 /// Decoded voxel chunks by chunk coordinate, read as one grid of global
 /// cells. A cell of a chunk it does not hold reads as air, as a chunk
 /// missing from the store does.
@@ -675,9 +1125,10 @@ impl VoxelGrid {
 /// Maps lattice columns to the voxel columns the heightfield draws there.
 ///
 /// `TerrainData::sample_height` reads raster column `p * (W - 1) / W` at
-/// lattice point `p`, both counted from the terrain's first column, with `W`
-/// raster columns across. This takes the nearest whole column, so a feature
-/// one column wide keeps a column instead of being blended into two.
+/// lattice point `p`, both counted from the terrain's first column (the
+/// first of its first chunk, `TerrainConfig::chunk_min`), with `W` raster
+/// columns across. This takes the nearest whole column, so a feature one
+/// column wide keeps a column instead of being blended into two.
 #[derive(Clone, Copy, Debug)]
 struct RasterColumns {
     offset_x: i64,
@@ -692,9 +1143,10 @@ impl RasterColumns {
             return None;
         }
         let resolution = config.chunk_resolution as i64;
+        let first_chunk = config.chunk_min();
         Some(Self {
-            offset_x: config.chunks_x as i64 * resolution,
-            offset_z: config.chunks_z as i64 * resolution,
+            offset_x: -(first_chunk.x as i64) * resolution,
+            offset_z: -(first_chunk.y as i64) * resolution,
             width: data.cache_width as i64,
             depth: data.cache_height as i64,
         })
@@ -820,8 +1272,8 @@ pub struct VoxelCaveReport {
     pub bricks: usize,
 }
 
-/// Most layers one lattice tile carves (32 km of 4-stud cells): a column
-/// whose gap claims more is corrupt, and its tile is skipped.
+/// Most layers one lattice tile carves (32,768 studs of 4-stud cells): a
+/// column whose gap claims more is corrupt, and its tile is skipped.
 const MAX_CARVE_LAYERS: i64 = 8192;
 
 /// Carve the caves of an import into `volume`, after every chunk has been
@@ -855,7 +1307,8 @@ pub fn carve_voxel_caves(
 ) -> VoxelCaveReport {
     let mut report = VoxelCaveReport::default();
     let cell = lattice_cell_size(config);
-    let aligned = (cell - ROBLOX_CELL_STUDS).abs() <= ROBLOX_CELL_STUDS * 1e-4
+    let voxel_cell = voxel_cell_size(config);
+    let aligned = (cell - voxel_cell).abs() <= voxel_cell * 1e-4
         && config.chunk_resolution as usize == CHUNK_EDGE
         && config.resolution_for_lod(0) as usize == CHUNK_EDGE;
     let raster = RasterColumns::new(config, data);
@@ -1043,11 +1496,12 @@ mod tests {
     const GRASS: u8 = 0;
     const ROCK: u8 = 1;
 
-    /// Build a fully-air `DecodedChunk` (every cell air, occupancy 0).
+    /// Build a fully-air `DecodedChunk` (every cell air, occupancy 0, dry).
     fn air_chunk() -> DecodedChunk {
         DecodedChunk {
             material: vec![AIR_MARKER; CELLS_PER_CHUNK],
             occupancy: vec![0; CELLS_PER_CHUNK],
+            water: vec![0; CELLS_PER_CHUNK],
         }
     }
 
@@ -1058,13 +1512,85 @@ mod tests {
         chunk.occupancy[i] = 255;
     }
 
+    /// Set one cell's material, occupancy and water.
+    fn set_cell(chunk: &mut DecodedChunk, (x, y, z): (usize, usize, usize), material: u8, occupancy: u8, water: u8) {
+        let i = DecodedChunk::index(x, y, z);
+        chunk.material[i] = material;
+        chunk.occupancy[i] = occupancy;
+        chunk.water[i] = water;
+    }
+
+    /// Linear index of local cell `(x, y, z)` in a chunk record's cells:
+    /// Roblox order, X innermost, the order the importer writes.
+    fn roblox_index(x: usize, y: usize, z: usize) -> usize {
+        y * CHUNK_EDGE * CHUNK_EDGE + z * CHUNK_EDGE + x
+    }
+
+    /// A chunk record the way the importer writes it: the header, then each
+    /// cell's `(material, occupancy)` from `cell`, in Roblox order.
+    fn record(version: u8, flags: u8, cell: impl Fn(usize, usize, usize) -> (u8, u8)) -> Vec<u8> {
+        let mut raw = vec![version, 1, flags];
+        raw.resize(CHUNK_HEADER_LEN + CELLS_PER_CHUNK * 2, 0);
+        for y in 0..CHUNK_EDGE {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    let (material, occupancy) = cell(x, y, z);
+                    let at = CHUNK_HEADER_LEN + roblox_index(x, y, z) * 2;
+                    raw[at] = material;
+                    raw[at + 1] = occupancy;
+                }
+            }
+        }
+        raw
+    }
+
+    /// `raw` with a water plane appended, each cell's water from `water`, in
+    /// the cells' Roblox order.
+    fn with_plane(mut raw: Vec<u8>, water: impl Fn(usize, usize, usize) -> u8) -> Vec<u8> {
+        let start = raw.len();
+        raw.resize(start + CELLS_PER_CHUNK, 0);
+        for y in 0..CHUNK_EDGE {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    raw[start + roblox_index(x, y, z)] = water(x, y, z);
+                }
+            }
+        }
+        raw
+    }
+
+    /// The importer's water invariant: a cell holding both a solid material
+    /// and water (Roblox Shorelines) is never full of solid, and a pure water
+    /// cell's occupancy is its amount of water.
+    fn assert_importer_water_invariant(chunk: &DecodedChunk) {
+        for i in 0..CELLS_PER_CHUNK {
+            let (material, occupancy, water) = (chunk.material[i], chunk.occupancy[i], chunk.water[i]);
+            if material == WATER_MARKER {
+                assert_eq!(water, occupancy, "cell {i}: pure water holds its occupancy as water");
+            } else if material != AIR_MARKER && water > 0 {
+                assert!(occupancy < u8::MAX, "cell {i}: a Shorelines cell is never full of solid");
+            }
+        }
+    }
+
+    /// Raster index of local column `(x, z)` of chunk (0, 0) under a grid
+    /// centred on the origin.
+    fn pixel(config: &TerrainConfig, data: &TerrainData, x: usize, z: usize) -> usize {
+        let res = config.chunk_resolution as usize;
+        let off_x = config.chunks_x as usize * res;
+        let off_z = config.chunks_z as usize * res;
+        (off_z + z) * data.cache_width as usize + off_x + x
+    }
+
     #[test]
     fn constants_agree_with_worlddb_and_importer() {
         // CHUNK_EDGE * ROBLOX_CELL_STUDS must equal the worlddb chunk edge
-        // (128) or region queries place columns at the wrong world position.
+        // (128) or region queries key chunks wrongly.
         assert_eq!(VOXEL_CHUNK_EDGE_STUDS, 128.0);
         assert_eq!(CELLS_PER_CHUNK, 32_768);
         assert_eq!(CHUNK_HEADER_LEN, 3);
+        assert!((MIN_EUSTRESS_CHUNK_VERSION..=EUSTRESS_CHUNK_VERSION).contains(&FIRST_WATER_PLANE_VERSION));
+        assert_eq!(CHUNK_FLAG_WATER & CHUNK_FLAG_WATER_PLANE, 0, "the flags are distinct bits");
     }
 
     #[test]
@@ -1179,24 +1705,21 @@ mod tests {
     #[test]
     fn decode_roundtrips_an_importer_style_record() {
         // Build a record exactly like roblox-import's encode_eustress_chunk:
-        // 3-byte header + CELLS_PER_CHUNK (material, occupancy) pairs. Put a
-        // Grass surface cell at (0,0,0) and verify decode reproduces it.
-        let mut raw = vec![EUSTRESS_CHUNK_VERSION, 1u8, 0u8]; // version, mat_count, flags
-        let mut cells = vec![0u8; CELLS_PER_CHUNK * 2];
-        // Air-fill: material AIR_MARKER, occupancy 0.
-        for c in cells.chunks_exact_mut(2) {
-            c[0] = AIR_MARKER;
-            c[1] = 0;
-        }
-        // Cell (0,0,0): Grass, occupancy 255.
-        let idx0 = DecodedChunk::index(0, 0, 0);
-        cells[idx0 * 2] = GRASS;
-        cells[idx0 * 2 + 1] = 255;
-        raw.extend_from_slice(&cells);
+        // 3-byte header + CELLS_PER_CHUNK (material, occupancy) pairs, air
+        // everywhere but a Grass surface cell at (0,0,0), and verify decode
+        // reproduces it.
+        let raw = record(EUSTRESS_CHUNK_VERSION, 0, |x, y, z| {
+            if (x, y, z) == (0, 0, 0) {
+                (GRASS, 255)
+            } else {
+                (AIR_MARKER, 0)
+            }
+        });
 
         // Round-trip through the raw decoder.
         let decoded = decode_voxel_chunk_raw(&raw).expect("raw decode");
         assert_eq!(decoded.material.len(), CELLS_PER_CHUNK);
+        assert_eq!(decoded.water.len(), CELLS_PER_CHUNK);
         assert_eq!(decoded.material_at(0, 0, 0), GRASS);
         assert_eq!(decoded.occupancy_at(0, 0, 0), 255);
         assert_eq!(column_top_surface(&decoded, 0, 0), Some((0, GRASS)));
@@ -1211,6 +1734,8 @@ mod tests {
     fn decode_rejects_malformed_records_without_panicking() {
         // Too short.
         assert!(decode_voxel_chunk_raw(&[1, 0, 0]).is_err());
+        assert!(decode_voxel_chunk_raw(&[EUSTRESS_CHUNK_VERSION]).is_err());
+        assert!(decode_voxel_chunk_raw(&[]).is_err());
         // Right length, wrong version.
         let mut raw = vec![99u8, 0, 0];
         raw.extend(std::iter::repeat(0u8).take(CELLS_PER_CHUNK * 2));
@@ -1219,16 +1744,157 @@ mod tests {
         assert!(decode_voxel_chunk(&[0xff, 0xff, 0xff, 0xff, 0x00]).is_err());
     }
 
+    /// The importer writes cells X innermost; the decoder reorders them so
+    /// `material_at(x, y, z)` names the same cell the importer wrote there.
+    #[test]
+    fn cells_decode_from_the_records_roblox_order() {
+        let raw = record(MIN_EUSTRESS_CHUNK_VERSION, 0, |x, y, z| {
+            if (x, y, z) == (3, 5, 7) {
+                (ROCK, 255)
+            } else {
+                (AIR_MARKER, 0)
+            }
+        });
+        let chunk = decode_voxel_chunk_raw(&raw).expect("decodes");
+        assert!(cell_is_solid(chunk.material_at(3, 5, 7), chunk.occupancy_at(3, 5, 7)));
+        assert_eq!(chunk.material_at(7, 5, 3), AIR_MARKER, "x and z are not swapped");
+        assert_eq!(column_top_surface(&chunk, 3, 7), Some((5, ROCK)));
+        assert_eq!(column_top_surface(&chunk, 7, 3), None);
+    }
+
+    /// Ported from the importer owner's seam metric: across the seam between
+    /// two chunks side by side in X, a smooth slope steps no more than it
+    /// does between neighbouring columns inside either chunk.
+    ///
+    /// The slope rises a quarter cell per column in X and an eighth in Z.
+    /// With the cells in the importer's order the seam steps a quarter cell,
+    /// like the interior (ratio 1). Read with X and Z swapped, each chunk's
+    /// columns would hold its transpose: the seam would then join column
+    /// `z` of one chunk's first row to row 31 of the other, about 4.1 cells
+    /// apart, against interior X steps of an eighth (ratio about 33).
+    #[test]
+    fn a_slope_across_a_chunk_seam_steps_like_its_interior() {
+        // Top solid cell of global column (gx, gz).
+        let top = |gx: usize, gz: usize| 2 + (2 * gx + gz) / 8;
+        let chunk = |cx: usize| {
+            let raw = record(EUSTRESS_CHUNK_VERSION, 0, |x, y, z| {
+                if y <= top(cx * CHUNK_EDGE + x, z) {
+                    (ROCK, 255)
+                } else {
+                    (AIR_MARKER, 0)
+                }
+            });
+            decode_voxel_chunk_raw(&raw).expect("decodes")
+        };
+        let (west, east) = (chunk(0), chunk(1));
+        let height = |chunk: &DecodedChunk, x: usize, z: usize| {
+            column_top_surface(chunk, x, z).expect("every column has ground").0 as f32
+        };
+
+        let (mut seam, mut interior, mut interior_pairs) = (0.0f32, 0.0f32, 0usize);
+        for z in 0..CHUNK_EDGE {
+            seam += (height(&east, 0, z) - height(&west, CHUNK_EDGE - 1, z)).abs();
+            for chunk in [&west, &east] {
+                for x in 0..CHUNK_EDGE - 1 {
+                    interior += (height(chunk, x + 1, z) - height(chunk, x, z)).abs();
+                    interior_pairs += 1;
+                }
+            }
+        }
+        let seam_step = seam / CHUNK_EDGE as f32;
+        let interior_step = interior / interior_pairs as f32;
+        assert!(interior_step > 0.0, "the slope rises inside the chunks");
+        let ratio = seam_step / interior_step;
+        assert!(ratio < 1.5, "the seam steps {seam_step} cells against {interior_step} inside (ratio {ratio})");
+    }
+
+    #[test]
+    fn a_version_2_water_plane_decodes_in_the_cells_order() {
+        // A Shorelines cell (rock, part full, under water) with a pure water
+        // cell above it, as the importer writes them.
+        let raw = with_plane(
+            record(EUSTRESS_CHUNK_VERSION, CHUNK_FLAG_WATER | CHUNK_FLAG_WATER_PLANE, |x, y, z| {
+                match (x, y, z) {
+                    (2, 4, 9) => (ROCK, 200),
+                    (2, 5, 9) => (WATER_MARKER, 90),
+                    _ => (AIR_MARKER, 0),
+                }
+            }),
+            |x, y, z| match (x, y, z) {
+                (2, 4, 9) => 180,
+                (2, 5, 9) => 90,
+                _ => 0,
+            },
+        );
+        let chunk = decode_voxel_chunk_raw(&raw).expect("decodes");
+        assert_eq!(chunk.water_at(2, 4, 9), 180, "the plane gives the Shorelines cell its water");
+        assert_eq!(chunk.water_at(9, 4, 2), 0, "the plane is reordered with the cells");
+        assert_eq!(chunk.water_at(2, 5, 9), 90);
+        assert_eq!(chunk.material_at(2, 4, 9), ROCK);
+        assert_eq!(chunk.occupancy_at(2, 4, 9), 200);
+        assert_eq!(chunk.water_at(CHUNK_EDGE, 0, 0), 0, "out of bounds is dry");
+        assert_importer_water_invariant(&chunk);
+    }
+
+    #[test]
+    fn a_version_2_record_without_a_plane_decodes_like_version_1() {
+        let cells = |x: usize, y: usize, z: usize| -> (u8, u8) {
+            match (x, y, z) {
+                (1, 2, 3) => (GRASS, 255),
+                (1, 3, 3) => (WATER_MARKER, 120),
+                (4, 3, 5) => (ROCK, 140),
+                _ => (AIR_MARKER, 0),
+            }
+        };
+        let v1 = decode_voxel_chunk_raw(&record(MIN_EUSTRESS_CHUNK_VERSION, CHUNK_FLAG_WATER, cells)).expect("v1");
+        let v2 = decode_voxel_chunk_raw(&record(EUSTRESS_CHUNK_VERSION, CHUNK_FLAG_WATER, cells)).expect("v2");
+        assert_eq!(v1.material, v2.material);
+        assert_eq!(v1.occupancy, v2.occupancy);
+        assert_eq!(v1.water, v2.water);
+        // Without a plane, lifted water holds its occupancy as water and
+        // nothing else holds any.
+        assert_eq!(v2.water_at(1, 3, 3), 120);
+        assert_eq!(v2.water_at(4, 3, 5), 0);
+        assert_eq!(v2.water.iter().filter(|&&water| water > 0).count(), 1);
+        assert_importer_water_invariant(&v2);
+    }
+
+    #[test]
+    fn records_whose_flags_and_length_disagree_are_rejected() {
+        let air = |_: usize, _: usize, _: usize| (AIR_MARKER, 0u8);
+        let dry = |_: usize, _: usize, _: usize| 0u8;
+        // A version 1 record cannot carry a plane, with or without its bytes.
+        assert!(decode_voxel_chunk_raw(&with_plane(record(1, CHUNK_FLAG_WATER_PLANE, air), dry)).is_err());
+        assert!(decode_voxel_chunk_raw(&record(1, CHUNK_FLAG_WATER_PLANE, air)).is_err());
+        // The plane flag without the plane, and the plane without the flag.
+        assert!(decode_voxel_chunk_raw(&record(2, CHUNK_FLAG_WATER_PLANE, air)).is_err());
+        assert!(decode_voxel_chunk_raw(&with_plane(record(2, 0, air), dry)).is_err());
+        // One byte short or long.
+        let mut short = with_plane(record(2, CHUNK_FLAG_WATER_PLANE, air), dry);
+        short.pop();
+        assert!(decode_voxel_chunk_raw(&short).is_err());
+        let mut long = record(1, 0, air);
+        long.push(0);
+        assert!(decode_voxel_chunk_raw(&long).is_err());
+        // Versions outside the range this decoder reads.
+        assert!(decode_voxel_chunk_raw(&record(0, 0, air)).is_err());
+        assert!(decode_voxel_chunk_raw(&record(EUSTRESS_CHUNK_VERSION + 1, 0, air)).is_err());
+        // The well-formed ones decode.
+        assert!(decode_voxel_chunk_raw(&record(1, 0, air)).is_ok());
+        assert!(decode_voxel_chunk_raw(&with_plane(record(2, CHUNK_FLAG_WATER_PLANE, air), dry)).is_ok());
+    }
+
     #[test]
     fn fill_writes_top_surface_height_and_material() {
-        // A 1-radius terrain (chunks_x = chunks_z = 1 → 3×3 chunks).
-        let config = voxel_terrain_config(1);
-        assert_eq!(config.height_scale, 1.0, "voxel heights are raw studs");
-        assert_eq!(config.height_offset, 0.0, "raw studs need a zero offset");
+        // A 1-radius terrain (chunks_x = chunks_z = 1 → 3×3 chunks) of 4 m
+        // cells.
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
+        assert_eq!(config.height_scale, 1.0, "voxel heights are raw world heights");
+        assert_eq!(config.height_offset, 0.0, "raw world heights need a zero offset");
         let mut data = TerrainData::default();
 
         // Chunk at voxel coords (0, 0, 0). One Grass column at local (0,0):
-        // solid y=0..=3 → top cell y=3 → world top = (3+1)*4 = 16 studs.
+        // solid y=0..=3 → top cell y=3 → world top = (3+1)*4 = 16 m.
         let mut chunk = air_chunk();
         for y in 0..=3 {
             set_solid(&mut chunk, 0, y, 0, GRASS);
@@ -1244,7 +1910,7 @@ mod tests {
         let off_x = config.chunks_x as usize * res;
         let off_z = config.chunks_z as usize * res;
         let h = data.height_cache[off_z * cache_width + off_x];
-        assert_eq!(h, 16.0, "world-Y top of a 4-cell column is 16 studs");
+        assert_eq!(h, 16.0, "world-Y top of a 4-cell column is 16 m");
 
         // Material: Grass alone, its own slot.
         let px = off_z * cache_width + off_x;
@@ -1259,7 +1925,7 @@ mod tests {
     fn fill_writes_each_surface_material_by_its_own_id() {
         // Materials that share a colour family stay distinct: Rock, Snow and
         // three that sit beside them (Basalt, CrackedLava, Water).
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let res = config.chunk_resolution as usize;
         let cache_width_chunks = config.chunks_x as usize;
 
@@ -1299,9 +1965,9 @@ mod tests {
 
     #[test]
     fn fill_raises_columns_in_a_higher_y_chunk() {
-        // A voxel chunk at cy=1 sits 128 studs higher: a y=0 solid cell's
-        // world top is 128 + (0+1)*4 = 132 studs.
-        let config = voxel_terrain_config(1);
+        // A voxel chunk at cy=1 sits one chunk (128 m of 4 m cells) higher: a
+        // y=0 solid cell's world top is 128 + (0+1)*4 = 132 m.
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut data = TerrainData::default();
         let mut chunk = air_chunk();
         set_solid(&mut chunk, 0, 0, 0, GRASS);
@@ -1331,7 +1997,7 @@ mod tests {
     /// writing its tile unconditionally erased the real terrain to y=0.
     #[test]
     fn air_chunk_above_does_not_erase_the_surface_below() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut data = TerrainData::default();
 
         let mut ground = air_chunk();
@@ -1355,7 +2021,7 @@ mod tests {
     /// the store iterates Morton order, not ascending Y.
     #[test]
     fn highest_surface_wins_regardless_of_arrival_order() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut low = air_chunk();
         set_solid(&mut low, 0, 0, 0, GRASS);
         let mut high = air_chunk();
@@ -1384,7 +2050,7 @@ mod tests {
     /// possible" would clamp these columns up to 0.
     #[test]
     fn negative_surface_heights_survive_the_combine() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut data = TerrainData::default();
         let mut chunk = air_chunk();
         set_solid(&mut chunk, 0, 0, 0, GRASS);
@@ -1397,6 +2063,248 @@ mod tests {
             -252.0,
             "a genuinely negative height must not be clamped to 0"
         );
+    }
+
+    #[test]
+    fn the_isosurface_sits_where_the_fill_crosses_one_half() {
+        assert_eq!(isosurface_offset(1.0, 0.0), 1.0, "full over empty is the top face");
+        assert!((isosurface_offset(1.0, 0.4) - 4.0 / 3.0).abs() < 1e-4);
+        assert!((isosurface_offset(0.6, 0.0) - 2.0 / 3.0).abs() < 1e-4);
+        // Rising with either fill, and within half a cell of the top face.
+        let fills_top = [128.0 / 255.0, 0.6, 0.75, 0.9, 1.0];
+        let fills_above = [0.0, 0.1, 0.25, 0.4, 127.0 / 255.0];
+        for &f_top in &fills_top {
+            for pair in fills_above.windows(2) {
+                assert!(isosurface_offset(f_top, pair[0]) < isosurface_offset(f_top, pair[1]));
+            }
+            for &f_above in &fills_above {
+                assert!((0.5..=1.5).contains(&isosurface_offset(f_top, f_above)));
+            }
+        }
+        for &f_above in &fills_above {
+            for pair in fills_top.windows(2) {
+                assert!(isosurface_offset(pair[0], f_above) < isosurface_offset(pair[1], f_above));
+            }
+        }
+        // Fills with no span between them give the top face, not a division
+        // by zero.
+        assert_eq!(isosurface_offset(0.5, 0.5), 1.0);
+        assert_eq!(isosurface_offset(f32::NAN, 0.0), 1.0);
+    }
+
+    #[test]
+    fn part_full_cells_place_the_surface_between_whole_cells() {
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
+        let mut chunk = air_chunk();
+        // Column (0, 0): full cells 0..=2 under a part-full cell that is not
+        // solid (occupancy 100).
+        for y in 0..=2 {
+            set_solid(&mut chunk, 0, y, 0, GRASS);
+        }
+        set_cell(&mut chunk, (0, 3, 0), GRASS, 100, 0);
+        // Column (1, 0): full cells 0..=1 under a solid but part-full top
+        // cell (occupancy 200) with air above.
+        for y in 0..=1 {
+            set_solid(&mut chunk, 1, y, 0, GRASS);
+        }
+        set_cell(&mut chunk, (1, 2, 0), GRASS, 200, 0);
+        let mut data = TerrainData::default();
+        fill_terrain_from_chunk(&mut data, &config, 0, 0, 0, &chunk);
+
+        let top_face = 3.0 * ROBLOX_CELL_STUDS;
+        let raised = data.height_cache[pixel(&config, &data, 0, 0)];
+        assert!(raised > top_face, "a part-full cell above raises the surface ({raised}) past the top face");
+        assert!((raised - (2.0 + isosurface_offset(1.0, 100.0 / 255.0)) * ROBLOX_CELL_STUDS).abs() < 1e-4);
+        let lowered = data.height_cache[pixel(&config, &data, 1, 0)];
+        assert!(lowered < top_face, "a part-full top cell lowers the surface ({lowered}) under its top face");
+        assert!((lowered - (2.0 + isosurface_offset(200.0 / 255.0, 0.0)) * ROBLOX_CELL_STUDS).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_part_full_cell_in_the_chunk_above_raises_a_surface_at_the_chunk_top() {
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
+        // Columns (0, 0) and (1, 0) solid up to the top layer of chunk cy 0.
+        let mut below = air_chunk();
+        for y in 0..CHUNK_EDGE {
+            set_solid(&mut below, 0, y, 0, GRASS);
+            set_solid(&mut below, 1, y, 0, GRASS);
+        }
+        // Chunk cy 1 holds a part-full cell over column (0, 0) alone.
+        let mut above = air_chunk();
+        set_cell(&mut above, (0, 0, 0), GRASS, 100, 0);
+
+        let mut data = TerrainData::default();
+        let mut columns = VoxelColumns::default();
+        // The chunk above arrives first, as Morton order allows.
+        for (cy, chunk) in [(1, &above), (0, &below)] {
+            fill_terrain_from_chunk(&mut data, &config, 0, cy, 0, chunk);
+            columns.record_chunk(0, cy, 0, chunk);
+        }
+        let top_face = CHUNK_EDGE as f32 * ROBLOX_CELL_STUDS;
+        assert_eq!(
+            data.height_cache[pixel(&config, &data, 0, 0)],
+            top_face,
+            "the fill places the surface as if the cell above were empty"
+        );
+
+        columns.refine_surface_tops(&mut data, &config);
+        let raised = data.height_cache[pixel(&config, &data, 0, 0)];
+        let expected = (31.0 + isosurface_offset(1.0, 100.0 / 255.0)) * ROBLOX_CELL_STUDS;
+        assert!(raised > top_face, "the cell above raises the surface ({raised}) past the top face ({top_face})");
+        assert!((raised - expected).abs() < 1e-4, "the surface is at {raised}, not {expected}");
+        assert_eq!(data.height_cache[pixel(&config, &data, 1, 0)], top_face, "nothing above column (1, 0)");
+    }
+
+    #[test]
+    fn holes_take_the_nearest_ground_in_their_row_or_the_nearest_row_with_some() {
+        // A 5 x 3 raster: G is ground with its height, W a hole under water
+        // at level 7, the rest holes.
+        //   row 0:  G10  .   .  G20  .
+        //   row 1:   .   .   W   .   .
+        //   row 2:   .  G30  .   .   .
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
+        let mut data = TerrainData {
+            cache_width: 5,
+            cache_height: 3,
+            height_cache: vec![0.0; 15],
+            material_cache: vec![[MATERIAL_SLOT_NONE, MATERIAL_SLOT_NONE, 0, 0]; 15],
+            ..TerrainData::default()
+        };
+        for (i, height) in [(0, 10.0), (3, 20.0), (11, 30.0)] {
+            data.height_cache[i] = height;
+            data.material_cache[i] = material_cell(GRASS);
+        }
+        let mut water = vec![f32::NAN; 15];
+        water[7] = 7.0;
+        fill_hole_heights(&config, &mut data, Some(&water[..]));
+        // Row 1 has no ground: it copies row 0, the row before it on the tie
+        // with row 2, and its water hole sits one 4 m cell under its level.
+        let expected: Vec<f32> = vec![
+            10.0, 10.0, 20.0, 20.0, 20.0,
+            10.0, 10.0, 3.0, 20.0, 20.0,
+            30.0, 30.0, 30.0, 30.0, 30.0,
+        ];
+        assert_eq!(data.height_cache, expected);
+        assert_eq!(data.material_cache[1][0], MATERIAL_SLOT_NONE, "a hole keeps no material");
+        assert_eq!(data.material_cache[0], material_cell(GRASS));
+    }
+
+    #[test]
+    fn water_levels_sit_at_the_fill_of_each_columns_highest_water_cell() {
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
+        // Chunk (0, 0, 0): column (3, 4) holds full water in cells 0..=5
+        // under a part-full cell 6; column (8, 8) has rock under a Shorelines
+        // cell, part-full rock holding water.
+        let mut sea = air_chunk();
+        for y in 0..=5 {
+            set_cell(&mut sea, (3, y, 4), WATER_MARKER, 255, 255);
+        }
+        set_cell(&mut sea, (3, 6, 4), WATER_MARKER, 128, 128);
+        for y in 0..=2 {
+            set_solid(&mut sea, 8, y, 8, ROCK);
+        }
+        set_cell(&mut sea, (8, 3, 8), ROCK, 100, 200);
+        // Chunk (0, -1, 0): full water in the top cell of columns (3, 4) and
+        // (5, 5).
+        let mut deep = air_chunk();
+        set_cell(&mut deep, (3, 31, 4), WATER_MARKER, 255, 255);
+        set_cell(&mut deep, (5, 31, 5), WATER_MARKER, 255, 255);
+
+        let mut data = TerrainData::default();
+        let mut columns = VoxelColumns::default();
+        for (cy, chunk) in [(0, &sea), (-1, &deep)] {
+            fill_terrain_from_chunk(&mut data, &config, 0, cy, 0, chunk);
+            columns.record_chunk(0, cy, 0, chunk);
+        }
+        assert!(columns.has_water());
+        let levels = voxel_water_levels(&config, &data, &columns);
+        assert_eq!(levels.len(), data.height_cache.len(), "one level per raster cell");
+        let level = |x, z| levels[pixel(&config, &data, x, z)];
+        assert!((level(3, 4) - (6.0 + 128.0 / 255.0) * ROBLOX_CELL_STUDS).abs() < 1e-4, "the highest water cell wins");
+        assert!((level(8, 8) - (3.0 + 200.0 / 255.0) * ROBLOX_CELL_STUDS).abs() < 1e-4, "a Shorelines cell holds water");
+        assert_eq!(level(5, 5), 0.0, "a full water cell's surface is its top face");
+        assert!(level(0, 0).is_nan(), "a dry column has no level");
+        assert_eq!(levels.iter().filter(|level| level.is_finite()).count(), 3);
+
+        let mut dry = VoxelColumns::default();
+        dry.record_chunk(0, 0, 0, &air_chunk());
+        assert!(!dry.has_water());
+    }
+
+    #[test]
+    fn an_off_centre_grid_holds_its_centre_chunk_in_the_middle_of_the_raster() {
+        let center = IVec2::new(40, -10);
+        let config = voxel_terrain_config(center, 1, 1, ROBLOX_CELL_STUDS);
+        assert!(config.contains_chunk(center));
+        let mut chunk = air_chunk();
+        set_solid(&mut chunk, 0, 0, 0, GRASS);
+        let mut data = TerrainData::default();
+        assert_eq!(fill_terrain_from_chunk(&mut data, &config, center.x, 0, center.y, &chunk), center);
+
+        // 3 x 3 chunks of 32 columns: the middle one starts at column and
+        // row 32.
+        let width = data.cache_width as usize;
+        assert_eq!(width, 3 * CHUNK_EDGE);
+        let middle = CHUNK_EDGE * width + CHUNK_EDGE;
+        assert_eq!(data.height_cache[middle], ROBLOX_CELL_STUDS);
+        assert_eq!(data.material_cache[middle], material_cell(GRASS));
+
+        // A chunk off the grid (the origin's) writes nothing.
+        fill_terrain_from_chunk(&mut data, &config, 0, 0, 0, &chunk);
+        assert_eq!(data.material_cache.iter().filter(|cell| cell[0] != MATERIAL_SLOT_NONE).count(), 1);
+
+        // The lattice column at the chunk's first voxel column shows it.
+        let raster = RasterColumns::new(&config, &data).expect("a raster");
+        let first = center * CHUNK_EDGE as i32;
+        assert_eq!(raster.voxel_column(first), Some(first));
+    }
+
+    #[test]
+    fn an_import_in_feet_lays_its_cells_out_at_four_feet() {
+        use crate::units::Unit;
+        let config = voxel_terrain_config(IVec2::ZERO, 2, 2, ROBLOX_CELL_STUDS * Unit::Foot.to_meters() as f32);
+        assert!((config.chunk_size - 39.0144).abs() < 1e-4, "chunk size {}", config.chunk_size);
+        assert!((voxel_cell_size(&config) - 1.2192).abs() < 1e-5);
+        // The lattice pairs with the voxel cell in any unit, so caves carve.
+        assert!((lattice_cell_size(&config) - voxel_cell_size(&config)).abs() < 1e-6);
+        // Each LOD band and the view distance span as many chunks as in
+        // metres.
+        let metres = voxel_terrain_config(IVec2::ZERO, 2, 2, ROBLOX_CELL_STUDS);
+        for (feet, metre) in config.lod_distances.iter().zip(&metres.lod_distances) {
+            assert!((feet / config.chunk_size - metre / metres.chunk_size).abs() < 1e-4);
+        }
+        assert!((config.view_distance / config.chunk_size - metres.view_distance / metres.chunk_size).abs() < 1e-4);
+
+        // A column solid up to local y 9, air above, in chunk cy 0: its
+        // surface is 10 cells of 1.2192 m up.
+        let mut chunk = air_chunk();
+        for y in 0..=9 {
+            set_solid(&mut chunk, 0, y, 0, GRASS);
+        }
+        let mut data = TerrainData::default();
+        fill_terrain_from_chunk(&mut data, &config, 0, 0, 0, &chunk);
+        let height = data.height_cache[pixel(&config, &data, 0, 0)];
+        assert!((height - 10.0 * 1.2192).abs() < 1e-4, "the surface is at {height} m");
+    }
+
+    /// A Part and the terrain under it are authored in one unit, so once each
+    /// is converted a Part at stud X 1280 stands on the first column of voxel
+    /// chunk 10 (1280 studs = 10 chunks of 128).
+    #[test]
+    fn a_part_and_the_terrain_column_under_it_share_one_world_position() {
+        use crate::units::{authored_to_engine_f32, Unit};
+        let chunk = IVec2::new(10, 0);
+        let config = voxel_terrain_config(chunk, 1, 1, ROBLOX_CELL_STUDS * Unit::Foot.to_meters() as f32);
+        assert!(config.contains_chunk(chunk));
+        let part_x = authored_to_engine_f32(1280.0, Unit::Foot);
+        let column_x = crate::terrain::chunk_world_position(chunk, &config).x;
+        assert!((part_x - column_x).abs() < 1e-4, "the Part is at {part_x} m, the terrain column at {column_x} m");
+        // The volume lattice puts voxel column 320 at the same place, and the
+        // raster reads the chunk's first column there.
+        let lattice_x = (chunk.x * CHUNK_EDGE as i32) as f32 * voxel_cell_size(&config);
+        assert!((part_x - lattice_x).abs() < 1e-4, "the lattice column is at {lattice_x} m");
+        let (part_u, column_u) = (config.world_to_uv(part_x, 0.0).x, config.chunk_point_uv(chunk, 0.0, 0.0).x);
+        assert!((part_u - column_u).abs() < 1e-5, "the Part is at u {part_u}, the column at u {column_u}");
     }
 
     // -- Caves ----------------------------------------------------------------
@@ -1426,7 +2334,8 @@ mod tests {
 
     /// Fill, record and carve an import of `chunks` the way the engine
     /// loader runs it: every chunk into the heightfield first, then the
-    /// chunks `cave_chunks` names into the grid, then the carve.
+    /// surfaces over chunk seams, the water and the holes, then the chunks
+    /// `cave_chunks` names into the grid, then the carve.
     fn import(config: &TerrainConfig, chunks: &[(IVec3, DecodedChunk)]) -> (TerrainData, TerrainVolume, VoxelCaveReport) {
         let mut data = TerrainData::default();
         let mut columns = VoxelColumns::default();
@@ -1434,6 +2343,9 @@ mod tests {
             fill_terrain_from_chunk(&mut data, config, coord.x, coord.y, coord.z, chunk);
             columns.record_chunk(coord.x, coord.y, coord.z, chunk);
         }
+        columns.refine_surface_tops(&mut data, config);
+        let water = voxel_water_levels(config, &data, &columns);
+        fill_hole_heights(config, &mut data, Some(&water[..]));
         let wanted = columns.cave_chunks();
         let mut grid = VoxelGrid::default();
         for (coord, chunk) in chunks {
@@ -1451,8 +2363,9 @@ mod tests {
         // One lattice point per voxel cell on every axis: the carve needs no
         // resampling in size, only the raster offset `RasterColumns` handles.
         for radius in [1, 4, 64] {
-            let config = voxel_terrain_config(radius);
+            let config = voxel_terrain_config(IVec2::ZERO, radius, radius, ROBLOX_CELL_STUDS);
             assert_eq!(lattice_cell_size(&config), ROBLOX_CELL_STUDS);
+            assert_eq!(lattice_cell_size(&config), voxel_cell_size(&config));
             assert_eq!(config.resolution_for_lod(0) as usize, CHUNK_EDGE);
         }
     }
@@ -1461,7 +2374,7 @@ mod tests {
     fn a_two_span_column_carves_the_gap_between_its_spans() {
         // Rock ground in cells 0..=2 everywhere, and a grass slab in cells
         // 8..=10 over columns 2..=12, leaving the gap 3..=7 under it.
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 0..=CHUNK_EDGE - 1, 0..=2, ROCK);
         fill_box(&mut chunk, 2..=12, 8..=10, GRASS);
@@ -1507,7 +2420,7 @@ mod tests {
 
     #[test]
     fn open_ground_beside_a_cave_mouth_keeps_the_heightfield_colour() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 0..=CHUNK_EDGE - 1, 0..=2, ROCK);
         fill_box(&mut chunk, 2..=12, 8..=10, GRASS);
@@ -1527,7 +2440,7 @@ mod tests {
         // Rock ground in cells 0..=2 everywhere (its top face at 3 cells) and
         // a grass roof in cells 6..=7 over columns 4..=12, leaving a gap
         // three cells tall under it.
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let cell = lattice_cell_size(&config);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 0..=CHUNK_EDGE - 1, 0..=2, ROCK);
@@ -1552,7 +2465,7 @@ mod tests {
     fn a_one_wide_tunnel_keeps_its_half_cell_floor_and_its_width() {
         // Solid rock in cells 0..=10 everywhere except a tunnel one column
         // wide (x = 8) and two cells tall (3..=4) running along z 2..=12.
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let cell = lattice_cell_size(&config);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 0..=CHUNK_EDGE - 1, 0..=10, ROCK);
@@ -1577,7 +2490,7 @@ mod tests {
 
     #[test]
     fn the_carve_opens_the_gap_and_leaves_the_rest_of_the_field_alone() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 0..=CHUNK_EDGE - 1, 0..=2, ROCK);
         fill_box(&mut chunk, 2..=12, 8..=10, GRASS);
@@ -1611,7 +2524,7 @@ mod tests {
         // A slab floating over nothing has no open cell between its lowest
         // and highest solid cell, so nothing is carved and the heightfield
         // keeps reading it as solid all the way down.
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut chunk = air_chunk();
         fill_box(&mut chunk, 2..=12, 8..=10, GRASS);
         let (data, volume, report) = import(&config, &[(IVec3::ZERO, chunk)]);
@@ -1625,7 +2538,7 @@ mod tests {
         // Ground in cells 0..=29 of the chunk at cy 0 and a roof in cells
         // 4..=6 of the chunk above it (global 36..=38): the gap 30..=35
         // crosses global cell 32. The roof chunk arrives first.
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut ground = air_chunk();
         fill_box(&mut ground, 0..=CHUNK_EDGE - 1, 0..=29, ROCK);
         let mut roof = air_chunk();
@@ -1654,7 +2567,7 @@ mod tests {
             }
             // Chunk (-1, 2), local column (1, 1).
             let extent = columns.extent(IVec2::new(-31, 65)).expect("the column has solid cells");
-            assert_eq!(extent, ColumnExtent { lowest: 0, highest: 37, solid_cells: 5 });
+            assert_eq!(extent, ColumnExtent { lowest: 0, highest: 37, top_occupancy: 255, solid_cells: 5 });
             assert!(extent.has_gap());
             assert!(columns.extent(IVec2::new(-32, 64)).is_none(), "an all-air column has no extent");
             let wanted = columns.cave_chunks();
@@ -1664,7 +2577,7 @@ mod tests {
 
     #[test]
     fn lattice_columns_show_the_voxel_column_sample_height_draws() {
-        let config = voxel_terrain_config(1);
+        let config = voxel_terrain_config(IVec2::ZERO, 1, 1, ROBLOX_CELL_STUDS);
         let mut data = TerrainData::default();
         data.resize_cache(&config);
         let width = data.cache_width as i32;

@@ -4,10 +4,12 @@
 //! [`chunk_has_volume`]) is drawn by marching cubes over the terrain field
 //! instead of as one height per column, so its caves, overhangs and tunnels
 //! show. Every other chunk keeps the heightfield mesh, and so does a
-//! volumetric chunk at LOD 1 and coarser: caves are not drawn far away,
-//! where their openings cover a few pixels and marching a tall lattice for
-//! them would cost more than the rest of the distant ring together.
-//! [`generate_chunk_render_mesh`] makes that choice for every system that
+//! volumetric chunk of a full surface at LOD 1 and coarser: caves are not
+//! drawn far away, where their openings cover a few pixels and marching a
+//! tall lattice for them would cost more than the rest of the distant ring
+//! together. A sparse surface marches its volumetric chunks at every LOD
+//! (see Holes below). [`generate_chunk_render_mesh`] makes that choice (see
+//! [`chunk_marches`]) for every system that
 //! meshes a chunk; `collider.rs` makes the same one for colliders, which use
 //! this surface as a trimesh whatever LOD the chunk renders at.
 //!
@@ -15,19 +17,20 @@
 //!
 //! The field is evaluated on the chunk's LOD-0 vertex lattice
 //! (`chunk_resolution` cells per side, the same spacing on Y) through
-//! [`lattice_field_sample`], which is exactly
-//! [`sample_field_lattice`](super::volume::sample_field_lattice). Each
+//! [`lattice_field_sample`], which away from holes (see Holes below) is
+//! exactly [`sample_field_lattice`](super::volume::sample_field_lattice). Each
 //! lattice cell marches its own band of layers: the lowest to highest ground
 //! of its four corner columns and the Y extent of the bricks over them, plus
 //! [`MARCH_MARGIN_CELLS`] on both ends. Below the band every cube is solid
 //! throughout and above it air, so the work follows the surface rather than
 //! the chunk's whole relief, and the surface closes everywhere except along
-//! the chunk's four sides. Two cells sharing a face, in one chunk or in two,
-//! both march every lattice edge the surface crosses on it: such an edge
-//! lies within the ground and brick range of its two end columns, which are
-//! corners of both cells. A vertex sits where the field's linear
-//! interpolant crosses zero on a lattice edge, at a position local to the
-//! chunk entity computed exactly like the heightfield mesh's. Its normal is
+//! the chunk's four sides and at holes (see Holes below). Two cells sharing
+//! a face, in one chunk or in two, both march every lattice edge the surface
+//! crosses on it: such an edge lies within the ground and brick range of its
+//! two end columns, which are corners of both cells. A vertex sits where the
+//! field's linear interpolant crosses zero on a lattice edge, at a position
+//! local to the chunk entity computed exactly like the heightfield mesh's.
+//! Its normal is
 //! the field's central-difference gradient at the edge's two lattice points,
 //! interpolated to the vertex: a function of global lattice samples only, so
 //! a border vertex gets the same normal from both chunks.
@@ -57,6 +60,25 @@
 //! and coarser, or one whose march fell back. No skirt hangs where an edit
 //! touches the border, where a cave can cross into a marching-cubes
 //! neighbour and a skirt would hang across it.
+//!
+//! ## Holes
+//!
+//! On a sparse surface (`TerrainData::sparse_surface`) a lattice column that
+//! stands on a hole, judged at its LOD-0 vertex exactly as the heightfield
+//! mesher judges that vertex, has no ground: its heightfield term reads as
+//! far below every layer (`HOLE_GROUND`), so the column is air wherever no
+//! brick adds rock. A cell with a hole corner and no brick owning a point of
+//! its corner columns marches nothing, just as the heightfield mesher leaves
+//! out every quad with a hole corner, so both meshes keep the same ground
+//! and a brick set down over holes draws alone. A cell with such a brick
+//! marches its hole corners as air, which stands a wall under the ground on
+//! its hole side, marched down to the foot of its band and open below it.
+//! Gradients never take a difference across the rim of a hole, where the
+//! field changes from the heightfield's to the edits' alone, so the ground
+//! keeps its normals right up to the rim (and such a wall takes the ground's).
+//! Since the heightfield mesh draws nothing over hole columns, a volumetric
+//! chunk of a sparse surface marches at every LOD ([`chunk_marches`]), so
+//! the bricks over its holes stay drawn beyond the nearest LOD band.
 //!
 //! ## Tables
 //!
@@ -103,6 +125,12 @@ const MAX_MARCH_LAYERS: i64 = 256;
 /// and bakes a colour from the field at every vertex, and a trimesh collider
 /// builds a BVH and its edge topology.
 pub const VOLUMETRIC_CHUNK_COST: usize = 8;
+
+/// Ground height standing in for a lattice column on a hole of a sparse
+/// surface (see the module docs): so far below any layer a chunk marches that
+/// its heightfield term reads as air throughout the column, and a crossing
+/// between it and a solid point lands on the solid point.
+const HOLE_GROUND: f32 = -1.0e9;
 
 // ============================================================================
 // Tables
@@ -467,6 +495,9 @@ struct ColumnBands {
     stored: Vec<(u32, u32, usize)>,
     /// Per column: the ground height the heightfield term subtracts.
     ground: Vec<f32>,
+    /// Per column: whether it stands on a hole, its `ground` then
+    /// [`HOLE_GROUND`]. Empty when no column does.
+    holes: Vec<bool>,
     /// Global lattice Y of box layer 0.
     layer_base: i32,
     /// Lattice cell size.
@@ -529,9 +560,21 @@ impl LatticeField {
         }
     }
 
+    /// Whether box column `(p.x, p.z)` of a banded field stands on a hole
+    /// (see the module docs). Never in a field from [`Self::from_fn`].
+    #[inline]
+    fn column_is_hole(&self, p: UVec3) -> bool {
+        self.columns.as_ref().is_some_and(|bands| {
+            bands.holes.get(p.x as usize + self.dims.x as usize * p.z as usize).copied().unwrap_or(false)
+        })
+    }
+
     /// Central-difference gradient at `p`, in field units per lattice step,
-    /// one-sided on the faces of the box. Points from solid toward air.
+    /// one-sided on the faces of the box and at the rim of a hole, past which
+    /// the field is of the other kind (see the module docs). Points from solid
+    /// toward air.
     pub fn gradient(&self, p: UVec3) -> Vec3 {
+        let hole = self.column_is_hole(p);
         let mut gradient = Vec3::ZERO;
         for axis in 0..3 {
             let (mut lo, mut hi) = (p, p);
@@ -540,6 +583,14 @@ impl LatticeField {
             }
             if p[axis] + 1 < self.dims[axis] {
                 hi[axis] += 1;
+            }
+            if axis != 1 {
+                if self.column_is_hole(lo) != hole {
+                    lo = p;
+                }
+                if self.column_is_hole(hi) != hole {
+                    hi = p;
+                }
             }
             let span = hi[axis] - lo[axis];
             if span > 0 {
@@ -715,10 +766,14 @@ struct ChunkBands {
     z0: i32,
     /// Ground height of every column from `x0 - 1` to `x0 + cells + 1` (and
     /// the same on Z), `x` fastest: the chunk's vertex columns plus the ring
-    /// around them its gradients read.
+    /// around them its gradients read. [`HOLE_GROUND`] on a hole.
     ground: Vec<f32>,
+    /// Per column of `ground`: whether it stands on a hole. Empty when none
+    /// does.
+    holes: Vec<bool>,
     /// Per cell, `x` fastest: the global lattice layers `(lo, hi)` its corners
-    /// span, marched as the cubes `lo..hi`.
+    /// span, marched as the cubes `lo..hi`. A cell that marches nothing (a
+    /// hole corner and no brick over its corners) holds the empty `(0, 0)`.
     bands: Vec<(i32, i32)>,
 }
 
@@ -734,6 +789,10 @@ impl ChunkBands {
 /// owning a point of one of them, plus [`MARCH_MARGIN_CELLS`] on both ends.
 /// Below a band no brick reaches and the ground is more than the margin above
 /// every corner, so each cube there is solid throughout, and above it air.
+/// A corner on a hole has no ground to count. A cell with one marches nothing
+/// unless a brick owns a point of its corners; one that does marches the wall
+/// on its hole side down to the band's foot, where it stays open (see the
+/// module docs).
 ///
 /// `None` without a height raster (a terrain without one draws its chunks
 /// from noise the field does not see: the field reads the band floor there,
@@ -754,19 +813,35 @@ fn chunk_bands(
     let cell = lattice_cell_size(config);
     let x0 = chunk_pos.x.checked_mul(cells)?;
     let z0 = chunk_pos.y.checked_mul(cells)?;
+    // Only a sparse surface with a material layer can have holes.
+    let sparse = data.sparse_surface && !data.material_cache.is_empty();
 
     // Ground height of every padded column, looked up once per column.
     let side = (cells + 3) as usize;
     let mut ground = Vec::with_capacity(side * side);
+    let mut holes = Vec::with_capacity(if sparse { side * side } else { 0 });
     for k in -1..=cells + 1 {
         for i in -1..=cells + 1 {
-            let h = lattice_surface_height(config, data, x0 + i, z0 + k);
+            let (nx, nz) = (x0 + i, z0 + k);
+            if sparse {
+                let hole = lattice_column_is_hole(config, data, nx, nz);
+                holes.push(hole);
+                if hole {
+                    ground.push(HOLE_GROUND);
+                    continue;
+                }
+            }
+            let h = lattice_surface_height(config, data, nx, nz);
             if !h.is_finite() {
                 return None;
             }
             ground.push(h);
         }
     }
+    if !holes.contains(&true) {
+        holes = Vec::new();
+    }
+    let hole = |column: usize| holes.get(column).copied().unwrap_or(false);
 
     // Lattice layers the bricks over each vertex column own.
     let corners = (cells + 1) as usize;
@@ -789,15 +864,32 @@ fn chunk_bands(
         for i in 0..cells as usize {
             let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
             let mut bricks: Option<(i32, i32)> = None;
+            let mut on_hole = false;
             for (di, dk) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let h = ground[(k + dk + 1) * side + i + di + 1];
-                low = low.min(h);
-                high = high.max(h);
+                let column = (k + dk + 1) * side + i + di + 1;
+                if hole(column) {
+                    on_hole = true;
+                } else {
+                    let h = ground[column];
+                    low = low.min(h);
+                    high = high.max(h);
+                }
                 if let Some((lo, hi)) = brick_layers[(k + dk) * corners + i + di] {
                     bricks = Some(bricks.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
                 }
             }
-            let (mut lo, mut hi) = ((low / cell).floor() as i64, (high / cell).ceil() as i64);
+            // The heightfield mesher leaves a quad with a hole corner out, and
+            // so does this cell unless a brick reaches it.
+            if on_hole && bricks.is_none() {
+                bands.push((0, 0));
+                continue;
+            }
+            // Every corner on a hole leaves the bricks alone to span.
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            if low <= high {
+                lo = (low / cell).floor() as i64;
+                hi = (high / cell).ceil() as i64;
+            }
             if let Some((brick_lo, brick_hi)) = bricks {
                 lo = lo.min(brick_lo as i64);
                 hi = hi.max(brick_hi as i64);
@@ -817,7 +909,22 @@ fn chunk_bands(
             bands.push((lo as i32, hi as i32));
         }
     }
-    Some(ChunkBands { cells, x0, z0, ground, bands })
+    Some(ChunkBands { cells, x0, z0, ground, holes, bands })
+}
+
+/// Whether global lattice column `nx, nz` stands on a hole of a sparse
+/// surface. The column is the LOD-0 mesh vertex whose height
+/// [`lattice_surface_height`] reads, found with the same arithmetic, and it
+/// is judged there as the heightfield mesher judges that vertex
+/// (`TerrainData::point_is_hole`).
+fn lattice_column_is_hole(config: &TerrainConfig, data: &TerrainData, nx: i32, nz: i32) -> bool {
+    let resolution = config.resolution_for_lod(0).max(1);
+    let r = resolution as i32;
+    let (chunk_x, i) = (nx.div_euclid(r), nx.rem_euclid(r));
+    let (chunk_z, k) = (nz.div_euclid(r), nz.rem_euclid(r));
+    let u = i as f32 / resolution as f32;
+    let v = k as f32 / resolution as f32;
+    data.point_is_hole(config, IVec2::new(chunk_x, chunk_z), u, v)
 }
 
 /// The terrain field over one chunk's LOD-0 lattice, stored in the bands of
@@ -836,21 +943,29 @@ struct ChunkLattice {
     /// Per sample of `field`: whether its lattice point carries an edit.
     edited: Vec<bool>,
     /// Per cell, `x` fastest: the box layers `start..end` of the cubes it
-    /// marches.
+    /// marches, `(0, 0)` for a cell that marches none.
     bands: Vec<(u32, u32)>,
 }
 
 impl ChunkLattice {
     fn sample(chunk_pos: IVec2, config: &TerrainConfig, data: &TerrainData, volume: &TerrainVolume) -> Option<Self> {
-        let ChunkBands { cells, x0, z0, ground, bands } = chunk_bands(chunk_pos, config, data, volume, false)?;
+        let ChunkBands { cells, x0, z0, ground, holes, bands } = chunk_bands(chunk_pos, config, data, volume, false)?;
         let cell = lattice_cell_size(config);
-        let layer0 = bands.iter().map(|&(lo, _)| lo).min()?;
-        let last = bands.iter().map(|&(_, hi)| hi).max()?;
+        // The box spans the bands of the cells that march; a cell that
+        // marches nothing neither sizes it nor stores a sample.
+        let (layer0, last) = bands
+            .iter()
+            .filter(|&&(lo, hi)| lo < hi)
+            .fold(None, |span: Option<(i32, i32)>, &(lo, hi)| {
+                Some(span.map_or((lo, hi), |(low, high)| (low.min(lo), high.max(hi))))
+            })?;
         let layers = last - layer0 + 1;
         let side = (cells + 3) as usize;
         let dims = UVec3::new(side as u32, (layers + 2) as u32, side as u32);
-        let cube_bands: Vec<(u32, u32)> =
-            bands.iter().map(|&(lo, hi)| ((lo - layer0 + 1) as u32, (hi - layer0 + 1) as u32)).collect();
+        let cube_bands: Vec<(u32, u32)> = bands
+            .iter()
+            .map(|&(lo, hi)| if lo < hi { ((lo - layer0 + 1) as u32, (hi - layer0 + 1) as u32) } else { (0, 0) })
+            .collect();
 
         // A cell's corners are box columns `i + 1 ..= i + 2`, and their
         // gradients read one column further each way, so the cell reaches
@@ -859,6 +974,9 @@ impl ChunkLattice {
         for k in 0..cells as usize {
             for i in 0..cells as usize {
                 let (start, end) = cube_bands[k * cells as usize + i];
+                if start == end {
+                    continue;
+                }
                 let reads = (start - 1, end + 1);
                 for b in k..=k + 3 {
                     for a in i..=i + 3 {
@@ -902,7 +1020,7 @@ impl ChunkLattice {
                 }
             }
         }
-        let columns = ColumnBands { stored, ground, layer_base: layer0 - 1, cell };
+        let columns = ColumnBands { stored, ground, holes, layer_base: layer0 - 1, cell };
         Some(Self {
             cells: cells as u32,
             layer0,
@@ -958,6 +1076,13 @@ impl ChunkLattice {
             axis != 2 && p.z == 1,
             axis != 2 && p.z == last,
         ]
+    }
+
+    /// Whether `vertex` sits on a hole's side of its edge: the end nearer to
+    /// it lies in a column on a hole, where only bricks add rock, so the
+    /// heightfield term did not make it.
+    fn over_hole(&self, vertex: &EdgeVertex) -> bool {
+        self.field.column_is_hole(if vertex.t < 0.5 { vertex.point } else { vertex.end() })
     }
 }
 
@@ -1158,7 +1283,11 @@ pub fn build_volume_chunk_geometry(
         let local = lattice.local_position(config, vertex);
         let normal = lattice.field.edge_normal(vertex);
         let world = origin + local;
-        let (color, brick) = if sample_field_parts(config, data, volume, world).term() == FieldTerm::Heightfield {
+        // Over a hole the heightfield has nothing to make, whatever the
+        // heights the raster still holds there say.
+        let heightfield = !lattice.over_hole(vertex)
+            && sample_field_parts(config, data, volume, world).term() == FieldTerm::Heightfield;
+        let (color, brick) = if heightfield {
             // The same inputs the heightfield mesher feeds the shared
             // colouring, one LOD-0 step apart.
             let (world_u, world_v) = world_to_uv(config, world.x, world.z);
@@ -1228,14 +1357,32 @@ pub fn volume_chunk_triangles(
     Some((positions, triangles))
 }
 
-/// Whether `chunk_pos` renders at `lod` by marching cubes: at LOD 0 when
-/// bricks reach its columns. Coarser LODs keep the heightfield mesh.
+/// Whether `chunk_pos` renders at `lod` by marching cubes on a full surface:
+/// at LOD 0 when bricks reach its columns. Coarser LODs keep the heightfield
+/// mesh. The meshers go by [`chunk_marches`], which also knows sparse
+/// terrain.
 pub fn chunk_uses_marching_cubes(chunk_pos: IVec2, lod: u32, config: &TerrainConfig, volume: &TerrainVolume) -> bool {
     lod == 0 && !volume.is_empty() && chunk_has_volume(chunk_pos, config, volume)
 }
 
+/// Whether `chunk_pos` renders at `lod` by marching cubes: as
+/// [`chunk_uses_marching_cubes`] says, and at every LOD on a sparse terrain
+/// (`TerrainData::sparse_surface`) whenever bricks reach its columns. The
+/// heightfield mesh draws nothing over hole columns, so bricks there (fills
+/// over a cleared terrain, caves under an imported map) would otherwise
+/// vanish beyond the nearest LOD band.
+pub fn chunk_marches(
+    chunk_pos: IVec2,
+    lod: u32,
+    config: &TerrainConfig,
+    data: &TerrainData,
+    volume: &TerrainVolume,
+) -> bool {
+    (lod == 0 || data.sparse_surface) && !volume.is_empty() && chunk_has_volume(chunk_pos, config, volume)
+}
+
 /// The render mesh of `chunk_pos` at `lod`: marching cubes over the terrain
-/// field when [`chunk_uses_marching_cubes`], else the heightfield mesh.
+/// field when [`chunk_marches`], else the heightfield mesh.
 ///
 /// Every system that meshes a chunk (the initial fill, streaming, LOD
 /// changes, the dirty-chunk remesh) comes through here, or through
@@ -1250,7 +1397,7 @@ pub fn generate_chunk_render_mesh(
     volume: &TerrainVolume,
     meshes: &mut Assets<Mesh>,
 ) -> Handle<Mesh> {
-    if chunk_uses_marching_cubes(chunk_pos, lod, config, volume) {
+    if chunk_marches(chunk_pos, lod, config, data, volume) {
         if let Some(geometry) = build_volume_chunk_geometry(chunk_pos, config, data, volume) {
             return meshes.add(geometry.into_mesh());
         }
@@ -1269,7 +1416,7 @@ pub fn generate_chunk_render_mesh_and_surface(
     volume: &TerrainVolume,
     meshes: &mut Assets<Mesh>,
 ) -> (Handle<Mesh>, Option<(Vec<Vec3>, Vec<[u32; 3]>)>) {
-    if chunk_uses_marching_cubes(chunk_pos, lod, config, volume) {
+    if chunk_marches(chunk_pos, lod, config, data, volume) {
         if let Some(geometry) = build_volume_chunk_geometry(chunk_pos, config, data, volume) {
             let surface = geometry.surface_triangles();
             return (meshes.add(geometry.into_mesh()), Some(surface));
@@ -1301,7 +1448,7 @@ pub fn chunk_mesh_cost(
     data: &TerrainData,
     volume: &TerrainVolume,
 ) -> usize {
-    if chunk_uses_marching_cubes(chunk_pos, lod, config, volume) {
+    if chunk_marches(chunk_pos, lod, config, data, volume) {
         volume_chunk_cost(chunk_pos, config, data, volume)
     } else {
         1
@@ -1619,6 +1766,7 @@ mod tests {
             chunk_resolution: 16,
             chunks_x: 2,
             chunks_z: 2,
+            center_chunk: IVec2::ZERO,
             lod_levels: 2,
             lod_distances: vec![64.0, 128.0],
             view_distance: 512.0,
@@ -1971,6 +2119,15 @@ mod tests {
         assert!(!chunk_uses_marching_cubes(SHAFT_CHUNK, 1, &config, &volume), "caves are not drawn far away");
         assert!(!chunk_uses_marching_cubes(PLAIN_CHUNK, 0, &config, &volume));
         assert!(!chunk_uses_marching_cubes(SHAFT_CHUNK, 0, &config, &TerrainVolume::new()));
+        // A sparse terrain marches its volumetric chunks at every LOD, since
+        // its heightfield mesh draws nothing over holes.
+        let mut sparse = data.clone();
+        sparse.sparse_surface = true;
+        assert!(chunk_marches(SHAFT_CHUNK, 0, &config, &data, &volume));
+        assert!(!chunk_marches(SHAFT_CHUNK, 1, &config, &data, &volume), "a full surface draws far chunks by heightfield");
+        assert!(chunk_marches(SHAFT_CHUNK, 1, &config, &sparse, &volume));
+        assert!(!chunk_marches(PLAIN_CHUNK, 1, &config, &sparse, &volume));
+        assert!(!chunk_marches(SHAFT_CHUNK, 1, &config, &sparse, &TerrainVolume::new()));
 
         // A volumetric chunk costs the cubes its cell bands hold, per cell.
         let lattice = ChunkLattice::sample(SHAFT_CHUNK, &config, &data, &volume).expect("samples");
@@ -2086,5 +2243,115 @@ mod tests {
         let banded: usize = lattice.bands.iter().map(|&(start, end)| (end - start) as usize).sum();
         let whole_box = (cells * cells) as usize * (dims.y - 3) as usize;
         assert!(banded * 2 < whole_box, "{banded} banded cubes against {whole_box} in the whole box");
+    }
+
+    // ------------------------------------------------------------------
+    // Holes
+    // ------------------------------------------------------------------
+
+    const NO_MATERIAL: [u8; 4] = [crate::terrain::MATERIAL_SLOT_NONE, crate::terrain::MATERIAL_SLOT_NONE, 0, 0];
+
+    #[test]
+    fn a_brick_over_holes_draws_alone_in_its_own_material() {
+        let config = test_config();
+        let mut data = rolling_data(&config);
+        data.material_cache = vec![NO_MATERIAL; data.height_cache.len()];
+        data.sparse_surface = true;
+        // A block across the heights the raster still holds under the holes
+        // (about 11 to 21 m), inside chunk (0, 0).
+        let (center, half) = (Vec3::new(13.0, 15.0, 13.0), Vec3::splat(4.0));
+        let mut volume = TerrainVolume::new();
+        let edit = apply_box(&config, &mut volume, center, half, CsgOp::Add, Some(TerrainMaterial::Brick));
+        assert!(!edit.is_empty());
+        assert!(chunk_uses_marching_cubes(SHAFT_CHUNK, 0, &config, &volume));
+
+        let geometry = build_volume_chunk_geometry(SHAFT_CHUNK, &config, &data, &volume).expect("the block marches");
+        let origin = chunk_world_position(SHAFT_CHUNK, &config);
+        let cell = lattice_cell_size(&config);
+        for p in &geometry.positions {
+            let world = Vec3::from_array(*p) + origin;
+            let off = ((world - center).abs() - half).max_element();
+            assert!(off.abs() <= cell, "vertex {world} is off the block by {off}");
+        }
+        // Closed, like the block, and with no skirt: it reaches no chunk side.
+        assert_eq!(geometry.indices.len(), geometry.surface_index_count);
+        assert_eq!(euler_characteristic_of_closed(&geometry.indices), 2);
+        // The brick's material all over, below the raster's heights too.
+        let brick = brick_material_uv(Some(TerrainMaterial::Brick));
+        assert!(geometry.brick_uvs.iter().all(|uv| *uv == brick), "a vertex takes the heightfield's colour");
+        // The collider marches the same surface.
+        let (_, triangles) = volume_chunk_triangles(SHAFT_CHUNK, &config, &data, &volume).expect("marches");
+        assert_eq!(triangles.len() * 3, geometry.surface_index_count);
+
+        // On a full surface the same raster is ground around the block.
+        data.sparse_surface = false;
+        let full = build_volume_chunk_geometry(SHAFT_CHUNK, &config, &data, &volume).expect("marches");
+        assert!(full.brick_uvs.contains(&brick_material_uv(None)), "the ground is drawn");
+    }
+
+    #[test]
+    fn holes_drop_the_cells_they_touch_and_leave_the_ground_upright_to_the_rim() {
+        use crate::terrain::material::material_cell;
+        use crate::terrain::mesh::chunk_ground_quads;
+
+        // 64 m chunks at 32 cells, so the shaft's bricks own a quarter of
+        // chunk (0, 0) and holes can sit clear of them.
+        let config = TerrainConfig { chunk_size: 64.0, chunk_resolution: 32, ..test_config() };
+        let mut data = rolling_data(&config);
+        data.material_cache = vec![material_cell(TerrainMaterial::Grass.to_u8()); data.height_cache.len()];
+        data.sparse_surface = true;
+        let volume = shaft_volume(&config);
+        // Holes under the chunk's lattice columns 22..=26 on both axes.
+        let r = config.resolution_for_lod(0);
+        let w = data.cache_width as usize;
+        for k in 22..=26u32 {
+            for i in 22..=26u32 {
+                let uv = config.chunk_point_uv(SHAFT_CHUNK, i as f32 / r as f32, k as f32 / r as f32);
+                let (x, z) = data.cell_at_uv(uv.x.clamp(0.0, 1.0), uv.y.clamp(0.0, 1.0));
+                data.material_cache[z * w + x] = NO_MATERIAL;
+            }
+        }
+
+        let lattice = ChunkLattice::sample(SHAFT_CHUNK, &config, &data, &volume).expect("samples");
+        let surface = lattice.march();
+        let lowest = surface
+            .vertices
+            .iter()
+            .map(|vertex| lattice.local_position(&config, vertex).y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(lowest < -6.0, "the shaft is still drawn, lowest vertex {lowest}");
+
+        // Every triangle stands in a quad the heightfield mesh keeps too.
+        let kept = chunk_ground_quads(SHAFT_CHUNK, r, &config, &data).expect("the chunk has holes");
+        assert!(kept.contains(&false));
+        let cell = lattice_cell_size(&config);
+        let quad = |v: f32| ((v / cell).floor().max(0.0) as u32).min(r - 1);
+        for t in surface.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| lattice.local_position(&config, &surface.vertices[i as usize]));
+            if (b - a).cross(c - a).length() < 1e-4 {
+                continue;
+            }
+            let centre = (a + b + c) / 3.0;
+            let (qx, qz) = (quad(centre.x), quad(centre.z));
+            assert!(kept[(qz * r + qx) as usize], "a triangle at {centre} stands in dropped quad ({qx}, {qz})");
+        }
+
+        // Nothing crosses up a column on a hole, and the ground's normals
+        // beside one stay upright rather than leaning into the hole.
+        let beside_hole = |p: UVec3| {
+            [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                lattice.field.column_is_hole(UVec3::new((p.x as i32 + dx) as u32, p.y, (p.z as i32 + dz) as u32))
+            })
+        };
+        let mut rim = 0;
+        for vertex in surface.vertices.iter().filter(|vertex| vertex.axis == 1) {
+            assert!(!lattice.field.column_is_hole(vertex.point), "a crossing up a hole column at {}", vertex.point);
+            if beside_hole(vertex.point) {
+                rim += 1;
+                let normal = lattice.field.edge_normal(vertex);
+                assert!(normal.y > 0.7, "the rim normal at {} leans to {normal}", vertex.point);
+            }
+        }
+        assert!(rim > 0, "the ground at the rim is drawn");
     }
 }

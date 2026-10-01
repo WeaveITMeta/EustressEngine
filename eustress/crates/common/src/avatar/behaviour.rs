@@ -52,6 +52,7 @@ pub fn inject_test_intent(
 mod tests {
     use super::*;
     use crate::avatar::climb::{AvatarClimb, ClimbPhase};
+    use crate::avatar::climbable::ClimbSurfaces;
     use crate::avatar::grip::Grip;
     use eustress_avatar_schema::{resolve, NOMINAL_BIND_HEIGHT_M};
     use crate::avatar::spawn::{AvatarBody, AvatarLocomotion};
@@ -606,8 +607,9 @@ mod tests {
         #[derive(Resource, Default, Debug)]
         struct Found(Option<Vec3>, Option<Vec3>);
 
-        fn probe_system(spatial: SpatialQuery, mut out: ResMut<Found>) {
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
             let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
             let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
             let body = AvatarBody {
                 metrics,
@@ -624,7 +626,7 @@ mod tests {
                 standable: true,
                 kind: crate::avatar::grip::GripKind::Ledge,
             };
-            out.0 = crate::avatar::climb::probe_leap(&spatial, &filter, &g, &body, Vec3::X)
+            out.0 = crate::avatar::climb::probe_leap(&spatial, &filter, &rule, &g, &body, Vec3::X)
                 .map(|f| f.point);
             // From the FAR end of wall A, heading away from it, there is
             // nothing but open air and flat ground.
@@ -632,7 +634,7 @@ mod tests {
                 point: Vec3::new(-5.9, 1.9, -2.0),
                 ..g
             };
-            out.1 = crate::avatar::climb::probe_leap(&spatial, &filter, &edge, &body, Vec3::NEG_X)
+            out.1 = crate::avatar::climb::probe_leap(&spatial, &filter, &rule, &edge, &body, Vec3::NEG_X)
                 .map(|f| f.point);
         }
 
@@ -670,8 +672,9 @@ mod tests {
         #[derive(Resource, Default, Debug)]
         struct Found((f32, f32));
 
-        fn probe_system(spatial: SpatialQuery, mut out: ResMut<Found>) {
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
             let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
             let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
             let body = AvatarBody {
                 metrics,
@@ -689,7 +692,7 @@ mod tests {
                 kind: crate::avatar::grip::GripKind::Ledge,
             };
             let cfg = crate::avatar::climb::probe_config_for(&body, 0.0);
-            out.0 = crate::avatar::grip::edge_extent(&spatial, &filter, &g, &cfg, 6.0, 0.25);
+            out.0 = crate::avatar::grip::edge_extent(&spatial, &filter, &rule, &g, &cfg, 6.0, 0.25);
         }
 
         let mut app = world(AvatarHost::Client);
@@ -721,8 +724,9 @@ mod tests {
         #[derive(Resource, Default, Debug)]
         struct Found(Option<Vec3>, Option<Vec3>);
 
-        fn probe_system(spatial: SpatialQuery, mut out: ResMut<Found>) {
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
             let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
             let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
             let body = AvatarBody {
                 metrics,
@@ -739,10 +743,10 @@ mod tests {
                 kind: crate::avatar::grip::GripKind::Ledge,
             };
             // Above the shelf.
-            out.0 = crate::avatar::climb::probe_below(&spatial, &filter, &at(0.0), &body)
+            out.0 = crate::avatar::climb::probe_below(&spatial, &filter, &rule, &at(0.0), &body)
                 .map(|f| f.point);
             // Far along the same wall the face is sheer.
-            out.1 = crate::avatar::climb::probe_below(&spatial, &filter, &at(30.0), &body)
+            out.1 = crate::avatar::climb::probe_below(&spatial, &filter, &rule, &at(30.0), &body)
                 .map(|f| f.point);
         }
 
@@ -781,8 +785,9 @@ mod tests {
         #[derive(Resource, Default, Debug)]
         struct Out(Vec3, bool, Vec3, bool);
 
-        fn probe_system(spatial: SpatialQuery, mut out: ResMut<Out>) {
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Out>) {
             let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
             let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
             let body = AvatarBody {
                 metrics,
@@ -800,18 +805,20 @@ mod tests {
                 &mut tf,
                 Vec3::new(0.2, 2.0, 1.15),
                 &spatial,
+                &rule,
                 &shape,
                 &filter,
                 metrics.capsule_radius,
             );
             out.0 = tf.translation;
             out.1 = moved;
-            out.3 = crate::avatar::locomotion::capsule_fits(
+            out.3 = crate::avatar::locomotion::capsule_fits_where(
                 &spatial,
                 &shape,
                 tf.translation,
                 tf.rotation,
                 &filter,
+                &|_| true,
             );
             // Free space stays free: a clear move must still be reported clear.
             let mut clear_tf = Transform::from_translation(Vec3::new(0.0, 30.0, 0.0));
@@ -819,6 +826,7 @@ mod tests {
                 &mut clear_tf,
                 Vec3::new(0.0, 31.0, 0.0),
                 &spatial,
+                &rule,
                 &shape,
                 &filter,
                 metrics.capsule_radius,
@@ -872,12 +880,14 @@ mod tests {
         #[derive(Resource, Default, Debug)]
         struct Found(Option<Vec3>, bool);
 
-        fn probe_system(spatial: SpatialQuery, mut out: ResMut<Found>) {
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
             let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
             // Face at z = -2, ledge top at y = 0.55 near x = 0.
             out.0 = crate::avatar::ik::find_foothold(
                 &spatial,
                 &filter,
+                &rule,
                 Vec3::new(0.0, 0.0, -2.0),
                 Vec3::Z,
                 1.2,
@@ -888,6 +898,7 @@ mod tests {
             out.1 = crate::avatar::ik::find_foothold(
                 &spatial,
                 &filter,
+                &rule,
                 Vec3::new(20.0, 0.0, -2.0),
                 Vec3::Z,
                 1.2,
@@ -1030,4 +1041,333 @@ mod tests {
 
     }
 
+    // ── Gravity ────────────────────────────────────────────────────────────
+
+    /// The controller jumps and falls under the live gravity. Switched to the
+    /// Moon's after landing, a standing jump still peaks at its authored
+    /// height (Roblox's JumpHeight rule), stays up as long as that height
+    /// takes to fall at 1.62 m/s², and passes its slow apex without being
+    /// "rescued".
+    #[test]
+    fn a_jump_on_the_moon_peaks_at_its_height_and_hangs() {
+        const MOON: f32 = 1.62;
+        let mut app = world(AvatarHost::Client);
+        ground(&mut app);
+        spawn_at(&mut app, Vec3::new(0.0, 2.0, 0.0));
+        let start = settle(&mut app);
+        let apex = {
+            let w = app.world_mut();
+            let mut q = w.query_filtered::<&AvatarBody, With<SpawnedByAvatarRuntime>>();
+            q.iter(w).next().map(|b| b.motion.jump_apex_m).expect("no avatar")
+        };
+        app.insert_resource(Gravity(Vec3::NEG_Y * MOON));
+
+        app.world_mut().resource_mut::<TestIntent>().jump = true;
+        let mut peak = start.y;
+        let mut airborne_frames = 0;
+        // About 2.1 s in the air at 1.62 m/s²; 400 frames sees it land.
+        for _ in 0..400 {
+            app.update();
+            peak = peak.max(body_pos(&mut app).y);
+            if !loco(&mut app).grounded {
+                airborne_frames += 1;
+            }
+        }
+        let rise = peak - start.y;
+        assert!(
+            (rise - apex).abs() < 0.1 * apex,
+            "rose {rise:.2} m; a jump authored to peak at {apex:.2} m should peak there under {MOON} m/s²"
+        );
+        // Up and down again: twice the time `apex` takes to fall at 1.62 m/s².
+        let expected_frames = 2.0 * (2.0 * apex / MOON).sqrt() * 60.0;
+        assert!(
+            (airborne_frames as f32 - expected_frames).abs() < 0.15 * expected_frames,
+            "{airborne_frames} frames in the air; {expected_frames:.0} expected under {MOON} m/s²"
+        );
+        assert!(loco(&mut app).grounded, "never came back down: {:?}", body_pos(&mut app));
+    }
+
+    /// Running and sprinting stop at a person's top speed, and a walk is never
+    /// capped: Box Head (walk 8 m/s) sprints at 12.42, and a speed boost to
+    /// 20 m/s moves at 20 walking and sprinting alike. The paces are set the
+    /// way a script's WalkSpeed leaves them, with the run at the gait ratio.
+    #[test]
+    fn a_sprint_stops_at_human_top_speed_and_a_walk_is_never_capped() {
+        use eustress_avatar_schema::metrics::HUMAN_SPRINT_CAP_MPS;
+        fn steady_speed(walk: f32, sprint: bool) -> f32 {
+            let mut app = world(AvatarHost::Client);
+            ground(&mut app);
+            spawn_at(&mut app, Vec3::new(-30.0, 2.0, 0.0));
+            settle(&mut app);
+            {
+                let w = app.world_mut();
+                let mut q = w.query_filtered::<&mut AvatarBody, With<SpawnedByAvatarRuntime>>();
+                let mut body = q.iter_mut(w).next().expect("no avatar");
+                body.motion.walk_speed = walk;
+                body.motion.run_speed = walk * 3.9 / 1.45;
+            }
+            set_intent(&mut app, Vec3::X, sprint);
+            // Ground acceleration settles to within 0.1% in half a second.
+            step(&mut app, 60);
+            loco(&mut app).planar_speed
+        }
+        for (walk, sprint, expected) in [
+            (8.0, true, HUMAN_SPRINT_CAP_MPS),
+            (8.0, false, 8.0),
+            (20.0, true, 20.0),
+            (20.0, false, 20.0),
+        ] {
+            let speed = steady_speed(walk, sprint);
+            assert!(
+                (speed - expected).abs() < 0.03 * expected,
+                "walk {walk}, sprint {sprint}: moved at {speed:.2} m/s, expected {expected}"
+            );
+        }
+    }
+
+    /// A launch speed (Roblox's JumpPower under UseJumpPower) is the take-off
+    /// speed, so the jump peaks where that speed peaks under the live
+    /// gravity, whatever height the body was authored with.
+    #[test]
+    fn a_launch_speed_jump_peaks_where_its_speed_takes_it() {
+        const LAUNCH: f32 = 8.0;
+        let mut app = world(AvatarHost::Client);
+        ground(&mut app);
+        spawn_at(&mut app, Vec3::new(0.0, 2.0, 0.0));
+        let start = settle(&mut app);
+        let (apex, gravity) = {
+            let w = app.world_mut();
+            let gravity = -w.resource::<Gravity>().0.y;
+            let mut q = w.query_filtered::<&mut AvatarBody, With<SpawnedByAvatarRuntime>>();
+            let mut body = q.iter_mut(w).next().expect("no avatar");
+            body.motion.jump_speed_mps = Some(LAUNCH);
+            (body.motion.jump_apex_m, gravity)
+        };
+        let expected = LAUNCH * LAUNCH / (2.0 * gravity);
+        assert!(expected > 2.0 * apex, "the launch speed must out-jump the authored height");
+
+        app.world_mut().resource_mut::<TestIntent>().jump = true;
+        let mut peak = start.y;
+        for _ in 0..240 {
+            app.update();
+            peak = peak.max(body_pos(&mut app).y);
+        }
+        let rise = peak - start.y;
+        assert!(
+            (rise - expected).abs() < 0.1 * expected,
+            "rose {rise:.2} m; an {LAUNCH} m/s take-off under {gravity} m/s² peaks at {expected:.2} m"
+        );
+        assert!(loco(&mut app).grounded, "never came back down: {:?}", body_pos(&mut app));
+    }
+
+    /// Weightless, an airborne body that is not moving is floating, not
+    /// wedged: it is never counted as stuck, and it stays where it is rather
+    /// than falling or being "freed" somewhere else.
+    #[test]
+    fn a_weightless_body_floats_in_place() {
+        fn stuck_time(app: &mut App) -> f32 {
+            let w = app.world_mut();
+            let mut q = w.query_filtered::<&crate::avatar::locomotion::AvatarTimers, With<SpawnedByAvatarRuntime>>();
+            q.iter(w).next().map(|t| t.stuck_time).expect("no avatar")
+        }
+
+        let mut app = world(AvatarHost::Client);
+        app.insert_resource(Gravity(Vec3::ZERO));
+        ground(&mut app);
+        spawn_at(&mut app, Vec3::new(0.0, 3.0, 0.0));
+        step(&mut app, 5);
+        let start = body_pos(&mut app);
+        // Several times the wedge grace period.
+        for frame in 0..120 {
+            app.update();
+            assert_eq!(stuck_time(&mut app), 0.0, "frame {frame}: a floating body counted as wedged");
+        }
+        let p = body_pos(&mut app);
+        // A fall, or a rescue teleport (at least 0.24 m), would be far beyond this.
+        assert!(
+            (p - start).length() < 0.05,
+            "a motionless weightless body moved from {start:?} to {p:?}"
+        );
+        assert!(!loco(&mut app).grounded, "a body 3 m up reads as grounded");
+    }
+
+    // ── Balance ────────────────────────────────────────────────────────────
+
+    /// The arms go out on a beam, and only there: ground under the feet and
+    /// none a stride to either side. Walking the edge of a wide platform has
+    /// solid ground on one side and is not balancing.
+    #[test]
+    fn only_a_narrow_support_is_balanced_on() {
+        #[derive(Resource, Default, Debug)]
+        struct Found(Vec<bool>);
+
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
+            let filter = SpatialQueryFilter::default();
+            let rule = surfaces.for_climber(Entity::PLACEHOLDER);
+            let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
+            let body = AvatarBody {
+                metrics,
+                motion,
+                control: crate::avatar::AvatarControl::LocalPlayer,
+                metrics_finalised: false,
+            };
+            let narrow = |feet: Vec3| {
+                crate::avatar::ik::on_narrow_support(&spatial, &filter, &rule, feet, Vec3::X, &body)
+            };
+            out.0 = vec![
+                // On the beam, walking along it.
+                narrow(Vec3::new(0.0, 1.2, 0.0)),
+                // On the open ground.
+                narrow(Vec3::new(0.0, 0.0, 10.0)),
+                // At the edge of a wide platform, the drop on one side only.
+                narrow(Vec3::new(-10.05, 1.2, 0.0)),
+            ];
+        }
+
+        let mut app = world(AvatarHost::Client);
+        ground(&mut app);
+        // A beam 0.25 m wide along Z, its top at 1.2 m.
+        box_at(&mut app, Vec3::new(0.0, 0.6, 0.0), Vec3::new(0.25, 1.2, 8.0), Quat::IDENTITY);
+        // A platform 6 m wide, its edge at x = -10, top at 1.2 m.
+        box_at(&mut app, Vec3::new(-13.0, 0.6, 0.0), Vec3::new(6.0, 1.2, 8.0), Quat::IDENTITY);
+        app.init_resource::<Found>();
+        app.add_systems(Update, probe_system);
+        step(&mut app, 6);
+
+        let found = &app.world().resource::<Found>().0;
+        assert_eq!(found, &vec![true, false, false], "beam, open ground, platform edge");
+    }
+
+    // ── What can be climbed ────────────────────────────────────────────────
+
+    /// "I don't want to start climbing other characters or custom NPCs or
+    /// anything out of the ordinary by default ... just things you'd expect
+    /// to climb."
+    ///
+    /// Every lane holds the same 1.9 m block, the height the other tests
+    /// grab, and differs only in what the block IS. Each is probed exactly as
+    /// a character walking into it probes. The control lanes, a plain wall and
+    /// a capsule-shaped prop, must be grabbed, so a lane that is refused is
+    /// refused for what it is and not for its shape.
+    #[test]
+    fn only_what_you_would_expect_to_climb_is_grabbed() {
+        use crate::attributes::{AttributeValue, Attributes};
+        use crate::avatar::climbable::CLIMBABLE_ATTRIBUTE;
+        use crate::classes::{BasePart, ClassName, Humanoid, Instance};
+
+        const LANES: [(&str, bool); 13] = [
+            ("wall", true),
+            ("unanchored crate", false),
+            ("kinematic platform", false),
+            ("npc", false),
+            ("npc statue marked climbable", true),
+            ("wall inside a folder marked unclimbable", false),
+            ("invisible wall", false),
+            ("wall behind a trigger volume", true),
+            ("capsule-shaped prop", true),
+            ("another player", false),
+            ("crate marked climbable", true),
+            ("npc loaded from a space", false),
+            ("wall in a folder with a stray humanoid", true),
+        ];
+        let lane_x = |i: usize| i as f32 * 4.0 - 20.0;
+
+        #[derive(Resource, Default, Debug)]
+        struct Found(Vec<Option<Vec3>>);
+
+        fn probe_system(spatial: SpatialQuery, surfaces: ClimbSurfaces, mut out: ResMut<Found>) {
+            let (metrics, motion) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
+            let body = AvatarBody {
+                metrics,
+                motion,
+                control: crate::avatar::AvatarControl::LocalPlayer,
+                metrics_finalised: false,
+            };
+            let climber = Entity::PLACEHOLDER;
+            let rule = surfaces.for_climber(climber);
+            out.0 = (0..13)
+                .map(|i| {
+                    let at = Vec3::new(i as f32 * 4.0 - 20.0, body.metrics.capsule_half_extent(), 0.0);
+                    crate::avatar::climb::detect_ledge(&spatial, &rule, at, Vec3::NEG_Z, &body, climber)
+                        .map(|g| g.point)
+                })
+                .collect();
+        }
+
+        let mut app = world(AvatarHost::Client);
+        ground(&mut app);
+        let block = |x: f32| {
+            (
+                Transform::from_translation(Vec3::new(x, 0.95, -1.5)),
+                Collider::cuboid(1.5, 1.9, 2.0),
+            )
+        };
+        let marked = |b: bool| {
+            let mut a = Attributes::new();
+            a.set(CLIMBABLE_ATTRIBUTE, AttributeValue::Bool(b));
+            a
+        };
+        let w = app.world_mut();
+        w.spawn((block(lane_x(0)), RigidBody::Static));
+        w.spawn((block(lane_x(1)), RigidBody::Dynamic));
+        w.spawn((block(lane_x(2)), RigidBody::Kinematic));
+        // An NPC: a Model holding a Humanoid, its body a static part.
+        let npc = w.spawn(Transform::default()).id();
+        w.spawn((Humanoid::default(), ChildOf(npc)));
+        w.spawn((block(lane_x(3)), RigidBody::Static, ChildOf(npc)));
+        // The same, with the part marked climbable: a statue.
+        let statue = w.spawn(Transform::default()).id();
+        w.spawn((Humanoid::default(), ChildOf(statue)));
+        w.spawn((block(lane_x(4)), RigidBody::Static, marked(true), ChildOf(statue)));
+        // A plain wall whose folder says no.
+        let folder = w.spawn((Transform::default(), marked(false))).id();
+        w.spawn((block(lane_x(5)), RigidBody::Static, ChildOf(folder)));
+        w.spawn((block(lane_x(6)), RigidBody::Static, BasePart { transparency: 1.0, ..default() }));
+        // A trigger volume filling the space in front of an ordinary wall.
+        w.spawn((block(lane_x(7)), RigidBody::Static));
+        w.spawn((
+            Transform::from_translation(Vec3::new(lane_x(7), 0.95, -0.3)),
+            Collider::cuboid(1.5, 1.9, 0.4),
+            RigidBody::Static,
+            Sensor,
+        ));
+        // A capsule the size of a person, 0.45 m in front: a prop, and then a
+        // player. Nothing differs between them but who they are.
+        for (lane, player) in [(8, false), (9, true)] {
+            let mut e = w.spawn((
+                Transform::from_translation(Vec3::new(lane_x(lane), 0.875, -0.45)),
+                Collider::capsule(0.27, 1.21),
+                RigidBody::Static,
+            ));
+            if player {
+                e.insert(SpawnedByAvatarRuntime(()));
+            }
+        }
+        w.spawn((block(lane_x(10)), RigidBody::Dynamic, marked(true)));
+        // The same NPC as a loaded Space records it: its Humanoid is an
+        // instance of that class, not the component.
+        let loaded = w.spawn((Transform::default(), Instance { class_name: ClassName::Model, ..default() })).id();
+        w.spawn((Instance { class_name: ClassName::Humanoid, ..default() }, ChildOf(loaded)));
+        w.spawn((block(lane_x(11)), RigidBody::Static, ChildOf(loaded)));
+        // Only a Model is a character: a Humanoid left loose in a Folder, as
+        // imported places carry, leaves the wall beside it climbable.
+        let loose = w.spawn((Transform::default(), Instance { class_name: ClassName::Folder, ..default() })).id();
+        w.spawn((Instance { class_name: ClassName::Humanoid, ..default() }, ChildOf(loose)));
+        w.spawn((block(lane_x(12)), RigidBody::Static, ChildOf(loose)));
+
+        app.init_resource::<Found>();
+        app.add_systems(Update, probe_system);
+        step(&mut app, 6);
+
+        let found = &app.world().resource::<Found>().0;
+        assert_eq!(found.len(), LANES.len());
+        for ((name, want), got) in LANES.iter().zip(found) {
+            assert_eq!(got.is_some(), *want, "{name}: grabbed at {got:?}, expected grabbed = {want}");
+        }
+        // Through the trigger volume, onto the wall: its face is at z = -0.5.
+        // Taking hold of the trigger volume itself would put the hands on
+        // its front, 0.4 m nearer.
+        let through = found[7].expect("the wall behind the trigger volume");
+        assert!(through.z < -0.45, "held the trigger volume at {through:?}, not the wall behind it");
+    }
 }

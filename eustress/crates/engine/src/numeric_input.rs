@@ -54,7 +54,9 @@ impl NumericInputOwner {
     /// Human-readable unit suffix shown in the floating input.
     pub fn unit(self) -> &'static str {
         match self {
-            NumericInputOwner::Move   => "studs",
+            // The live label is `NumericInputState::unit_label`, which
+            // names the display unit.
+            NumericInputOwner::Move   => "m",
             NumericInputOwner::Scale  => "×",
             NumericInputOwner::Rotate => "°",
         }
@@ -96,7 +98,12 @@ pub struct NumericInputState {
     /// Parsed override if the buffer is a valid number. Tools consume
     /// this every frame while numeric entry is active so drag
     /// visualization shows the typed value rather than cursor position.
+    /// A Move distance is in metres, whatever unit it was typed in.
     pub override_value: Option<f32>,
+    /// For a Move entry, the status bar's display unit when typing began:
+    /// the unit of a number typed without one. `None` for Scale (a factor)
+    /// and Rotate (degrees).
+    pub length_unit: Option<eustress_common::units::Unit>,
 }
 
 impl NumericInputState {
@@ -107,11 +114,22 @@ impl NumericInputState {
         self.axis = None;
         self.relative = false;
         self.override_value = None;
+        self.length_unit = None;
     }
 
     fn reparse(&mut self) {
         self.relative = self.text.starts_with('+') || self.text.starts_with("-+");
-        self.override_value = parse_numeric_buffer(&self.text);
+        self.override_value = parse_numeric_buffer(&self.text, self.length_unit);
+    }
+
+    /// The unit the floating input shows beside the number: the display
+    /// unit for a Move distance, `×` for Scale, `°` for Rotate.
+    pub fn unit_label(&self) -> &'static str {
+        match self.owner {
+            Some(NumericInputOwner::Move) => self.length_unit.unwrap_or_default().symbol(),
+            Some(owner) => owner.unit(),
+            None => "",
+        }
     }
 }
 
@@ -120,11 +138,13 @@ impl NumericInputState {
 /// - `+2.5`        → 2.5 relative (leading `+` = delta from initial)
 /// - `-2.5`        → -2.5 absolute
 /// - `.5`          → 0.5
-/// - `2.5m` / `2.5 m`     → 2.5 studs (`m` is a synonym for studs in v1)
-/// - `2.5ft`       → 0.7620 studs  (0.3048 m per foot)
-/// - `2.5in`       → 0.0635 studs
-/// - `2.5cm`       → 0.025 studs
-/// - `2.5mm`       → 0.0025 studs
+/// - `2.5`         → 2.5 in the display unit, for a Move distance
+/// - `2.5m` / `2.5 m`     → 2.5 m
+/// - `2.5ft`       → 0.762 m
+/// - `2.5in`       → 0.0635 m
+/// - `2.5cm`       → 0.025 m
+/// - `2.5mm`       → 0.0025 m
+/// - `2 studs`     → 0.56 m (`Unit::Stud`, 0.28 m)
 /// - `90deg` / `90°`   → 90 degrees (Rotate tool consumes as-is)
 /// - `1.57rad`     → 89.954 degrees (converts to Rotate's display unit)
 /// - empty / just sign / just unit → None (no override yet)
@@ -135,7 +155,10 @@ impl NumericInputState {
 /// - `=sin(30deg)`     → 0.5
 /// - `=sqrt(2)`        → 1.4142
 /// - `=pi`             → 3.14159
-/// - `=2.5m + 30cm`    → 2.8 studs (unit math via conversion-to-studs)
+/// - `=2.5m + 30cm`    → 2.8 m. With no length unit anywhere in the
+///   expression, its result is in the display unit (`=2+3` with feet
+///   showing is 5 ft); with one, suffixed numbers convert to metres and
+///   plain numbers are plain factors (`=2m*3` is 6 m).
 ///
 /// Expression mode supports `+ - * /`, parentheses, `^` power,
 /// and functions `sin, cos, tan, asin, acos, atan, sqrt, abs, floor,
@@ -143,14 +166,17 @@ impl NumericInputState {
 /// unless an inner literal carries a `deg` suffix.
 ///
 /// Unit suffixes inside expressions are evaluated inline as multipliers.
-fn parse_numeric_buffer(text: &str) -> Option<f32> {
+fn parse_numeric_buffer(text: &str, length_unit: Option<eustress_common::units::Unit>) -> Option<f32> {
     if text.is_empty() { return None; }
     let trimmed = text.trim();
     if trimmed.is_empty() { return None; }
+    // Metres per plain number: the display unit for a Move distance, 1 otherwise.
+    let plain = length_unit.map_or(1.0, |u| u.to_meters() as f32);
 
     // Expression mode — the buffer starts with `=`.
     if let Some(expr) = trimmed.strip_prefix('=') {
-        return eval_expression(expr);
+        let (value, had_length_unit) = eval_expression_with_units(expr)?;
+        return Some(if had_length_unit { value } else { value * plain });
     }
 
     let t = trimmed.trim_start_matches('+');
@@ -175,22 +201,32 @@ fn parse_numeric_buffer(text: &str) -> Option<f32> {
     };
 
     let raw: f32 = num_part.parse().ok()?;
-    Some(raw * unit_multiplier(&unit_part))
+    Some(if unit_part.is_empty() { raw * plain } else { raw * unit_multiplier(&unit_part) })
 }
 
+/// Metres per unit for a length suffix, through `Unit` (a stud is
+/// `Unit::Stud`); degrees per unit for an angle suffix. An unknown suffix
+/// counts as 1, so a typo leaves the number as typed.
 fn unit_multiplier(unit: &str) -> f32 {
+    if let Some(m) = length_multiplier(unit) {
+        return m;
+    }
     match unit {
-        ""             => 1.0,
-        "m" | "stud" | "studs" => 1.0,
-        "cm"           => 0.01,
-        "mm"           => 0.001,
-        "km"           => 1000.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet"   => 0.3048,
-        "yd" | "yard" | "yards"  => 0.9144,
         "deg" | "°" | "degree" | "degrees" => 1.0,
         "rad" | "radian" | "radians" => 180.0 / std::f32::consts::PI,
         _ => 1.0,
+    }
+}
+
+/// Metres per unit when `unit` names a length, else `None`.
+fn length_multiplier(unit: &str) -> Option<f32> {
+    if let Some(u) = eustress_common::units::Unit::from_any(unit) {
+        return Some(u.to_meters() as f32);
+    }
+    match unit {
+        "km" => Some(1000.0),
+        "yd" | "yard" | "yards" => Some(0.9144),
+        _ => None,
     }
 }
 
@@ -293,19 +329,21 @@ fn refresh_property_ref_table(
 /// property system. No leading `=` required — the caller has
 /// already stripped it.
 pub fn parse_expression_public(src: &str) -> Option<f32> {
-    eval_expression(src)
+    eval_expression_with_units(src).map(|(value, _)| value)
 }
 
-fn eval_expression(src: &str) -> Option<f32> {
-    let mut p = ExprParser { src, pos: 0 };
+/// Evaluate an expression; also report whether any number in it carried a
+/// length unit.
+fn eval_expression_with_units(src: &str) -> Option<(f32, bool)> {
+    let mut p = ExprParser { src, pos: 0, had_length_unit: false };
     p.skip_ws();
     let v = p.parse_addsub()?;
     p.skip_ws();
     if p.pos < p.src.len() { return None; } // trailing garbage
-    v.is_finite().then_some(v)
+    v.is_finite().then_some((v, p.had_length_unit))
 }
 
-struct ExprParser<'a> { src: &'a str, pos: usize }
+struct ExprParser<'a> { src: &'a str, pos: usize, had_length_unit: bool }
 
 impl<'a> ExprParser<'a> {
     fn peek(&self) -> Option<char> { self.src[self.pos..].chars().next() }
@@ -439,9 +477,11 @@ impl<'a> ExprParser<'a> {
         while let Some(c) = self.peek() {
             if c.is_ascii_alphabetic() || c == '°' { self.bump(); } else { break; }
         }
-        let unit = &self.src[unit_start..self.pos];
-        let m = unit_multiplier(&unit.to_ascii_lowercase());
-        Some(base * m)
+        let unit = self.src[unit_start..self.pos].to_ascii_lowercase();
+        if length_multiplier(&unit).is_some() {
+            self.had_length_unit = true;
+        }
+        Some(base * unit_multiplier(&unit))
     }
 
     fn read_ident(&mut self) -> String {
@@ -566,6 +606,7 @@ fn detect_numeric_input_start(
     scale_state: Res<ScaleToolState>,
     rotate_state: Res<RotateToolState>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
 ) {
     if numeric.active {
         // Drain our reader so stale events don't trigger reactivation
@@ -622,6 +663,9 @@ fn detect_numeric_input_start(
     numeric.active = true;
     numeric.owner = Some(owner);
     numeric.axis = axis;
+    // A Move distance typed without a unit is in the display unit.
+    numeric.length_unit = (owner == NumericInputOwner::Move)
+        .then(|| display_unit.map(|d| d.get()).unwrap_or_default());
     numeric.anchor_x = ax;
     numeric.anchor_y = ay;
     // handle_numeric_input_keys picks up the starter char via its own
@@ -722,5 +766,55 @@ fn handle_numeric_input_keys(
 
     if dirty {
         numeric.reparse();
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use eustress_common::units::Unit;
+
+    fn close(a: Option<f32>, b: f32) -> bool {
+        a.is_some_and(|a| (a - b).abs() < 1e-5)
+    }
+
+    #[test]
+    fn two_studs_are_0_56_metres() {
+        assert!(close(parse_numeric_buffer("2 studs", Some(Unit::Meter)), 0.56));
+        assert!(close(parse_numeric_buffer("2stud", Some(Unit::Foot)), 0.56));
+    }
+
+    #[test]
+    fn a_plain_number_is_in_every_display_unit() {
+        for &unit in Unit::PICKABLE.iter() {
+            let expected = 2.0 * unit.to_meters() as f32;
+            assert!(close(parse_numeric_buffer("2", Some(unit)), expected), "{unit:?}");
+            assert!(close(parse_numeric_buffer("=1+1", Some(unit)), expected), "{unit:?} expression");
+        }
+    }
+
+    #[test]
+    fn a_typed_unit_wins_over_the_display_unit() {
+        for &unit in Unit::PICKABLE.iter() {
+            assert!(close(parse_numeric_buffer("2ft", Some(unit)), 0.6096), "{unit:?}");
+            assert!(close(parse_numeric_buffer("=2m + 30cm", Some(unit)), 2.3), "{unit:?}");
+            assert!(close(parse_numeric_buffer("=2m*3", Some(unit)), 6.0), "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn scale_and_rotate_take_plain_numbers() {
+        assert!(close(parse_numeric_buffer("2", None), 2.0));
+        assert!(close(parse_numeric_buffer("90deg", None), 90.0));
+    }
+
+    #[test]
+    fn the_move_label_names_the_display_unit() {
+        let state = NumericInputState {
+            owner: Some(NumericInputOwner::Move),
+            length_unit: Some(Unit::Foot),
+            ..Default::default()
+        };
+        assert_eq!(state.unit_label(), Unit::Foot.symbol());
     }
 }

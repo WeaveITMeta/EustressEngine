@@ -20,6 +20,9 @@
 //!   cargo run -p eustress-roblox-assets --bin rbx_import                  # all 47 (skips existing Spaces)
 //!   cargo run -p eustress-roblox-assets --bin rbx_import -- "Mobility"    # one universe
 //!   cargo run -p eustress-roblox-assets --bin rbx_import -- --clean       # re-import: trash-move existing Spaces first
+//!   rbx_import --place "Vehicle Simulator" --space "Vehicle Simulator Drive Test"
+//!                                          # one place into a named Space (universe from its row,
+//!                                          # or --universe <name>); leaves import_batch_report.json alone
 //!
 //! Env knobs (same as the engine's File→Import path):
 //!   EUSTRESS_ROBLOX_ASSET_DIR    local asset mirror tried before the network
@@ -107,13 +110,36 @@ const EUSTRESS_DIR: &str = r"C:\Users\miksu\Documents\Eustress";
 fn main() {
     let mut clean = false;
     let mut filter: Option<String> = None;
-    for arg in std::env::args().skip(1) {
-        if arg == "--clean" {
-            clean = true;
-        } else {
-            filter = Some(arg);
+    let (mut place, mut space_name, mut universe_name) = (None, None, None);
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--clean" => clean = true,
+            "--place" => place = args.next(),
+            "--space" => space_name = args.next(),
+            "--universe" => universe_name = args.next(),
+            _ => filter = Some(arg),
         }
     }
+    // One place into a named Space (`--place <stem> --space <name>`), or the
+    // whole table.
+    let one_place = place.is_some();
+    let places: Vec<(String, String, String)> = match place {
+        Some(stem) => {
+            let Some(space) = space_name else {
+                eprintln!("--place needs --space <name>: the Space to import into");
+                std::process::exit(2);
+            };
+            let universe = universe_name
+                .or_else(|| PLACES.iter().find(|(s, _, _)| *s == stem).map(|(_, u, _)| u.to_string()));
+            let Some(universe) = universe else {
+                eprintln!("--place {stem:?} is not in the table: give --universe <name>");
+                std::process::exit(2);
+            };
+            vec![(stem, universe, space)]
+        }
+        None => PLACES.iter().map(|(s, u, n)| (s.to_string(), u.to_string(), n.to_string())).collect(),
+    };
 
     let src = PathBuf::from(SRC_DIR);
     let eustress = PathBuf::from(EUSTRESS_DIR);
@@ -136,7 +162,7 @@ fn main() {
     let mut agg_unmapped: BTreeMap<String, u64> = BTreeMap::new();
     let mut agg_reasons: BTreeMap<String, u64> = BTreeMap::new();
 
-    for (stem, universe, space) in PLACES {
+    for (stem, universe, space) in &places {
         if let Some(f) = &filter {
             if universe != f {
                 continue;
@@ -154,10 +180,16 @@ fn main() {
             skipped += 1;
             continue;
         }
+        // The trashed copy, when --clean moved one: a rebuild's own work
+        // comes back from it after the import.
+        let mut trashed: Option<PathBuf> = None;
         if space_root.exists() {
             if clean {
                 match trash_move(&eustress.join(universe).join("Spaces"), space, &space_root) {
-                    Ok(to) => println!("  (moved old Space to {})", to.display()),
+                    Ok(to) => {
+                        println!("  (moved old Space to {})", to.display());
+                        trashed = Some(to);
+                    }
                     Err(e) => {
                         println!("FAIL (trash-move: {e})");
                         fail += 1;
@@ -241,6 +273,22 @@ fn main() {
                     "OK  ({} nodes, {} glb + {} tex + {} snd fetched, {} asset-warn)",
                     r.total_nodes_imported, meshes, textures, sounds, warn
                 );
+                // A rebuild's own work: its `Rebuild` folders and its patches
+                // to imported instances (`eustress_roblox_import::carry_over`).
+                if let Some(old) = &trashed {
+                    match eustress_roblox_import::carry_over::carry_over(old, &space_root) {
+                        Ok(c) if c.folders.is_empty()
+                            && c.patches_applied + c.patches_orphaned + c.patches_invalid == 0 => {}
+                        Ok(c) => println!(
+                            "  carried over: {} Rebuild folder(s), {} patch(es) applied, {} orphaned, {} invalid",
+                            c.folders.len(),
+                            c.patches_applied,
+                            c.patches_orphaned,
+                            c.patches_invalid
+                        ),
+                        Err(e) => println!("  CARRY-OVER FAILED: {e} (the old Space is intact in .trash)"),
+                    }
+                }
                 place_rows.push(serde_json::json!({
                     "universe": universe, "space": space, "ok": true,
                     "nodes": r.total_nodes_imported, "events": r.events_imported,
@@ -261,7 +309,8 @@ fn main() {
         }
     }
 
-    // Aggregate report → <Eustress>/import_batch_report.json
+    // Aggregate report → <Eustress>/import_batch_report.json (the whole
+    // batch's; a one-place run leaves it alone).
     let mut reasons: Vec<(&String, &u64)> = agg_reasons.iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(a.1));
     let aggregate = serde_json::json!({
@@ -278,10 +327,12 @@ fn main() {
             .collect::<Vec<_>>(),
     });
     let agg_path = eustress.join("import_batch_report.json");
-    let _ = std::fs::write(
-        &agg_path,
-        serde_json::to_string_pretty(&aggregate).unwrap_or_default(),
-    );
+    if !one_place {
+        let _ = std::fs::write(
+            &agg_path,
+            serde_json::to_string_pretty(&aggregate).unwrap_or_default(),
+        );
+    }
 
     println!("\n════════════════════════════════════════════");
     println!(" {ok} imported · {fail} failed · {skipped} skipped · {total_nodes} nodes");
@@ -299,7 +350,9 @@ fn main() {
             println!("   {space}: {why}");
         }
     }
-    println!(" aggregate report: {}", agg_path.display());
+    if !one_place {
+        println!(" aggregate report: {}", agg_path.display());
+    }
     println!("════════════════════════════════════════════");
     if fail > 0 {
         std::process::exit(1);
@@ -399,6 +452,7 @@ fn write_space_toml(space_root: &Path, name: &str) {
          author = \"Simbuilder\"\n\
          version = \"0.1.0\"\n\
          created_with = \"Eustress Engine (Roblox batch import)\"\n\
+         transform_rule = \"parent_pose\"\n\
          \n\
          [metadata]\n\
          created = \"2026-07-09T00:00:00.000000000+00:00\"\n\

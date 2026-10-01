@@ -506,23 +506,29 @@ fn disable_deformation_on_startup(mut config: ResMut<DeformationConfig>) {
 
 // ── plugin ───────────────────────────────────────────────────────────────
 
+/// Deformation is off in Edit mode, on as a Play session starts, and off
+/// again, every dent undone, as the session ends. A Pause is neither: it
+/// enters and exits Playing too, and undoing dents there healed them all.
+fn add_deformation_session_hooks(app: &mut App) {
+    app.add_systems(Startup, disable_deformation_on_startup)
+        .add_systems(crate::play_mode::session_start(), enable_deformation_on_play);
+    crate::play_mode::add_session_end_systems(
+        app,
+        (
+            disable_deformation_on_stop,
+            eustress_common::realism::deformation::systems::restore_all_deformables,
+        ),
+    );
+}
+
 /// Wires Avian collisions into the vertex-deformation pipeline and gates that
 /// pipeline to play sessions.
 pub struct DeformationBridgePlugin;
 
 impl Plugin for DeformationBridgePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, disable_deformation_on_startup)
-            .add_systems(OnEnter(PlayModeState::Playing), enable_deformation_on_play)
-            .add_systems(
-                OnExit(PlayModeState::Playing),
-                (
-                    disable_deformation_on_stop,
-                    eustress_common::realism::deformation::systems::restore_all_deformables,
-                )
-                    .chain(),
-            )
-            .add_systems(
+        add_deformation_session_hooks(app);
+        app.add_systems(
                 Update,
                 enable_collision_events_for_deformables.run_if(in_state(PlayModeState::Playing)),
             )
@@ -547,5 +553,40 @@ impl Plugin for DeformationBridgePlugin {
                     .in_set(PhysicsSystems::Last)
                     .run_if(in_state(PlayModeState::Playing)),
             );
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn go(app: &mut App, state: PlayModeState) {
+        app.world_mut().resource_mut::<NextState<PlayModeState>>().set(state);
+        app.update();
+    }
+
+    fn enabled(app: &App) -> bool {
+        app.world().resource::<DeformationConfig>().enabled
+    }
+
+    /// Deformation stays on through a Pause and Resume (switching it off
+    /// there undid every dent) and goes off as the session stops, from
+    /// Paused too.
+    #[test]
+    fn deformation_lasts_the_session_through_a_pause() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<PlayModeState>().init_resource::<DeformationConfig>();
+        add_deformation_session_hooks(&mut app);
+        app.update();
+        assert!(!enabled(&app), "off in Edit mode");
+        go(&mut app, PlayModeState::Playing);
+        assert!(enabled(&app));
+        go(&mut app, PlayModeState::Paused);
+        go(&mut app, PlayModeState::Playing);
+        assert!(enabled(&app), "a Pause and Resume leave it on");
+        go(&mut app, PlayModeState::Paused);
+        go(&mut app, PlayModeState::Editing);
+        assert!(!enabled(&app), "Stop from Paused switches it off");
     }
 }

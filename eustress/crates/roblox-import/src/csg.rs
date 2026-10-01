@@ -30,11 +30,14 @@
 //! in [`OBFUSCATION_KEY`].
 //!
 //! Three render-mesh versions exist in the wild:
-//! - **CSGMDL2** — plaintext body: a 32-byte hash, then `u32` vertex
+//! - **CSGMDL2**: a 32-byte hash, then `u32` vertex
 //!   count, a `u32` vertex-stride magic (84), `count` × 84-byte vertices
 //!   (pos f32×3, normal f32×3, color u8×4, normalId u32, uv f32×2, two
 //!   `u128` zero magics around a tangent f32×3), then `u32` index count
-//!   and `count/3` triangles of `u32×3`.
+//!   and `count/3` triangles of `u32×3`. The body is plaintext in some
+//!   blobs and XOR-obfuscated like CSGMDL4's in others: the `MeshData` of
+//!   the `PartOperationAsset` Roblox serves for a cloud union is
+//!   obfuscated. The stride magic tells the two apart.
 //! - **CSGMDL4** — CSGMDL2, XOR-obfuscated, plus a trailing `u32` list.
 //! - **CSGMDL5** — XOR-obfuscated, struct-of-arrays with quantised
 //!   normals/tangents and delta-encoded face indices (a small state
@@ -291,7 +294,13 @@ pub fn decode_mesh_data(blob: &[u8]) -> Result<CsgMesh, CsgError> {
     let magic: [u8; 10] = blob[..10].try_into().unwrap();
 
     if magic == csgmdl_magic(2) {
-        decode_csgmdl2(&blob[10..], false)
+        if csgmdl2_body_is_plaintext(&blob[10..]) {
+            decode_csgmdl2(&blob[10..], false)
+        } else {
+            let mut deob = blob[10..].to_vec();
+            deobfuscate(10, &mut deob);
+            decode_csgmdl2(&deob, true)
+        }
     } else if magic == csgmdl_magic(4) {
         decode_csgmdl4(&blob[10..])
     } else if magic == csgmdl_magic(5) {
@@ -317,6 +326,15 @@ fn decode_csgmdl2(body: &[u8], _obfuscated: bool) -> Result<CsgMesh, CsgError> {
     let mesh = read_mesh2(&mut cur)?;
     mesh.validate()?;
     Ok(mesh)
+}
+
+/// Whether a CSGMDL2 body (the bytes after the magic) is plaintext: its
+/// vertex-stride magic, after the 32-byte hash and the vertex count, reads
+/// 84 as stored. An obfuscated body reads 84 only once de-obfuscated.
+fn csgmdl2_body_is_plaintext(body: &[u8]) -> bool {
+    body.get(36..40)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) == 84)
+        .unwrap_or(false)
 }
 
 /// CSGMDL4: obfuscated CSGMDL2 + trailing u32 list. We de-obfuscate the
@@ -598,6 +616,19 @@ pub fn write_glb(path: &Path, mesh: &CsgMesh) -> std::io::Result<()> {
     std::fs::write(path, glb)
 }
 
+/// [`write_glb`] with a material: the mesh is unit-normalised the same way and
+/// the primitive draws with `material`.
+pub fn write_glb_with_material(
+    path: &Path,
+    mesh: &CsgMesh,
+    material: &GlbMaterial,
+) -> std::io::Result<()> {
+    let unit = to_unit_mesh(mesh);
+    let glb = encode_glb_with_material(&unit, Some(material))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(path, glb)
+}
+
 /// The bounding-box centre and the per-axis divisor [`to_unit_mesh`] uses.
 ///
 /// The divisor is the box's extent, except that a degenerate (flat) axis gets
@@ -656,8 +687,35 @@ pub fn to_unit_mesh(mesh: &CsgMesh) -> CsgMesh {
     out
 }
 
+/// A glTF material for [`encode_glb_with_material`]: one embedded base-colour
+/// image plus the PBR scalars. See `texture_bake` for how the importer fills it.
+#[derive(Debug, Clone)]
+pub struct GlbMaterial {
+    /// PNG or JPEG bytes, embedded in the glb's binary chunk.
+    pub image: Vec<u8>,
+    /// `image/png` or `image/jpeg`.
+    pub mime: &'static str,
+    /// Multiplies the image (RGBA).
+    pub base_color: [f32; 4],
+    /// glTF `roughnessFactor`.
+    pub roughness: f32,
+    /// glTF `metallicFactor`.
+    pub metallic: f32,
+    /// glTF alpha mode: `OPAQUE`, `MASK` (cut at 0.5) or `BLEND`.
+    pub alpha_mode: &'static str,
+}
+
 /// Encode `mesh` into glb bytes (testable without touching the FS).
 pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
+    encode_glb_with_material(mesh, None)
+}
+
+/// [`encode_glb`], plus an optional material that the primitive uses: its
+/// image goes into the binary chunk and becomes the base-colour texture.
+pub fn encode_glb_with_material(
+    mesh: &CsgMesh,
+    material: Option<&GlbMaterial>,
+) -> Result<Vec<u8>, CsgError> {
     mesh.validate()?;
     if mesh.is_empty() {
         return Err(CsgError::Malformed("cannot write empty mesh to glb".into()));
@@ -690,7 +748,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
     views.push(BufferView {
         byte_offset: idx_offset,
         byte_length: bin.len() - idx_offset,
-        target: 34963, // ELEMENT_ARRAY_BUFFER
+        target: Some(34963), // ELEMENT_ARRAY_BUFFER
     });
     let idx_accessor = accessors.len();
     accessors.push(Accessor {
@@ -719,7 +777,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
     views.push(BufferView {
         byte_offset: pos_offset,
         byte_length: bin.len() - pos_offset,
-        target: 34962, // ARRAY_BUFFER
+        target: Some(34962), // ARRAY_BUFFER
     });
     let pos_accessor = accessors.len();
     accessors.push(Accessor {
@@ -744,7 +802,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
         views.push(BufferView {
             byte_offset: off,
             byte_length: bin.len() - off,
-            target: 34962,
+            target: Some(34962),
         });
         normal_accessor = Some(accessors.len());
         accessors.push(Accessor {
@@ -770,7 +828,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
         views.push(BufferView {
             byte_offset: off,
             byte_length: bin.len() - off,
-            target: 34962,
+            target: Some(34962),
         });
         uv_accessor = Some(accessors.len());
         accessors.push(Accessor {
@@ -796,7 +854,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
         views.push(BufferView {
             byte_offset: off,
             byte_length: bin.len() - off,
-            target: 34962,
+            target: Some(34962),
         });
         color_accessor = Some(accessors.len());
         accessors.push(Accessor {
@@ -810,6 +868,23 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
         align4(&mut bin);
     }
 
+    // The material's image, if any, after the vertex data.
+    let image_view = match material {
+        Some(m) => {
+            let off = bin.len();
+            bin.extend_from_slice(&m.image);
+            let view = views.len();
+            views.push(BufferView {
+                byte_offset: off,
+                byte_length: m.image.len(),
+                target: None,
+            });
+            align4(&mut bin);
+            Some((view, m))
+        }
+        None => None,
+    };
+
     // ── Assemble the glTF JSON. ──
     let json = build_gltf_json(
         bin.len(),
@@ -820,6 +895,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
         normal_accessor,
         uv_accessor,
         color_accessor,
+        image_view,
     );
     let mut json_bytes = serde_json::to_vec(&json)
         .map_err(|e| CsgError::Malformed(format!("glTF json serialize: {e}")))?;
@@ -853,7 +929,9 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
 struct BufferView {
     byte_offset: usize,
     byte_length: usize,
-    target: u32,
+    /// `ARRAY_BUFFER` / `ELEMENT_ARRAY_BUFFER` for geometry; `None` for an
+    /// embedded image, which glTF requires to carry no target.
+    target: Option<u32>,
 }
 
 struct Accessor {
@@ -875,18 +953,22 @@ fn build_gltf_json(
     normal_accessor: Option<usize>,
     uv_accessor: Option<usize>,
     color_accessor: Option<usize>,
+    material: Option<(usize, &GlbMaterial)>,
 ) -> serde_json::Value {
     use serde_json::{json, Value};
 
     let views_json: Vec<Value> = views
         .iter()
         .map(|v| {
-            json!({
+            let mut view = json!({
                 "buffer": 0,
                 "byteOffset": v.byte_offset,
                 "byteLength": v.byte_length,
-                "target": v.target,
-            })
+            });
+            if let Some(target) = v.target {
+                view["target"] = json!(target);
+            }
+            view
         })
         .collect();
 
@@ -918,23 +1000,50 @@ fn build_gltf_json(
         attributes["COLOR_0"] = json!(c);
     }
 
-    json!({
+    let mut primitive = json!({
+        "attributes": attributes,
+        "indices": idx_accessor,
+        "mode": 4
+    });
+    if material.is_some() {
+        primitive["material"] = json!(0);
+    }
+
+    let mut root = json!({
         "asset": { "version": "2.0", "generator": "eustress-roblox-import CSG extractor" },
         "scene": 0,
         "scenes": [ { "name": "Scene0", "nodes": [0] } ],
         "nodes": [ { "name": "csg", "mesh": 0 } ],
         "meshes": [ {
             "name": "csg",
-            "primitives": [ {
-                "attributes": attributes,
-                "indices": idx_accessor,
-                "mode": 4
-            } ]
+            "primitives": [ primitive ]
         } ],
         "buffers": [ { "byteLength": bin_len } ],
         "bufferViews": views_json,
         "accessors": accessors_json,
-    })
+    });
+    if let Some((image_view, m)) = material {
+        let mut mat = json!({
+            "pbrMetallicRoughness": {
+                "baseColorTexture": { "index": 0 },
+                "baseColorFactor": m.base_color,
+                "metallicFactor": m.metallic,
+                "roughnessFactor": m.roughness
+            },
+            "alphaMode": m.alpha_mode
+        });
+        if m.alpha_mode == "MASK" {
+            mat["alphaCutoff"] = json!(0.5);
+        }
+        root["materials"] = json!([mat]);
+        root["images"] = json!([{ "bufferView": image_view, "mimeType": m.mime }]);
+        // Linear filtering with mipmaps, repeating: Roblox textures tile.
+        root["samplers"] = json!([{
+            "magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497
+        }]);
+        root["textures"] = json!([{ "sampler": 0, "source": 0 }]);
+    }
+    root
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,6 +1574,21 @@ mod tests {
         assert_eq!(mesh.uvs[2], [0.0, 1.0]);
     }
 
+    /// Cloud unions (`PartOperationAsset.MeshData`) carry CSGMDL2 with the
+    /// body obfuscated from byte 10, as CSGMDL4 is. Both forms decode alike.
+    #[test]
+    fn decode_csgmdl2_with_an_obfuscated_body() {
+        let plain = make_csgmdl2_triangle();
+        let mut obfuscated = plain.clone();
+        deobfuscate(10, &mut obfuscated[10..]);
+        assert!(!csgmdl2_body_is_plaintext(&obfuscated[10..]));
+        let a = decode_mesh_data(&plain).expect("plaintext body");
+        let b = decode_mesh_data(&obfuscated).expect("obfuscated body");
+        assert_eq!(a.positions, b.positions);
+        assert_eq!(a.indices, b.indices);
+        assert_eq!(b.positions[1], [1.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn csgk_is_detected_as_no_mesh() {
         let mut blob = b"CSGK".to_vec();
@@ -1657,6 +1781,35 @@ mod tests {
             other => panic!("expected Baked, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A textured glb embeds its image in an untargeted buffer view and points
+    /// the primitive at material 0, the one the engine loads as `Material0`.
+    #[test]
+    fn textured_glb_embeds_one_material() {
+        let mesh = aabb_box_mesh([1.0, 1.0, 1.0]);
+        let material = GlbMaterial {
+            image: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+            mime: "image/png",
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            roughness: 0.5,
+            metallic: 0.0,
+            alpha_mode: "OPAQUE",
+        };
+        let glb = encode_glb_with_material(&mesh, Some(&material)).expect("encode");
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let j: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).unwrap();
+        assert_eq!(j["meshes"][0]["primitives"][0]["material"], 0);
+        assert_eq!(j["materials"].as_array().unwrap().len(), 1);
+        assert_eq!(j["textures"][0]["source"], 0);
+        let view = j["images"][0]["bufferView"].as_u64().unwrap() as usize;
+        assert!(j["bufferViews"][view].get("target").is_none(), "image views carry no target");
+        assert_eq!(j["bufferViews"][view]["byteLength"], 7);
+        // An untextured glb has none of it.
+        let plain = encode_glb(&mesh).unwrap();
+        let plain_len = u32::from_le_bytes(plain[12..16].try_into().unwrap()) as usize;
+        let p: serde_json::Value = serde_json::from_slice(&plain[20..20 + plain_len]).unwrap();
+        assert!(p.get("materials").is_none());
     }
 
     /// Geometry that is not centred on its own origin is recentred: Roblox

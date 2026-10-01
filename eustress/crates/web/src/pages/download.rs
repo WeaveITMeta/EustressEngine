@@ -6,7 +6,7 @@
 // =============================================================================
 
 use leptos::prelude::*;
-use crate::components::{CentralNav, Footer};
+use crate::components::{use_player_release, CentralNav, Footer, PlayerPlatformButtons};
 
 // -----------------------------------------------------------------------------
 // Main Component
@@ -31,6 +31,8 @@ pub fn DownloadPage() -> impl IntoView {
     let mac_size = RwSignal::new(String::new());
     let linux_url = RwSignal::new(String::new());
     let linux_size = RwSignal::new(String::new());
+    // The Player has its own release and its own manifest, player/latest.json.
+    let player_release = use_player_release();
     let platforms_line = move || match (!mac_url.get().is_empty(), !linux_url.get().is_empty()) {
         (true, true) => "Available for Windows, macOS and Linux.",
         (true, false) => "Available for Windows and macOS. Linux is coming soon.",
@@ -204,7 +206,28 @@ pub fn DownloadPage() -> impl IntoView {
                     </div>
                 </Show>
             </section>
-            
+
+            // Eustress Player: what plays the simulations Eustress Engine
+            // makes. Open to everyone, like the Player page and the Play
+            // dialog on a simulation's page; only the Engine asks for sign-in.
+            <section class="primary-download" id="player" aria-labelledby="player-download-h">
+                <div class="download-card-main">
+                    <div class="download-icon-large">
+                        <img src="/assets/icons/gamepad.svg" alt="" />
+                    </div>
+
+                    <h2 id="player-download-h">"Eustress Player"</h2>
+                    <p class="download-desc">
+                        "Plays published simulations and joins multiplayer sessions. "
+                        "To make simulations of your own, download Eustress Engine above."
+                    </p>
+
+                    <PlayerPlatformButtons release=player_release />
+
+                    <a href="/downloads/player" class="btn-secondary-steel card-btn">"About Eustress Player"</a>
+                </div>
+            </section>
+
             // System Requirements
             <section class="requirements-section">
                 <div class="section-header-industrial">

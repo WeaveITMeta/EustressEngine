@@ -24,6 +24,11 @@ pub enum Unit {
 #[serde(rename_all = "snake_case")]
 pub enum LengthUnit { Meter, Millimeter, Centimeter, Kilometer, Inch, Foot, Yard, Stud }
 
+/// One stud in metres: Roblox's 0.28 m, the stud every Eustress crate uses.
+/// `eustress_common::units::Unit::Stud` holds the same value; this crate
+/// cannot name it, so a test in eustress-tools (which sees both) pins them.
+pub const STUD_METERS: f64 = 0.28;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AngleUnit { Radian, Degree }
@@ -64,7 +69,7 @@ impl Quantity {
     pub fn scalar(v: f64) -> Self     { Self { value: v, unit: Unit::Scalar } }
 
     /// Canonical SI value:
-    /// - lengths → meters (1 stud = 1 meter in Eustress world coords)
+    /// - lengths → meters (a stud is [`STUD_METERS`], 0.28 m)
     /// - angles → radians
     /// - mass → kg
     /// - force → newtons
@@ -130,7 +135,7 @@ fn length_to_meters(u: LengthUnit) -> f64 {
         LengthUnit::Inch       => 0.0254,
         LengthUnit::Foot       => 0.3048,
         LengthUnit::Yard       => 0.9144,
-        LengthUnit::Stud       => 1.0,   // Eustress convention: 1 stud = 1 m
+        LengthUnit::Stud       => STUD_METERS,
     }
 }
 
@@ -169,7 +174,7 @@ mod tests {
         approx(Quantity::parse("50 mm").unwrap().to_si(), 0.05);
         approx(Quantity::parse("1.5m").unwrap().to_si(), 1.5);
         approx(Quantity::parse("90 deg").unwrap().to_si(), 90.0_f64.to_radians());
-        approx(Quantity::parse("2 studs").unwrap().to_si(), 2.0);
+        approx(Quantity::parse("2 studs").unwrap().to_si(), 0.56);
         // 12 in = 1 ft: unit factors multiply (0.0254 * 12), so allow
         // one ulp of float drift against the exact 0.3048.
         approx(Quantity::parse("12 in").unwrap().to_si(), 0.3048);

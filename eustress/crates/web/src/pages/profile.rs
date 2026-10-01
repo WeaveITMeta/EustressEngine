@@ -13,7 +13,6 @@ use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
 use crate::utils::{format_bliss_exact, format_count};
 
-const API_URL: &str = "https://api.eustress.dev";
 
 /// User profile data.
 #[derive(Clone, Debug, PartialEq)]
@@ -114,7 +113,7 @@ pub fn ProfilePage() -> impl IntoView {
     // Fetch profile from Cloudflare Worker
     let uname = username();
     spawn_local(async move {
-        let url = format!("{}/api/community/users/{}", API_URL, urlencoding::encode(&uname));
+        let url = format!("{}/api/community/users/{}", crate::state::api_base(), urlencoding::encode(&uname));
         match gloo_net::http::Request::get(&url).send().await {
             Ok(resp) if resp.ok() => {
                 if let Ok(data) = resp.json::<ProfileApiResponse>().await {

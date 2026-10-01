@@ -1,12 +1,14 @@
 // ============================================================================
 // Eustress Engine Studio - Terrain Panel
 // Paint material picker, terrain properties, chunk list, and import/export.
-// Brush tools and settings live in the Terrain ribbon tab toolbar; the Paint
-// brush settings there show the same material picker as a swatch grid.
+// The terrain tools live in the Terrain ribbon tab and the tool bar over the
+// viewport (terrain_tool_bar.slint), which shows the same materials as a
+// thumbnail picker.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox, LineEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
+import { TerrainToolsUi } from "terrain_tool_bar.slint";
 
 // One terrain material slot for the pickers, pushed from Rust
 // (`sync_terrain_materials_to_slint`) off `TerrainMaterialSlots`: the slot
@@ -211,6 +213,10 @@ export component TerrainEditor inherits Rectangle {
     // Paint material picker: every material slot, the slot the Paint brush
     // lays down (shown selected) and its name.
     in property <[TerrainMaterialSlotData]> materials: [];
+    // Water, listed on its own under the ground materials: painting with it
+    // raises real water. -1 while the slot table has none.
+    in property <int> water-slot: -1;
+    in property <color> water-swatch;
     in property <int> paint-material: 0;
     in property <string> paint-material-name: "Grass";
     // The built-in material the picked slot starts from. "Add material"
@@ -254,6 +260,7 @@ export component TerrainEditor inherits Rectangle {
     callback on-set-paint-material(int); // slot id
     callback on-add-material(string); // name, empty lets Rust pick one
     callback on-insert-layer(string); // layer class name, e.g. "TerrainStamp"
+    callback on-terrain-action(string); // a "terrain:" action, e.g. "terrain:convert-water-paint"
 
     background: Theme.panel-background;
     
@@ -477,7 +484,12 @@ export component TerrainEditor inherits Rectangle {
                             horizontal-stretch: 1;
                             min-width: 200px;
                             height: 28px;
-                            background: root.edit-mode ? Theme.accent-blue : Theme.button-background;
+                            // Lit in selection cyan while the terrain tools
+                            // are the current tool (the tool bar holds their
+                            // settings; this panel does not repeat them).
+                            background: root.edit-mode ? Theme.accent-cyan.with-alpha(0.18) : Theme.button-background;
+                            border-width: 1px;
+                            border-color: root.edit-mode ? Theme.accent-cyan : transparent;
                             border-radius: 4px;
                             
                             TouchArea {
@@ -505,8 +517,8 @@ export component TerrainEditor inherits Rectangle {
                                 }
                                 
                                 Text {
-                                    text: root.edit-mode ? "Editing (T)" : "Edit Mode (T)";
-                                    color: root.edit-mode ? white : Theme.text-primary;
+                                    text: "Terrain tools (" + TerrainToolsUi.tools-key + ")";
+                                    color: root.edit-mode ? Theme.accent-cyan : Theme.text-primary;
                                     font-size: 11px;
                                     font-weight: 500;
                                     vertical-alignment: center;
@@ -515,12 +527,9 @@ export component TerrainEditor inherits Rectangle {
                                 }
                                 
                                 if root.edit-mode: Text {
-                                    // The 3D brushes carry internal ids; show the ribbon's names.
-                                    text: root.current-brush == "voxeladd" ? "ADD"
-                                        : (root.current-brush == "voxelremove" ? "SUBTRACT"
-                                        : (root.current-brush == "voxelsmooth" ? "SMOOTH 3D"
-                                        : root.current-brush.to-uppercase()));
-                                    color: #ffffff80;  // theme-exempt: translucent white label on accent-blue button
+                                    // The active tool's name, as the ribbon shows it.
+                                    text: root.current-brush == "sealevel" ? "SEA LEVEL" : root.current-brush.to-uppercase();
+                                    color: Theme.text-secondary;
                                     font-size: 10px;
                                     vertical-alignment: center;
                                     min-width: 40px;
@@ -550,6 +559,44 @@ export component TerrainEditor inherits Rectangle {
                         custom: mat.custom;
                         selected: mat.slot-id == root.paint-material;
                         clicked => { root.on-set-paint-material(mat.slot-id); }
+                    }
+
+                    if root.water-slot >= 0: MaterialRow {
+                        label: "Water (real water)";
+                        swatch: root.water-swatch;
+                        custom: false;
+                        selected: root.water-slot == root.paint-material;
+                        clicked => { root.on-set-paint-material(root.water-slot); }
+                    }
+
+                    // Older Spaces painted Water as a ground colour. This
+                    // turns that paint into seabed under real water, up to
+                    // the level each painted body would hold. Offered, never
+                    // done silently: the level is a guess, and undo takes it
+                    // back.
+                    if root.water-slot >= 0: Rectangle {
+                        height: 32px;
+
+                        convert-water := Rectangle {
+                            x: 8px;
+                            y: 2px;
+                            width: parent.width - 16px;
+                            height: 28px;
+                            border-radius: 4px;
+                            background: convert-water-touch.has-hover ? Theme.button-hover : Theme.button-background;
+
+                            convert-water-touch := TouchArea {
+                                clicked => { root.on-terrain-action("terrain:convert-water-paint"); }
+                            }
+
+                            Text {
+                                text: "Convert water paint to real water";
+                                color: Theme.text-primary;
+                                font-size: Theme.font-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     // Add material: a new Space slot that starts as the
@@ -692,6 +739,33 @@ export component TerrainEditor inherits Rectangle {
 
                     Text {
                         text: "Adds a layer on the ground in view. Scatter covers the whole terrain until it is given a size. Spline Point extends the selected spline.";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+
+                    // The seed's trees, grass and lakes, planned again off
+                    // the ground as it stands, in place of the generated ones.
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: regenerate-touch.has-hover ? Theme.button-hover : Theme.button-background;
+
+                        regenerate-touch := TouchArea {
+                            clicked => { root.on-terrain-action("terrain:regenerate-layers"); }
+                        }
+
+                        Text {
+                            text: "Regenerate layers from seed";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Brings back the seed's trees, grass and lakes over the ground as it is now. Layers you made stay.";
                         color: Theme.text-secondary;
                         font-size: 10px;
                         wrap: word-wrap;

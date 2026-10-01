@@ -1,669 +1,724 @@
 // ============================================================================
-// Eustress Engine Studio - Output Console
-// Log viewer with filtering and search
+// Eustress Engine Studio - Output
+//
+// The bottom dock's Output tab: one row per log line, built in Rust
+// (`sync_bevy_to_slint`, the Output block) from OutputConsole after the level,
+// source and search filters. A row carries its time, level, source, the
+// script it came from (clickable: opens the script at the line), the message,
+// how many identical lines in a row it stands for, and an error's stack
+// (click the row to show it). Play's start and stop arrive as divider rows.
+//
+// Scrolling follows new output while Auto-scroll is on and the view is at
+// the bottom; scrolling up pauses it, and "Jump to latest" (or scrolling
+// back down) resumes it.
+//
+// DockTabs is the Output / Timeline / Data Grid switcher all three dock
+// panels share.
 // ============================================================================
 
-import { LineEdit, ScrollView, CheckBox, TextEdit } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { KitField, KitSegmented } from "dialog_kit.slint";
 
+// One row of the Output list, built in Rust.
+export struct OutputRow {
+    // The entry's id, stable while the buffer trims (copy and expand use it).
+    id: int,
+    // "line", or "divider" for Play's start and stop.
+    kind: string,
+    // 0 info, 1 warning, 2 error, 3 debug.
+    level: int,
+    // "luau", "rune", "system", "bliss", "play", ...
+    source: string,
+    // The badge's text for `source`: "Luau", "Rune", "Engine", "Bliss".
+    badge: string,
+    time: string,
+    text: string,
+    // Identical lines in a row, shown once with this count.
+    count: int,
+    // The script's instance path, and its short form for the link.
+    script: string,
+    script-label: string,
+    // The script's source file and line, for the jump. "" and 0 when unknown.
+    file: string,
+    line: int,
+    // Stack frames, one per line; "" when none.
+    stack: string,
+    expanded: bool,
+}
+
+// The bottom dock's panel switcher: Output, Timeline and Data Grid. The
+// active tab is underlined in the selection cyan.
+export component DockTabs inherits HorizontalLayout {
+    in-out property <string> mode: "output";
+    callback set-mode(string);
+
+    spacing: 0px;
+
+    for tab in [
+        { id: "output", label: "Output" },
+        { id: "timeline", label: "Timeline" },
+        { id: "datagrid", label: "Data Grid" },
+    ]: Rectangle {
+        width: tab-label.preferred-width + 20px;
+        background: tab-touch.has-hover && root.mode != tab.id ? Theme.button-hover : transparent;
+
+        tab-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.mode = tab.id;
+                root.set-mode(tab.id);
+            }
+        }
+        tab-label := Text {
+            text: tab.label;
+            color: root.mode == tab.id ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            font-weight: root.mode == tab.id ? 600 : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if root.mode == tab.id: Rectangle {
+            x: 6px;
+            y: parent.height - 2px;
+            width: parent.width - 12px;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent-cyan;
+        }
+    }
+}
+
+// A thin vertical rule between toolbar groups.
+component ToolbarRule inherits Rectangle {
+    width: 9px;
+    Rectangle {
+        x: 4px;
+        y: (parent.height - self.height) / 2;
+        width: 1px;
+        height: 14px;
+        background: Theme.border-color;
+    }
+}
+
+// A toolbar control's hover tip: the tooltip's body, shown by Slint's
+// Tooltip on hover (a TouchArea's `moved` only fires while pressed, so a
+// hint opened from it never showed).
+component DockTip inherits Rectangle {
+    in property <string> text;
+    background: Theme.dialog-background;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 6px;
+    drop-shadow-color: Theme.shadow-float;
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: 11px;
+        }
+    }
+}
+
+// A level filter: its icon and how many lines of that level there are. On,
+// it wears the level's colour; off, it is dimmed and its lines are hidden.
+component LevelToggle inherits Rectangle {
+    in property <image> icon;
+    in property <int> count;
+    in property <color> tint;
+    in property <bool> on;
+    in property <string> hint;
+    callback toggled();
+
+    width: level-row.preferred-width;
+    border-radius: 3px;
+    background: level-touch.has-hover ? Theme.button-hover
+        : root.on ? root.tint.with-alpha(0.12) : transparent;
+    border-width: 1px;
+    border-color: root.on ? root.tint.with-alpha(0.35) : transparent;
+
+    level-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+    level-row := HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 6px;
+        spacing: 4px;
+        // The icon keeps its own colours (tinting flattens its glyph);
+        // off, it is dimmed.
+        Image {
+            width: 12px;
+            source: root.icon;
+            image-fit: contain;
+            opacity: root.on ? 1.0 : 0.35;
+        }
+        Text {
+            text: root.count;
+            color: root.on ? Theme.text-primary : Theme.text-disabled;
+            font-size: 10px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+    Tooltip {
+        DockTip { text: root.hint; }
+    }
+}
+
+// An icon button for the toolbar's right end. `active` shows a latched
+// state (Auto-scroll) in the selection cyan.
+component DockIconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> hint;
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 24px;
+    border-radius: 3px;
+    background: btn-touch.has-hover
+        ? (root.danger ? Theme.error-surface-hover : Theme.button-hover)
+        : root.active ? Theme.accent-cyan.with-alpha(0.16) : transparent;
+
+    btn-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px;
+        height: 13px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.active ? Theme.accent-cyan
+            : btn-touch.has-hover && root.danger ? Theme.text-error
+            : btn-touch.has-hover ? Theme.text-primary
+            : Theme.text-secondary;
+    }
+    Tooltip {
+        DockTip { text: root.hint; }
+    }
+}
+
+// One Output row: a log line, or a Play divider.
+component OutputLine inherits Rectangle {
+    in property <OutputRow> item;
+    callback jump(string, int);
+    callback copy(int);
+    callback toggle-stack(int);
+
+    property <bool> is-divider: root.item.kind == "divider";
+    property <color> level-color: root.item.level == 2 ? Theme.text-error
+        : root.item.level == 1 ? Theme.text-warning
+        : root.item.level == 3 ? Theme.text-disabled
+        : Theme.text-primary;
+    property <color> badge-color: root.item.source == "luau" ? Theme.text-accent
+        : root.item.source == "rune" ? Theme.accent-orange
+        : root.item.source == "bliss" ? Theme.text-success
+        : Theme.text-secondary;
+
+    height: root.is-divider ? 26px : line-layout.preferred-height;
+    background: root.is-divider ? transparent
+        : row-touch.has-hover ? Theme.explorer-item-hover
+        : root.item.level == 2 ? Theme.text-error.with-alpha(0.06)
+        : root.item.level == 1 ? Theme.text-warning.with-alpha(0.04)
+        : transparent;
+
+    // An error or a warning whose script is known opens that script at
+    // the line, from a click anywhere on the row. Any other row with a
+    // stack shows or hides it.
+    property <bool> goes-to-script: (root.item.level == 1 || root.item.level == 2) && root.item.file != "";
+    row-touch := TouchArea {
+        mouse-cursor: root.goes-to-script || root.item.stack != "" ? pointer : default;
+        clicked => {
+            if root.goes-to-script {
+                root.jump(root.item.file, root.item.line);
+            } else if root.item.stack != "" {
+                root.toggle-stack(root.item.id);
+            }
+        }
+    }
+
+    // ── Play divider ──
+    if root.is-divider: HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Rectangle { height: 1px; background: Theme.border-color; }
+        }
+        Text {
+            text: root.item.text + "  ·  " + root.item.time;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Rectangle { height: 1px; background: Theme.border-color; }
+        }
+    }
+
+    // ── A log line (its height is the row's, so a shown stack grows it) ──
+    line-layout := VerticalLayout {
+        visible: !root.is-divider;
+        spacing: 0px;
+
+        HorizontalLayout {
+            height: 20px;
+            padding-left: 8px;
+            padding-right: 6px;
+            spacing: 6px;
+
+            Text {
+                width: 50px;
+                text: root.item.time;
+                color: Theme.text-disabled;
+                font-size: 10.5px;
+                vertical-alignment: center;
+            }
+
+            // Level mark: warnings and errors only, so info stays quiet.
+            Rectangle {
+                width: 11px;
+                if root.item.level == 1 || root.item.level == 2: Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 11px;
+                    height: 11px;
+                    source: root.item.level == 2 ? @image-url("../../assets/icons/ui/error.svg")
+                        : @image-url("../../assets/icons/ui/warning.svg");
+                    image-fit: contain;
+                }
+            }
+
+            // Source badge
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: max(38px, badge-text.preferred-width + 10px);
+                    height: 14px;
+                    border-radius: 3px;
+                    background: root.badge-color.with-alpha(0.14);
+                    badge-text := Text {
+                        text: root.item.badge;
+                        color: root.badge-color;
+                        font-size: 9px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // The script, as a link to its line when the file is known.
+            if root.item.script-label != "": Rectangle {
+                width: min(180px, link-text.preferred-width);
+                link-touch := TouchArea {
+                    mouse-cursor: root.item.file != "" ? pointer : default;
+                    clicked => {
+                        if root.item.file != "" {
+                            root.jump(root.item.file, root.item.line);
+                        }
+                    }
+                }
+                link-text := Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.item.line > 0 ? root.item.script-label + ":" + root.item.line : root.item.script-label;
+                    color: (link-touch.has-hover || (root.goes-to-script && row-touch.has-hover)) && root.item.file != "" ? Theme.accent-cyan : Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if (link-touch.has-hover || (root.goes-to-script && row-touch.has-hover)) && root.item.file != "": Rectangle {
+                    y: parent.height - 4px;
+                    height: 1px;
+                    background: Theme.accent-cyan;
+                }
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.item.text;
+                color: root.level-color;
+                font-size: 11px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            // Identical lines in a row, counted.
+            if root.item.count > 1: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: count-text.preferred-width + 10px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: Theme.background-tertiary;
+                    count-text := Text {
+                        text: "×" + root.item.count;
+                        color: Theme.text-secondary;
+                        font-size: 9px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // An error's stack: its own button, so a click on the row can
+            // go to the script while this shows or hides the stack.
+            if root.item.stack != "": Rectangle {
+                width: 18px;
+                border-radius: 3px;
+                background: stack-touch.has-hover ? Theme.button-hover : transparent;
+                stack-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-stack(root.item.id); }
+                }
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 9px;
+                    height: 9px;
+                    source: root.item.expanded ? @image-url("../../assets/icons/ui/chevron-down.svg")
+                        : @image-url("../../assets/icons/ui/chevron-right.svg");
+                    image-fit: contain;
+                    colorize: Theme.text-secondary;
+                }
+            }
+
+            // Copy this line (and its stack). Shown on hover.
+            Rectangle {
+                width: 20px;
+                opacity: row-touch.has-hover || copy-touch.has-hover ? 1.0 : 0.0;
+                border-radius: 3px;
+                background: copy-touch.has-hover ? Theme.button-hover : transparent;
+                copy-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.copy(root.item.id); }
+                }
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 11px;
+                    height: 11px;
+                    source: @image-url("../../assets/icons/ui/copy.svg");
+                    image-fit: contain;
+                    colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+                }
+            }
+        }
+
+        // The stack, under the message.
+        if root.item.expanded && root.item.stack != "": HorizontalLayout {
+            padding-left: 8px + 50px + 6px + 11px + 6px;
+            padding-right: 8px;
+            padding-bottom: 6px;
+            stack-text := Text {
+                text: root.item.stack;
+                color: Theme.text-secondary;
+                font-size: 10.5px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
 
 export component OutputConsole inherits Rectangle {
-    // Properties
+    // Filters. Rust applies them (with the search text) when it builds `rows`.
     in-out property <bool> show-info: true;
     in-out property <bool> show-warnings: true;
     in-out property <bool> show-errors: true;
     in-out property <bool> show-debug: false;
     in-out property <string> filter-text: "";
-    in-out property <bool> auto-scroll: true;
-    // Source filter: "all", "rune", "luau"
+    // Source filter: "all", "luau", "rune", "system" (Engine) or "bliss".
     in-out property <string> source-filter: "all";
-    // Pre-rendered text for the full output (set by Rust, enables multi-line select + copy)
-    in-out property <string> all-text: "";
+    // Follow new output while on (and while the view is at the bottom).
+    in-out property <bool> auto-scroll: true;
 
-    // Bottom-panel mode — "output" or "timeline". The tab buttons
-    // live inside this toolbar so there is no separate chrome row.
+    // The rows after the filters, and how many lines of each level there are
+    // before them (the toggles' counts).
+    in property <[OutputRow]> rows: [];
+    in property <int> count-info: 0;
+    in property <int> count-warnings: 0;
+    in property <int> count-errors: 0;
+    in property <int> count-debug: 0;
+    // Lines in the buffer before any filter, for the empty state's wording.
+    in property <int> total-lines: 0;
+    // Moves whenever `rows` is rebuilt; the view follows the new tail.
+    in property <int> rows-revision: 0;
+
+    // Bottom-panel mode — "output", "timeline" or "datagrid".
     in-out property <string> panel-mode: "output";
     callback set-panel-mode(string);
-    
-    // Callbacks
+
     callback on-clear();
     callback on-filter-changed(string);
     callback on-toggle-level(string);
+    // A row's id: copy that line (and its stack) to the clipboard.
     callback on-copy-log(int);
+    // Copy every visible row.
+    callback on-copy-all();
     callback on-close();
     callback on-open-path(string);
-    
+    // Open a script's file at a line.
+    callback on-jump(string, int);
+    // Show or hide a row's stack (by id).
+    callback on-toggle-stack(int);
+
+    // At the bottom of the list, so new output follows. Scrolling up clears
+    // it and pauses the following; scrolling back down or "Jump to latest"
+    // sets it again.
+    property <bool> pinned: true;
+    property <bool> at-bottom: list.viewport-y <= list.visible-height - list.viewport-height + 4px;
+    // New rows arrived while paused.
+    property <bool> unseen: false;
+
+    function scroll-to-end() {
+        list.viewport-y = min(0px, list.visible-height - list.viewport-height);
+    }
+    changed rows-revision => {
+        if root.auto-scroll && root.pinned {
+            root.scroll-to-end();
+            settle.running = true;
+        } else if root.rows.length > 0 {
+            root.unseen = true;
+        }
+    }
+    changed auto-scroll => {
+        if root.auto-scroll {
+            root.pinned = true;
+            root.unseen = false;
+            root.scroll-to-end();
+        }
+    }
+    // The list's height settles a frame after new rows; follow it there too.
+    settle := Timer {
+        interval: 30ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if root.auto-scroll && root.pinned {
+                root.scroll-to-end();
+            }
+        }
+    }
+
     background: Theme.panel-background;
-    
+
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
-        
-        // Single integrated toolbar
-        // Layout: [icon Output] | [info][warn][err][dbg] [Clear] | [Filter...] | --- | [checkbox Auto-scroll] [X]
+
+        // ── Toolbar ──
         Rectangle {
-            height: 30px;
+            height: 28px;
             background: Theme.header-background;
-            
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
             HorizontalLayout {
-                padding-left: 2px;
+                padding-left: 4px;
                 padding-right: 4px;
-                padding-top: 2px;
-                spacing: 1px;
-                alignment: stretch;
-                
-                // Output / Timeline tab buttons — styled to match
-                // Explorer/Assets/Universes/Toolbox panel tabs.
-                Rectangle {
-                    width: 72px;
-                    background: root.panel-mode == "output" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 3px;
 
-                    output-mode-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "output";
-                            root.set-panel-mode("output");
-                        }
-                    }
+                DockTabs {
+                    mode <=> root.panel-mode;
+                    set-mode(mode) => { root.set-panel-mode(mode); }
+                }
 
-                    Text {
-                        text: "Output";
-                        color: root.panel-mode == "output" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                ToolbarRule { }
+
+                LevelToggle {
+                    icon: @image-url("../../assets/icons/ui/error.svg");
+                    count: root.count-errors;
+                    tint: Theme.text-error;
+                    on: root.show-errors;
+                    hint: "Errors";
+                    toggled => { root.show-errors = !root.show-errors; root.on-toggle-level("error"); }
+                }
+                LevelToggle {
+                    icon: @image-url("../../assets/icons/ui/warning.svg");
+                    count: root.count-warnings;
+                    tint: Theme.text-warning;
+                    on: root.show-warnings;
+                    hint: "Warnings";
+                    toggled => { root.show-warnings = !root.show-warnings; root.on-toggle-level("warning"); }
+                }
+                LevelToggle {
+                    icon: @image-url("../../assets/icons/ui/info.svg");
+                    count: root.count-info;
+                    tint: Theme.text-secondary;
+                    on: root.show-info;
+                    hint: "Messages";
+                    toggled => { root.show-info = !root.show-info; root.on-toggle-level("info"); }
+                }
+                LevelToggle {
+                    icon: @image-url("../../assets/icons/ui/debug.svg");
+                    count: root.count-debug;
+                    tint: Theme.text-secondary;
+                    on: root.show-debug;
+                    hint: "Debug";
+                    toggled => { root.show-debug = !root.show-debug; root.on-toggle-level("debug"); }
+                }
+
+                ToolbarRule { }
+
+                KitSegmented {
+                    height: 22px;
+                    managed: true;
+                    options: ["All", "Luau", "Rune", "Engine", "Bliss"];
+                    current-index: root.source-filter == "luau" ? 1
+                        : root.source-filter == "rune" ? 2
+                        : root.source-filter == "system" ? 3
+                        : root.source-filter == "bliss" ? 4 : 0;
+                    selected(i) => {
+                        root.source-filter = i == 1 ? "luau" : i == 2 ? "rune" : i == 3 ? "system" : i == 4 ? "bliss" : "all";
                     }
                 }
 
+                Rectangle { horizontal-stretch: 1; }
+
+                // Search: works together with the level and source filters.
                 Rectangle {
-                    width: 80px;
-                    background: root.panel-mode == "timeline" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-
-                    timeline-mode-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "timeline";
-                            root.set-panel-mode("timeline");
-                        }
+                    width: 200px;
+                    KitField {
+                        width: 100%;
+                        height: 100%;
+                        inset: 22px;
+                        placeholder-text: "Search output";
+                        text <=> root.filter-text;
+                        edited(t) => { root.on-filter-changed(t); }
                     }
-
-                    Text {
-                        text: "Timeline";
-                        color: root.panel-mode == "timeline" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    Image {
+                        x: 7px;
+                        y: (parent.height - self.height) / 2;
+                        width: 11px;
+                        height: 11px;
+                        source: @image-url("../../assets/icons/ui/search.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-disabled;
                     }
                 }
 
-                // Data Grid — Data Platform bottom-panel tab (right of Timeline).
-                Rectangle {
-                    width: 84px;
-                    background: root.panel-mode == "datagrid" ? Theme.panel-background : Theme.tab-inactive;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
+                ToolbarRule { }
 
-                    datagrid-mode-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.panel-mode = "datagrid";
-                            root.set-panel-mode("datagrid");
-                        }
-                    }
-
-                    Text {
-                        text: "Data Grid";
-                        color: root.panel-mode == "datagrid" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                DockIconButton {
+                    icon: @image-url("../../assets/icons/ui/scroll.svg");
+                    hint: root.auto-scroll ? "Auto-scroll: on" : "Auto-scroll: off";
+                    active: root.auto-scroll;
+                    clicked => { root.auto-scroll = !root.auto-scroll; }
                 }
-                
-                // Separator
-                Rectangle {
-                    width: 9px;
-                    Rectangle {
-                        x: 4px;
-                        y: 6px;
-                        width: 1px;
-                        height: 18px;
-                        background: Theme.border-color;
-                    }
+                DockIconButton {
+                    icon: @image-url("../../assets/icons/ui/copy.svg");
+                    hint: "Copy visible lines";
+                    clicked => { root.on-copy-all(); }
                 }
-                
-                // Info filter
-                Rectangle {
-                    width: 28px;
-                    
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 26px;
-                        height: 22px;
-                        background: info-touch.has-hover ? Theme.button-hover : 
-                                    (root.show-info ? Theme.button-hover : transparent);
-                        border-radius: 3px;
-                        
-                        info-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.show-info = !root.show-info; root.on-toggle-level("info"); }
-                            moved => { info-tooltip.show(); }
-                        }
-                        
-                        Image {
-                            x: 5px;
-                            y: 3px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/info.svg");
-                            image-fit: contain;
-                        }
-                        
-                        info-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: info-tip-text.preferred-width + 12px;
-                                info-tip-text := Text {
-                                    text: "Toggle Info Messages";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
+                DockIconButton {
+                    icon: @image-url("../../assets/icons/ui/clear.svg");
+                    hint: "Clear output";
+                    clicked => { root.on-clear(); }
                 }
-                
-                // Warning filter
-                Rectangle {
-                    width: 28px;
-                    
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 26px;
-                        height: 22px;
-                        background: warn-touch.has-hover ? Theme.button-hover :
-                                    (root.show-warnings ? Theme.button-hover : transparent);
-                        border-radius: 3px;
-                        
-                        warn-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.show-warnings = !root.show-warnings; root.on-toggle-level("warning"); }
-                            moved => { warn-tooltip.show(); }
-                        }
-                        
-                        Image {
-                            x: 5px;
-                            y: 3px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/warning.svg");
-                            image-fit: contain;
-                        }
-                        
-                        warn-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: warn-tip-text.preferred-width + 12px;
-                                warn-tip-text := Text {
-                                    text: "Toggle Warnings";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Error filter
-                Rectangle {
-                    width: 28px;
-                    
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 26px;
-                        height: 22px;
-                        background: err-touch.has-hover ? Theme.button-hover :
-                                    (root.show-errors ? Theme.button-hover : transparent);
-                        border-radius: 3px;
-                        
-                        err-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.show-errors = !root.show-errors; root.on-toggle-level("error"); }
-                            moved => { err-tooltip.show(); }
-                        }
-                        
-                        Image {
-                            x: 5px;
-                            y: 3px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/error.svg");
-                            image-fit: contain;
-                        }
-                        
-                        err-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: err-tip-text.preferred-width + 12px;
-                                err-tip-text := Text {
-                                    text: "Toggle Errors";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Debug filter
-                Rectangle {
-                    width: 28px;
-                    
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 26px;
-                        height: 22px;
-                        background: dbg-touch.has-hover ? Theme.button-hover :
-                                    (root.show-debug ? Theme.button-hover : transparent);
-                        border-radius: 3px;
-                        
-                        dbg-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.show-debug = !root.show-debug; root.on-toggle-level("debug"); }
-                            moved => { dbg-tooltip.show(); }
-                        }
-                        
-                        Image {
-                            x: 5px;
-                            y: 3px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/debug.svg");
-                            image-fit: contain;
-                        }
-                        
-                        dbg-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: dbg-tip-text.preferred-width + 12px;
-                                dbg-tip-text := Text {
-                                    text: "Toggle Debug";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Separator between level and source filters
-                Rectangle {
-                    width: 9px;
-                    Rectangle {
-                        x: 4px;
-                        y: 6px;
-                        width: 1px;
-                        height: 18px;
-                        background: Theme.border-color;
-                    }
-                }
-
-                // Rune source filter — matches the Command Bar's Rune
-                // accent (#ffb74d Material Design Orange 300) so the
-                // language glyph reads as the same concept across
-                // panels. Dark warm-brown background frames the orange
-                // text with the same value relationship the green pair
-                // had (#2d4a1e / #8fce5a).
-                Rectangle {
-                    width: 46px;
-
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 44px;
-                        height: 22px;
-                        background: rune-touch.has-hover ? Theme.button-hover :
-                                    (root.source-filter == "rune" ? #4a3a1e : transparent);  // theme-exempt: bespoke Rune-glyph warm-brown active tint, no palette token
-                        border-radius: 3px;
-                        border-width: root.source-filter == "rune" ? 1px : 0px;
-                        border-color: #7a5a2e;  // theme-exempt: bespoke Rune-glyph warm-brown border, no palette token
-
-                        rune-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                if root.source-filter == "rune" {
-                                    root.source-filter = "all";
-                                } else {
-                                    root.source-filter = "rune";
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Rune";
-                            color: root.source-filter == "rune" ? Theme.cat-constraint : Theme.text-secondary;
-                            font-size: 10px;
-                            font-weight: 500;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Luau source filter
-                Rectangle {
-                    width: 46px;
-
-                    Rectangle {
-                        x: 1px;
-                        y: 4px;
-                        width: 44px;
-                        height: 22px;
-                        background: luau-touch.has-hover ? Theme.button-hover :
-                                    (root.source-filter == "luau" ? #1e3a5a : transparent);  // theme-exempt: bespoke Luau-glyph navy tint; no solid token (selection-background is translucent in Modern)
-                        border-radius: 3px;
-                        border-width: root.source-filter == "luau" ? 1px : 0px;
-                        border-color: #2e6aaa;  // theme-exempt: bespoke Luau-glyph blue border, no palette token
-
-                        luau-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                if root.source-filter == "luau" {
-                                    root.source-filter = "all";
-                                } else {
-                                    root.source-filter = "luau";
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Luau";
-                            color: root.source-filter == "luau" ? Theme.text-accent : Theme.text-secondary;
-                            font-size: 10px;
-                            font-weight: 500;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Clear button (next to filters)
-                Rectangle {
-                    width: 54px;
-                    
-                    Rectangle {
-                        x: 4px;
-                        y: 4px;
-                        width: 46px;
-                        height: 22px;
-                        background: clear-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-radius: 3px;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-                        
-                        clear-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-clear(); }
-                            moved => { clear-tooltip.show(); }
-                        }
-                        
-                        Text {
-                            text: "Clear";
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        
-                        clear-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: clear-tip-text.preferred-width + 12px;
-                                clear-tip-text := Text {
-                                    text: "Clear All Output";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Separator
-                Rectangle {
-                    width: 9px;
-                    Rectangle {
-                        x: 4px;
-                        y: 6px;
-                        width: 1px;
-                        height: 18px;
-                        background: Theme.border-color;
-                    }
-                }
-                
-                // Filter input
-                Rectangle {
-                    horizontal-stretch: 1;
-                    max-width: 180px;
-                    min-width: 80px;
-                    
-                    Rectangle {
-                        y: 3px;
-                        height: 24px;
-                        
-                        LineEdit {
-                            width: 100%;
-                            height: 100%;
-                            placeholder-text: "Filter...";
-                            text <=> root.filter-text;
-                            edited(text) => { root.on-filter-changed(text); }
-                        }
-                    }
-                }
-                
-                // Spacer
-                Rectangle { horizontal-stretch: 2; }
-                
-                // Auto-scroll toggle
-                Rectangle {
-                    width: 90px;
-                    
-                    Rectangle {
-                        x: 0px;
-                        y: 4px;
-                        width: 90px;
-                        height: 22px;
-                        background: autoscroll-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                        border-radius: 3px;
-                        
-                        autoscroll-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.auto-scroll = !root.auto-scroll; }
-                            moved => { autoscroll-tooltip.show(); }
-                        }
-                        
-                        // Checkbox square
-                        Rectangle {
-                            x: 6px;
-                            y: 4px;
-                            width: 14px;
-                            height: 14px;
-                            border-width: 1px;
-                            border-color: root.auto-scroll ? Theme.accent-blue : Theme.text-secondary;
-                            border-radius: 3px;
-                            background: root.auto-scroll ? Theme.accent-blue : transparent;
-                            
-                            if root.auto-scroll: Rectangle {
-                                x: 3px;
-                                y: 3px;
-                                width: 8px;
-                                height: 8px;
-                                background: white;
-                                border-radius: 1px;
-                            }
-                        }
-                        
-                        // Label
-                        Text {
-                            x: 24px;
-                            text: "Auto-scroll";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        
-                        autoscroll-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: autoscroll-tip-text.preferred-width + 12px;
-                                autoscroll-tip-text := Text {
-                                    text: "Toggle Auto-scroll";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Close (X) button — hides the output panel
-                Rectangle {
-                    width: 28px;
-                    
-                    Rectangle {
-                        x: 2px;
-                        y: 4px;
-                        width: 22px;
-                        height: 22px;
-                        background: close-touch.has-hover ? Theme.accent-red : transparent;
-                        border-radius: 3px;
-                        
-                        close-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                            moved => { close-tooltip.show(); }
-                        }
-                        
-                        Image {
-                            x: 3px;
-                            y: 3px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/close.svg");
-                            image-fit: contain;
-                        }
-                        
-                        close-tooltip := PopupWindow {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            Rectangle {
-                                background: Theme.dialog-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-                                height: 24px;
-                                width: close-tip-text.preferred-width + 12px;
-                                close-tip-text := Text {
-                                    text: "Close Output Panel";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
+                DockIconButton {
+                    icon: @image-url("../../assets/icons/ui/close.svg");
+                    hint: "Close panel";
+                    clicked => { root.on-close(); }
                 }
             }
         }
-        
-        // Log output — TextEdit from std-widgets is a scrollable,
-        // read-only-capable, multi-line text area with built-in
-        // selection + copy. Replaces a prior ScrollView + Rectangle +
-        // TextInput sandwich that had no viewport-width/height set
-        // (so the scroll bar never appeared) AND a TextInput that
-        // captured the wheel event before the ScrollView could see
-        // it. TextEdit solves both in one primitive. The separate
-        // "don't zoom the 3D viewport while hovering Output" fix
-        // lives in camera_controller.rs (delegates to
-        // ui_focus.has_focus instead of a duplicate bounds check).
+
+        // ── The rows ──
         Rectangle {
             vertical-stretch: 1;
-            background: transparent;
 
-            TextEdit {
+            list := ListView {
                 width: 100%;
                 height: 100%;
-                text: root.all-text;
-                read-only: true;
-                wrap: no-wrap;
-                font-size: 12px;
+                // A user's scroll decides whether the view follows: at the
+                // bottom it does, anywhere above it pauses.
+                scrolled => {
+                    root.pinned = root.at-bottom;
+                    if root.pinned {
+                        root.unseen = false;
+                    }
+                }
+
+                for row in root.rows: OutputLine {
+                    item: row;
+                    jump(file, line) => { root.on-jump(file, line); }
+                    copy(id) => { root.on-copy-log(id); }
+                    toggle-stack(id) => { root.on-toggle-stack(id); }
+                }
             }
 
-            // Empty state
-            if root.all-text == "": Text {
+            // Paused with new output below: one click back to the tail.
+            if root.unseen && !root.pinned: Rectangle {
+                x: parent.width - self.width - 16px;
+                y: parent.height - self.height - 10px;
+                width: jump-row.preferred-width;
+                height: 22px;
+                border-radius: 11px;
+                background: jump-touch.has-hover ? Theme.accent-cyan : Theme.accent-cyan.with-alpha(0.85);
+                drop-shadow-blur: 6px;
+                drop-shadow-color: Theme.shadow-float;
+
+                jump-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.pinned = true;
+                        root.unseen = false;
+                        root.scroll-to-end();
+                    }
+                }
+                jump-row := HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 5px;
+                    Image {
+                        width: 9px;
+                        source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                        image-fit: contain;
+                        colorize: Theme.panel-background;
+                    }
+                    Text {
+                        text: "Jump to latest";
+                        color: Theme.panel-background;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Empty states
+            if root.rows.length == 0: Text {
                 x: 0px;
-                y: 10px;
-                width: 100%;
-                text: "No log entries";
-                color: Theme.text-secondary;
-                font-size: 12px;
+                y: 14px;
+                width: parent.width;
+                text: root.total-lines == 0
+                    ? "No output yet. Prints, warnings and errors from scripts appear here."
+                    : "No lines match the filters.";
+                color: Theme.text-disabled;
+                font-size: 11px;
                 horizontal-alignment: center;
             }
         }

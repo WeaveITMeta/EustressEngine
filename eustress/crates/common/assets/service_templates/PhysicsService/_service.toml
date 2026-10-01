@@ -9,14 +9,13 @@
 [service]
 class_name = "PhysicsService"
 icon = "physicsservice"
-description = "Gravity, solver settings, and which physics domains step"
+description = "Solver settings and which physics domains step"
 can_have_children = false
 
 [properties]
 # Master switch. Off stops every domain below.
 enabled = true
-# Metres per second squared. Eustress is metre-native.
-gravity = [0.0, -9.80665, 0.0]
+# Gravity is not set here: it belongs to the Workspace (workspace.Gravity).
 time_scale = 1.0
 # Avian substeps per fixed step. 6 is the engine's pinned determinism value.
 solver_substeps = 6

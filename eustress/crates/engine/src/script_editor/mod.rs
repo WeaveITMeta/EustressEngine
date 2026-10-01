@@ -32,8 +32,14 @@
 //! the same API can be added later (Phase 8) for external editors.
 
 pub mod analyzer;
+pub mod editing;
+pub mod language;
+pub mod luau_service;
+pub mod luau_parse;
 pub mod plugin;
+pub mod rune_service;
 pub mod runtime_snapshot;
+pub mod theme;
 pub mod workspace;
 #[cfg(feature = "lsp")]
 pub mod lsp;

@@ -1,38 +1,17 @@
 //! `SurfaceLightSpawner` — `ClassSpawner` for `ClassName::SurfaceLight`.
 //!
-//! Implements **Option A** from `LIGHTING_AUDIT.md` §4.4 — the Roblox
-//! semantics-matching path:
+//! The entity carries the [`SurfaceLight`][SurfaceLightComponent]
+//! authoring component + `Instance` + `Name`. The light itself is a
+//! `bevy_pbr::SpotLight` on an emitter child that
+//! `eustress_common::plugins::light_classes` places at the centre of the
+//! parent part's `face`, aimed out of it with the cone `angle` — Roblox's
+//! SurfaceLight. A face change re-aims that emitter, so no property needs a
+//! respawn.
 //!
-//! 1. The parent `SurfaceLight` entity carries the
-//!    [`SurfaceLight`][SurfaceLightComponent] authoring component +
-//!    `Instance` + `Name`.
-//! 2. A child entity carries an emissive `Mesh3d` quad whose normal
-//!    aligns with the configured face (`Top/Bottom/Front/Back/Left/Right`).
-//! 3. A second child entity carries a `bevy_pbr::PointLight` offset
-//!    along the face normal so the light actually illuminates other
-//!    geometry. Brightness is multiplied by
-//!    [`AREA_LIGHT_BRIGHTNESS_SCALE`] — matches the legacy
-//!    `spawn.rs::spawn_surface_light` constant.
-//!
-//! Per `LIGHTING_AUDIT.md` §4.4 "Face change triggers a respawn" the
-//! face-change path is the ONE light-class property that requires
-//! `apply_edit` to return `true`. Every other property is a cheap
-//! mutation that can be applied without rebuilding the child entities.
-//!
-//! ## What this spawner does NOT do (yet)
-//!
-//! - Does NOT resolve the parent `BasePart`'s `size` to half-extents
-//!   for the quad. The face-direction → local-normal mapping below is
-//!   independent of parent size; the quad's dimensions default to 1×1
-//!   metres until the file_loader hot path supplies the parent size.
-//!   Wave 3's surface-light sync system (LIGHTING_AUDIT.md §4.4
-//!   `sync_surface_light_to_bevy`) is where the parent-size lookup
-//!   lands — out of scope for this spawner-only task.
-//! - Does NOT attach a `Mesh3d` cookie texture. The `texture` field
-//!   is round-tripped through serialize/deserialize but the renderer
-//!   binding is `TODO` (LIGHTING_AUDIT.md step 11).
+//! The `texture` field is round-tripped through serialize/deserialize; the
+//! renderer binding needs Bevy's `pbr_light_textures` feature, which the
+//! engine does not enable.
 
-use bevy::math::primitives::Rectangle;
 use bevy::prelude::*;
 
 use eustress_common::class_registry::{
@@ -49,23 +28,13 @@ use super::toml_helpers::{
     read_descriptor_f32, read_descriptor_string, read_transform_section, transform_to_toml,
 };
 use super::wire;
-use super::AREA_LIGHT_BRIGHTNESS_SCALE;
 
-/// Face → local-normal unit vector. Matches Roblox's
-/// `Front=-Z, Back=+Z, Top=+Y, Bottom=-Y, Right=+X, Left=-X`
-/// convention; consult `LIGHTING_AUDIT.md` §4.4 "face_to_local" for
-/// the rationale.
+/// Face → local-normal unit vector, Roblox's
+/// `Front=-Z, Back=+Z, Top=+Y, Bottom=-Y, Right=+X, Left=-X`. The one
+/// definition lives in `light_classes`, which aims the emitter with it.
+#[cfg(test)]
 fn face_to_local_normal(face: &str) -> Vec3 {
-    match face {
-        "Top" => Vec3::Y,
-        "Bottom" => Vec3::NEG_Y,
-        "Front" => Vec3::NEG_Z,
-        "Back" => Vec3::Z,
-        "Right" => Vec3::X,
-        "Left" => Vec3::NEG_X,
-        // Unknown face → Front (matches the EustressSurfaceLight default).
-        _ => Vec3::NEG_Z,
-    }
+    eustress_common::plugins::light_classes::face_normal(face)
 }
 
 #[derive(Default)]
@@ -93,8 +62,10 @@ impl ClassSpawner for SurfaceLightSpawner {
         let face = props
             .get_enum("light.face")
             .or_else(|| props.get_string("light.face"))
+            .map(eustress_common::plugins::light_classes::normalize_face)
             .unwrap_or(defaults.face.as_str())
             .to_string();
+        let angle = props.get_f32("light.angle").unwrap_or(defaults.angle);
         let shadows = props.get_bool("light.shadows").unwrap_or(defaults.shadows);
         // Roblox `Light.Enabled`; a disabled light emits nothing.
         let enabled = props.get_bool("light.enabled").unwrap_or(defaults.enabled);
@@ -104,81 +75,35 @@ impl ClassSpawner for SurfaceLightSpawner {
             .map(|s| s.to_string());
 
         let transform = props.get_transform("transform").copied().unwrap_or_default();
-        let normal_local = face_to_local_normal(&face);
 
-        // Build the child meshes/materials BEFORE the spawn so the
-        // `with_children` closure doesn't have to grab the asset stores
-        // (borrow-disjointness — we already hold `&mut ctx.commands` +
-        // `&mut ctx.meshes`).
-        //
-        // The quad is 1×1 m by default; the surface-light sync system
-        // (LIGHTING_AUDIT.md §4.4) will resize it once parent BasePart
-        // size resolution is wired into SpawnCtx (Wave 3.G).
-        let quad_handle = ctx.meshes.add(Rectangle::new(1.0, 1.0));
-        let material_handle = ctx.standard_materials.add(StandardMaterial {
-            base_color: color,
-            emissive: color.to_linear() * brightness,
-            unlit: false,
-            ..default()
-        });
-
-        // Quad transform: positioned slightly forward of the face plane
-        // (per §4.4: `Transform::from_translation(normal_local * 0.001)
-        //  .looking_at(Vec3::ZERO, Vec3::Y)`). The look_at orients the
-        // quad's normal toward `+Z` (Bevy convention); we then offset
-        // it by the face-local normal so the quad sits on the face.
-        let quad_transform = Transform {
-            translation: normal_local * 0.001,
-            // Align quad +Z with the face normal so the emissive face
-            // points outward. Using `from_rotation_arc` rather than
-            // `looking_at` avoids the degenerate case where `Vec3::Y`
-            // is parallel to the face normal (Top/Bottom).
-            rotation: Quat::from_rotation_arc(Vec3::Z, normal_local),
-            scale: Vec3::ONE,
-        };
-        let light_transform = Transform::from_translation(normal_local * 0.05);
-
-        let mut entity_commands = ctx.commands.spawn((
-            transform,
-            Instance {
-                name: name.clone(),
-                class_name: ClassName::SurfaceLight,
-                archivable,
-                id: 0,
-                ai: false,
-                uuid,
-            },
-            SurfaceLightComponent {
-                color,
-                brightness,
-                range,
-                face: face.clone(),
-                shadows,
-                enabled,
-                texture,
-            },
-            Name::new(name),
-        ));
-        entity_commands.with_children(|p| {
-            p.spawn((
-                Mesh3d(quad_handle),
-                MeshMaterial3d(material_handle),
-                quad_transform,
-                Name::new("SurfaceLight.Emissive"),
-            ));
-            p.spawn((
-                PointLight {
-                    color,
-                    intensity: if enabled { brightness * AREA_LIGHT_BRIGHTNESS_SCALE } else { 0.0 },
-                    range,
-                    shadow_maps_enabled: shadows && enabled,
-                    ..default()
+        // The emitter (a SpotLight at the face, aimed out of it) is built
+        // from this authoring component by `light_classes`, like every other
+        // spawn path.
+        ctx.commands
+            .spawn((
+                transform,
+                Visibility::default(),
+                Instance {
+                    name: name.clone(),
+                    class_name: ClassName::SurfaceLight,
+                    archivable,
+                    id: 0,
+                    ai: false,
+                    uuid,
                 },
-                light_transform,
-                Name::new("SurfaceLight.Emitter"),
-            ));
-        });
-        entity_commands.id()
+                SurfaceLightComponent {
+                    color,
+                    brightness,
+                    range,
+                    face,
+                    angle,
+                    shadows,
+                    enabled,
+                    texture,
+                },
+                Name::new(name),
+            ))
+            .id()
     }
 
     fn serialize(&self, world: &World, entity: Entity) -> Vec<u8> {
@@ -241,92 +166,36 @@ impl ClassSpawner for SurfaceLightSpawner {
     }
 
     fn apply_edit(&self, world: &mut World, entity: Entity, props: &PropertyBag) -> bool {
-        // Determine if a respawn is required BEFORE mutating anything —
-        // a face change reshapes the child entities (their transforms
-        // depend on `face_to_local_normal`), so we hand back `true`
-        // and let the caller orchestrate the despawn+respawn dance.
-        let face_changed = if let Some(new_face) = props
-            .get_enum("light.face")
-            .or_else(|| props.get_string("light.face"))
-        {
-            world
-                .entity(entity)
-                .get::<SurfaceLightComponent>()
-                .map(|s| s.face.as_str() != new_face)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        // Apply the cheap mutations regardless — even if a respawn will
-        // follow, the SurfaceLightComponent must reflect the new prop
-        // state so the post-respawn spawn() picks the right values out
-        // of the world via the caller's recomputed PropertyBag.
-        let (new_color, new_brightness, new_range, new_shadows) = {
-            let mut entity_mut = world.entity_mut(entity);
-            let mut sl = entity_mut.get_mut::<SurfaceLightComponent>();
-            if let Some(s) = sl.as_deref_mut() {
-                if let Some(c) = read_color(props, "light.color") {
-                    s.color = c;
-                }
-                if let Some(b) = props.get_f32("light.brightness") {
-                    s.brightness = b;
-                }
-                if let Some(r) = props.get_f32("light.range") {
-                    s.range = r;
-                }
-                if let Some(sh) = props.get_bool("light.shadows") {
-                    s.shadows = sh;
-                }
-                if let Some(t) = props.get_string("appearance.texture") {
-                    s.texture = if t.is_empty() { None } else { Some(t.to_string()) };
-                }
-                (s.color, s.brightness, s.range, s.shadows)
-            } else {
-                (Color::WHITE, 1.0, 60.0, true)
+        // Every property, the face included, is a mutation of the authoring
+        // component: `light_classes` re-aims and rebuilds the emitter from
+        // it, so nothing needs a respawn.
+        let mut entity_mut = world.entity_mut(entity);
+        if let Some(mut s) = entity_mut.get_mut::<SurfaceLightComponent>() {
+            if let Some(c) = read_color(props, "light.color") {
+                s.color = c;
             }
-        };
-
-        if face_changed {
-            return true;
-        }
-
-        // Walk children and sync the PointLight + emissive material.
-        // We collect child Entities first to drop the &Children borrow
-        // before the mutable PointLight query (entity_mut would conflict).
-        let child_entities: Vec<Entity> = world
-            .entity(entity)
-            .get::<Children>()
-            .map(|c| c.iter().collect())
-            .unwrap_or_default();
-        for child in child_entities {
-            if let Some(mut pl) = world.entity_mut(child).get_mut::<PointLight>() {
-                pl.color = new_color;
-                pl.intensity = new_brightness * AREA_LIGHT_BRIGHTNESS_SCALE;
-                pl.range = new_range;
-                pl.shadow_maps_enabled = new_shadows;
+            if let Some(b) = props.get_f32("light.brightness") {
+                s.brightness = b;
             }
-            // Sync the emissive material color. Two-step: first read
-            // the handle, then mutate the underlying material; the
-            // intermediate borrow drop matters to satisfy the borrow
-            // checker (Assets<StandardMaterial> is a Resource we'd
-            // otherwise alias with the entity-mut query).
-            let mat_handle = world
-                .entity(child)
-                .get::<MeshMaterial3d<StandardMaterial>>()
-                .map(|h| h.0.clone());
-            if let Some(handle) = mat_handle {
-                if let Some(mut materials) =
-                    world.get_resource_mut::<Assets<StandardMaterial>>()
-                {
-                    if let Some(mut mat) = materials.get_mut(&handle) {
-                        mat.base_color = new_color;
-                        mat.emissive = new_color.to_linear() * new_brightness;
-                    }
-                }
+            if let Some(r) = props.get_f32("light.range") {
+                s.range = r;
+            }
+            if let Some(a) = props.get_f32("light.angle") {
+                s.angle = a;
+            }
+            if let Some(f) = props.get_enum("light.face").or_else(|| props.get_string("light.face")) {
+                s.face = eustress_common::plugins::light_classes::normalize_face(f).to_string();
+            }
+            if let Some(sh) = props.get_bool("light.shadows") {
+                s.shadows = sh;
+            }
+            if let Some(en) = props.get_bool("light.enabled") {
+                s.enabled = en;
+            }
+            if let Some(t) = props.get_string("appearance.texture") {
+                s.texture = if t.is_empty() { None } else { Some(t.to_string()) };
             }
         }
-        // No respawn unless face changed (handled above).
         false
     }
 
@@ -345,7 +214,11 @@ impl ClassSpawner for SurfaceLightSpawner {
             bag.set("light.brightness", PropertyValue::Float(b));
         }
         if let Some(r) = rbx.property("Range").and_then(|p| p.as_f32()) {
-            bag.set("light.range", PropertyValue::Float(r));
+            // Studs to metres (1 stud = 1 ft), as the importer converts it.
+            bag.set("light.range", PropertyValue::Float(r * 0.3048));
+        }
+        if let Some(a) = rbx.property("Angle").and_then(|p| p.as_f32()) {
+            bag.set("light.angle", PropertyValue::Float(a));
         }
         if let Some(face) = rbx.property("Face").and_then(|p| p.as_str().map(str::to_string)) {
             bag.set("light.face", PropertyValue::Enum(face));
@@ -491,6 +364,7 @@ mod tests {
                     brightness: 2.0,
                     range: 12.0,
                     face: "Top".to_string(),
+                    angle: 120.0,
                     shadows: true,
                     enabled: true,
                     texture: None,
@@ -506,18 +380,17 @@ mod tests {
     }
 
     #[test]
-    fn apply_edit_face_change_requires_respawn() {
+    fn apply_edit_face_change_re_aims_without_respawn() {
         let mut world = World::new();
         let entity = world
             .spawn((SurfaceLightComponent::default(), Transform::default()))
             .id();
         let mut bag = PropertyBag::new();
-        bag.set("light.face", PropertyValue::Enum("Top".into()));
+        bag.set("light.face", PropertyValue::Enum("Enum.NormalId.Top".into()));
         let respawn = SurfaceLightSpawner.apply_edit(&mut world, entity, &bag);
-        assert!(
-            respawn,
-            "face change must signal respawn — LIGHTING_AUDIT.md §4.4"
-        );
+        assert!(!respawn, "the emitter re-aims from the component; no respawn");
+        let sl = world.entity(entity).get::<SurfaceLightComponent>().unwrap();
+        assert_eq!(sl.face, "Top");
     }
 
     #[test]

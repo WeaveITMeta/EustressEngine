@@ -186,6 +186,10 @@ fn attribute_value_to_json(value: &AttributeValue) -> serde_json::Value {
             }).collect();
             serde_json::json!({"type": "ColorSequence", "value": kps})
         }
+        AttributeValue::UDim { scale, offset } => serde_json::json!({"type": "UDim", "value": [scale, offset]}),
+        AttributeValue::EnumItem { enum_type, name, value } => {
+            serde_json::json!({"type": "EnumItem", "value": {"type": enum_type, "name": name, "value": value}})
+        }
     }
 }
 
@@ -1230,7 +1234,11 @@ fn pointlight_from_properties(props: &HashMap<String, serde_json::Value>) -> Eus
     if let Some(shadows) = props.get("Shadows").and_then(|v| v.as_bool()) {
         let _ = light.set_property("Shadows", PropertyValue::Bool(shadows));
     }
-    
+
+    if let Some(radius) = props.get("Radius").and_then(|v| v.as_f64()) {
+        let _ = light.set_property("Radius", PropertyValue::Float(radius as f32));
+    }
+
     // Roblox `Light.Enabled`; absent = on (the class default).
     if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
         light.enabled = enabled;
@@ -1253,13 +1261,21 @@ fn spotlight_from_properties(props: &HashMap<String, serde_json::Value>) -> Eust
     if let Some(angle) = props.get("Angle").and_then(|v| v.as_f64()) {
         let _ = light.set_property("Angle", PropertyValue::Float(angle as f32));
     }
-    
+
+    if let Some(face) = props.get("Face").and_then(|v| v.as_str()) {
+        let _ = light.set_property("Face", PropertyValue::Enum(face.to_string()));
+    }
+
+    if let Some(shadows) = props.get("Shadows").and_then(|v| v.as_bool()) {
+        light.shadows = shadows;
+    }
+
     if let Some(color_json) = props.get("Color") {
         if let Some(color) = json_to_property(color_json, "Color") {
             let _ = light.set_property("Color", color);
         }
     }
-    
+
     // Roblox `Light.Enabled`; absent = on (the class default).
     if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
         light.enabled = enabled;
@@ -1282,13 +1298,21 @@ fn surfacelight_from_properties(props: &HashMap<String, serde_json::Value>) -> S
     if let Some(face) = props.get("Face").and_then(|v| v.as_str()) {
         let _ = light.set_property("Face", PropertyValue::Enum(face.to_string()));
     }
-    
+
+    if let Some(angle) = props.get("Angle").and_then(|v| v.as_f64()) {
+        let _ = light.set_property("Angle", PropertyValue::Float(angle as f32));
+    }
+
+    if let Some(shadows) = props.get("Shadows").and_then(|v| v.as_bool()) {
+        light.shadows = shadows;
+    }
+
     if let Some(color_json) = props.get("Color") {
         if let Some(color) = json_to_property(color_json, "Color") {
             let _ = light.set_property("Color", color);
         }
     }
-    
+
     // Roblox `Light.Enabled`; absent = on (the class default).
     if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
         light.enabled = enabled;

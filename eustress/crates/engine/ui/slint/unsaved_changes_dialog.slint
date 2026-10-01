@@ -1,0 +1,164 @@
+// ============================================================================
+// Eustress Engine Studio - Unsaved Changes Dialog
+// Asked before closing script tabs, or exiting, with unsaved code edits
+// ============================================================================
+
+import { HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component UnsavedChangesDialog inherits Rectangle {
+    /// The tabs with unsaved edits, as one line ("A, B and 2 more").
+    in property <string> names: "";
+    /// How many tabs have unsaved edits.
+    in property <int> count: 0;
+
+    callback on-save();
+    callback on-discard();
+    callback on-cancel();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    TouchArea {
+        clicked => { root.on-cancel(); }
+        scroll-event(event) => {
+            return accept;
+        }
+    }
+
+    // Enter saves, Escape cancels.
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.on-cancel();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.on-save();
+                return accept;
+            }
+            accept
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 440px;
+        height: 200px;
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: Theme.shadow-color;
+
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
+
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            HorizontalBox {
+                spacing: 16px;
+
+                Image {
+                    width: 32px;
+                    height: 32px;
+                    source: @image-url("../../assets/icons/ui/warning.svg");
+                    image-fit: contain;
+                }
+
+                VerticalBox {
+                    spacing: 8px;
+
+                    Text {
+                        text: root.count == 1
+                            ? "Save changes to " + root.names + "?"
+                            : "Save changes to " + root.count + " scripts?";
+                        color: Theme.text-primary;
+                        font-size: 18px;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.count == 1
+                            ? "Your edits are lost if you don't save them."
+                            : root.names + ". Your edits are lost if you don't save them.";
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalBox {
+                spacing: 8px;
+                alignment: end;
+
+                Rectangle {
+                    width: 110px;
+                    height: 36px;
+                    background: discard-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                    border-radius: 4px;
+
+                    discard-touch := TouchArea {
+                        clicked => { root.on-discard(); }
+                    }
+
+                    Text {
+                        text: "Don't Save";
+                        color: Theme.text-error;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: cancel-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                    border-radius: 4px;
+
+                    cancel-touch := TouchArea {
+                        clicked => { root.on-cancel(); }
+                    }
+
+                    Text {
+                        text: "Cancel";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: save-touch.has-hover ? Theme.button-primary-hover : Theme.button-primary;
+                    border-radius: 4px;
+
+                    save-touch := TouchArea {
+                        clicked => { root.on-save(); }
+                    }
+
+                    Text {
+                        text: "Save";
+                        color: white;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

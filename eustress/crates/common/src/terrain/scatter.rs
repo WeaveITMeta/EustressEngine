@@ -13,8 +13,9 @@
 //! average), where in the cell it stands, its scale, turn, variant and tint. Every draw is taken whatever
 //! the rules decide, so one cell's outcome never shifts another's. A
 //! candidate is kept when the ground passes the layer's rules there, read
-//! from the SURFACE the meshers draw (`surface_data`): the footprint, the
-//! height, the slope from the normal, the material weights, and, with
+//! from the SURFACE the meshers draw (`surface_data`): the footprint, ground
+//! under it at all (no hole of a sparse surface), the height, the slope from
+//! the normal, the material weights, and, with
 //! AvoidRoads, the corridors of the Road and Path splines the bake laid.
 //! Nothing placed is stored: an edit, a bake or a layer change places the
 //! affected tiles again, and the same inputs place the same instances on
@@ -58,12 +59,14 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 use std::time::Duration;
 
+use bevy::camera::visibility::VisibilityRange;
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::height_query::{height_at_world, material_weights_at_world};
+use super::mesh::ground_at_world;
 use super::layer_instances::{compose_world_pose, layer_id, TerrainScatter};
 use super::layers::{rects_overlap, rotated_rect_bounds, surface_data, PreparedLayers, SplineMode, TerrainBaked};
 use super::material::TerrainMaterial;
@@ -72,6 +75,9 @@ use super::scatter_meshes::{
     SHRUB_VARIANTS,
 };
 use super::volume::{chunk_has_volume, sample_field, TerrainVolume};
+use super::voxel_water::TerrainVoxelWater;
+use super::water::WaterConfig;
+use super::water_bodies::WaterBodyState;
 use super::{
     apply_terrain_dirty_chunks, scene_camera_translation, SurfaceChanges, TerrainConfig, TerrainData,
     TerrainDirtyChunks, TerrainGridKey, TerrainRoot,
@@ -131,6 +137,8 @@ const SCATTER_QUIET_SECS: f64 = 0.15;
 const DROP_MARGIN_FRACTION: f32 = 0.15;
 /// The spline modes AvoidRoads keeps off.
 const AVOIDED_SPLINES: [SplineMode; 2] = [SplineMode::Road, SplineMode::Path];
+/// The spline modes whose beds nothing but rocks stands in.
+const WET_SPLINES: [SplineMode; 1] = [SplineMode::River];
 
 // ============================================================================
 // Layer descriptions
@@ -295,6 +303,9 @@ pub struct ScatterLayer {
     pub footprint: Option<ScatterFootprint>,
     /// Streaming radius, metres, the kind's default already applied.
     pub radius: f32,
+    /// The Radius was typed, rather than the kind's default (see
+    /// [`Self::reach`]).
+    pub explicit_radius: bool,
 }
 
 impl Default for ScatterLayer {
@@ -320,11 +331,33 @@ impl Default for ScatterLayer {
             seed: 1,
             footprint: None,
             radius: ScatterKind::Grass.default_radius(),
+            explicit_radius: false,
         }
     }
 }
 
 impl ScatterLayer {
+    /// How far from the view this layer draws, metres: its radius, never past
+    /// `render_distance` (the Workspace RenderDistance, [`ScatterRenderDistance`])
+    /// when the host has one. A Trees or Custom layer left on the kind's
+    /// distance draws to the RenderDistance itself, so trees reach as far as
+    /// the rest of the world.
+    pub fn reach(&self, render_distance: Option<f32>) -> f32 {
+        let Some(limit) = render_distance.filter(|limit| limit.is_finite() && *limit > 0.0) else {
+            return self.radius;
+        };
+        if !self.explicit_radius && matches!(self.kind, ScatterKind::Trees | ScatterKind::Custom) {
+            limit.min(MAX_RADIUS as f32)
+        } else {
+            self.radius.min(limit)
+        }
+    }
+
+    /// Whether this layer may stand under water: only rocks do, on a lake
+    /// bed or in a river.
+    fn grows_under_water(&self) -> bool {
+        self.kind == ScatterKind::Rocks
+    }
     /// Whether chunk `chunk` can hold any instance of this layer: it is on
     /// `config`'s grid, it overlaps the footprint, and the layer places
     /// anything at all (a density, and a mesh when it is Custom).
@@ -332,8 +365,7 @@ impl ScatterLayer {
         if !(self.density > 0.0) || (self.kind == ScatterKind::Custom && self.mesh_asset.trim().is_empty()) {
             return false;
         }
-        let (extent_x, extent_z) = (config.chunks_x as i32, config.chunks_z as i32);
-        if chunk.x < -extent_x || chunk.x > extent_x || chunk.y < -extent_z || chunk.y > extent_z {
+        if !config.contains_chunk(chunk) {
             return false;
         }
         match self.footprint.and_then(|footprint| footprint.bounds()) {
@@ -434,6 +466,51 @@ fn buried_or_carved(config: &TerrainConfig, ground: &TerrainData, volume: &Terra
         || sample_field(config, ground, volume, Vec3::new(p.x, h + VOLUME_PROBE, p.y)) < 0.0
 }
 
+/// How far the host draws the world, metres: the engine's Workspace
+/// RenderDistance, `None` on a host without one. Scatter never streams past
+/// it (see [`ScatterLayer::reach`]).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScatterRenderDistance(pub Option<f32>);
+
+/// The water standing over the ground, which scatter keeps out of (rocks
+/// excepted): the ocean, the lakes, the terrain's own voxel water, and the
+/// beds of rivers.
+#[derive(Clone, Copy, Default)]
+pub struct ScatterWater<'a> {
+    /// World Y of the ocean, `None` while it is off.
+    pub sea_level: Option<f32>,
+    /// The lakes' floods, filled over the same ground scatter reads.
+    pub lakes: Option<&'a WaterBodyState>,
+    /// The water imported with the terrain or filled through the Terrain API.
+    pub voxel: Option<&'a TerrainVoxelWater>,
+    /// The baked splines, whose River beds hold water.
+    pub rivers: Option<&'a PreparedLayers>,
+}
+
+impl ScatterWater<'_> {
+    /// Whether ground at world `p`, height `h`, stands under water.
+    pub fn covers(&self, config: &TerrainConfig, ground: &TerrainData, p: Vec2, h: f32) -> bool {
+        let over = |level: Option<f32>| level.is_some_and(|level| level > h);
+        over(self.sea_level)
+            || over(self.lakes.and_then(|lakes| lakes.level_at(config, ground, p)))
+            || over(self.voxel.and_then(|voxel| voxel.level_at(config, ground, p)))
+            || self.rivers.is_some_and(|rivers| rivers.in_bed(p, &WET_SPLINES))
+    }
+}
+
+/// What the water of [`ScatterWater`] was when the batches were last marked,
+/// so a change to it marks them stale. A change to the voxel water's levels
+/// is caught by its change detection instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WaterKey {
+    /// The ocean's level, as bits, `None` while it is off.
+    sea_level: Option<u32>,
+    /// `WaterBodyState::revision`.
+    lakes: u64,
+    /// The terrain carries voxel water.
+    voxel: bool,
+}
+
 /// A range typed backwards still means the range between its ends.
 fn ordered(a: f32, b: f32) -> (f32, f32) {
     if a <= b { (a, b) } else { (b, a) }
@@ -449,13 +526,14 @@ pub fn place_chunk(
     ground: &TerrainData,
     volume: &TerrainVolume,
     corridors: Option<&PreparedLayers>,
+    water: &ScatterWater,
 ) -> Vec<ScatterInstance> {
     let tpc = tiles_per_chunk(layer, config.chunk_size);
     let mut placed = Vec::new();
     for z in 0..tpc {
         for x in 0..tpc {
             let tile = chunk * tpc + IVec2::new(x, z);
-            placed.extend(place_tile(layer, tile, config, ground, volume, corridors));
+            placed.extend(place_tile(layer, tile, config, ground, volume, corridors, water));
         }
     }
     placed
@@ -464,8 +542,8 @@ pub fn place_chunk(
 /// Every instance `layer` places on tile `tile` (see `tiles_per_chunk`) of
 /// `config`'s grid, over `ground` (the surface data) and `volume`, keeping
 /// off the Road and Path corridors of `corridors` when the layer avoids
-/// roads. Deterministic: the same inputs give the same instances, in the same
-/// order.
+/// roads, and out of `water` unless it is rocks. Deterministic: the same
+/// inputs give the same instances, in the same order.
 pub fn place_tile(
     layer: &ScatterLayer,
     tile: IVec2,
@@ -473,6 +551,7 @@ pub fn place_tile(
     ground: &TerrainData,
     volume: &TerrainVolume,
     corridors: Option<&PreparedLayers>,
+    water: &ScatterWater,
 ) -> Vec<ScatterInstance> {
     let mut placed = Vec::new();
     let tpc = tiles_per_chunk(layer, config.chunk_size);
@@ -513,6 +592,7 @@ pub fn place_tile(
     };
     let probe_volume = !volume.is_empty() && chunk_has_volume(chunk, config, volume);
     let corridors = corridors.filter(|_| layer.avoid_roads);
+    let dry_only = !layer.grows_under_water();
     let key = chunk_key(layer.seed, layer.id, tile);
 
     for row in 0..cells {
@@ -529,6 +609,11 @@ pub fn place_tile(
             }
             let p = origin + Vec2::new((column as f32 + x_draw) * cell, (row as f32 + z_draw) * cell);
             if layer.footprint.is_some_and(|footprint| !footprint.contains(p)) {
+                continue;
+            }
+            // Nothing stands over a hole of a sparse surface, where no ground
+            // is drawn.
+            if !ground_at_world(config, ground, p.x, p.y) {
                 continue;
             }
             let h = height_at_world(config, ground, p.x, p.y);
@@ -550,6 +635,9 @@ pub fn place_tile(
                 continue;
             }
             if probe_volume && buried_or_carved(config, ground, volume, p, h) {
+                continue;
+            }
+            if dry_only && water.covers(config, ground, p, h) {
                 continue;
             }
             let yaw = Quat::from_rotation_y(yaw_draw * TAU);
@@ -881,6 +969,13 @@ pub struct TerrainScatterState {
     /// Clock seconds (`Time`, the clock `TerrainDirtyChunks::last_mark_secs`
     /// is stamped with) of each layer's latest change.
     layer_changed: HashMap<u64, f64>,
+    /// The water the batches were placed around.
+    water: WaterKey,
+    /// Clock seconds of the water's latest change, which waits to go quiet
+    /// as the ground does.
+    water_changed: Option<f64>,
+    /// The RenderDistance the batches' distance cuts were built for.
+    render_distance: Option<f32>,
 }
 
 impl TerrainScatterState {
@@ -903,6 +998,48 @@ pub struct ScatterLayerQueries<'w, 's> {
     scatters: Query<'w, 's, (Entity, Option<&'static Instance>, &'static TerrainScatter)>,
     transforms: Query<'w, 's, &'static Transform>,
     parents: Query<'w, 's, &'static ChildOf>,
+}
+
+/// What scatter reads beside the ground and its layers: the water it keeps
+/// out of, and how far the host draws the world.
+#[derive(SystemParam)]
+pub struct ScatterSurroundings<'w, 's> {
+    ocean: Option<Res<'w, WaterConfig>>,
+    lakes: Option<Res<'w, WaterBodyState>>,
+    voxel: Query<'w, 's, Ref<'static, TerrainVoxelWater>, With<TerrainRoot>>,
+    render_distance: Option<Res<'w, ScatterRenderDistance>>,
+}
+
+impl ScatterSurroundings<'_, '_> {
+    fn sea_level(&self) -> Option<f32> {
+        self.ocean.as_deref().filter(|ocean| ocean.enabled).map(|ocean| ocean.sea_level)
+    }
+
+    fn water_key(&self, root: Entity) -> WaterKey {
+        WaterKey {
+            sea_level: self.sea_level().map(f32::to_bits),
+            lakes: self.lakes.as_deref().map_or(0, WaterBodyState::revision),
+            voxel: self.voxel.contains(root),
+        }
+    }
+
+    /// Whether root `root`'s voxel water changed since this system last ran.
+    fn voxel_changed(&self, root: Entity) -> bool {
+        self.voxel.get(root).is_ok_and(|water| water.is_changed())
+    }
+
+    fn water<'a>(&'a self, root: Entity, rivers: Option<&'a PreparedLayers>) -> ScatterWater<'a> {
+        ScatterWater {
+            sea_level: self.sea_level(),
+            lakes: self.lakes.as_deref(),
+            voxel: self.voxel.get(root).ok().map(|water| water.into_inner()),
+            rivers,
+        }
+    }
+
+    fn render_distance(&self) -> Option<f32> {
+        self.render_distance.as_deref().and_then(|distance| distance.0)
+    }
 }
 
 impl ScatterLayerQueries<'_, '_> {
@@ -977,8 +1114,20 @@ struct Wanted {
     tile: IVec2,
 }
 
+/// The distance cut every drawn piece of a batch carries: gone past `reach`
+/// from the view, fading over its last [`FADE_FRACTION`], so a layer ends in
+/// a circle at its reach rather than along the squares its tiles stream in.
+/// `use_aabb` measures to the middle of a merged tile's bounds; an entity's
+/// own origin is where it stands.
+fn batch_visibility(reach: f32, use_aabb: bool) -> VisibilityRange {
+    const FADE_FRACTION: f32 = 0.05;
+    let reach = reach.max(1.0);
+    VisibilityRange { start_margin: 0.0..0.0, end_margin: reach * (1.0 - FADE_FRACTION)..reach, use_aabb }
+}
+
 /// Spawn one batch from `parts`, returning its entity, or `None` when there
-/// is nothing to draw or collide with.
+/// is nothing to draw or collide with. Everything drawn stops at `reach`
+/// ([`batch_visibility`]).
 #[allow(clippy::too_many_arguments)]
 fn spawn_batch(
     commands: &mut Commands,
@@ -986,6 +1135,7 @@ fn spawn_batch(
     chunk: IVec2,
     tile: IVec2,
     origin: Vec3,
+    reach: f32,
     parts: ScatterBatchParts,
     assets: &mut ScatterAssets,
     meshes: &mut Assets<Mesh>,
@@ -1021,7 +1171,7 @@ fn spawn_batch(
         Visibility::default(),
     ));
     if let (Some(merged), Some(material)) = (parts.merged, merged_material) {
-        batch.insert((Mesh3d(meshes.add(merged.into_mesh())), MeshMaterial3d(material)));
+        batch.insert((Mesh3d(meshes.add(merged.into_mesh())), MeshMaterial3d(material), batch_visibility(reach, true)));
         if foliage {
             // Thousands of thin blades per tile: their shadows cost far
             // more than they show.
@@ -1046,8 +1196,9 @@ fn spawn_batch(
         }
     }
     let batch = batch.id();
+    let visibility = batch_visibility(reach, false);
     for (mesh, material, transform) in children {
-        commands.spawn((Mesh3d(mesh), MeshMaterial3d(material), transform, Visibility::default(), ChildOf(batch)));
+        commands.spawn((Mesh3d(mesh), MeshMaterial3d(material), transform, Visibility::default(), visibility.clone(), ChildOf(batch)));
     }
     Some(batch)
 }
@@ -1068,13 +1219,23 @@ pub fn update_terrain_scatter(
         With<TerrainRoot>,
     >,
     layer_queries: ScatterLayerQueries,
+    surroundings: ScatterSurroundings,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     live: Query<(), With<ScatterBatch>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     asset_server: Option<Res<AssetServer>>,
 ) {
-    let TerrainScatterState { layers, batches, seen_surface, terrain, layer_changed } = &mut *state;
+    let TerrainScatterState {
+        layers,
+        batches,
+        seen_surface,
+        terrain,
+        layer_changed,
+        water,
+        water_changed,
+        render_distance: built_render_distance,
+    } = &mut *state;
     let (Some((root, config, base, baked, volume)), Some(mut meshes), Some(mut materials)) =
         (roots.iter().next(), meshes, materials)
     else {
@@ -1098,12 +1259,22 @@ pub fn update_terrain_scatter(
         mark_surface_changes(batches, &dirty.surface_changes_since(*seen_surface));
         *seen_surface = dirty.surface_seq();
     }
+    let now_secs = time.as_deref().map(|time| time.elapsed_secs_f64());
+
+    // Water rose, fell, spread or drained: every batch may now stand in it
+    // or be free of it. Water changes seldom (a lake refilled, the sea level
+    // set), so they all go stale rather than tracking where.
+    let water_now = surroundings.water_key(root);
+    if water_now != *water || surroundings.voxel_changed(root) {
+        *water = water_now;
+        *water_changed = now_secs;
+        batches.values_mut().for_each(|record| record.stale = true);
+    }
 
     // A layer gone or disabled takes its batches at once, as does one whose
     // new Kind cuts its chunks into tiles of another size (their keys name
     // tiles that no longer exist); a changed one's go stale and stay drawn
     // until their replacements are built.
-    let now_secs = time.as_deref().map(|time| time.elapsed_secs_f64());
     let current: HashMap<u64, ScatterLayer> =
         layer_queries.gather().into_iter().map(|layer| (layer.id, layer)).collect();
     // What each changed layer makes stale: `Some` boxes when only its
@@ -1155,6 +1326,13 @@ pub fn update_terrain_scatter(
     let size = config.chunk_size.max(1e-3);
     let viewer = scene_camera_translation(&cameras).unwrap_or(Vec3::ZERO);
     let viewer = Vec2::new(viewer.x, viewer.z);
+    let render_distance = surroundings.render_distance();
+    // A new RenderDistance moves every layer's distance cut, which the
+    // batches carry: they are built again, drawing meanwhile.
+    if render_distance != *built_render_distance {
+        *built_render_distance = render_distance;
+        batches.values_mut().for_each(|record| record.stale = true);
+    }
 
     // Out of range, or despawned by something else (a scene cleared under
     // it): gone, and built again if it comes back into range.
@@ -1162,7 +1340,8 @@ pub fn update_terrain_scatter(
         let alive = record.entity.is_none_or(|entity| live.contains(entity));
         let in_reach = layers.get(id).is_some_and(|layer| {
             let tile_size = size / tiles_per_chunk(layer, config.chunk_size) as f32;
-            chunk_distance(*tile, tile_size, viewer) <= layer.radius + drop_margin(layer.radius, tile_size)
+            let reach = layer.reach(render_distance);
+            chunk_distance(*tile, tile_size, viewer) <= reach + drop_margin(reach, tile_size)
         });
         if alive && in_reach {
             return true;
@@ -1174,21 +1353,25 @@ pub fn update_terrain_scatter(
     // Tiles come into range without a batch, and stale batches. A tile whose
     // chunk the layer cannot place on is settled here without a build.
     let mut wanted: Vec<Wanted> = Vec::new();
-    let (extent_x, extent_z) = (config.chunks_x as i32, config.chunks_z as i32);
+    let (grid_min, grid_max) = (config.chunk_min(), config.chunk_max());
     for layer in layers.values() {
         let tpc = tiles_per_chunk(layer, config.chunk_size);
         let tile_size = size / tpc as f32;
-        let lo = ((viewer - Vec2::splat(layer.radius)) / tile_size).floor();
-        let hi = ((viewer + Vec2::splat(layer.radius)) / tile_size).floor();
-        let x_range = (lo.x as i32).max(-extent_x * tpc)..=(hi.x as i32).min(extent_x * tpc + tpc - 1);
+        let reach = layer.reach(render_distance);
+        let lo = ((viewer - Vec2::splat(reach)) / tile_size).floor();
+        let hi = ((viewer + Vec2::splat(reach)) / tile_size).floor();
+        // The grid's first tile, and the last tile of its last chunk.
+        let first = grid_min.saturating_mul(IVec2::splat(tpc));
+        let last = grid_max.saturating_mul(IVec2::splat(tpc)).saturating_add(IVec2::splat(tpc - 1));
+        let x_range = (lo.x as i32).max(first.x)..=(hi.x as i32).min(last.x);
         for x in x_range {
-            for z in (lo.y as i32).max(-extent_z * tpc)..=(hi.y as i32).min(extent_z * tpc + tpc - 1) {
+            for z in (lo.y as i32).max(first.y)..=(hi.y as i32).min(last.y) {
                 let tile = IVec2::new(x, z);
                 if batches.contains_key(&(layer.id, tile)) {
                     continue;
                 }
                 let distance = chunk_distance(tile, tile_size, viewer);
-                if distance > layer.radius {
+                if distance > reach {
                     continue;
                 }
                 let chunk = tile_chunk(tile, tpc);
@@ -1203,7 +1386,8 @@ pub fn update_terrain_scatter(
     // Wait for the stroke or drag to settle; the stale batch keeps drawing.
     // A tile with no batch yet is not held back, so streaming never stalls.
     let quiet = |since: f64| now_secs.is_none_or(|now| now - since >= SCATTER_QUIET_SECS);
-    let ground_quiet = dirty.as_deref().is_none_or(|dirty| quiet(dirty.last_mark_secs));
+    let ground_quiet = dirty.as_deref().is_none_or(|dirty| quiet(dirty.last_mark_secs))
+        && water_changed.is_none_or(|since| quiet(since));
     for (&(id, tile), record) in batches.iter_mut() {
         if !record.stale {
             continue;
@@ -1234,6 +1418,7 @@ pub fn update_terrain_scatter(
     let ground = surface_data(base, baked);
     let volume = volume.unwrap_or(TerrainVolume::empty());
     let corridors = baked.and_then(TerrainBaked::prepared);
+    let water = surroundings.water(root, corridors);
     let started = Instant::now();
     for (built, want) in wanted.iter().enumerate() {
         if built >= MAX_BUILDS_PER_FRAME || (built > 0 && started.elapsed() >= BUILD_TIME_BUDGET) {
@@ -1242,7 +1427,7 @@ pub fn update_terrain_scatter(
         let Some(layer) = layers.get(&want.layer) else { continue };
         let tpc = tiles_per_chunk(layer, config.chunk_size);
         let chunk = tile_chunk(want.tile, tpc);
-        let instances = place_tile(layer, want.tile, config, ground, volume, corridors);
+        let instances = place_tile(layer, want.tile, config, ground, volume, corridors, &water);
         let corner = tile_origin(want.tile, tpc, config);
         let origin = Vec3::new(corner.x, 0.0, corner.y);
         let parts = build_batch_parts(layer, origin, &instances, &mut assets.library);
@@ -1252,6 +1437,7 @@ pub fn update_terrain_scatter(
             chunk,
             want.tile,
             origin,
+            layer.reach(render_distance),
             parts,
             &mut assets,
             &mut meshes,
@@ -1274,6 +1460,7 @@ impl Plugin for TerrainScatterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainScatterState>()
             .init_resource::<ScatterAssets>()
+            .init_resource::<ScatterRenderDistance>()
             .init_resource::<TerrainDirtyChunks>()
             .add_systems(Update, update_terrain_scatter.after(apply_terrain_dirty_chunks));
     }
@@ -1336,12 +1523,11 @@ mod tests {
     }
 
     fn place(layer: &ScatterLayer, chunk: IVec2, config: &TerrainConfig, data: &TerrainData) -> Vec<ScatterInstance> {
-        place_chunk(layer, chunk, config, data, TerrainVolume::empty(), None)
+        place_chunk(layer, chunk, config, data, TerrainVolume::empty(), None, &ScatterWater::default())
     }
 
     fn every_chunk(config: &TerrainConfig) -> impl Iterator<Item = IVec2> {
-        let (x, z) = (config.chunks_x as i32, config.chunks_z as i32);
-        (-x..=x).flat_map(move |cx| (-z..=z).map(move |cz| IVec2::new(cx, cz)))
+        config.grid_chunks()
     }
 
     #[test]
@@ -1402,7 +1588,7 @@ mod tests {
             for x in 0..tpc {
                 let tile = chunk * tpc + IVec2::new(x, z);
                 assert_eq!(tile_chunk(tile, tpc), chunk);
-                let placed = place_tile(&meadow, tile, &config, &data, TerrainVolume::empty(), None);
+                let placed = place_tile(&meadow, tile, &config, &data, TerrainVolume::empty(), None, &ScatterWater::default());
                 assert!(!placed.is_empty() && placed.len() <= 21 * 21, "tile {tile}: {} placed", placed.len());
                 let lo = tile_origin(tile, tpc, &config);
                 assert!(
@@ -1515,6 +1701,33 @@ mod tests {
         assert!(placed.iter().all(|i| (i.position.x + 48.0).abs() <= 5.0));
     }
 
+    #[test]
+    fn nothing_is_placed_over_a_hole() {
+        use crate::terrain::material::MATERIAL_SLOT_NONE;
+
+        let config = config();
+        let grass = |_: Vec2| TerrainMaterial::Grass;
+        let mut data = ground(&config, |_| 0.0, Some(&grass));
+        // The west half of chunk (0, 0)'s tile (cells 32..48 on both axes)
+        // holds no material, which on a sparse surface makes it holes.
+        let w = data.cache_width as usize;
+        for z in 32..48 {
+            for x in 32..40 {
+                data.material_cache[z * w + x] = [MATERIAL_SLOT_NONE; 4];
+            }
+        }
+        let layer = ScatterLayer::default();
+        let full = place(&layer, IVec2::ZERO, &config, &data);
+        data.sparse_surface = true;
+        let sparse = place(&layer, IVec2::ZERO, &config, &data);
+        assert!(!sparse.is_empty() && sparse.len() < full.len(), "{} of {} kept", sparse.len(), full.len());
+        // A cell's draws do not depend on the ground, so the holes take away
+        // exactly the instances over them.
+        let over_ground: Vec<ScatterInstance> =
+            full.iter().copied().filter(|i| ground_at_world(&config, &data, i.position.x, i.position.z)).collect();
+        assert_eq!(sparse, over_ground);
+    }
+
     fn road(mode: SplineMode) -> LayerDesc {
         LayerDesc {
             id: 50,
@@ -1538,24 +1751,95 @@ mod tests {
         let data = flat(&config);
         let layer = ScatterLayer { density: 40.0, avoid_roads: true, ..ScatterLayer::default() };
         let chunk = IVec2::ZERO;
+        let dry = ScatterWater::default();
         // Along z = 16 through the chunk; the corridor reaches 8 m either side.
         let near_road = |instances: &[ScatterInstance]| instances.iter().filter(|i| (i.position.z - 16.0).abs() <= 7.9).count();
 
         let roads = PreparedLayers::new(&config, &data, &[road(SplineMode::Road)]);
-        let avoided = place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&roads));
+        let avoided = place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&roads), &dry);
         assert!(!avoided.is_empty(), "the ground either side still holds scatter");
         assert_eq!(near_road(&avoided), 0, "nothing on the road or its shoulders");
         assert!(avoided.iter().all(|i| (i.position.z - 16.0).abs() > 7.99));
 
         let ignored = ScatterLayer { avoid_roads: false, ..layer.clone() };
-        let over = place_chunk(&ignored, chunk, &config, &data, TerrainVolume::empty(), Some(&roads));
+        let over = place_chunk(&ignored, chunk, &config, &data, TerrainVolume::empty(), Some(&roads), &dry);
         assert!(near_road(&over) > 0, "without AvoidRoads the road is scattered over");
 
         let paths = PreparedLayers::new(&config, &data, &[road(SplineMode::Path)]);
-        assert_eq!(near_road(&place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&paths))), 0);
+        assert_eq!(near_road(&place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&paths), &dry)), 0);
         let river = PreparedLayers::new(&config, &data, &[road(SplineMode::River)]);
-        let banks = place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&river));
+        let banks = place_chunk(&layer, chunk, &config, &data, TerrainVolume::empty(), Some(&river), &dry);
         assert!(near_road(&banks) > 0, "a river is not a road");
+    }
+
+    #[test]
+    fn nothing_but_rocks_stands_under_water() {
+        let config = config();
+        // Ground falling a metre every 9.6 m eastward, level with the sea at
+        // x = 0, through the two chunks either side of it.
+        let data = ground(&config, |p| -p.x / 9.6, None);
+        let chunk = IVec2::new(-1, -1);
+        let trees = ScatterLayer { kind: ScatterKind::Trees, density: 40.0, ..ScatterLayer::default() };
+        let rocks = ScatterLayer { kind: ScatterKind::Rocks, density: 40.0, ..trees.clone() };
+        let place_in = |layer: &ScatterLayer, water: &ScatterWater| {
+            [chunk, IVec2::new(0, -1)]
+                .into_iter()
+                .flat_map(|c| place_chunk(layer, c, &config, &data, TerrainVolume::empty(), None, water))
+                .collect::<Vec<_>>()
+        };
+        let dry = place_in(&trees, &ScatterWater::default());
+        assert!(dry.iter().any(|i| i.position.y < -0.5), "the low ground holds trees while dry");
+
+        let sea = ScatterWater { sea_level: Some(0.0), ..ScatterWater::default() };
+        let shore = place_in(&trees, &sea);
+        assert!(!shore.is_empty() && shore.len() < dry.len());
+        assert!(shore.iter().all(|i| i.position.y >= 0.0), "no tree under the sea");
+        assert!(place_in(&rocks, &sea).iter().any(|i| i.position.y < -0.5), "rocks lie on the sea bed");
+
+        // Imported water standing 1 m deep over the east half, as levels.
+        let (lo, _) = config.footprint_xz();
+        let step = cell(&config);
+        let w = data.cache_width as usize;
+        let levels = (0..data.height_cache.len())
+            .map(|i| {
+                let x = lo.x + (i % w) as f32 * step;
+                if x > 0.0 { config.world_height(data.height_cache[i]) + 1.0 } else { f32::NAN }
+            })
+            .collect();
+        let voxel = TerrainVoxelWater {
+            levels,
+            width: data.cache_width,
+            height: data.cache_height,
+            ..TerrainVoxelWater::default()
+        };
+        let pools = ScatterWater { voxel: Some(&voxel), ..ScatterWater::default() };
+        let beside = place_in(&trees, &pools);
+        assert!(!beside.is_empty() && beside.iter().all(|i| i.position.x <= step), "no tree in the imported water");
+
+        // A river's bed holds none; its banks do.
+        let level = flat(&config);
+        let river = PreparedLayers::new(&config, &level, &[road(SplineMode::River)]);
+        let channel = ScatterWater { rivers: Some(&river), ..ScatterWater::default() };
+        let banks = place_chunk(&trees, IVec2::ZERO, &config, &level, TerrainVolume::empty(), None, &channel);
+        assert!(!banks.is_empty());
+        assert!(banks.iter().all(|i| (i.position.z - 16.0).abs() > 3.99), "nothing in the 8 m bed");
+        assert!(banks.iter().any(|i| (i.position.z - 16.0).abs() < 7.9), "the banks keep their trees");
+    }
+
+    #[test]
+    fn reach_never_passes_the_render_distance() {
+        let grass = ScatterLayer::default();
+        assert_eq!(grass.reach(None), ScatterKind::Grass.default_radius());
+        assert_eq!(grass.reach(Some(1000.0)), ScatterKind::Grass.default_radius(), "grass keeps its short reach");
+        assert_eq!(grass.reach(Some(50.0)), 50.0);
+        let trees = ScatterLayer { kind: ScatterKind::Trees, radius: ScatterKind::Trees.default_radius(), ..grass.clone() };
+        assert_eq!(trees.reach(None), ScatterKind::Trees.default_radius());
+        assert_eq!(trees.reach(Some(3000.0)), 3000.0, "trees on the Kind's distance follow the RenderDistance");
+        assert_eq!(trees.reach(Some(400.0)), 400.0);
+        let typed = ScatterLayer { radius: 600.0, explicit_radius: true, ..trees };
+        assert_eq!(typed.reach(Some(3000.0)), 600.0, "a typed Radius holds");
+        assert_eq!(typed.reach(Some(400.0)), 400.0, "and still stops at the RenderDistance");
+        assert_eq!(typed.reach(Some(f32::NAN)), 600.0);
     }
 
     fn instance(position: Vec3, scale: f32, variant: u8) -> ScatterInstance {

@@ -398,8 +398,8 @@ impl ModalTool for RoadNodePlaceTool {
             place_road_node(world, origin, direction);
         });
         // Counted optimistically: the closure runs after this returns and
-        // drops clicks that miss the terrain, so the label can read one high
-        // after a stray click at the sky. The label is advisory; round-
+        // drops clicks that miss the terrain (with a toast), so the label can
+        // read one high after a stray click at the sky. The label is advisory; round-
         // tripping the real result back into the tool isn't worth a resource.
         self.placed_this_session += 1;
         ToolStepResult::Continue
@@ -411,10 +411,25 @@ impl ModalTool for RoadNodePlaceTool {
         // left to commit. The tool ends via Cancel (Esc/right-click).
     }
 
-    fn cancel(&mut self, _commands: &mut Commands) {
+    fn cancel(&mut self, commands: &mut Commands) {
         // No preview entities are held (see `preview_entities` below):
         // already-placed nodes are real, persistent instances and must
-        // survive a Cancel.
+        // survive a Cancel. Esc or right-click finishes the road, so the
+        // next Add Node starts a new one. Decided once the frame's commands
+        // run: Add Node re-arming the placer cancels this one too, and
+        // must keep the road it just chose.
+        commands.queue(|world: &mut World| {
+            let placing = world.get_resource::<ActiveModalTool>().is_some_and(|tool| tool.id() == Some(PLACE_TOOL_ID));
+            if placing {
+                return;
+            }
+            let finished = world.get_resource_mut::<ActiveRoad>().and_then(|mut road| road.0.take()).is_some();
+            if finished {
+                if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+                    notifications.info("Road finished. The next Add Node starts a new road.");
+                }
+            }
+        });
     }
 
     fn auto_exit_on_commit(&self) -> bool { false }
@@ -444,17 +459,29 @@ fn place_road_node(world: &mut World, ray_origin: Vec3, ray_direction: Vec3) {
     // Scoped so the immutable terrain borrow is released before the writes
     // below take `&mut World`. Also reads the highest Order among the layers
     // already baked, which a new road is placed above.
-    let (hit, top_order) = {
+    let terrain = {
         let mut q = world.query_filtered::<(&TerrainConfig, &TerrainData, Option<&TerrainBaked>), With<TerrainRoot>>();
-        let Some((config, data, baked)) = q.iter(world).next() else { return };
-        let top = baked.and_then(|b| b.layers().iter().map(|l| l.order).max());
-        // The ground the user sees, terrain layers included.
-        let surface = eustress_common::terrain::surface_data(data, baked);
-        (eustress_common::terrain::height_query::raycast_terrain(config, surface, ray, 5000.0, 2.0), top)
+        q.iter(world).next().map(|(config, data, baked)| {
+            let top = baked.and_then(|b| b.layers().iter().map(|l| l.order).max());
+            // The ground the user sees, terrain layers included.
+            let surface = eustress_common::terrain::surface_data(data, baked);
+            (eustress_common::terrain::height_query::raycast_terrain(config, surface, ray, 5000.0, 2.0), top)
+        })
     };
-    // Missed the terrain entirely: stay silent, the tool is still armed and
-    // the user just clicks again.
-    let Some(world_pos) = hit else { return };
+    // A click that places nothing says why; the tool stays armed and the user
+    // just clicks again.
+    let missed = match terrain {
+        None => Some("There is no terrain to lay a road on. Generate terrain first."),
+        Some((None, _)) => Some("That click missed the terrain. Click on the ground to place a road node."),
+        Some((Some(_), _)) => None,
+    };
+    if let Some(message) = missed {
+        if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+            notifications.warning(message);
+        }
+        return;
+    }
+    let Some((Some(world_pos), top_order)) = terrain else { return };
 
     let space_root = space_root_of(world.get_resource::<crate::space::SpaceRoot>());
     // Re-checked because the road can be deleted, or its creation undone,

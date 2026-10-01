@@ -154,7 +154,7 @@ pub enum WorldStateError {
 ///
 /// # Implementations
 ///
-/// - `Grid2D`    — ARC-AGI-3 2D grid tasks  (in Vortex)
+/// - `Grid2D`    — 2D grid puzzles  (in Vortex)
 /// - `Scene3D`   — EustressEngine 3D scenes (in eustress-engine)
 /// - `GameState` — Rune-scripted game levels (in Vortex)
 ///
@@ -199,7 +199,7 @@ pub trait WorldState: Clone + Send + Sync + 'static {
 
     /// Score `self` against `goal`. Higher = closer to goal.
     ///
-    /// For ARC: `exact_match` (bool → 0.0 or 1.0) + `cell_accuracy` ([0,1]).
+    /// For grid puzzles: `exact_match` (bool → 0.0 or 1.0) + `cell_accuracy` ([0,1]).
     /// For physics: continuous goal satisfaction measure.
     fn score_against(&self, goal: &Self) -> Self::Score;
 

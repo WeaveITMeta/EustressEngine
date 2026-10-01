@@ -3,7 +3,6 @@
 // Toast notification system
 // ============================================================================
 
-import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // Notification data
@@ -23,120 +22,146 @@ component NotificationToast inherits Rectangle {
     in property <bool> dismissible: true;
     
     callback dismissed();
+
+    // The level's one colour: the left bar and the icon.
+    property <color> tone: root.level == "error" ? Theme.text-error
+        : root.level == "warning" ? Theme.text-warning
+        : root.level == "success" ? Theme.text-success
+        : Theme.accent-cyan;
     
     width: 300px;
-    // Grow to fit the wrapped message instead of pinning 72px. The body Text
-    // word-wraps, so a longer notice (the telemetry one runs to three lines)
-    // painted OUTSIDE the border, over whatever panel sat behind the toast.
-    // `Rectangle` does not size itself from its children, so the height is
-    // taken from the content layout's preferred height, floored at the
-    // original 72px so short toasts look exactly as before.
+    // Grow to fit the wrapped message instead of pinning a height. The body
+    // Text word-wraps, so a longer notice (the telemetry one runs to three
+    // lines) would otherwise paint OUTSIDE the card. `Rectangle` does not
+    // size itself from its children, so the height is taken from the
+    // content layout's preferred height, with a floor for one-line toasts.
     //
     // This cannot hit the property recursion the `Notifications` parent warns
     // about: `width` is fixed at 300px, so the wrap height is fully determined
     // without anything consulting `height` on the way back.
-    height: max(72px, content.preferred-height);
-    background: Theme.dialog-background;
-    border-radius: 8px;
+    height: max(56px, content.preferred-height);
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: root.level == "error" ? Theme.accent-red :
-                  root.level == "warning" ? Theme.accent-yellow :
-                  root.level == "success" ? Theme.accent-green :
-                  Theme.accent-blue;
-    drop-shadow-blur: 12px;
-    drop-shadow-color: Theme.shadow-color;
-    
-    content := HorizontalBox {
-        padding: 12px;
-        spacing: 12px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow-float;
+    clip: true;
 
-        // Icon
-        Rectangle {
-            width: 32px;
-            height: 32px;
-            background: root.level == "error" ? Theme.accent-red :
-                        root.level == "warning" ? Theme.accent-yellow :
-                        root.level == "success" ? Theme.accent-green :
-                        Theme.accent-blue;
-            border-radius: 16px;
-            
-            Image {
-                width: 16px;
-                height: 16px;
-                source: root.level == "error" ? @image-url("../../assets/icons/ui/close.svg") :
-                        root.level == "warning" ? @image-url("../../assets/icons/ui/warning.svg") :
-                        root.level == "success" ? @image-url("../../assets/icons/ui/check.svg") :
-                        @image-url("../../assets/icons/ui/info.svg");
-                image-fit: contain;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+    // The level bar down the left edge.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 3px;
+        height: parent.height;
+        background: root.tone;
+    }
+
+    // The 1px top hairline every floating surface carries.
+    Rectangle {
+        x: 3px;
+        y: 0;
+        width: parent.width - 3px;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+    
+    content := HorizontalLayout {
+        padding-left: 15px;
+        padding-right: 8px;
+        padding-top: 11px;
+        padding-bottom: 12px;
+        spacing: 10px;
+
+        // Level badge on the title's line: a tinted disc with a line glyph
+        // (check or cross from the icon set, or an ASCII i / !), all in the
+        // level colour. The status SVGs are filled discs, which a colorize
+        // flattens into a blank dot, so the glyph is drawn here instead.
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                background: root.tone.with-alpha(0.16);
+                border-width: 1px;
+                border-color: root.tone.with-alpha(0.45);
+
+                if root.level == "success" || root.level == "error": Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 12px;
+                    height: 12px;
+                    source: root.level == "success" ? @image-url("../../assets/icons/ui/check.svg")
+                        : @image-url("../../assets/icons/ui/close.svg");
+                    image-fit: contain;
+                    colorize: root.tone;
+                }
+                if root.level != "success" && root.level != "error": Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.level == "warning" ? "!" : "i";
+                    color: root.tone;
+                    font-size: 12px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
         
         // Content
-        VerticalBox {
+        VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 4px;
+            alignment: start;
+            padding-top: 2px;
+            spacing: 3px;
             
             Text {
                 text: root.title;
                 color: Theme.text-primary;
+                font-size: 12px;
                 font-weight: 600;
                 overflow: elide;
             }
             
-            Text {
+            if root.message != "": Text {
                 text: root.message;
                 color: Theme.text-secondary;
                 font-size: 12px;
-                // `wrap` only, no `elide`: the two contradict each other —
-                // eliding truncates the very message the toast exists to
-                // deliver, and now that the toast grows to fit there is
-                // nothing to truncate.
+                // `wrap` only, no `elide`: eliding would truncate the very
+                // message the toast exists to deliver, and the toast grows
+                // to fit, so there is nothing to truncate.
                 wrap: word-wrap;
             }
         }
         
-        // Dismiss button
-        if root.dismissible: Rectangle {
-            width: 24px;
-            height: 24px;
-            background: dismiss-touch.has-hover ? Theme.button-hover : transparent;
-            border-radius: 4px;
-            
-            dismiss-touch := TouchArea {
-                clicked => { root.dismissed(); }
+        // Dismiss control, top-right.
+        if root.dismissible: VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 24px;
+                height: 24px;
+                background: dismiss-touch.pressed ? Theme.button-pressed
+                    : dismiss-touch.has-hover ? Theme.button-hover : transparent;
+                border-radius: Theme.radius-sm;
+
+                dismiss-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.dismissed(); }
+                }
+
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    source: @image-url("../../assets/icons/ui/close.svg");
+                    image-fit: contain;
+                    colorize: dismiss-touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+                }
             }
-            
-            Image {
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/close.svg");
-                image-fit: contain;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-    }
-    
-    // Progress bar for auto-dismiss
-    Rectangle {
-        y: parent.height - 3px;
-        width: parent.width;
-        height: 3px;
-        background: transparent;
-        border-bottom-left-radius: 8px;
-        border-bottom-right-radius: 8px;
-        clip: true;
-        
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            background: root.level == "error" ? Theme.accent-red :
-                        root.level == "warning" ? Theme.accent-yellow :
-                        root.level == "success" ? Theme.accent-green :
-                        Theme.accent-blue;
-            // Animation would be controlled from Rust
         }
     }
 }

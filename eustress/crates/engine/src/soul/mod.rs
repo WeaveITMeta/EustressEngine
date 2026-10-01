@@ -34,6 +34,9 @@ pub mod rune_ecs_module;
 /// `eustress::dm`: Rune's access to the live Play DataModel Luau shares.
 #[cfg(feature = "realism-scripting")]
 pub mod rune_datamodel;
+/// `eustress::terrain`: Rune's edits and reads of the Space's terrain in Play.
+#[cfg(feature = "realism-scripting")]
+pub mod rune_terrain;
 /// Per-frame Rune execution for Play / Run mode — bridge install, lifecycle
 /// callbacks, and effect drain, all inside ONE Bevy system. See the module
 /// docs for why the previous multi-system split could not work.
@@ -383,12 +386,10 @@ impl Plugin for EngineSoulPlugin {
         // Add build pipeline plugin (includes Claude integration)
         app.add_plugins(SoulBuildPipelinePlugin);
         
-        // Install the cached model catalog BEFORE anything resolves a model,
-        // and start the background refresh for the next launch. Order matters:
-        // `GlobalSoulSettings::load()` below can fall back to `default()`,
-        // which reads `WorkshopModel::default()` and would otherwise pin the
-        // compiled-in seed for the rest of the session.
-        model_catalog::install_and_refresh();
+        // The Workshop model list is resolved against each provider's own
+        // model list, fetched with the user's own keys (see `model_catalog`).
+        // Until the providers answer, the compiled-in table stands.
+        model_catalog::remove_retired_catalog_cache();
 
         // Load global Soul settings from disk
         let global_settings = GlobalSoulSettings::load();
@@ -410,6 +411,14 @@ impl Plugin for EngineSoulPlugin {
                 cleanup_removed_soulscripts,
                 sync_space_root_to_audit,
             ));
+
+        // Ask the providers which models the user's keys can use: at launch,
+        // and again whenever a key changes.
+        app.init_resource::<model_catalog::ModelCatalogRevision>()
+            .add_systems(Update, (
+                model_catalog::rediscover_on_key_change,
+                model_catalog::apply_discovered_models,
+            ).chain());
 
         info!("EngineSoulPlugin initialized - Claude API + Hot Compile ready");
     }

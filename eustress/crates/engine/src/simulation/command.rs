@@ -618,7 +618,7 @@ pub fn snapshot_runs_json(ledger: &SimRunLedger) -> Value {
 
 /// Every current sim value: `SimValuesResource` merged with the current value
 /// of each enabled, finite watchpoint (`SimValuesResource` wins a collision).
-/// Subsystems that own their physics (the ARC-1 nuclear model) record only
+/// Subsystems that own their physics record only
 /// into the watchpoint registry, so both stores are needed for a full picture.
 pub fn merged_sim_values(
     sim_values: Option<&SimValuesResource>,

@@ -776,6 +776,99 @@ export component SidePanelHeader inherits Rectangle {
     }
 }
 
+// Header row of every floating panel (DRAFTING_UX.md Law 1): an icon disc
+// in the brand accent, a 13px/600 title with an optional one-line subtitle,
+// and the standard close button (28px hit box, 18px glyph, red on hover),
+// always top-right. ToolPanel and the Sketch panel both use it, so a change
+// here reaches every floating panel at once.
+export component FloatingPanelHeader inherits Rectangle {
+    in property <image> icon;
+    in property <bool> show-icon: true;
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    in property <bool> closable: true;
+    callback close();
+
+    height: 44px;
+    background: transparent;
+
+    // Default (stretch) alignment, so the title takes the free width and
+    // the close button lands at the right edge; `alignment: center` would
+    // pack all three in the middle. A box layout puts a fixed-size child at
+    // the start of its cross axis, so the disc and the close button each
+    // sit in a VerticalLayout that centres them.
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        if root.show-icon: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: Theme.accent-eustress.with-alpha(0.18);
+                border-width: 1px;
+                border-color: Theme.accent-eustress.with-alpha(0.4);
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    source: root.icon;
+                    image-fit: contain;
+                    colorize: Theme.accent-eustress;
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-md;
+                font-weight: 600;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+
+        if root.closable: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                background: close-touch.has-hover ? Theme.accent-red.with-alpha(0.2) : transparent;
+                border-radius: Theme.radius-sm;
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "×";
+                    color: close-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                close-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.close(); }
+                }
+            }
+        }
+    }
+}
+
 // Panel header component
 export component PanelHeader inherits Rectangle {
     in property <string> title: "";

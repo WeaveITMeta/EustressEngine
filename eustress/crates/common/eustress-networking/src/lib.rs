@@ -8,12 +8,13 @@
 //!
 //! | Module | Holds | IO |
 //! |---|---|---|
-//! | [`wire`] | Protocol version 1: messages, framing, size limits | none |
-//! | [`join_link`] | `eustress://join/…` links | none |
+//! | [`wire`] | Protocol version 3: messages, framing, size limits | none |
+//! | [`join_link`] | `eustress-player://join/…` links | none |
 //! | [`session`] | Bevy systems: hosting, joining, world download, avatar replication | none |
+//! | [`repl`] | Server authority: the world, motion and input lanes, remote calls | none |
 //! | [`native`] | Desktop transport: a WebTransport host and player | sockets and threads; not built for wasm32 |
 //!
-//! The first three are IO-free, so a browser build keeps them and swaps in
+//! All but the last are IO-free, so a browser build keeps them and swaps in
 //! its own transport behind the same [`session::NetLink`] channels.
 //!
 //! ## Using it
@@ -33,6 +34,7 @@
 //! replication tier after avatars.
 
 pub mod join_link;
+pub mod repl;
 pub mod session;
 pub mod wire;
 
@@ -54,8 +56,10 @@ pub use ownership::{NetworkOwner, OwnershipRequest, OwnershipTransfer};
 pub use protocol::{EustressChannel, EustressMessage, EustressProtocol};
 pub use replication::{Replicated, ReplicationFilter, ReplicationGroup};
 pub use session::{
-    begin_host, begin_join, EndSession, HostConfig, HostSession, LocalWorldReady, NetLink, NetNotice, NetPlugin,
-    NetReplica, PlayerSession, SendChat, WorldDownloaded,
+    begin_host, begin_join, AppVersion, ClosePurchase, EndSession, FireRemote, HostConfig, HostSession, LocalWorldReady,
+    MotionArrived, NetLink, NetNotice, NetPlugin, NetReplica, PlayerSession, PromptPurchase, RemoteArrived,
+    RemoteReplied, SendChat, SendMotion, SendReceipts, SendRemoteReply, SendTracks, SendWorld, TracksArrived,
+    WorldArrived, WorldDownloaded,
 };
 
 /// Common re-exports.
@@ -66,7 +70,6 @@ pub mod prelude {
     };
 
     pub use super::{
-        scale::{Stud, METERS_TO_STUDS, STUD_TO_METERS},
         EustressChannel, EustressMessage, EustressProtocol, NetworkConfig, NetworkError, NetworkOwner,
         OwnershipRequest, OwnershipTransfer, Replicated, ReplicationFilter, ReplicationGroup, TickConfig,
         TransportConfig,
