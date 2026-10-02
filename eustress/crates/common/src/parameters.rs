@@ -901,14 +901,34 @@ impl InstanceParameters {
 // Connectors (the sources a binding names)
 // ============================================================================
 
+/// Whether `name` can name a Connector folder under `DataService`: letters,
+/// digits, `-`, `_` and single spaces between words. Nothing in it can climb
+/// out of the Space, name a drive or stream (`:`), be trimmed by Windows (a
+/// leading or trailing space or dot), or be a name Windows keeps for a device.
+pub fn is_connector_name(name: &str) -> bool {
+    const DEVICES: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "COM\u{b9}", "COM\u{b2}", "COM\u{b3}", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
+        "LPT7", "LPT8", "LPT9", "LPT\u{b9}", "LPT\u{b2}", "LPT\u{b3}",
+    ];
+    !name.is_empty()
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && !name.contains("  ")
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
+        && !DEVICES.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
 /// A Connector's `[attributes]`, read from `<space>/DataService/<name>/_instance.toml`
 /// as the string pairs the data crate's source layer parses.
 ///
-/// `name` is the Connector's folder name, one path segment; anything that could
-/// climb out of the Space is refused.
+/// `name` is the Connector's folder name ([`is_connector_name`]); any other
+/// name is refused before the disk is touched.
 pub fn connector_attributes(space_root: &std::path::Path, name: &str) -> Result<Vec<(String, String)>, String> {
-    if name.trim().is_empty() || name.contains(['/', '\\']) || name.contains("..") {
-        return Err(format!("'{name}' is not a Connector name"));
+    if !is_connector_name(name) {
+        return Err(format!(
+            "'{name}' is not a Connector name: a Connector's name is letters, digits, '-', '_' and single spaces"
+        ));
     }
     let path = space_root.join("DataService").join(name).join("_instance.toml");
     let text = std::fs::read_to_string(&path)
@@ -1848,6 +1868,20 @@ mod disk_tests {
     use super::*;
 
     #[test]
+    fn connector_names_are_words_digits_dashes_and_single_spaces() {
+        assert!(is_connector_name("SupplierGraph"));
+        for good in ["Client B", "supplier_graph-2", "Capteurs \u{e9}t\u{e9}"] {
+            assert!(is_connector_name(good), "{good:?}");
+        }
+        for bad in [
+            "", "..", ".", "a/b", "a\\b", "../x", "a:b", "C:", "Sensors:stream", "a.b", "x?y", " a", "a ", "a  b", "CON",
+            "nul", "COM1", "LPT\u{b9}", "a\tb",
+        ] {
+            assert!(!is_connector_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn labels_split_on_the_first_dot_and_the_default_domain_stays_bare() {
         assert_eq!(parameter_label(DEFAULT_PARAMETER_DOMAIN, "setpoint"), "setpoint");
         assert_eq!(parameter_label("hvac", "setpoint"), "hvac.setpoint");
@@ -1935,6 +1969,7 @@ class_name = \"Folder\"
         assert!(attrs.contains(&("poll_seconds".to_string(), "10".to_string())));
         assert!(connector_attributes(&space, "Notes").unwrap_err().contains("not a Connector"));
         assert!(connector_attributes(&space, "../Bench").is_err());
+        assert!(connector_attributes(&space, "Bench:stream").is_err(), "a stream name never reaches the disk");
         assert_eq!(connector_names(&space), vec!["Bench".to_string()]);
         let _ = std::fs::remove_dir_all(&space);
     }
