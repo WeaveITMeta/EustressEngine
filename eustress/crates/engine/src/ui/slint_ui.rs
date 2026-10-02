@@ -16656,7 +16656,7 @@ fn drain_slint_actions(
                                 if let Some(w) = ui {
                                     let strings = |cells: Vec<String>| {
                                         slint::ModelRc::new(slint::VecModel::from(
-                                            cells.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                                            cells.iter().map(|cell| super::display_text::shown_line(cell)).collect::<Vec<_>>(),
                                         ))
                                     };
                                     let header = ["column", "A mean", "B mean", "B - A mean", "A min", "B min", "A max", "B max", "A sd", "B sd"];
@@ -16664,7 +16664,11 @@ fn drain_slint_actions(
                                     w.set_datagrid_rows(slint::ModelRc::new(slint::VecModel::from(
                                         table.into_iter().map(|cells| DataGridRow { cells: strings(cells) }).collect::<Vec<_>>(),
                                     )));
-                                    w.set_datagrid_name(format!("Compare: {} (A) vs {} (B)", name_of(a), name_of(b)).into());
+                                    w.set_datagrid_name(super::display_text::shown_line(&format!(
+                                        "Compare: {} (A) vs {} (B)",
+                                        name_of(a),
+                                        name_of(b)
+                                    )));
                                 }
                                 commands.insert_resource(crate::timeline_panel::BottomPanelMode::DataGrid);
                                 if let Some(ref mut s) = res.state {
@@ -21464,7 +21468,7 @@ fn sync_data_grid_to_selection(
             // Header label = "name (unit)" when the column carries a unit.
             let headers: Vec<slint::SharedString> = frame.specs().map(|s| {
                 let u = s.unit.clone().map(|u| format!(" ({u})")).unwrap_or_default();
-                slint::SharedString::from(format!("{}{}", s.name, u))
+                super::display_text::shown_line(&format!("{}{}", s.name, u))
             }).collect();
 
             // Cap the model so a huge CSV can't stall the UI thread; the grid is
@@ -21476,7 +21480,7 @@ fn sync_data_grid_to_selection(
             let mut rows: Vec<DataGridRow> = Vec::with_capacity(n);
             for r in 0..n {
                 let cells: Vec<slint::SharedString> = cols.iter()
-                    .map(|(_, data)| slint::SharedString::from(data_cell_string(data, r)))
+                    .map(|(_, data)| super::display_text::shown_line(&data_cell_string(data, r)))
                     .collect();
                 rows.push(DataGridRow {
                     cells: slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cells))),
@@ -21488,13 +21492,13 @@ fn sync_data_grid_to_selection(
             window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows))));
             // The grid previews the first MAX_ROWS rows; say so when it stops short.
             let title = if total > n { format!("{name} (first {n} of {total} rows)") } else { name };
-            window.set_datagrid_name(slint::SharedString::from(title));
+            window.set_datagrid_name(super::display_text::shown_line(&title));
         }
         None => {
             // A Dataset is selected but has no parseable CSV — clear the grid.
             window.set_datagrid_columns(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new()))));
             window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<DataGridRow>::new()))));
-            window.set_datagrid_name(slint::SharedString::from(name));
+            window.set_datagrid_name(super::display_text::shown_line(&name));
         }
     }
 }
@@ -21835,10 +21839,10 @@ fn sync_data_chart_to_slint(
     match &chart3 {
         Some(c3) => {
             window.set_chart_points3(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(c3.points.clone()))));
-            window.set_chart_x3_label(c3.labels[0].as_str().into());
-            window.set_chart_y3_label(c3.labels[1].as_str().into());
-            window.set_chart_z3_label(c3.labels[2].as_str().into());
-            window.set_chart_color3_label(c3.color_label.as_str().into());
+            window.set_chart_x3_label(super::display_text::shown_line(&c3.labels[0]));
+            window.set_chart_y3_label(super::display_text::shown_line(&c3.labels[1]));
+            window.set_chart_z3_label(super::display_text::shown_line(&c3.labels[2]));
+            window.set_chart_color3_label(super::display_text::shown_line(&c3.color_label));
         }
         None => {
             window.set_chart_points3(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<ChartPoint3>::new()))));
@@ -21847,18 +21851,18 @@ fn sync_data_chart_to_slint(
     }
     match frame.as_ref().and_then(|f| compute_chart_data(f, ov)) {
         Some(cd) => {
-            window.set_chart_title(name.into());
-            window.set_chart_x_label(cd.x_label.into());
-            window.set_chart_y_label(cd.y_label.into());
+            window.set_chart_title(super::display_text::shown_line(&name));
+            window.set_chart_x_label(super::display_text::shown_line(&cd.x_label));
+            window.set_chart_y_label(super::display_text::shown_line(&cd.y_label));
             window.set_chart_series_path(cd.series_path.into());
             window.set_chart_fit_path(cd.fit_path.into());
-            window.set_chart_fit_label(cd.fit_label.into());
+            window.set_chart_fit_label(super::display_text::shown_line(&cd.fit_label));
             window.set_chart_x_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.x_ticks))));
             window.set_chart_y_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.y_ticks))));
             window.set_chart_points(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.points))));
         }
         None => {
-            window.set_chart_title(name.into());
+            window.set_chart_title(super::display_text::shown_line(&name));
             window.set_chart_series_path("".into());
             window.set_chart_fit_path("".into());
             window.set_chart_fit_label("".into());
@@ -22426,18 +22430,18 @@ fn push_data_sources(ui: &StudioWindow, rows: &[DataSourceRow]) {
         .enumerate()
         .map(|(i, r)| DataSourceEntry {
             id: i as i32,
-            name: r.name.as_str().into(),
-            source_type: r.kind.as_str().into(),
+            name: super::display_text::shown_line(&r.name),
+            source_type: super::display_text::shown_line(&r.kind),
             url: if r.endpoint.is_empty() {
                 "(set the endpoint in Properties)".into()
             } else {
-                r.endpoint.as_str().into()
+                super::display_text::shown_line(&r.endpoint)
             },
             // Nothing keeps a Connector connected yet, so a sound config is
             // "disconnected" and a broken one "error"; Test says more.
             status: if r.problem.is_some() { "error" } else { "disconnected" }.into(),
             test_state: r.test_state.as_str().into(),
-            test_detail: r.test_detail.as_str().into(),
+            test_detail: super::display_text::shown_line(&r.test_detail),
             tested_at: r.tested_at.as_str().into(),
         })
         .collect();
