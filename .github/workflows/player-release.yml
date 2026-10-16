@@ -408,9 +408,9 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
-      # DIAGNOSTIC, remove before a tag: symbols so gdb names the SIGFPE site.
-      CARGO_PROFILE_RELEASE_STRIP: "false"
-      CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
+      # Keep the symbol table through the checks below (the static-initializer
+      # guard reads it, and gdb names frames with it); Package strips it.
+      CARGO_PROFILE_RELEASE_STRIP: "debuginfo"
       CARGO_BUILD_JOBS: 2
       VERSION: ${{ needs.version.outputs.version }}
       BIN_DIR: eustress/target/release
@@ -453,10 +453,9 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
 
-      # DIAGNOSTIC, remove with the symbols above: it needs an unstripped
-      # binary. The smoke test, which starts Luau, is the lasting check.
+      # A linker that drops a C++ static initializer passes every Rust check
+      # and fails only at run time, so the binary is checked for Luau's.
       - name: Check that Luau's static initializers are linked
-        continue-on-error: true
         run: |
           nm -C "$BIN_DIR/eustress-client" | grep -E '_GLOBAL__sub_I_.*lmem' || { echo "::error::lmem.cpp's static initializer is missing"; exit 1; }
           readelf -S -W "$BIN_DIR/eustress-client" | grep -E 'init_array'
@@ -508,6 +507,8 @@ jobs:
 
       - name: Package
         run: |
+          # The checks above needed the symbol table; what ships does not.
+          strip --strip-all "$BIN_DIR/eustress-client"
           # One top-level folder, so unpacking never scatters files.
           STAGE=pkg/eustress-player
           pwsh installer/stage-player.ps1 -BinDir "$BIN_DIR" -OutDir "$STAGE"
