@@ -439,7 +439,7 @@ jobs:
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
             mesa-vulkan-drivers librsvg2-bin mold clang xvfb \
-            libxkbcommon-x11-0
+            libxkbcommon-x11-0 gdb
 
       - name: Build
         working-directory: eustress
@@ -456,6 +456,26 @@ jobs:
             exit 1
           fi
           echo "OK: ${GOT}"
+
+      # Diagnostic: a native crash (a signal such as SIGFPE, not a Rust panic)
+      # prints no backtrace. Under gdb the faulting thread's stack, the
+      # faulting instruction and every thread's stack are printed. A run that
+      # does not crash within 40 s is interrupted, so the step always ends;
+      # it never fails the job, and the smoke test below still decides.
+      - name: Backtrace a startup crash (diagnostic)
+        continue-on-error: true
+        run: |
+          xvfb-run --auto-servernum \
+            timeout --signal=INT --kill-after=15 40 \
+            gdb -batch -nx \
+              -ex "set pagination off" \
+              -ex "handle SIGPIPE nostop noprint" \
+              -ex run \
+              -ex bt \
+              -ex "x/8i \$pc" \
+              -ex "info registers" \
+              -ex "thread apply all bt 16" \
+              --args "$BIN_DIR/eustress-client" 2>&1 | tail -n 400 || true
 
       - name: Smoke test
         run: |
