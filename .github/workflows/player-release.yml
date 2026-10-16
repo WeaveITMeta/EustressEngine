@@ -426,13 +426,16 @@ jobs:
 
       # mesa-vulkan-drivers gives the smoke test a software Vulkan adapter;
       # librsvg2-bin renders the desktop icons from the Player's SVG.
+      # libxkbcommon-x11-0 is loaded at runtime by winit on X11; desktops ship
+      # it, the runner image does not, and the smoke test panics without it.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
-            mesa-vulkan-drivers librsvg2-bin mold clang xvfb
+            mesa-vulkan-drivers librsvg2-bin mold clang xvfb \
+            libxkbcommon-x11-0
 
       - name: Build
         working-directory: eustress
