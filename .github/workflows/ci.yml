@@ -56,6 +56,7 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-tools-${{ hashFiles('eustress/Cargo.toml') }}
 
+      - name: Install cargo-deny
         run: cargo install cargo-deny
 
       - name: cargo-deny (advisories, bans, sources)
