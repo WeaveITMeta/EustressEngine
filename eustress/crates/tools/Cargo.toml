@@ -44,6 +44,10 @@ eustress-data = { path = "../data", features = ["import"] }
 # Parametric CAD kernel — cad_create_part / cad_export_glb evaluate
 # feature trees and write .glb without a live Studio.
 eustress-cad = { path = "../cad" }
+# The same glam as eustress-cad and eustress-mesh-edit, so their Vec3 is one type here.
+glam = "0.29"
+# Splits an imported mesh into pieces (the planning in mesh_tools).
+eustress-mesh-edit = { path = "../mesh-edit" }
 
 # Base64 — `script_tools::ImageToCodeTool` encodes images for Claude's
 # vision API. Kept here so the tool works identically out-of-process.

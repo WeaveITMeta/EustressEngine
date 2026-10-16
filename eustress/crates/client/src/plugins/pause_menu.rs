@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use avian3d::prelude::LinearVelocity;
 
 use super::player_plugin::{PlayerService, PlayerCamera, SpawnLocation, get_spawn_position_or_default};
+use eustress_play_runtime::screen_menu::{pause_card, row_at, settings_card, step, MenuCard, ScreenMenu};
 
 // ============================================================================
 // Settings Data
@@ -127,6 +128,8 @@ pub enum SettingsScreen {
 pub struct PauseMenuState {
     /// Whether the pause menu is open
     pub is_open: bool,
+    /// The highlighted row of the menu on screen (see `screen_menu`).
+    pub selected: usize,
     /// Current settings screen (None = main menu)
     pub settings_screen: SettingsScreen,
     /// Temporary settings being edited (applied on save)
@@ -155,8 +158,7 @@ impl Plugin for PauseMenuPlugin {
             .init_resource::<GameSettings>()
             .add_message::<ResetCharacterEvent>()
             .add_message::<SettingsChangedEvent>()
-            .add_systems(Update, toggle_pause_menu)
-            // TODO: Replace egui pause menu with Slint UI
+            .add_systems(Update, (toggle_pause_menu, drive_pause_menu).chain())
             .add_systems(Update, (handle_reset_character, apply_settings));
     }
 }
@@ -177,10 +179,14 @@ fn toggle_pause_menu(
         if pause_state.settings_screen != SettingsScreen::None {
             pause_state.settings_screen = SettingsScreen::None;
             pause_state.temp_settings = None; // Discard unsaved changes
+            pause_state.selected = 1; // back on the row that opened Settings
             return;
         }
         
         pause_state.is_open = !pause_state.is_open;
+        if pause_state.is_open {
+            pause_state.selected = 0; // Resume, as every opening
+        }
         pause_state.settings_screen = SettingsScreen::None;
         pause_state.temp_settings = None;
         
@@ -199,18 +205,118 @@ fn toggle_pause_menu(
     }
 }
 
-/// Draw the pause menu UI
-/// TODO: Migrate to Slint UI — egui dependency removed.
-fn _draw_pause_menu(
-    _pause_state: ResMut<PauseMenuState>,
-    _settings: ResMut<GameSettings>,
-    _player_service: ResMut<PlayerService>,
-    _cursor_options: Query<&mut bevy::window::CursorOptions, With<bevy::window::Window>>,
-    _reset_events: MessageWriter<ResetCharacterEvent>,
-    _settings_events: MessageWriter<SettingsChangedEvent>,
-    _exit_events: MessageWriter<AppExit>,
+/// What the menu shows for this state: the main rows, or the settings screen.
+fn current_card(pause: &PauseMenuState, settings: &GameSettings) -> MenuCard {
+    if pause.settings_screen != SettingsScreen::None {
+        settings_card(settings.mouse_sensitivity, pause.selected)
+    } else {
+        pause_card(pause.selected)
+    }
+}
+
+/// Close the menu and give the cursor back to play (the Esc path does the same).
+fn close_pause_menu(
+    pause: &mut PauseMenuState,
+    cursor_options: &mut Query<&mut bevy::window::CursorOptions, With<bevy::window::Window>>,
+    player_service: &mut PlayerService,
 ) {
-    // Stub: egui UI removed. Will be replaced with Slint pause menu.
+    pause.is_open = false;
+    pause.settings_screen = SettingsScreen::None;
+    pause.temp_settings = None;
+    pause.selected = 0;
+    if let Ok(mut cursor) = cursor_options.single_mut() {
+        cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+        cursor.visible = false;
+    }
+    player_service.cursor_locked = true;
+}
+
+/// The pause menu's rows, and the keys and clicks that choose them. Drawn by
+/// `eustress_play_runtime::screen_menu`: Up and Down, or a click, highlight a
+/// row; Enter or a click selects it. On Settings, Left and Right change the
+/// mouse sensitivity, the one setting the Player applies so far.
+fn drive_pause_menu(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut pause: ResMut<PauseMenuState>,
+    mut settings: ResMut<GameSettings>,
+    mut player_service: ResMut<PlayerService>,
+    mut cursor_options: Query<&mut bevy::window::CursorOptions, With<bevy::window::Window>>,
+    mut settings_events: MessageWriter<SettingsChangedEvent>,
+    mut exit: MessageWriter<AppExit>,
+    mut screen: ResMut<ScreenMenu>,
+) {
+    if !pause.is_open {
+        screen.0 = None;
+        return;
+    }
+    let in_settings = pause.settings_screen != SettingsScreen::None;
+    let card = current_card(&pause, &settings);
+    let rows = card.rows.len();
+
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        pause.selected = step(pause.selected, rows, 1);
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        pause.selected = step(pause.selected, rows, -1);
+    }
+
+    // A click on a row chooses it. The cursor and the menu are both in window
+    // logical px.
+    let mut choice: Option<usize> = None;
+    if buttons.just_pressed(bevy::input::mouse::MouseButton::Left) {
+        if let Ok(window) = windows.single() {
+            if let Some(point) = window.cursor_position() {
+                let size = Vec2::new(window.width(), window.height());
+                if let Some(row) = row_at(&card, size, point) {
+                    pause.selected = row;
+                    choice = Some(row);
+                }
+            }
+        }
+    }
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+        choice = Some(pause.selected);
+    }
+
+    if in_settings {
+        // Left and Right move the sensitivity, on the row it sits on, in steps
+        // of 0.1 kept between 0.1 and 5.0.
+        let direction = if keys.just_pressed(KeyCode::ArrowRight) {
+            1.0
+        } else if keys.just_pressed(KeyCode::ArrowLeft) {
+            -1.0
+        } else {
+            0.0
+        };
+        if direction != 0.0 && pause.selected == 0 {
+            let next = ((settings.mouse_sensitivity + 0.1 * direction).clamp(0.1, 5.0) * 10.0).round() / 10.0;
+            if (next - settings.mouse_sensitivity).abs() > 1e-4 {
+                settings.mouse_sensitivity = next;
+                settings_events.write(SettingsChangedEvent);
+            }
+        }
+        // Back is the only other row: choosing it returns to the main menu.
+        if matches!(choice, Some(row) if row != 0) {
+            pause.settings_screen = SettingsScreen::None;
+            pause.selected = 1;
+        }
+    } else {
+        match choice {
+            Some(0) => close_pause_menu(&mut pause, &mut cursor_options, &mut player_service),
+            Some(1) => {
+                pause.settings_screen = SettingsScreen::Controls;
+                pause.selected = 0;
+            }
+            Some(_) => {
+                exit.write(AppExit::Success);
+            }
+            None => {}
+        }
+    }
+
+    screen.0 = if pause.is_open { Some(current_card(&pause, &settings)) } else { None };
 }
 
 /// Apply settings to game systems

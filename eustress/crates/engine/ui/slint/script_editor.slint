@@ -293,10 +293,12 @@ component EustressTextEdit inherits Rectangle {
     /// Height of one rendered line, measured from the live font. Same floor,
     /// same reason.
     out property <length> line-height: max(1px, line-probe.preferred-height);
-    /// Left padding the `TextInput` applies before the first glyph. Overlays
-    /// add this so column 0 lands on the first character rather than the edge.
+    /// Where the `TextInput` sits inside the scrolled content; it has no
+    /// padding of its own. The overlays add the same offset, so the glyphs,
+    /// the selection, the caret and a click share one origin and column 0
+    /// lands on the first character rather than the edge.
     out property <length> text-inset-x: 12px;
-    /// Top padding before the first baseline row.
+    /// The same offset from the top, before the first line.
     out property <length> text-inset-y: 5px;
 
     // Tracks the last known caret line/col (1-based) so F12 / Shift+F12
@@ -379,9 +381,10 @@ component EustressTextEdit inherits Rectangle {
             // long. Without the explicit estimate, Slint's TextInput inside a
             // size-clamped Flickable can report a clipped preferred-height
             // and the Flickable then refuses to scroll past the first page.
-            // Plus the horizontal scrollbar's strip when lines scroll
-            // sideways, so the last line never sits under the bar.
-            viewport-height: max(self.height, text-input.preferred-height
+            // Plus the inset above the first line, and the horizontal
+            // scrollbar's strip when lines scroll sideways, so the last line
+            // never sits under the bar.
+            viewport-height: max(self.height, root.text-inset-y + text-input.preferred-height
                 + (self.viewport-width > self.width ? 14px : 0px));
 
             // The caret's line: a faint band while the editor has focus.
@@ -455,12 +458,16 @@ component EustressTextEdit inherits Rectangle {
             }
 
             text-input := TextInput {
-                x: 0px; y: 0px;
+                // At the text inset, so its glyphs, selection and click
+                // mapping start where the overlay's do. A TextInput has no
+                // padding to do this itself.
+                x: root.text-inset-x; y: root.text-inset-y;
                 // As wide as the longest line when lines do not wrap, so the
-                // Flickable scrolls sideways across all of it.
+                // Flickable scrolls sideways across all of it. Otherwise it
+                // fills the viewport to the right of the inset.
                 width: root.wrap == TextWrap.no-wrap && root.max-line-chars > 0
                     ? max(flick.width, root.max-line-chars * root.char-advance + 2 * root.text-inset-x + 48px)
-                    : flick.width;
+                    : flick.width - root.text-inset-x;
                 // Height MUST match the Flickable's viewport-height, not the
                 // visible viewport. Otherwise the TextInput is clipped to
                 // one page of text and lines beyond that never render.
@@ -492,28 +499,36 @@ component EustressTextEdit inherits Rectangle {
                 edited => { root.edited(self.text); }
 
                 // Track caret via pixel position → 1-based line/col.
-                // Monospace math: line = y/18 + 1, col = x/7.8 + 1.
+                // The grid is measured (line-height, char-advance), not
+                // assumed. The caret is always on a line top or a glyph
+                // boundary, so each quotient is a whole number in exact
+                // arithmetic; round() removes the float error that would
+                // otherwise make the int conversion truncate it to the line
+                // or column before.
+                // `pos` is relative to this TextInput. caret-px and caret-py
+                // are the same point in the scrolled content (the inset plus
+                // `pos`): the drawn caret and the scrolling use those.
                 cursor-position-changed(pos) => {
-                    root.caret-line = (pos.y / root.line-height) + 1;
-                    root.caret-col = max(1, (pos.x / root.char-advance) + 1);
-                    root.caret-px = pos.x;
-                    root.caret-py = pos.y;
+                    root.caret-line = round(pos.y / root.line-height) + 1;
+                    root.caret-col = max(1, round(pos.x / root.char-advance) + 1);
+                    root.caret-px = root.text-inset-x + pos.x;
+                    root.caret-py = root.text-inset-y + pos.y;
                     root.caret-on = true;
                     // Keep the caret in view, sideways and up and down, with a
                     // margin, never past the content's edges. Skipped until the
                     // view has a real size, so a first layout cannot scroll it.
                     if (flick.width > 80px && flick.height > 40px) {
-                        if (pos.x < -flick.viewport-x + 4px) {
-                            flick.viewport-x = min(0px, 24px - pos.x);
-                        } else if (pos.x > -flick.viewport-x + flick.width - 40px) {
+                        if (root.caret-px < -flick.viewport-x + 4px) {
+                            flick.viewport-x = min(0px, 24px - root.caret-px);
+                        } else if (root.caret-px > -flick.viewport-x + flick.width - 40px) {
                             flick.viewport-x = max(min(0px, flick.width - flick.viewport-width),
-                                flick.width - 64px - pos.x);
+                                flick.width - 64px - root.caret-px);
                         }
-                        if (pos.y < -flick.viewport-y) {
-                            flick.viewport-y = min(0px, -pos.y);
-                        } else if (pos.y + root.line-height > -flick.viewport-y + flick.height - 14px) {
+                        if (root.caret-py < -flick.viewport-y) {
+                            flick.viewport-y = min(0px, -root.caret-py);
+                        } else if (root.caret-py + root.line-height > -flick.viewport-y + flick.height - 14px) {
                             flick.viewport-y = max(min(0px, flick.height - flick.viewport-height),
-                                flick.height - 18px - pos.y - root.line-height);
+                                flick.height - 18px - root.caret-py - root.line-height);
                         }
                     }
                     root.caret-moved(root.caret-line, root.caret-col);

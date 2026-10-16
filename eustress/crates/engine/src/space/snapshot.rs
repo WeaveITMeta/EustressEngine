@@ -192,17 +192,16 @@ pub(crate) fn blockers(world: &World) -> Blockers {
     Blockers { save, revert, pending, busy }
 }
 
-/// Run git in the Space with no console window, output captured.
+/// Run git in the Space with hooks off and no console window, output captured.
 pub(crate) fn git(space_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(args).current_dir(space_root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = cmd.output().map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    // Every path given to git here is a path, never a pattern: no wildcard
+    // (`*`, `?`, `[...]`) and no pathspec magic (`:(top)`, `:/`, `:!`),
+    // which git reads as instructions even after `--`.
+    let out = eustress_tools::sandbox::git_command(space_root)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if out.status.success() {
         Ok(out)
     } else {
@@ -589,26 +588,71 @@ struct InflightRevert {
 #[derive(Resource, Default)]
 pub(crate) struct RevertJob(Option<InflightRevert>);
 
-/// A path to revert: relative to the Space, inside it, and not git's own.
-pub(crate) fn check_path(raw: &str) -> Result<String, String> {
-    let path = raw.trim().replace('\\', "/");
-    let path = path.trim_end_matches('/');
-    let p = Path::new(path);
-    let bad = path.is_empty()
-        || p.is_absolute()
-        || p.has_root()
-        || path.contains(':')
-        || p.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
-        || path == ".git"
-        || path.starts_with(".git/");
-    if bad {
-        Err(format!(
-            "'{raw}' is not a path inside the Space. Give paths relative to the Space folder, \
-             such as Workspace/Tower"
-        ))
-    } else {
-        Ok(path.to_string())
+/// A path to revert: relative to the Space, inside it once every link on
+/// disk is followed, and not git's own, by the rules every tool's path
+/// follows (`eustress_tools::sandbox::resolve`). The restore writes the
+/// files under it, so a junction inside the Space that points outside must
+/// not lead the write there. A pathspec form (`:(top)x`, `:/x`, `:!x`) is
+/// never a path; git would read it as an instruction even after `--`.
+pub(crate) fn check_path(space_root: &Path, raw: &str) -> Result<String, String> {
+    let advice = "Give paths relative to the Space folder, such as Workspace/Tower";
+    if raw.trim_start().starts_with(':') {
+        return Err(format!("'{raw}' is a git pathspec form, not a path. {advice}"));
     }
+    let rel = eustress_tools::sandbox::relative(raw).map_err(|why| format!("{why}. {advice}"))?;
+    if rel.as_os_str().is_empty() {
+        return Err(format!("'{raw}' is not a path inside the Space. {advice}"));
+    }
+    eustress_tools::sandbox::resolve(space_root, raw).map_err(|why| format!("{why}. {advice}"))?;
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// The links (junctions, symbolic links) under the folders a revert restores
+/// (`paths`, or the whole Space) that lead outside the Space, or nowhere.
+/// The walk never goes through a link, and skips `.git`. On Windows it does
+/// not list a cloud folder that is not yet on this machine (listing would
+/// download it); such a folder holds no local link.
+///
+/// It looks once, before the safety snapshot: a link made after that and
+/// before the restore runs is not caught.
+fn links_leading_out(space_root: &Path, paths: Option<&[String]>) -> Vec<PathBuf> {
+    let Ok(space) = space_root.canonicalize() else { return Vec::new() };
+    let mut stack: Vec<PathBuf> = match paths {
+        None => vec![space_root.to_path_buf()],
+        Some(paths) => paths.iter().map(|rel| space_root.join(rel)).collect(),
+    };
+    let mut out = Vec::new();
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if meta.file_type().is_symlink() {
+            if !path.canonicalize().is_ok_and(|target| target.starts_with(&space)) {
+                out.push(path);
+            }
+            continue;
+        }
+        if !meta.is_dir() {
+            continue;
+        }
+        // A cloud folder not yet on this machine (OneDrive and the like) is
+        // not listed: listing it would download it, and what is not here
+        // holds no link. A downloaded one is walked like any folder.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+            const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+            if meta.file_attributes() & (FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0 {
+                continue;
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&path) else { continue };
+        for entry in entries.flatten() {
+            if !entry.file_name().eq_ignore_ascii_case(".git") {
+                stack.push(entry.path());
+            }
+        }
+    }
+    out
 }
 
 /// Files the target snapshot holds (within `paths`) that are on disk now but
@@ -659,6 +703,12 @@ pub(crate) fn start_revert(
         return Err("a revert is already running. Wait for it to finish".to_string());
     }
     let root = space_root(world)?;
+    // A Space a newer build made is not reverted. The revert saves tabs, takes a
+    // safety snapshot and writes the restore plan into that Space, so the check
+    // comes before any of them.
+    if let Some(format) = crate::space::format_migration::newer_than_build(&root) {
+        return Err(crate::space::format_migration::newer_space_message(format));
+    }
     ensure_editing(world)?;
     ensure_no_pending_revert(&root)?;
     // A host holds the database open, so the restore could not swap it.
@@ -669,7 +719,7 @@ pub(crate) fn start_revert(
     let paths = match paths {
         None => None,
         Some(p) if p.is_empty() => None,
-        Some(p) => Some(p.iter().map(|s| check_path(s)).collect::<Result<Vec<_>, _>>()?),
+        Some(p) => Some(p.iter().map(|s| check_path(&root, s)).collect::<Result<Vec<_>, _>>()?),
     };
 
     let db_backed = checkpoint::is_db_backed(&root);
@@ -688,6 +738,25 @@ pub(crate) fn start_revert(
                 snap.label
             ));
         }
+    }
+
+    // `git restore` writes through a junction or link inside the folders it
+    // restores (Git for Windows follows one, tested), so a link inside the
+    // Space that leads elsewhere would carry the revert's writes there.
+    let leading_out = links_leading_out(&root, paths.as_deref());
+    if !leading_out.is_empty() {
+        let shown: Vec<String> = leading_out
+            .iter()
+            .take(10)
+            .map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/"))
+            .collect();
+        return Err(format!(
+            "the revert would write through {} link(s) inside the Space that lead outside it: {}{}. \
+             Remove them, then revert again",
+            leading_out.len(),
+            shown.join(", "),
+            if leading_out.len() > shown.len() { ", ..." } else { "" }
+        ));
     }
 
     let exposed = ignored_files_the_revert_would_overwrite(&root, &snap.sha, paths.as_deref())?;
@@ -913,11 +982,141 @@ mod tests {
         assert_eq!(clean_label(&"x".repeat(300)).len(), 120);
     }
 
+    fn revert_space(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("eus_snapshot_paths_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("S").join("Workspace").join("Tower")).unwrap();
+        root
+    }
+
     #[test]
     fn revert_paths_stay_inside_the_space() {
-        assert_eq!(check_path("Workspace\\Tower/").unwrap(), "Workspace/Tower");
-        for bad in ["", "/etc", "C:/x", "../up", "Workspace/../../x", ".git", ".git/config"] {
-            assert!(check_path(bad).is_err(), "{bad}");
+        let root = revert_space("inside");
+        let space = root.join("S");
+        assert_eq!(check_path(&space, "Workspace\\Tower/").unwrap(), "Workspace/Tower");
+        for bad in [
+            "", "/etc", "C:/x", "../up", "Workspace/../../x", ".git", ".git/config", ".GIT/config",
+            "Workspace/.git./x", "Workspace/CON",
+            // Pathspec forms git would read as instructions.
+            ":(top)Workspace", ":/Workspace", ":!Workspace", ":(exclude)x", " :(glob)*",
+        ] {
+            assert!(check_path(&space, bad).is_err(), "{bad}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A junction inside the Space that points outside is followed, so a
+    /// revert path through it is refused. Skipped, with the reason printed,
+    /// where one cannot be made.
+    #[cfg(windows)]
+    #[test]
+    fn a_revert_path_through_a_junction_out_of_the_space_is_refused() {
+        let root = revert_space("junction");
+        let space = root.join("S");
+        let outside = root.join("Outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = space.join("Workspace").join("link");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output();
+        if !made.as_ref().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: a junction could not be made here ({made:?})");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        assert!(check_path(&space, "Workspace/link").is_err());
+        assert!(check_path(&space, "Workspace/link/x.toml").is_err());
+        assert!(check_path(&space, "Workspace/Tower").is_ok());
+        // A revert of a folder holding the link, or of the whole Space, is
+        // refused too: git restore would write through it.
+        assert_eq!(links_leading_out(&space, None), vec![link.clone()]);
+        assert_eq!(links_leading_out(&space, Some(&["Workspace".to_string()])), vec![link.clone()]);
+        assert!(links_leading_out(&space, Some(&["Workspace/Tower".to_string()])).is_empty());
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The documented limit: the check looks once. A link made after it ran
+    /// is not in its answer, though a fresh look finds it, so nothing should
+    /// read the check as covering the moment of the restore.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_made_after_the_check_is_not_in_its_answer() {
+        let root = revert_space("late");
+        let space = root.join("S");
+        let outside = root.join("Outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let checked = links_leading_out(&space, None);
+        let link = space.join("Workspace").join("late");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output();
+        if !made.as_ref().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: a junction could not be made here ({made:?})");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        assert!(checked.is_empty(), "the earlier answer saw no link");
+        assert_eq!(links_leading_out(&space, None), vec![link.clone()], "a fresh look does");
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A hook planted in the Space's repository never runs when the engine
+    /// commits: the failing pre-commit hook would have stopped the commit,
+    /// and the post-commit hook would have left its mark.
+    #[test]
+    fn a_hook_in_the_space_never_runs_on_a_commit() {
+        use crate::editor_settings::{git_commit_locked, EmptyCommit, GitAutosave};
+        let root = std::env::temp_dir().join(format!("eus_snapshot_hooks_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if git(&root, &["init", "--quiet"]).is_err() {
+            return; // No git on this machine.
+        }
+        for (key, value) in [("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")] {
+            git(&root, &["config", key, value]).unwrap();
+        }
+        let hooks = root.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for (name, body) in [("pre-commit", "#!/bin/sh\nexit 1\n"), ("post-commit", "#!/bin/sh\ntouch hook_ran\n")] {
+            let hook = hooks.join(name);
+            std::fs::write(&hook, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let committed = git_commit_locked(&root, "test", None, EmptyCommit::Skip);
+        let ok = matches!(committed, Ok(GitAutosave::Committed(_)));
+        assert!(ok, "the commit did not land: {:?}", committed.err());
+        assert!(!root.join("hook_ran").exists(), "the post-commit hook ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod newer_revert_tests {
+    use super::*;
+
+    /// A revert into a Space a newer build made starts nothing: it returns the
+    /// refusal and queues no revert.
+    #[test]
+    fn a_revert_into_a_newer_space_starts_nothing() {
+        let root = std::env::temp_dir().join(format!("eustress_revert_newer_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("space.toml"),
+            format!("[space]\nname = \"Garage\"\nformat = {}\n", eustress_common::space_format::CURRENT + 1),
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.insert_resource(crate::space::SpaceRoot(root.clone()));
+        world.init_resource::<RevertJob>();
+        let reply: RevertReply = Box::new(|_: &mut World, _: &RevertOutcome| {});
+        let err = start_revert(&mut world, "any", None, Origin::Studio, reply)
+            .expect_err("a revert into a newer Space is refused");
+        assert!(err.contains("format"), "{err}");
+        assert!(world.resource::<RevertJob>().0.is_none(), "no revert is queued");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

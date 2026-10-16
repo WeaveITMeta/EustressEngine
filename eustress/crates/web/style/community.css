@@ -1,0 +1,185 @@
+/* The Community page (src/pages/community.rs).
+   It is built on the Gallery's tokens and parts (gallery.css): glass panels, chips, buttons, section heads, the Gallery's cards
+   and live cards. This file adds only what the Community page has and the Gallery does not: the header with people search and
+   the figures, the creators and hours lists, the avatars, and the empty and failed states of each section.
+   Text keeps 4.5:1 or better: #eef2f7 and #b4bdc9 on the glass, #8a95a4 for hints. */
+
+.cm-wrap { padding: 28px 0 0; }
+
+/* ---- The header: what this page is, people search, and the figures ---- */
+.cm-hero {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 32px;
+    align-items: end;
+    padding: 34px 36px;
+    overflow: hidden;
+    background: linear-gradient(120deg, rgba(60, 186, 84, 0.11), rgba(16, 21, 29, 0.72) 52%);
+}
+.cm-hero::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--g-accent), transparent 70%);
+}
+.cm-hero-copy { min-width: 0; }
+.cm-title {
+    margin: 0 0 10px;
+    font-size: clamp(30px, 4vw, 52px);
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    overflow-wrap: anywhere;
+}
+.cm-lede { margin: 0 0 22px; max-width: 560px; color: var(--g-text-2); font-size: 16.5px; }
+
+.cm-search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 560px;
+    padding: 5px 5px 5px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--g-line-strong);
+    background: rgba(7, 9, 13, 0.55);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cm-search:focus-within { border-color: rgba(60, 186, 84, 0.6); box-shadow: 0 0 0 4px rgba(60, 186, 84, 0.12); }
+.cm-search-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--g-muted); stroke-width: 2; stroke-linecap: round; }
+.cm-q {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--g-text);
+    font: 15px var(--g-sans);
+}
+.cm-q::placeholder { color: var(--g-muted); }
+.g-page .cm-q:focus-visible { outline: none; }
+.cm-search .g-btn { min-height: 38px; flex: none; }
+.cm-hint { margin: 10px 0 0; color: var(--g-muted); font-size: 14px; }
+
+/* What a search found. */
+.cm-results { margin-top: 14px; max-width: 560px; }
+.cm-people {
+    list-style: none;
+    margin: 0;
+    padding: 6px;
+    display: grid;
+    gap: 2px;
+    border: 1px solid var(--g-line);
+    border-radius: 12px;
+    background: rgba(7, 9, 13, 0.5);
+}
+.cm-person { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 9px; transition: background 0.18s; }
+.cm-person:hover { background: rgba(143, 160, 182, 0.1); }
+.cm-name-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.cm-name { overflow-wrap: anywhere; }
+.cm-verified { justify-self: start; padding: 1px 8px; font-size: 11px; }
+.cm-go { margin-left: auto; color: var(--g-muted); flex: none; }
+.cm-empty-inline { padding: 14px 16px; border: 1px dashed var(--g-line-strong); border-radius: 12px; background: rgba(7, 9, 13, 0.4); }
+.cm-empty-inline b { color: var(--g-text); }
+.cm-empty-inline p { margin: 3px 0 0; color: var(--g-text-2); font-size: 14px; }
+
+/* The figures: the Worker's numbers, in mono, side by side. */
+.cm-figures {
+    margin: 0;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(118px, auto);
+    border: 1px solid var(--g-line);
+    border-radius: 12px;
+    overflow: hidden;
+}
+.cm-figures > div { padding: 14px 20px; background: rgba(7, 9, 13, 0.45); border-left: 1px solid var(--g-line); }
+.cm-figures > div:first-child { border-left: 0; }
+.cm-figures dt { font: 600 11px var(--g-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--g-muted); }
+.cm-figures dd { margin: 4px 0 0; font: 600 26px/1.1 var(--g-mono); font-feature-settings: "tnum"; color: var(--g-text); }
+
+/* ---- The two columns: what is happening, and who ---- */
+.cm-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 36px; align-items: start; }
+.cm-main, .cm-side { min-width: 0; }
+.cm-section { padding-top: 34px; }
+.cm-main .g-rail { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.cm-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.g-page a.cm-more { flex: none; font-size: 13px; font-weight: 600; color: var(--g-accent-bright); }
+.g-page a.cm-more:hover { text-decoration: underline; }
+.cm-note { display: flex; align-items: center; gap: 10px; margin: -4px 0 14px; color: var(--g-text-2); font-size: 14px; font-weight: 600; }
+
+/* Creators and the hours list: rows of people. */
+.cm-list { list-style: none; margin: 0; padding: 6px; display: grid; gap: 2px; }
+.cm-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-radius: 10px; }
+.cm-row + .cm-row { box-shadow: 0 -1px 0 rgba(143, 160, 182, 0.08); }
+.cm-who { min-width: 0; display: grid; gap: 2px; }
+.cm-strong { font-weight: 600; color: var(--g-text); }
+.cm-handle { font: 500 13.5px var(--g-mono); color: var(--g-text-2); overflow-wrap: anywhere; }
+.cm-handle.cm-strong { color: var(--g-text); font-weight: 600; }
+.g-page a.cm-handle:hover { color: var(--g-accent-bright); }
+.cm-sub { font: 12.5px var(--g-mono); font-feature-settings: "tnum"; color: var(--g-muted); }
+.cm-spaces { font-size: 13px; color: var(--g-muted); overflow-wrap: anywhere; }
+.g-page .cm-spaces a { color: var(--g-text-2); border-bottom: 1px solid var(--g-line-strong); }
+.g-page .cm-spaces a:hover { color: var(--g-accent-bright); border-bottom-color: var(--g-accent-bright); }
+.cm-rank { width: 24px; flex: none; text-align: right; font: 600 13px var(--g-mono); font-feature-settings: "tnum"; color: var(--g-muted); }
+.cm-board .cm-row:nth-child(-n+3) .cm-rank { color: var(--g-accent-bright); }
+.cm-grow { flex: 1; min-width: 0; }
+.cm-hours { flex: none; font: 600 13.5px var(--g-mono); font-feature-settings: "tnum"; color: var(--g-text); }
+.cm-foot { margin: 10px 4px 0; font-size: 12.5px; color: var(--g-muted); }
+
+/* The avatar: a fixed square that never squishes, a picture under /assets or a letter. */
+.cm-av {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    aspect-ratio: 1 / 1;
+    border-radius: 12px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--g-line-strong);
+    background: radial-gradient(circle at 30% 25%, rgba(60, 186, 84, 0.26), transparent 60%), linear-gradient(135deg, #142019, #0b1017);
+}
+.cm-av img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.cm-av.g-skel { border: 0; }
+.cm-letter { font: 700 17px/1 var(--g-sans); color: var(--g-accent-bright); }
+.cm-board .cm-av { width: 32px; height: 32px; border-radius: 10px; }
+.cm-board .cm-letter { font-size: 14px; }
+
+/* Popular tags: the Gallery's tag chips, with how many Spaces use each. */
+.cm-tags { gap: 8px; }
+.cm-count { margin-left: 7px; font: 600 11px var(--g-mono); font-feature-settings: "tnum"; color: var(--g-muted); }
+
+/* ---- A section with nothing to show, or whose route failed ---- */
+.cm-empty { display: flex; gap: 16px; align-items: flex-start; padding: 18px 20px; }
+.cm-empty b { color: var(--g-text); }
+.cm-empty p { margin: 3px 0 10px; color: var(--g-text-2); font-size: 14px; }
+.cm-empty p:last-child { margin-bottom: 0; }
+.cm-failed .g-glyph { color: var(--g-warn); background: rgba(227, 179, 65, 0.1); }
+
+/* Loading shapes, not made-up rows. */
+.cm-skel-live { height: 88px; border-radius: var(--g-radius); }
+.cm-skel-chip { width: 84px; height: 30px; border-radius: 999px; }
+
+.cm-band { margin-top: 56px; }
+
+/* ---- Small screens: one column, the search full width ---- */
+@media (max-width: 860px) {
+    .cm-wrap { padding-top: 16px; }
+    .cm-hero { grid-template-columns: 1fr; gap: 22px; padding: 24px 20px; }
+    .cm-search { max-width: none; }
+    .cm-search .g-btn { padding: 0 14px; }
+    .cm-results { max-width: none; }
+    .cm-figures { grid-auto-columns: minmax(0, 1fr); }
+    .cm-figures > div { padding: 12px 12px; }
+    .cm-figures dd { font-size: 20px; }
+    .cm-layout { grid-template-columns: 1fr; gap: 0; }
+    .cm-main .g-rail, .cm-grid { grid-template-columns: 1fr; }
+    .cm-band { margin-top: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .cm-search, .cm-person { transition: none; }
+}

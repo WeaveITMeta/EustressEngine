@@ -248,14 +248,17 @@ regex = "1"
 rayon = "1.10"
 crossbeam = "0.8"
 tracing = "0.1"
-# Flamegraph renderer for the opt-in per-system profiler (feature
-# `profiling`). Optional + workspace-pinned (0.11) so the default build never
-# pulls it; only `--features profiling` links it. `tracing-subscriber` is NOT
+# Flamegraph renderer, always linked: the script profiler (src/profiler.rs
+# `script_recorder`, armed by EUSTRESS_SCRIPT_PROFILE) renders its windows in
+# every build, and the per-system profiler (feature `profiling`) uses it too.
+# Workspace-pinned (0.11, no default features). `tracing-subscriber` is NOT
 # a direct dep — the profiler reaches it via `bevy::log::tracing_subscriber`
 # (bevy's own re-export) so the `Layer<Registry>` types match `BoxedLayer`.
-inferno = { workspace = true, optional = true }
+inferno = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 eustress-forge-sdk = { path = "../forge-sdk" }
+# `private_file`: files only the signed-in user can open.
+eustress-identity = { path = "../identity", default-features = false }
 # Forge ORCHESTRATION crate (DISTINCT from the connect-only SDK above) —
 # carries the in-forge sim module (residency-cell → SimCell gang placement).
 # Optional + behind the `sim-orchestration` engine feature so the default
@@ -440,6 +443,8 @@ core = [
     # directive). Wraps bevy_gaussian_splatting (stable, via the `radiance`
     # crate). Splats coexist with normal meshes; demo spawn via EUSTRESS_SPLAT.
     "gaussian-splatting",
+    # Hardware ray tracing, Auto by default (see the `raytracing` feature).
+    "raytracing",
 ]
 
 # ── Individual feature gates ──────────────────────────────────────────────────
@@ -452,6 +457,22 @@ realism-scripting = []
 # fallback, so Luau hot-reload, the Play-start spawn, and `Touched` never ran
 # even though mlua was linked and ready.
 luau = ["eustress-common/luau"]
+# Hardware ray-traced lighting (Bevy Solari 0.19). Decided per launch and per
+# GPU by crates/engine/src/raytracing/ (Auto by default, guarded); a GPU
+# without ray queries draws exactly as before. Adds bevy_solari (pure Rust and
+# WGSL, no native SDK) and turns on bevy_pbr's `dfg_lut` (bevy_solari asks
+# for it), which every raster frame then uses too.
+raytracing = ["bevy/bevy_solari"]
+# NVIDIA DLSS Ray Reconstruction on Solari cameras. Build-time: DLSS_SDK,
+# VULKAN_SDK, libclang and the MSVC C compiler. Run time: nvngx_dlss.dll and
+# nvngx_dlssd.dll beside the exe. Makes the renderer Vulkan-only wherever a
+# Vulkan driver exists (Bevy's raw_vulkan_init). Release builds only, after
+# NVIDIA's trademark approval; never in `default`.
+dlss = ["raytracing", "bevy/dlss"]
+# For CI and machines without the DLSS SDK: compiles every `dlss` code path
+# with DLSS itself compiled out (dlss_wgpu's `mock`; Bevy's dlss module
+# absent; raw_vulkan_init still on), so `--all-features` builds anywhere.
+force_disable_dlss = ["dlss", "bevy/force_disable_dlss"]
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
 # EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail.
@@ -462,15 +483,17 @@ streaming = ["eustress-common/streaming"]
 # StreamNode — exposes the in-process stream on a TCP socket (plus REST/SSE on
 # port+10000) so sibling processes can subscribe and publish.
 #
-# DELIBERATELY NOT IN `core`. The node has no authentication: every connected
-# peer may publish into any topic ring and subscribe to any other, including
-# `scene_deltas` (live scene contents) and `agent_commands`. A default
-# `cargo build` must not open that surface, so this is opt-in:
+# DELIBERATELY NOT IN `core`. Every connection logs in over TLS 1.3, and each
+# party may publish and subscribe only to the topics `parties.toml` grants it
+# (`scene_deltas` and `agent_commands` also need `admin = true` to publish). A
+# default `cargo build` still opens no stream surface, so this is opt-in:
 #
 #     cargo run --features stream-node
 #
-# Even when enabled it binds 127.0.0.1 (see `NodeConfig::bind_addr`); reaching
-# it from another host additionally requires an explicit `bind_all()`.
+# Even when enabled, the plugin starts no node until a certificate, a key and
+# a parties file are configured, and it binds 127.0.0.1 (see
+# `NodeConfig::bind_addr`); reaching it from another host additionally
+# requires an explicit `bind_all()`.
 stream-node = ["streaming", "dep:eustress-stream-node"]
 # Toast notifications (bottom-right stack + Settings tab)
 notifications = []
@@ -559,15 +582,15 @@ hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]
 # Opt-in per-system flamegraph (src/profiler.rs `mod enabled`). `bevy_ecs/trace`
 # is now ALWAYS on (see the bevy_ecs dep above), so the per-system spans exist in
-# every build and this feature only adds `inferno` to render the SVG + installs
-# the capturing tracing Layer. Because no Bevy feature flips, this build is
+# every build and this feature installs the capturing tracing Layer (`inferno`,
+# which renders the SVG, is always linked). Because no Bevy feature flips, this build is
 # incremental (engine-only), NOT a full Bevy rebuild.
 #   Everyday phase profiler (no feature):
 #     EUSTRESS_PROFILE=1 cargo run -p eustress-engine   → eustress_profile_phases.txt
 #   Per-system deep dive (this feature):
 #     EUSTRESS_PROFILE=1 cargo run --features profiling -p eustress-engine
 #     → eustress_profile.txt + eustress_profile.svg (per-system, inferno)
-profiling = ["dep:inferno"]
+profiling = []
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]
 
@@ -585,4 +608,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    # `private_file.rs`: a secret's folder and file get an access list of
+    # their own (the user and SYSTEM), set and read back.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
 ] }

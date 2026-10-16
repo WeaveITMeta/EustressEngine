@@ -1,0 +1,39 @@
+/* The internal draft Economics model (/economics-draft, built only with the `economics-draft` feature): the chart colors and the two layout rules the public
+   page does not have. The draft page puts this file in a <style> of its own, so the stylesheet every visitor downloads does not hold it. */
+.eco-step > .g-chip { margin-top: auto; }
+.eco-col-reset p { margin: 0 0 12px; }
+.eco-svg {
+    --eco-invest: #9aa6ff;
+    --eco-toinv: #d98f4e;
+    --eco-reserve: #2dd4bf;
+    --eco-expenses: #f59e4b;
+    --eco-taxes: #90a4ae;
+    --eco-profit: #5ee37a;
+    --eco-kept: #3cba54;
+    --eco-kept-t: #5ee37a;
+    --eco-bad: #ff786e;
+}
+.eco-svg .n-invest { fill: var(--eco-invest); }
+.eco-svg .n-toinv { fill: var(--eco-toinv); }
+.eco-svg .n-reserve { fill: var(--eco-reserve); }
+.eco-svg .n-expenses { fill: var(--eco-expenses); }
+.eco-svg .n-profit { fill: var(--eco-profit); }
+.eco-svg .n-taxes { fill: var(--eco-taxes); }
+.eco-svg .n-kept { fill: var(--eco-kept); }
+.eco-svg .n-bad { fill: var(--eco-bad); }
+.eco-svg .l-invest { stroke: var(--eco-invest); }
+.eco-svg .l-toinv { stroke: var(--eco-toinv); }
+.eco-svg .l-expenses { stroke: var(--eco-expenses); }
+.eco-svg .l-profit { stroke: var(--eco-profit); }
+.eco-svg .l-taxes { stroke: var(--eco-taxes); }
+.eco-svg .l-kept { stroke: var(--eco-kept); }
+.eco-svg .l-bad { stroke: var(--eco-bad); }
+.eco-svg .c-1 { fill: var(--g-text); }
+.eco-svg .c-invest { fill: var(--eco-invest); }
+.eco-svg .c-toinv { fill: var(--eco-toinv); }
+.eco-svg .c-reserve { fill: var(--eco-reserve); }
+.eco-svg .c-expenses { fill: var(--eco-expenses); }
+.eco-svg .c-profit { fill: var(--eco-profit); }
+.eco-svg .c-taxes { fill: var(--eco-taxes); }
+.eco-svg .c-kept { fill: var(--eco-kept-t); }
+.eco-svg .c-bad { fill: var(--eco-bad); }

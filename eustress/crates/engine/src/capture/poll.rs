@@ -22,6 +22,10 @@
 //!   (see [`super::credentials`]), with an environment variable of the same
 //!   name as a fallback for headless and CI runs. Every log path runs the URL
 //!   through `redact_query`.
+//! - **No redirects, no environment proxy, https only.** Every call goes
+//!   through [`super::transport::CaptureTransport`], whose errors are built
+//!   from the error kind and the host, never from a formatted URL; [`fetch_all`]
+//!   also scrubs the key out of any error text as a second layer.
 //! - **Both endpoints are read-only.** There is no write path to either system
 //!   anywhere in this crate.
 //! - **A rate limit backs off.** A 429 stops the walk and pushes the next
@@ -61,6 +65,10 @@ pub struct PollOutcome {
     pub connector: PathBuf,
     pub profile: Profile,
     pub result: Result<PollPayload, CaptureError>,
+    /// The Connector's key could not be resolved (none saved, or a
+    /// `secret_ref` that is not a SAM name): logged, not announced, as a
+    /// skipped poll always was.
+    pub secret_unresolved: bool,
 }
 
 /// What a successful fetch returned.
@@ -228,7 +236,7 @@ pub fn discover(space_root: &Path) -> Vec<ConnectorSpec> {
 ///
 /// Pure with respect to the transport: pass a stub and the whole pagination,
 /// error, and rate-limit path is testable with no network.
-pub fn fetch_all(
+fn fetch_pages(
     spec: &ConnectorSpec,
     transport: &dyn HttpTransport,
     api_key: Option<&str>,
@@ -295,6 +303,45 @@ pub fn fetch_all(
     Ok(PollPayload { opportunities, raw_pages, total_records, pages_fetched: pages, skipped })
 }
 
+/// Fetch every page for one Connector, with the key scrubbed from any error.
+///
+/// The transport already builds its errors without the URL. This is the
+/// second layer, so no lower layer's formatting can put the key in a log line,
+/// the status bar, or a toast.
+pub fn fetch_all(
+    spec: &ConnectorSpec,
+    transport: &dyn HttpTransport,
+    api_key: Option<&str>,
+    max_pages: u32,
+) -> Result<PollPayload, CaptureError> {
+    fetch_pages(spec, transport, api_key, max_pages).map_err(|e| match api_key {
+        Some(key) => scrub(e, key),
+        None => e,
+    })
+}
+
+/// Replace every occurrence of `secret` in an error's message.
+///
+/// Skipped for a value under eight characters, which no real API key is, so
+/// scrubbing can never mangle ordinary words in a message.
+fn scrub(error: CaptureError, secret: &str) -> CaptureError {
+    let secret = secret.trim();
+    if secret.len() < 8 {
+        return error;
+    }
+    let clean = |m: String| m.replace(secret, "[redacted]");
+    match error {
+        CaptureError::MissingSecret(m) => CaptureError::MissingSecret(clean(m)),
+        CaptureError::BadQuery(m) => CaptureError::BadQuery(clean(m)),
+        CaptureError::Transport(m) => CaptureError::Transport(clean(m)),
+        CaptureError::Upstream(m) => CaptureError::Upstream(clean(m)),
+        CaptureError::Parse(m) => CaptureError::Parse(clean(m)),
+        CaptureError::Io(m) => CaptureError::Io(clean(m)),
+        CaptureError::Untrusted(m) => CaptureError::Untrusted(clean(m)),
+        other => other,
+    }
+}
+
 /// Build a SAM query from a Connector's attributes.
 fn sam_query(spec: &ConnectorSpec, offset: u64) -> Result<sources::SamQuery, CaptureError> {
     let posted_from = spec.option("posted_from").unwrap_or_default().to_string();
@@ -351,19 +398,38 @@ fn grants_query(spec: &ConnectorSpec, offset: u64) -> sources::GrantsQuery {
 /// Returns the value, never stores it, and reports the variable NAME on
 /// failure so a user can fix it without the message ever carrying a secret.
 fn resolve_secret(spec: &ConnectorSpec) -> Result<Option<String>, CaptureError> {
+    resolve_secret_with(spec, &super::credentials::get)
+}
+
+/// [`resolve_secret`] with the saved-key lookup given, so a test never reads
+/// the system credential store or the person's own files.
+fn resolve_secret_with(
+    spec: &ConnectorSpec,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, CaptureError> {
     match spec.profile {
         Profile::GrantsSearch => Ok(None),
         Profile::SamOpportunities => {
             let name = spec.secret_ref.as_deref().unwrap_or(super::credentials::DEFAULT_SAM_KEY);
+            // `secret_ref` comes from a file an agent can write. Refuse any
+            // name that is not a SAM credential before anything is read.
+            if !super::credentials::is_sam_credential_name(name) {
+                return Err(CaptureError::Untrusted(format!(
+                    "secret_ref {name:?} is not a SAM.gov credential name; it must be \
+                     SAM_API_KEY or SAM_API_KEY_<NAME>"
+                )));
+            }
             // The saved key wins over the environment; see `credentials::get`.
-            match super::credentials::get(name) {
+            match lookup(name) {
                 Some(v) => Ok(Some(v)),
                 // Name the BUTTON, not the variable. Telling a grant writer to
                 // set an environment variable and relaunch is not a workflow,
                 // and an error message is the one place they are guaranteed to
                 // be looking when they need the answer.
                 None => Err(CaptureError::MissingSecret(format!(
-                    "no SAM.gov API key yet. Capture ▸ Sources ▸ API Key, paste it, Save.                      It is free from your SAM.gov Account Details page. (credential: {name})"
+                    "no SAM.gov API key yet. Capture ▸ Sources ▸ API Key, paste it, Save. \
+                     It is free from your SAM.gov Account Details page. \
+                     (credential: {name})"
                 ))),
             }
         }
@@ -375,6 +441,7 @@ fn scan_connectors(
     time: Res<Time>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     mut poll: ResMut<CapturePoll>,
+    mut notifications: MessageWriter<crate::ui::notifications::NotificationEvent>,
 ) {
     poll.seconds_to_next_scan -= time.delta_secs();
     if poll.seconds_to_next_scan > 0.0 {
@@ -393,18 +460,31 @@ fn scan_connectors(
             continue;
         }
 
-        let api_key = match resolve_secret(&spec) {
-            Ok(k) => k,
-            Err(e) => {
-                // Push the retry out so a missing key does not re-log every
-                // scan, and say so once.
-                poll.next_due.insert(spec.dir.clone(), elapsed + spec.poll_seconds as f64);
-                warn!("capture: {} skipped: {e}", spec.dir.display());
-                poll.last = Some(format!("{e}"));
-                continue;
-            }
-        };
+        // A Connector is a file any MCP agent can write. Check where it points
+        // BEFORE any secret is read, so a tampered Connector never gets as far
+        // as a key in memory, a thread, or a request.
+        if let Err(e) = sources::pin_endpoint(&spec.endpoint, spec.profile.canonical_endpoints()) {
+            poll.next_due.insert(spec.dir.clone(), elapsed + spec.poll_seconds as f64);
+            warn!("capture: {} not polled: {e}", spec.dir.display());
+            poll.last = Some(format!("{e}"));
+            // A toast, not just a log line: a Connector pointing somewhere
+            // else is either a typo or tampering, and the user needs to know
+            // which file to look at either way. Throttled by `next_due`.
+            let name = spec
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            notifications.write(crate::ui::notifications::NotificationEvent::warning(
+                crate::ui::notifications::NotificationCategory::General,
+                "Capture source not polled",
+                format!("'{name}' {e}"),
+            ));
+            continue;
+        }
 
+        // The next poll is due a full interval out either way, so a missing
+        // key does not re-log every scan.
         poll.next_due.insert(spec.dir.clone(), elapsed + spec.poll_seconds as f64);
         poll.inflight.push(spec.dir.clone());
 
@@ -412,9 +492,16 @@ fn scan_connectors(
         std::thread::Builder::new()
             .name("capture-poll".into())
             .spawn(move || {
-                let transport = eustress_data::source::http::UreqTransport::default();
-                let result = fetch_all(&spec, &transport, api_key.as_deref(), 10);
-                let _ = tx.send(PollOutcome { connector: spec.dir, profile: spec.profile, result });
+                // The key is read here, on the fetch thread: reading it waits
+                // on the system credential store, which no frame system does.
+                let (result, secret_unresolved) = match resolve_secret(&spec) {
+                    Ok(api_key) => {
+                        let transport = super::transport::CaptureTransport::new();
+                        (fetch_all(&spec, &transport, api_key.as_deref(), 10), false)
+                    }
+                    Err(e) => (Err(e), true),
+                };
+                let _ = tx.send(PollOutcome { connector: spec.dir, profile: spec.profile, result, secret_unresolved });
             })
             .ok();
     }
@@ -466,6 +553,11 @@ fn drain_poll_results(
                     "Capture sync",
                     summary,
                 ));
+            }
+            Err(e) if outcome.secret_unresolved => {
+                // No usable key: skipped, said once in the log, as before.
+                warn!("capture: {} skipped: {e}", outcome.connector.display());
+                poll.last = Some(format!("{e}"));
             }
             Err(e) => {
                 // A rate limit is not a failure of the tool; push the next
@@ -700,7 +792,7 @@ posted_to = "08/23/2026"
             secret_ref: None,
             options,
         };
-        assert_eq!(resolve_secret(&spec), Ok(None), "Grants.gov requires no credential");
+        assert_eq!(resolve_secret_with(&spec, &|_| None), Ok(None), "Grants.gov requires no credential");
 
         let stub = Stub::new(vec![HttpResponse::new(
             200,
@@ -713,13 +805,102 @@ posted_to = "08/23/2026"
     #[test]
     fn a_missing_sam_key_names_the_variable_not_the_value() {
         let mut spec = sam_spec();
-        spec.secret_ref = Some("A_VARIABLE_THAT_IS_NOT_SET_12345".into());
-        match resolve_secret(&spec) {
+        spec.secret_ref = Some("SAM_API_KEY_NOT_SET_ANYWHERE_12345".into());
+        match resolve_secret_with(&spec, &|_| None) {
             Err(CaptureError::MissingSecret(m)) => {
-                assert!(m.contains("A_VARIABLE_THAT_IS_NOT_SET_12345"), "{m}");
+                assert!(m.contains("SAM_API_KEY_NOT_SET_ANYWHERE_12345"), "{m}");
+                assert!(m.contains("API Key"), "the message must name the button: {m}");
             }
             other => panic!("expected a missing-secret error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_connector_naming_another_secret_is_refused_before_anything_is_read() {
+        // PATH is set everywhere; before the rule, this returned its value.
+        let mut spec = sam_spec();
+        spec.secret_ref = Some("PATH".into());
+        assert!(matches!(resolve_secret_with(&spec, &|_| None), Err(CaptureError::Untrusted(_))));
+        spec.secret_ref = Some("ANTHROPIC_API_KEY".into());
+        assert!(matches!(resolve_secret_with(&spec, &|_| None), Err(CaptureError::Untrusted(_))));
+    }
+
+    #[test]
+    fn a_tampered_endpoint_sends_nothing_even_with_a_key_in_hand() {
+        // An agent-written Connector: enabled, pointed at its own server. The
+        // fetch must refuse before the transport sees a single request.
+        let mut spec = sam_spec();
+        spec.endpoint = "https://evil.example/collect".into();
+        let stub = Stub::new(vec![]);
+        let result = fetch_all(&spec, &stub, Some("SUPERSECRET"), 10);
+        assert!(matches!(result, Err(CaptureError::Untrusted(_))), "{result:?}");
+        assert!(stub.seen.lock().unwrap().is_empty(), "the key reached a transport");
+    }
+
+    #[test]
+    fn a_tampered_grants_endpoint_makes_no_request() {
+        let mut options = HashMap::new();
+        options.insert("statuses".into(), "posted".into());
+        let spec = ConnectorSpec {
+            dir: PathBuf::from("/tmp/Grants Source"),
+            profile: Profile::GrantsSearch,
+            endpoint: "http://localhost:3030/internal".into(),
+            enabled: true,
+            poll_seconds: 3600,
+            secret_ref: None,
+            options,
+        };
+        let stub = Stub::new(vec![]);
+        assert!(matches!(fetch_all(&spec, &stub, None, 10), Err(CaptureError::Untrusted(_))));
+        assert!(stub.seen.lock().unwrap().is_empty());
+    }
+
+    /// A transport that fails the way ureq's Display does: with the full URL,
+    /// query string and key included, in its error text.
+    struct LeakyTransport;
+
+    impl HttpTransport for LeakyTransport {
+        fn send(&self, request: &HttpRequest) -> eustress_data::Result<HttpResponse> {
+            Err(eustress_data::DataError::Schema(format!("{}: Dns Failed", request.url)))
+        }
+    }
+
+    #[test]
+    fn a_transport_that_leaks_the_url_still_cannot_leak_the_key() {
+        match fetch_all(&sam_spec(), &LeakyTransport, Some("SUPERSECRET123"), 1) {
+            Err(e) => {
+                let text = e.to_string();
+                assert!(!text.contains("SUPERSECRET123"), "{text}");
+                assert!(text.contains("[redacted]"), "the scrub did not run: {text}");
+            }
+            Ok(_) => panic!("the leaky transport always fails"),
+        }
+    }
+
+    #[test]
+    fn no_attribute_or_option_can_move_the_request_off_sam() {
+        // The roads to sam_request: the endpoint attribute (blank takes the
+        // profile default) and the Connector's options. Each must end at the
+        // canonical URL, whatever the options are called.
+        let toml = r#"
+[metadata]
+class_name = "Connector"
+
+[attributes]
+profile = "sam"
+enabled = true
+url = "https://evil.example/"
+host = "evil.example"
+base_url = "https://evil.example/"
+posted_from = "08/01/2026"
+posted_to = "08/23/2026"
+"#;
+        let spec = parse_connector(Path::new("/tmp/c"), toml).expect("parses");
+        let stub = Stub::new(vec![page(&["a"], 1)]);
+        fetch_all(&spec, &stub, Some("KEY12345678"), 1).expect("fetches");
+        let seen = stub.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].starts_with(&format!("{}?", sources::SAM_SEARCH_URL)), "{}", seen[0]);
     }
 
     #[test]

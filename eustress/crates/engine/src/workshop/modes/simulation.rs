@@ -102,22 +102,23 @@ impl ToolHandler for SetBreakpointTool {
     }
 
     fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        // Nothing a tool can queue creates a breakpoint: the registry lives in
+        // the running engine, and the only writers are the Rune simulation
+        // bindings (`add_breakpoint`). Reporting "Breakpoint set" here
+        // made a caller wait for a pause that could never come, so the call
+        // says what it can and cannot do.
         let watchpoint = input.get("watchpoint").and_then(|v| v.as_str()).unwrap_or("");
-        let condition = input.get("condition").and_then(|v| v.as_str()).unwrap_or("");
-        let threshold = input.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
         ToolResult {
             tool_name: "set_breakpoint".to_string(),
             tool_use_id: String::new(),
-            success: true,
-            content: format!("Breakpoint set: pause when {} {} {:.4}", watchpoint, condition, threshold),
-            structured_data: Some(serde_json::json!({
-                "action": "set_breakpoint",
-                "watchpoint": watchpoint,
-                "condition": condition,
-                "threshold": threshold,
-            })),
-            stream_topic: Some("workshop.simulation.breakpoint".to_string()),
+            success: false,
+            content: format!(
+                "No breakpoint was set on '{watchpoint}': breakpoints can only be created from a Rune script \
+                 (the simulation bindings' add_breakpoint), not from a tool call. To stop a run at a condition, \
+                 run_simulation with duration_s and read the result with await_simulation."
+            ),
+            structured_data: None,
+            stream_topic: None,
         }
     }
 }
@@ -148,22 +149,137 @@ impl ToolHandler for ExportRecordingTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let format = input.get("format").and_then(|v| v.as_str()).unwrap_or("csv");
-        let filename = input.get("filename").and_then(|v| v.as_str()).unwrap_or("recording");
-        let ext = if format == "json" { "json" } else { "csv" };
-        let output_path = ctx.space_root.join("Workspace").join(format!("{}.{}", filename, ext));
-
-        ToolResult {
+        let refuse = |content: String| ToolResult {
             tool_name: "export_recording".to_string(),
             tool_use_id: String::new(),
-            success: true,
-            content: format!("Exporting simulation recording to {}", output_path.display()),
-            structured_data: Some(serde_json::json!({
-                "action": "export_recording",
-                "format": format,
-                "path": output_path.to_string_lossy(),
-            })),
-            stream_topic: Some("workshop.simulation.export".to_string()),
+            success: false,
+            content,
+            structured_data: None,
+            stream_topic: None,
+        };
+        let format = input
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("csv")
+            .trim()
+            .to_ascii_lowercase();
+        if format != "csv" && format != "json" {
+            return refuse(format!("Unknown format '{format}'. Use csv or json."));
         }
+
+        // The name becomes a file name, so only its last path component is
+        // used, and only plain characters survive: a request can never write
+        // outside the recordings folder.
+        let raw = input.get("filename").and_then(|v| v.as_str()).unwrap_or("recording");
+        let stem: String = std::path::Path::new(raw)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("recording")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let stem = stem.trim_matches('_');
+        let stem = if stem.is_empty() { "recording" } else { stem };
+
+        // Every run's recording is exported when the run stops, to
+        // `<universe>/.eustress/knowledge/recordings/<space>/sim_*.json`
+        // (simulation/plugin.rs). This re-exports the newest one under the
+        // requested name, as JSON or as one CSV per series.
+        let space = ctx.space_root.file_name().and_then(|n| n.to_str()).unwrap_or("default");
+        let dir = ctx
+            .universe_root
+            .join(".eustress")
+            .join("knowledge")
+            .join("recordings")
+            .join(space);
+        let newest = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("sim_") && name.ends_with(".json")
+            })
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .max_by_key(|(modified, _)| *modified)
+            .map(|(_, path)| path);
+        let Some(source) = newest else {
+            return refuse(format!(
+                "No recording to export: {} holds none. A recording is written when a simulation run stops \
+                 (press Stop, or stop_simulation).",
+                dir.display()
+            ));
+        };
+        let recording: eustress_common::simulation::SimulationRecording = match std::fs::read(&source)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
+        {
+            Ok(r) => r,
+            Err(e) => return refuse(format!("Could not read {}: {e}", source.display())),
+        };
+
+        let (output, written) = if format == "json" {
+            let path = dir.join(format!("export_{stem}.json"));
+            let result = recording.export_json(&path);
+            (path, result)
+        } else {
+            let path = dir.join(format!("export_{stem}"));
+            let result = recording.export_csv(&path);
+            (path, result)
+        };
+        match written {
+            Ok(()) => ToolResult {
+                tool_name: "export_recording".to_string(),
+                tool_use_id: String::new(),
+                success: true,
+                content: format!(
+                    "Exported {} ({} series, {} events) to {}",
+                    source.file_name().and_then(|n| n.to_str()).unwrap_or("the recording"),
+                    recording.series.len(),
+                    recording.events.len(),
+                    output.display()
+                ),
+                structured_data: Some(serde_json::json!({
+                    "source": source.to_string_lossy(),
+                    "path": output.to_string_lossy(),
+                    "format": format,
+                    "series": recording.series.len(),
+                    "events": recording.events.len(),
+                })),
+                stream_topic: Some("workshop.simulation.export".to_string()),
+            },
+            Err(e) => refuse(format!("Could not write {}: {e}", output.display())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::modes::test_context;
+    use serde_json::json;
+
+    #[test]
+    fn set_breakpoint_does_not_claim_to_set_one() {
+        let r = SetBreakpointTool.execute(
+            json!({ "watchpoint": "temp", "condition": "greater_than", "threshold": 10.0 }),
+            &test_context(),
+        );
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn export_recording_with_no_recording_is_an_error() {
+        let r = ExportRecordingTool.execute(json!({ "filename": "../../escape", "format": "json" }), &test_context());
+        assert!(!r.success);
+        assert!(r.content.contains("No recording"));
+    }
+
+    #[test]
+    fn export_recording_rejects_an_unknown_format() {
+        let r = ExportRecordingTool.execute(json!({ "filename": "x", "format": "xlsx" }), &test_context());
+        assert!(!r.success);
     }
 }

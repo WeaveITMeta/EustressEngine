@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 
 use eustress_stream::StreamConfig;
 
@@ -7,12 +8,11 @@ use eustress_stream::StreamConfig;
 pub struct NodeConfig {
     /// Interface to bind every listener to (TCP, QUIC, REST).
     ///
-    /// Defaults to `127.0.0.1` — **loopback only**. A node carries no
-    /// authentication of any kind: every connected peer may publish into any
-    /// topic ring and subscribe to any other, including `scene_deltas` (live
-    /// scene contents) and `agent_commands`. Binding a wildcard address hands
-    /// that to anything that can route to the host, so exposing a node beyond
-    /// loopback has to be a deliberate act, not a default.
+    /// Defaults to `127.0.0.1`, **loopback only**. Every connection logs in
+    /// over TLS 1.3, loopback included, and each party may publish and
+    /// subscribe only to the topics its `parties.toml` entry grants. A
+    /// non-loopback bind additionally requires at least one enabled party;
+    /// with none, the node refuses to start.
     ///
     /// Override with [`NodeConfig::with_bind_addr`], or with
     /// [`NodeConfig::bind_all`] once a trusted network boundary (VPN, firewall,
@@ -35,9 +35,22 @@ pub struct NodeConfig {
     /// Per-connection outbound channel capacity (messages). Default: 8192.
     pub connection_channel_capacity: usize,
     /// Maximum inbound frame size in bytes. Default: 16 MiB.
+    /// Frames before login are capped at 64 KB whatever this says.
     pub frame_max_bytes: usize,
     /// Node identifier (used in cluster consistent hash ring).
+    /// Every login transcript carries it too, so it is at most 64 bytes.
     pub node_id: String,
+    /// PEM certificate every listener presents (TCP, QUIC, REST). Required:
+    /// without it the node does not start its listeners. The node never
+    /// generates a certificate.
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for `tls_cert`. Required. It is opened with the
+    /// owner-only check (`eustress_identity::private_file::verify_open`) and
+    /// read through the handle that check returns.
+    pub tls_key: Option<PathBuf>,
+    /// `parties.toml`: the parties enrolled to log in, with their grants.
+    /// Required. The file and its folder must pass the owner-only check.
+    pub parties_path: Option<PathBuf>,
 }
 
 impl Default for NodeConfig {
@@ -54,6 +67,9 @@ impl Default for NodeConfig {
             connection_channel_capacity: 8192,
             frame_max_bytes: 16 * 1024 * 1024,
             node_id: format!("node-{}", std::process::id()),
+            tls_cert: None,
+            tls_key: None,
+            parties_path: None,
         }
     }
 }
@@ -67,9 +83,8 @@ impl NodeConfig {
 
     /// Bind to all interfaces (`0.0.0.0`).
     ///
-    /// The node is unauthenticated, so this exposes publish and subscribe on
-    /// every topic to anything that can reach the host. Only call this behind a
-    /// trusted network boundary.
+    /// Every connection still logs in and is held to its grants, and the node
+    /// refuses to start unless at least one party is enabled.
     pub fn bind_all(mut self) -> Self {
         self.bind_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         self
@@ -102,6 +117,19 @@ impl NodeConfig {
 
     pub fn with_node_id(mut self, id: impl Into<String>) -> Self {
         self.node_id = id.into();
+        self
+    }
+
+    /// The PEM certificate and private key every listener uses.
+    pub fn with_tls(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        self.tls_cert = Some(cert.into());
+        self.tls_key = Some(key.into());
+        self
+    }
+
+    /// The `parties.toml` the node enrolls parties from.
+    pub fn with_parties(mut self, path: impl Into<PathBuf>) -> Self {
+        self.parties_path = Some(path.into());
         self
     }
 

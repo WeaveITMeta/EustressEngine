@@ -1,0 +1,377 @@
+// ============================================================================
+// Find in Scripts (Ctrl+Shift+F)
+//
+// A modal over every script in the open Space. Rust owns the matches: each
+// keystroke and the Match case box go to Rust (`query-changed`,
+// `match-case-changed`), which searches and pushes `results`, `selected` and
+// `status`. A row shows the script's name and the line number, where the
+// script lives, and the matching line with the match marked. Up, Down, Page Up
+// and Page Down move the highlight through Rust (`move-selection`); Enter or a
+// click opens the row (`open-result`) and the window shows the script at that
+// line; Escape, the close button or a click outside closes (`close`).
+//
+// Read-only: nothing here edits a script or the scene.
+// Law 1 chrome: DialogScrim > DialogCard (dialog_kit.slint).
+// ============================================================================
+
+import { LineEdit, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard } from "dialog_kit.slint";
+
+/// One match. `text` is the matching line, trimmed and at most about 200
+/// characters; `match-start` and `match-len` are the match's byte span inside
+/// it. Slint cannot cut a string by offset, so Rust also sends the line already
+/// cut into the part `before` the match, the `hit` and the part `after`.
+export struct ScriptSearchRow {
+    name: string,
+    location: string,
+    line: int,
+    text: string,
+    match-start: int,
+    match-len: int,
+    before: string,
+    hit: string,
+    after: string,
+}
+
+// A themed checkbox: the box fills with the selection cyan when on.
+component MatchCaseBox inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    height: 28px;
+    width: label-row.preferred-width;
+
+    label-row := HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 8px;
+        spacing: 7px;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                background: root.checked ? Theme.accent-cyan : Theme.input-background;
+                border-width: 1px;
+                border-color: root.checked ? Theme.accent-cyan : Theme.input-border;
+                if root.checked: Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    source: @image-url("../../assets/icons/ui/check.svg");
+                    image-fit: contain;
+                    colorize: Theme.panel-background;
+                }
+            }
+        }
+
+        Text {
+            text: "Match case";
+            color: root.checked ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// One result: the script and line over the matching line, the match marked.
+component HitRow inherits Rectangle {
+    in property <ScriptSearchRow> data;
+    in property <bool> selected: false;
+    callback chosen();
+
+    // ScriptSearchModal.row-height says the same, to keep the highlight in view.
+    height: 48px;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.explorer-item-selected
+        : row-touch.has-hover ? Theme.explorer-item-hover : transparent;
+
+    // The highlighted row's bar on the left edge.
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.selected ? 24px : 0px;
+        border-radius: 1.5px;
+        background: Theme.accent-cyan;
+    }
+
+    row-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    VerticalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        padding-top: 6px;
+        padding-bottom: 5px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            HorizontalLayout {
+                spacing: 1px;
+
+                Text {
+                    text: root.data.name;
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: ":" + root.data.line;
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.data.location;
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // The matching line. The three parts sit end to end; the match gets a
+        // band behind it. Each part is as wide as its own text, so the band
+        // lands under the match in any font.
+        Rectangle {
+            // An empty Text still measures about a character wide, so no
+            // `before` counts as no width.
+            property <length> before-width: root.data.before == "" ? 0px : before.preferred-width;
+
+            height: 16px;
+            clip: true;
+
+            Rectangle {
+                x: parent.before-width;
+                width: hit.preferred-width;
+                height: parent.height;
+                border-radius: 2px;
+                background: Theme.accent-yellow.with-alpha(0.3);
+            }
+
+            before := Text {
+                x: 0px;
+                width: self.preferred-width;
+                text: root.data.before;
+                color: Theme.text-secondary;
+                font-family: "Consolas";
+                font-size: 12px;
+                wrap: no-wrap;
+                vertical-alignment: center;
+            }
+
+            hit := Text {
+                x: parent.before-width;
+                width: self.preferred-width;
+                text: root.data.hit;
+                color: Theme.text-primary;
+                font-family: "Consolas";
+                font-size: 12px;
+                font-weight: 700;
+                wrap: no-wrap;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: parent.before-width + hit.preferred-width;
+                width: max(0px, parent.width - self.x);
+                text: root.data.after;
+                color: Theme.text-secondary;
+                font-family: "Consolas";
+                font-size: 12px;
+                wrap: no-wrap;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component ScriptSearchModal inherits Rectangle {
+    in property <bool> show: false;
+    in-out property <string> query: "";
+    in-out property <bool> match-case: false;
+    in property <[ScriptSearchRow]> results: [];
+    /// The highlighted row of `results`.
+    in property <int> selected: 0;
+    /// The line under the title: how many matches, or that the list was cut.
+    in property <string> status: "";
+
+    callback query-changed(string);
+    callback match-case-changed(bool);
+    callback open-result(int);
+    callback move-selection(int);
+    callback close();
+
+    // One row's height (HitRow's), so the list can keep the highlighted row in view.
+    property <length> row-height: 48px;
+
+    width: 100%;
+    height: 100%;
+    visible: root.show;
+
+    // Up and Down move the highlight, Page Up and Page Down move ten rows,
+    // Enter opens it and Escape closes. The query field asks first, because
+    // the text input would take the arrows for itself; the scope under it
+    // answers when the keyboard is anywhere else in the card.
+    function handle-key(event: KeyEvent) -> EventResult {
+        if (event.text == Key.Escape) {
+            root.close();
+            return EventResult.accept;
+        }
+        if (event.text == Key.DownArrow) {
+            root.move-selection(1);
+            return EventResult.accept;
+        }
+        if (event.text == Key.UpArrow) {
+            root.move-selection(-1);
+            return EventResult.accept;
+        }
+        if (event.text == Key.PageDown) {
+            root.move-selection(10);
+            return EventResult.accept;
+        }
+        if (event.text == Key.PageUp) {
+            root.move-selection(-10);
+            return EventResult.accept;
+        }
+        if (event.text == Key.Return) {
+            if (root.selected >= 0 && root.selected < root.results.length) {
+                root.open-result(root.selected);
+            }
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
+
+    // Scroll just far enough that row `index` is fully in view.
+    function reveal(index: int) {
+        if (index < 0) {
+            return;
+        }
+        if (index * root.row-height + list.viewport-y < 0px) {
+            list.viewport-y = -(index * root.row-height);
+        } else if ((index + 1) * root.row-height + list.viewport-y > list.visible-height) {
+            list.viewport-y = list.visible-height - (index + 1) * root.row-height;
+        }
+    }
+
+    changed selected => { root.reveal(root.selected); }
+    // A new search starts the list from its top row.
+    changed results => { list.viewport-y = 0px; }
+    changed show => {
+        if (root.show) {
+            query-field.focus();
+            query-field.select-all();
+        }
+    }
+
+    DialogScrim {
+        dismiss => { root.close(); }
+
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: max(24px, (parent.height - self.height) / 6);
+            width: min(760px, parent.width - 32px);
+            height: min(580px, parent.height - 48px);
+            icon: @image-url("../../assets/icons/ui/search.svg");
+            title: "Find in Scripts";
+            subtitle: root.status;
+            close => { root.close(); }
+
+            FocusScope {
+                vertical-stretch: 1;
+                key-pressed(event) => { return root.handle-key(event); }
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        query-field := LineEdit {
+                            horizontal-stretch: 1;
+                            text <=> root.query;
+                            placeholder-text: "Search every script in this Space";
+                            init => {
+                                self.focus();
+                                self.select-all();
+                            }
+                            edited(text) => { root.query-changed(text); }
+                            key-pressed(event) => { return root.handle-key(event); }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            MatchCaseBox {
+                                checked <=> root.match-case;
+                                toggled(on) => { root.match-case-changed(on); }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        clip: true;
+                        background: Theme.background-secondary.with-alpha(0.6);
+                        border-radius: Theme.radius-md;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        list := ListView {
+                            width: 100%;
+                            height: 100%;
+
+                            for hit-data[idx] in root.results: HitRow {
+                                data: hit-data;
+                                selected: idx == root.selected;
+                                chosen => { root.open-result(idx); }
+                            }
+                        }
+
+                        if root.results.length == 0: Text {
+                            x: 0px;
+                            y: 18px;
+                            width: parent.width;
+                            text: root.query == "" ? "Type to search every script in this Space." : "No matches.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Up and Down move, Enter opens, Esc closes";
+                        color: Theme.text-disabled;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

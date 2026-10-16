@@ -121,8 +121,8 @@ On Avian 0.7:
 
 | Class | Joint |
 |---|---|
-| `WeldConstraint` | `FixedJoint` holding the pose the two parts are in when it binds |
-| `Weld`, `ManualWeld` | `FixedJoint` holding `Part0 * C0 == Part1 * C1` |
+| `WeldConstraint` | the weld group as one body, holding the pose the two parts are in when it binds; a `FixedJoint` in a group with an anchored part (see Weld groups) |
+| `Weld`, `ManualWeld` | the same, holding `Part0 * C0 == Part1 * C1` (see Weld groups) |
 | `HingeConstraint` | `RevoluteJoint`, hinge axis the attachment frame's X |
 | `PrismaticConstraint` | `PrismaticJoint`, slider axis the attachment frame's X |
 | `CylindricalConstraint` | a `PrismaticJoint` to a physics-only body with no instance, and a `RevoluteJoint` from it (Avian has no cylindrical joint) |
@@ -153,10 +153,73 @@ Things about Avian 0.7 that the mapping has to respect:
   to that part's pose before the step; the engine rewrites such Transforms from the
   nearest ancestor body after `PositionToTransform`.
 - Avian skips contacts between two bodies joined by any joint that carries
-  `JointCollisionDisabled`. Welds carry it: welded parts are one assembly and never touch
-  each other, as in Roblox. The other constraint joints leave it off, since two parts
+  `JointCollisionDisabled`. Welds carry it, so the two parts a weld joins never touch each
+  other, as in Roblox. The other constraint joints leave it off, since two parts
   joined by a hinge still touch; a `NoCollisionConstraint` is what turns a pair's contacts
   off. The physics-only body of a `CylindricalConstraint` has no collider.
+- Stock 0.7.0 estimates a contact's separation within a step by turning each contact point
+  with its body, so a fast-spinning round body (a wheel at speed) reads as lifted off the
+  ground after its first substep and loses its normal force, and with it its grip, for the
+  rest of the step: a car topped out at 45 m/s with its driven wheels slipping 23 percent,
+  and its wheels sank into the road. The workspace's copy (`.patches/avian3d-0.7.0`) counts
+  a contact point's turn only where it takes the contact deeper.
+- Stock 0.7.0's gyroscopic step keeps a spin's angular momentum but not its energy, so a
+  free wheel spun about its axle tumbles off it with more energy than it had. The
+  workspace's copy takes the implicit midpoint rule, which keeps both.
+- Parry meets a cuboid and a cylinder, capsule or convex hull (a wedge) with GJK, whose
+  normals are noise when the cuboid is kilometres across and the gap is sub-millimetre: a
+  wheel resting on a 4 km baseplate was thrown into the air, and a wedge slid across it
+  veered aside. The workspace's copy meets a large cuboid's face as a half-space. Its
+  `PATCH.md` has the details of all three.
+- A joint between two bodies neither of which simulates (two anchored parts) panics
+  linking it into the solver's islands; see Constraints between anchored parts.
+
+### Weld groups
+
+Bodies welded together form a group, and a group of dynamic bodies is ONE rigid body, as a
+Roblox assembly is. The heaviest body of the group is its hub, judged by each part's shape
+and authored density rather than the solver's current mass (a part made dynamic a moment
+ago can read light). The hub keeps its body; every other part keeps its own entity and
+collider, attached to the hub's body at the part's place in the hub's frame, and its own
+body is switched off (`play-runtime/src/assemblies.rs`). So the hub weighs, turns and
+collides as the whole group, its parts never collide with each other, and nothing inside
+it can bend or drift, whatever shape the script's welds had: a script that welds every part
+to a 30 kg seat gets the same body as one that welds them to the chassis. A touch or a
+raycast on a part still names that part, and every part reads the group's `AssemblyMass`.
+
+A merged part follows its hub: after every physics step it stands where the hub holds it
+and moves as the hub does, and it is drawn where the hub is drawn (eased between steps). A
+script's `CFrame` write to any part moves the whole group, as in Roblox; its
+`AssemblyLinearVelocity`, `AssemblyAngularVelocity` and `ApplyImpulse` act on the group's
+body, and anything else that pushes a part (a mover, a `VectorForce`, buoyancy) is moved
+onto the hub at the part's centre of mass each step. A hinge, prismatic, cylindrical or
+spring constraint whose attachment is on a part acts on the hub at the attachment's place in
+the world. A constraint between two parts of one group builds no joint, since they cannot
+move against each other. A `NoCollisionConstraint` on a merged part keeps the whole group
+from colliding with the other part.
+
+The Space's own welds join the same groups: a loaded weld between two parts of a merged
+group is switched off while the group stands, and any other loaded joint on a merged part
+(a hinge, a `Motor6D`) is carried by the hub at the same place. All of it is undone when a
+part leaves its group and when the session ends, so Edit finds every part its own body. A
+part that fractures leaves its group, and the rest re-form around the heaviest part left.
+
+A group with a static, kinematic or character body in it (an anchored part, an avatar)
+keeps one `FixedJoint` per weld, since a static anchor is well conditioned. Groups are made
+again when a weld changes or one of their bodies is anchored or released, and the
+constraints that hang from their parts are built again with them. A plan that comes out the
+same (a rider's `SeatWeld` coming or going, a part spawned elsewhere) changes nothing. A
+`WeldConstraint` holds the offset it was made with, taken when both its parts were first
+drawn: its `Part0`, `Part1` or `Enabled` changing takes a new one, as in Roblox, so a group
+that re-forms never welds its parts where they have drifted to. A part that joins a group
+goes to the place its welds give it at once, as a Roblox weld snaps.
+
+Avian turns every joint correction into velocity, so joints between bodies of very
+different mass do not stay rigid. A 30 kg seat welded to 700 kg of chassis, with the springs
+on the seat, drifted 18 cm at rest and threw a bumper off at 89 m/s. A star of joints from
+the heaviest body, each at its part's centre of mass, held to millimetres while the hub
+outweighed the rest: a 390 kg deck carrying 840 kg of parts drifted 33 mm into a wall. One
+body drifts none, and the solver has one body instead of a body and a joint per part.
 
 Constraints loaded from the Space work at their attachments too: each end's frame is the
 Attachment's `CFrame` on its part's pose, expressed in the body the part moves with, so an
@@ -168,6 +231,18 @@ import as `Weld`, with their `C0` and `C1`, so a legacy-welded assembly holds to
 Play. Where the loaded parts sit apart from what `C0` and `C1` say, the weld pulls them
 together when physics starts, as Roblox's does; the first eight such welds are named in a
 warning, since that usually means a frame came in wrong.
+
+### Constraints between anchored parts
+
+A constraint none of whose parts simulates (two anchored parts, a welded model that is
+still anchored) builds no joint until one of them is released, and then builds from the
+same attachments and offsets. Avian 0.7 links every joint into the simulation islands of
+its two bodies, only a dynamic or kinematic body has one, and a joint between two bodies
+that have none panics the solver. A Roblox constraint between anchored parts does nothing
+until a part moves either, so a script can weld, hinge and spring a whole vehicle while it
+is anchored and release it at once: it starts assembled where it was built, with nothing
+falling while the joints are made. Constraints loaded from the Space wait the same way
+(`AwaitingSimulatedBody` in `joint_resolver.rs`).
 
 ## Seats
 
@@ -230,6 +305,21 @@ same joints and keep the same tree. Stop removes everything a script made.
 - A `PrismaticConstraint` with limits stops the slider at each limit.
 - Two parts joined by a `NoCollisionConstraint` pass through each other; each still
   collides with everything else.
+- A car whose parts are all welded to a 30 kg seat, with the suspension hung on the seat,
+  is one 1260 kg body on its spine, settles on its springs and drives to 15 m/s in five
+  seconds.
+- Two welded parts are one body weighing both; anchoring one splits them, and the weld
+  becomes a joint to the anchored part. Destroying the heavier leaves the other standing.
+- A loaded weld's pair is one body in Play and a joint again after Stop; a loaded hinge on
+  a merged part turns at the same place, on the hub.
+- Two anchored parts welded or hinged build no joint; releasing one builds it, and the
+  part holds where it was welded, or swings on the hinge.
+- A model welded while anchored falls as one rigid piece once released.
+- A ball rolling at 30 m/s stays on the road (its centre never below its radius) and keeps
+  its speed; a ball spun on the spot grips and turns its spin into speed without sinking.
+- A cylinder wheel rolling at 30 m/s across a 4 km baseplate neither sinks nor hops, and a
+  wedge slid across it stops dead ahead.
+- A wheel spun about its axle in the air keeps spinning about the axle.
 - Everything a script built shows in the Explorer during Play and is gone after Stop.
 
 ## Status
@@ -245,5 +335,4 @@ parts' poses itself), loaded `Weld` binding and the avatar-weld rule
 system in `docs/networking/SEATS.md`). None of it has run yet.
 
 Not written yet: poses for parts nested under another part's body (the pull reads parts
-whose own Transform changed, and a nested part's does not as its body moves), and
-`AssemblyMass` in the Play tree, which scripts read as nil for now.
+whose own Transform changed, and a nested part's does not as its body moves).

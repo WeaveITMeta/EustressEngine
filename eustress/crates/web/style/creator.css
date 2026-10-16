@@ -1,5 +1,5 @@
 /* =============================================================================
-   Creator dashboard (/creator) and a listing's pass store
+   Sell page (/projects/:sim_id) and a listing's pass store
    =============================================================================
    The purchases page's surfaces, labels and tabular figures, so the buyer's
    and the seller's side of the same money read alike. Live mode is marked in
@@ -617,6 +617,12 @@
     margin: 0 0 12px;
     font-size: 13px;
     color: #ff6b6b;
+}
+
+.keys-note {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--color-text-muted, #8b949e);
 }
 
 @media (max-width: 640px) {

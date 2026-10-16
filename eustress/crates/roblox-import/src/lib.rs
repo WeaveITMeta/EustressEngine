@@ -76,7 +76,6 @@ pub mod property_map;
 pub mod roblox_mesh;
 pub mod texture_bake;
 pub mod service_props;
-pub mod carry_over;
 mod pose;
 pub mod service_router;
 pub mod sink;

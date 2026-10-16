@@ -125,6 +125,41 @@ export struct ThemeData {
 }
 
 // Global theme colors - dark mode by default
+// The main window's height, and where a popup goes so it stays on screen.
+// StudioWindow sets `window-height`; popups below an anchor ask these
+// functions for their y, so one that would run off the bottom of the window
+// opens upward or moves up as far as it needs to.
+export global PopupBounds {
+    in-out property <length> window-height: 0px;
+
+    // The y of a popup that opens under an anchor, relative to the anchor's
+    // parent: below the anchor when it fits, else above it when that fits, else
+    // as high as keeps it inside the window. `anchor-top` is the anchor's top
+    // in window coordinates, `below` the offset of the popup's top edge when it
+    // opens under the anchor, `popup-h` the popup's height.
+    public pure function drop-y(anchor-top: length, below: length, popup-h: length) -> length {
+        if window-height <= 0px {
+            return below;
+        }
+        if anchor-top + below + popup-h <= window-height {
+            return below;
+        }
+        if anchor-top - popup-h >= 0px {
+            return -popup-h;
+        }
+        return max(0px, window-height - popup-h) - anchor-top;
+    }
+
+    // The y of a popup held at `offset` from the anchor's top, moved only as
+    // far as needed to keep it inside the window.
+    public pure function fit-y(anchor-top: length, offset: length, popup-h: length) -> length {
+        if window-height <= 0px {
+            return offset;
+        }
+        return max(0px, min(anchor-top + offset, window-height - popup-h)) - anchor-top;
+    }
+}
+
 export global Theme {
     // ── Built-in palettes ────────────────────────────────────────────────
     // The two shipped palettes as compile-time constants (values migrated
@@ -214,25 +249,25 @@ export global Theme {
         radius-lg: 8px,
         radius-xl: 12px,
     };
-    out property <ThemeData> preset-modern: {
-        background-primary: #0a0f18,
-        background-secondary: #0d1320,
-        background-tertiary: #131b2b,
-        panel-background: #0c1220,
-        header-background: #101a2c,
-        viewport-background: #04070d,
-        tab-active: #122034,
-        tab-inactive: #0b1322,
-        tab-hover: #172a42,
-        text-primary: #e8ecf3,
-        text-secondary: #8b95a7,
-        text-disabled: #4b5568,
-        text-accent: #4fd6ff,
+    out property <ThemeData> preset-voltec: {
+        background-primary: #0b0f15,
+        background-secondary: #0f141b,
+        background-tertiary: #161c25,
+        panel-background: #0f141b,
+        header-background: #161c25,
+        viewport-background: #06080c,
+        tab-active: #161c25,
+        tab-inactive: #0b0f15,
+        tab-hover: #1c2430,
+        text-primary: #f5f5f5,
+        text-secondary: #9aa4b2,
+        text-disabled: #5b6675,
+        text-accent: #66d9ff,
         text-error: #ff6b6b,
-        text-warning: #ffcc55,
-        text-success: #3ce0b0,
-        border-color: #0a84ff26,
-        border-focus: #0a84ff,
+        text-warning: #f2c14e,
+        text-success: #4ade80,
+        border-color: #1f2733,
+        border-focus: #00bfff,
         border-error: #ff5470,
         success-surface: #0d2419,
         success-surface-hover: #123320,
@@ -241,60 +276,60 @@ export global Theme {
         error-surface: #2a0f14,
         error-surface-hover: #3d1219,
         error-surface-border: #7a2030,
-        button-background: #111a2a,
-        button-hover: #1a2740,
-        button-pressed: #0b1322,
-        button-primary: #0a84ff,
-        button-primary-hover: #3aa0ff,
-        input-background: #0a1120,
-        input-border: #0a84ff38,
-        input-focus: #0a84ff,
-        selection-background: #0a84ff26,
-        selection-border: #0a84ff,
-        overlay-background: #060a12e8,
-        dialog-background: #0d1526,
+        button-background: #1c2430,
+        button-hover: #243040,
+        button-pressed: #0f141b,
+        button-primary: #006a94,
+        button-primary-hover: #0077a3,
+        input-background: #0b0f15,
+        input-border: #2b3646,
+        input-focus: #00bfff,
+        selection-background: #00bfff26,
+        selection-border: #00bfff,
+        overlay-background: #06080ce8,
+        dialog-background: #161c25,
         modal-backdrop: #000000cc,
-        dialog-titlebar-background: #0a1322,
-        accent-blue: #0a84ff,
-        accent-cyan: #22d3ee,
-        accent-eustress: #0a84ff,
-        accent-green: #34d399,
-        accent-green-bright: #00ffa3,
+        dialog-titlebar-background: #0f141b,
+        accent-blue: #0099cc,
+        accent-cyan: #00bfff,
+        accent-eustress: #0077a3,
+        accent-green: #4ade80,
+        accent-green-bright: #86efac,
         accent-orange: #ff9f45,
         accent-purple: #c084fc,
         accent-red: #ff5470,
-        accent-yellow: #ffd166,
-        cat-parts: #60a5fa,
+        accent-yellow: #f2c14e,
+        cat-parts: #38bdf8,
         cat-structure: #4ade80,
-        cat-constraint: #fbbf24,
+        cat-constraint: #f2c14e,
         cat-modify: #c084fc,
-        cat-data: #22d3ee,
-        panel-glass: #0a1120cc,
-        border-highlight: #0a84ff22,
+        cat-data: #00bfff,
+        panel-glass: #0f141bcc,
+        border-highlight: #ffffff0f,
         shadow-float: #000000a6,
-        border-glow-color: #0a84ff7a,
-        ribbon-background: #080d18,
-        ribbon-tab-active: #122034,
-        ribbon-tab-inactive: #0b1322,
-        ribbon-separator: #0a84ff26,
-        explorer-item-hover: #111a2a,
-        explorer-item-selected: #0a3a4a,
-        explorer-folder: #f0c04a,
-        explorer-file: #c8d0dc,
-        output-info: #4fd6ff,
-        output-warning: #ffcc55,
+        border-glow-color: #00bfff40,
+        ribbon-background: #06080c,
+        ribbon-tab-active: #161c25,
+        ribbon-tab-inactive: #0b0f15,
+        ribbon-separator: #1f2733,
+        explorer-item-hover: #121821,
+        explorer-item-selected: #0a3a4d,
+        explorer-folder: #f2c14e,
+        explorer-file: #c9d1dc,
+        output-info: #66d9ff,
+        output-warning: #f2c14e,
         output-error: #ff6b6b,
-        output-debug: #8b95a7,
+        output-debug: #9aa4b2,
         gizmo-x: #f14c4c,
         gizmo-y: #4ec9b0,
         gizmo-z: #569cd6,
         shadow-color: #000000a0,
-        accent-glow-blur: 12px,
+        accent-glow-blur: 8px,
         backdrop-blur-lg: 14px,
-        radius-sm: 5px,
-        radius-md: 9px,
-        radius-lg: 16px,
-        radius-xl: 22px,
+        radius-sm: 2px,
+        radius-md: 4px,
+        radius-lg: 8px,
+        radius-xl: 12px,
     };
 
     // ── The live palette ─────────────────────────────────────────────────
@@ -303,11 +338,10 @@ export global Theme {
     // persisted choice on the first frame.
     in-out property <ThemeData> data: root.preset-classic;
 
-    // UI-state mirror ONLY — no longer drives any color (colors come from
-    // `data`). Kept so the Settings > Theme swatch pair can highlight the
-    // active choice; Rust sets it alongside `set_data`. Phase B removes it
-    // when the swatch pair becomes a data-driven theme list.
-    in-out property <bool> modern: false;
+    // True while the Voltec theme is active. It drives no color (colors come
+    // from `data`); Rust reads it to pick the base accent for modes that have
+    // none of their own, and sets it alongside `set_data`.
+    in-out property <bool> voltec: false;
 
     // ── Alias tokens ─────────────────────────────────────────────────────
     // Every consumer's `Theme.background-primary` (across ~42 files) keeps
@@ -663,7 +697,7 @@ export component IconButton inherits Rectangle {
     // Tooltip popup — uses PopupWindow for correct z-ordering above all panels
     tooltip-popup := PopupWindow {
         x: 0px;
-        y: root.height + 4px;
+        y: PopupBounds.drop-y(root.absolute-position.y, root.height + 4px, self.height);
         
         Rectangle {
             background: Theme.dialog-background;

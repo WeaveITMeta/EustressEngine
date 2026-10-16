@@ -2,13 +2,23 @@
 
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
+use crate::sandbox::Refusal;
 use std::path::PathBuf;
 
-fn resolve_sandboxed_path(ctx: &ToolContext, relative_path: &str) -> Option<PathBuf> {
-    let cleaned = relative_path.replace('\\', "/");
-    if cleaned.contains("..") { return None; }
-    let resolved = ctx.universe_root.join(&cleaned);
-    if resolved.starts_with(&ctx.universe_root) { Some(resolved) } else { None }
+/// `relative_path` inside the Universe, by the shared rules in [`crate::sandbox`].
+fn resolve_sandboxed_path(ctx: &ToolContext, relative_path: &str) -> Result<PathBuf, Refusal> {
+    crate::sandbox::resolve(&ctx.universe_root, relative_path)
+}
+
+/// The first `max` bytes of `s`, cut back to a character boundary, so a
+/// truncation never splits a character (slicing at a fixed byte panics on
+/// one). Every tool that shortens text uses this.
+pub(crate) fn utf8_prefix(s: &str, max: usize) -> &str {
+    let mut cut = max.min(s.len());
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
 }
 
 fn err_result(tool: &str, msg: String) -> ToolResult {
@@ -48,8 +58,8 @@ impl ToolHandler for ReadFileTool {
             None => return err_result("read_file", "Missing: path".into()),
         };
         let resolved = match resolve_sandboxed_path(ctx, path_str) {
-            Some(p) => p,
-            None => return err_result("read_file", format!("Path '{}' outside sandbox", path_str)),
+            Ok(p) => p,
+            Err(why) => return err_result("read_file", format!("Path refused: {why}")),
         };
 
         // If the caller passed a directory, don't silently error. Soul
@@ -92,7 +102,7 @@ impl ToolHandler for ReadFileTool {
         match std::fs::read_to_string(&resolved) {
             Ok(content) => {
                 let truncated = if content.len() > 50_000 {
-                    format!("{}...\n[truncated — {} bytes]", &content[..50_000], content.len())
+                    format!("{}...\n[truncated, {} bytes]", utf8_prefix(&content, 50_000), content.len())
                 } else { content };
                 ToolResult {
                     tool_name: "read_file".to_string(), tool_use_id: String::new(), success: true,
@@ -145,11 +155,8 @@ impl ToolHandler for ListDirectoryTool {
             ctx.universe_root.clone()
         } else {
             match resolve_sandboxed_path(ctx, path_str) {
-                Some(p) => p,
-                None => return err_result(
-                    "list_directory",
-                    format!("Path '{}' is outside the Universe sandbox (or contains `..`).", path_str),
-                ),
+                Ok(p) => p,
+                Err(why) => return err_result("list_directory", format!("Path refused: {why}")),
             }
         };
 
@@ -255,8 +262,8 @@ impl ToolHandler for WriteFileTool {
             None => return err_result("write_file", "Missing: content".into()),
         };
         let resolved = match resolve_sandboxed_path(ctx, path_str) {
-            Some(p) => p,
-            None => return err_result("write_file", format!("Path '{}' outside sandbox", path_str)),
+            Ok(p) => p,
+            Err(why) => return err_result("write_file", format!("Path refused: {why}")),
         };
         // Engine-managed files must not be overwritten by the AI agent.
         // _instance.toml files are the authoritative source of truth for
@@ -265,7 +272,8 @@ impl ToolHandler for WriteFileTool {
         // template (e.g. one that defaults mesh to parts/block.glb) destroys
         // custom mesh references and all physics/material data. Use
         // create_entity / update_entity instead.
-        if resolved.file_name().map(|n| n == "_instance.toml").unwrap_or(false) {
+        // In any case: on Windows `_INSTANCE.TOML` is the same file.
+        if resolved.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("_instance.toml")).unwrap_or(false) {
             return err_result(
                 "write_file",
                 "Cannot overwrite _instance.toml — use create_entity or update_entity instead".into(),
@@ -281,5 +289,24 @@ impl ToolHandler for WriteFileTool {
             },
             Err(e) => err_result("write_file", format!("Failed: {}", e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod utf8_prefix_boundary_tests {
+    use crate::file_tools::utf8_prefix;
+
+    #[test]
+    fn never_splits_a_character() {
+        // "é" is two bytes: a limit inside it backs up to before it.
+        assert_eq!(utf8_prefix("aé", 2), "a");
+        assert_eq!(utf8_prefix("aé", 3), "aé");
+        assert_eq!(utf8_prefix("a—b", 2), "a");
+    }
+
+    #[test]
+    fn a_short_string_is_returned_whole() {
+        assert_eq!(utf8_prefix("abc", 10), "abc");
+        assert_eq!(utf8_prefix("", 0), "");
     }
 }

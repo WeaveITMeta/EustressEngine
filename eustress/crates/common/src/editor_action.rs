@@ -34,6 +34,12 @@ pub enum Action {
     SaveScene,
     /// Save the current Space under a new name.
     SaveSceneAs,
+    /// Rename the open Space or Universe. Opens a chooser: Universe or Space.
+    Rename,
+    /// Rename the active Universe folder.
+    RenameUniverse,
+    /// Rename the open Space in place.
+    RenameSpace,
     /// Publish the whole Universe to the Eustress platform.
     PublishUniverse,
     /// Publish only the active Space (incremental update).
@@ -123,6 +129,10 @@ pub enum Action {
     // CSG Operations
     CSGNegate,      // Negate selected part (CSG subtract)
     CSGUnion,       // Union selected parts
+    // Split the selected Part's mesh into its connected parts, in a new Model. The original moves to the trash.
+    MeshSplitParts,
+    // Split the selected Part's mesh at its hard edges, in a new Model. The original moves to the trash.
+    MeshSplitEdges,
     CSGIntersect,   // Intersect selected parts
     CSGSeparate,    // Separate union into parts
 
@@ -148,6 +158,9 @@ pub enum Action {
     InsertObject,
     /// Ctrl+F: find objects in the scene by name, and rename them.
     FindReplace,
+    /// Ctrl+Shift+F: search the text of every script in the open Space and open
+    /// a result at its line.
+    FindInScripts,
     /// Ctrl+Shift+V: paste as children of the primary selection.
     PasteInto,
     /// Ctrl+Shift+X: put the keyboard in the Explorer search box.
@@ -156,6 +169,13 @@ pub enum Action {
     FocusPropertiesFilter,
     /// Ribbon toggle (no default chord): dragged parts stop at other parts.
     ToggleCollisions,
+    /// I: sample the look under the cursor (a part's colour and material,
+    /// or the terrain's material) into the sampled look; the terrain brush
+    /// takes its material too. Changes no part.
+    SampleLook,
+    /// Ctrl+Alt+B: arm the Paint Bucket, whose clicks paint parts with the
+    /// sampled look.
+    ToolPaintBucket,
 
     // Terrain tools (docs/design/TERRAIN_TOOLS_UX.md section 6). Every one
     // but `TerrainTools` is in the terrain context (`ActionContext::Terrain`):
@@ -259,6 +279,9 @@ impl Action {
             Action::OpenFile => "Open File",
             Action::SaveScene => "Save Scene",
             Action::SaveSceneAs => "Save Space As",
+            Action::Rename => "Rename",
+            Action::RenameUniverse => "Rename Universe",
+            Action::RenameSpace => "Rename Space",
             Action::PublishUniverse => "Publish Universe",
             Action::PublishSpace => "Publish Space",
             Action::Undo => "Undo",
@@ -312,6 +335,8 @@ impl Action {
             Action::StopPlay => "Stop Play",
             Action::CSGNegate => "CSG Negate",
             Action::CSGUnion => "CSG Union",
+            Action::MeshSplitParts => "Split Mesh Into Parts",
+            Action::MeshSplitEdges => "Split Mesh At Edges",
             Action::CSGIntersect => "CSG Intersect",
             Action::CSGSeparate => "CSG Separate",
             Action::ToolPartSwap => "Part Swap",
@@ -326,10 +351,13 @@ impl Action {
             Action::ToolPathArray => "Path Array",
             Action::InsertObject => "Insert Object",
             Action::FindReplace => "Find & Replace",
+            Action::FindInScripts => "Find in Scripts",
             Action::PasteInto => "Paste Into",
             Action::FocusExplorerSearch => "Search Explorer",
             Action::FocusPropertiesFilter => "Filter Properties",
             Action::ToggleCollisions => "Toggle Collisions",
+            Action::SampleLook => "Sample Look",
+            Action::ToolPaintBucket => "Paint Bucket",
             Action::TerrainTools => "Terrain Tools",
             Action::TerrainDraw => "Terrain: Draw",
             Action::TerrainSculpt => "Terrain: Sculpt",
@@ -429,6 +457,13 @@ mod tests {
         let params: serde_json::Value =
             serde_json::from_str(r#"{"action":"ViewMode2D","action":"Delete"}"#).unwrap();
         assert_eq!(parse_action(&params), Some(Action::Delete));
+    }
+
+    #[test]
+    fn find_in_scripts_is_a_named_action() {
+        assert_eq!(parse_action(&json!({ "action": "FindInScripts" })), Some(Action::FindInScripts));
+        assert_eq!(Action::FindInScripts.name(), "Find in Scripts");
+        assert_eq!(Action::FindInScripts.context(), ActionContext::Global);
     }
 
     #[test]

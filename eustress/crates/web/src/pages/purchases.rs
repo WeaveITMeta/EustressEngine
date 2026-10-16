@@ -40,7 +40,7 @@ fn when(ts: &str) -> (String, String) {
             let local = t.with_timezone(&chrono::Local);
             (
                 local.format("%b %-d, %Y").to_string(),
-                local.format("%B %-d, %Y at %H:%M").to_string(),
+                crate::time_words::when_ms(t.timestamp_millis() as f64),
             )
         }
         Err(_) => (ts.to_string(), ts.to_string()),
@@ -69,6 +69,16 @@ fn simulation_label(s: &SimulationSpend) -> String {
 
 fn thumbnail_url(api_url: &str, simulation_id: &str) -> String {
     format!("{api_url}/api/simulations/{simulation_id}/thumbnail")
+}
+
+/// A simulation's thumbnail: the signed URL the record carries (an adult or unrated simulation, whose public URL is refused),
+/// else the public one. None outside a simulation.
+fn simulation_thumbnail(api_url: &str, simulation_id: Option<&str>, signed: Option<&str>) -> Option<String> {
+    match (signed.filter(|s| !s.is_empty()), simulation_id) {
+        (Some(url), Some(_)) => Some(url.to_string()),
+        (None, Some(id)) => Some(thumbnail_url(api_url, id)),
+        (_, None) => None,
+    }
 }
 
 /// What the purchase list is narrowed to. A `None` id is the bucket with no
@@ -516,7 +526,7 @@ fn SimulationRow(
         let target = target.clone();
         move || focus.with(|f| f.as_ref() == Some(&target))
     };
-    let sources: Vec<String> = spend.simulation_id.iter().map(|id| thumbnail_url(&api_url, id)).collect();
+    let sources: Vec<String> = simulation_thumbnail(&api_url, spend.simulation_id.as_deref(), spend.thumbnail_url.as_deref()).into_iter().collect();
     let fallback = if spend.simulation_id.is_some() { "/assets/icons/gamepad.svg" } else { "/assets/icons/receipt.svg" };
     let meta = match (&spend.simulation_id, spend.creator_name.is_empty()) {
         (Some(_), false) => format!("by {} \u{00b7} {}", spend.creator_name, plural(spend.purchases, "purchase", "purchases")),
@@ -552,8 +562,8 @@ fn PurchaseRow(purchase: Purchase, api_url: String) -> impl IntoView {
     if !purchase.icon.is_empty() {
         sources.push(purchase.icon.clone());
     }
-    if let Some(id) = &purchase.simulation_id {
-        sources.push(thumbnail_url(&api_url, id));
+    if let Some(url) = simulation_thumbnail(&api_url, purchase.simulation_id.as_deref(), purchase.thumbnail_url.as_deref()) {
+        sources.push(url);
     }
     let fallback = if purchase.is_bliss() { "/assets/icons/bliss.svg" } else { "/assets/icons/ticket.svg" };
 
@@ -598,5 +608,27 @@ fn PurchaseRow(purchase: Purchase, api_url: String) -> impl IntoView {
                 <time class="purchases-item-date" datetime=purchase.ts.clone() title=full>{day}</time>
             </div>
         </li>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_signed_thumbnail_from_the_record_is_used_and_otherwise_the_public_one() {
+        let api = "https://api.eustress.dev";
+        let signed = "https://api.eustress.dev/api/simulations/a/thumbnail?exp=1800&sig=x";
+        assert_eq!(simulation_thumbnail(api, Some("a"), Some(signed)).as_deref(), Some(signed));
+        assert_eq!(simulation_thumbnail(api, Some("a"), None).as_deref(), Some("https://api.eustress.dev/api/simulations/a/thumbnail"));
+        assert_eq!(simulation_thumbnail(api, Some("a"), Some("")).as_deref(), Some("https://api.eustress.dev/api/simulations/a/thumbnail"));
+        assert_eq!(simulation_thumbnail(api, None, Some(signed)), None);
+        // and the Worker's field is read from both records
+        let p: crate::api::purchases::Purchase = serde_json::from_str(&format!(r#"{{"id":"r","ts":"2026-10-08T17:00:00Z","currency":"TKT","amount":10,"simulation_id":"a","thumbnail_url":"{signed}"}}"#)).unwrap();
+        assert_eq!(p.thumbnail_url.as_deref(), Some(signed));
+        let s: crate::api::purchases::SimulationSpend = serde_json::from_str(&format!(r#"{{"simulation_id":"a","thumbnail_url":"{signed}"}}"#)).unwrap();
+        assert_eq!(s.thumbnail_url.as_deref(), Some(signed));
+        let old: crate::api::purchases::SimulationSpend = serde_json::from_str(r#"{"simulation_id":"a"}"#).unwrap();
+        assert_eq!(old.thumbnail_url, None);
     }
 }

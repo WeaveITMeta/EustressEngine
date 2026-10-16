@@ -104,11 +104,11 @@ impl BinaryEcsInstance {
     }
 }
 
-/// Latch: the Space path the binary-ECS boot-load already ran for. A
-/// genuine Space switch (path change) re-arms it, so the load runs
-/// exactly once per Space — mirrors `WorldDbDecision`.
+/// Latch: the Space open the binary-ECS boot-load already ran for, as its
+/// path and `SpaceLoadGeneration`. Every open re-arms it, a reopen of the
+/// same path included, so the load runs exactly once per open.
 #[derive(Resource, Default)]
-pub struct BinaryEcsLoadLatch(pub Option<PathBuf>);
+pub struct BinaryEcsLoadLatch(pub Option<(PathBuf, u64)>);
 
 /// Marks a binary-ECS entity whose typed config component(s) were edited
 /// in place (NOT via `Transform`/`BasePart`/`Tags`/`Instance`, which the
@@ -179,6 +179,7 @@ fn def_from_components(
             Some(AssetReference {
                 mesh: mesh.to_string(),
                 scene: DEFAULT_SCENE.to_string(),
+                scale_kind: None,
             })
         },
         transform: TransformData {
@@ -891,7 +892,7 @@ pub fn sys_stream_in_on_select(
 fn load_binary_ecs_instances(
     mut commands: Commands,
     space_root: Res<SpaceRoot>,
-    mut latch: ResMut<BinaryEcsLoadLatch>,
+    (mut latch, generation): (ResMut<BinaryEcsLoadLatch>, Res<crate::space::file_loader::SpaceLoadGeneration>),
     load_in_progress: Res<LoadInProgress>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -912,8 +913,9 @@ fn load_binary_ecs_instances(
     // already spawned from the tree (see the boot-load-all branch below).
     live_instances: Query<&eustress_common::classes::Instance>,
 ) {
-    // Already loaded for this Space.
-    if latch.0.as_deref() == Some(space_root.0.as_path()) {
+    // Already loaded for this open.
+    let this_open = (space_root.0.clone(), generation.0);
+    if latch.0.as_ref() == Some(&this_open) {
         return;
     }
     // Wait until the file loader's pass finishes (services + disk entities
@@ -931,8 +933,8 @@ fn load_binary_ecs_instances(
         return;
     };
 
-    // Commit the decision for this Space so we never re-spawn.
-    latch.0 = Some(space_root.0.clone());
+    // Commit the decision for this open so we never re-spawn.
+    latch.0 = Some(this_open);
 
     // No DB → legacy disk-only Space; the entities partition is empty by
     // definition. Latched above, so this is a one-shot no-op.
@@ -1037,6 +1039,111 @@ fn load_binary_ecs_instances(
          into the ECS (visible in viewport + Explorer + Properties); cores \
          whose entity is already live from the tree were skipped"
     );
+}
+
+/// Seconds between two scans for typed config edits.
+const TYPED_CONFIG_SCAN_SECS: f64 = 1.0;
+/// Binary-ECS entities re-exported per scan. The window moves on each scan, so
+/// every entity is looked at within a few seconds, at a fixed cost per second.
+const TYPED_CONFIG_SCAN_WINDOW: usize = 256;
+
+/// Where the typed-config scan stands: when it last ran, where its window
+/// starts next, and the `[properties]` fingerprint of each entity it has seen.
+#[derive(Resource, Default)]
+pub struct TypedConfigBaseline {
+    last_scan: Option<std::time::Instant>,
+    cursor: usize,
+    fingerprints: std::collections::HashMap<Entity, u64>,
+}
+
+/// The indices a scan visits: up to `cap` of `total`, from `cursor` on,
+/// wrapping, and the cursor the next scan starts at.
+fn scan_window(total: usize, cursor: usize, cap: usize) -> (Vec<usize>, usize) {
+    if total == 0 {
+        return (Vec::new(), 0);
+    }
+    let start = cursor % total;
+    let len = total.min(cap);
+    let indices = (0..len).map(|k| (start + k) % total).collect();
+    (indices, (start + len) % total)
+}
+
+/// Typed config edits (a UICorner's radius, a light's brightness) write the
+/// class's own components in place, and no `Changed` filter of the save mirror
+/// sees them, so the entity never re-bakes. Once a second, a window of the
+/// binary-ECS entities whose class has a spawner is re-exported, and one whose
+/// exported `[properties]` changed since the last look is marked
+/// [`BinaryDirty`]: the mirror re-bakes it next. The first look only records a
+/// baseline, and a marked entity's baseline moves on, so it is marked once per
+/// edit.
+fn mark_typed_config_edits(world: &mut World) {
+    if world.get_resource::<TypedConfigBaseline>().is_none() {
+        world.insert_resource(TypedConfigBaseline::default());
+    }
+    if world
+        .get_resource::<LoadInProgress>()
+        .map(|l| l.active)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let mut baseline = world.remove_resource::<TypedConfigBaseline>().unwrap_or_default();
+    let due = baseline
+        .last_scan
+        .map_or(true, |at| at.elapsed().as_secs_f64() >= TYPED_CONFIG_SCAN_SECS);
+    if !due {
+        world.insert_resource(baseline);
+        return;
+    }
+    baseline.last_scan = Some(std::time::Instant::now());
+    let edited = typed_config_edits(world, &mut baseline);
+    world.insert_resource(baseline);
+    for entity in edited {
+        world.entity_mut(entity).insert(BinaryDirty);
+    }
+}
+
+/// The entities of one scan window whose exported `[properties]` changed since
+/// the last scan, with the baseline updated for every entity the window saw.
+fn typed_config_edits(world: &mut World, baseline: &mut TypedConfigBaseline) -> Vec<Entity> {
+    use std::hash::{Hash, Hasher};
+    let mut query = world.query_filtered::<(Entity, &Instance), With<BinaryEcsInstance>>();
+    let entities: Vec<(Entity, ClassName)> = query
+        .iter(world)
+        .map(|(entity, instance)| (entity, instance.class_name.clone()))
+        .collect();
+    let live: std::collections::HashSet<Entity> = entities.iter().map(|(entity, _)| *entity).collect();
+    baseline.fingerprints.retain(|entity, _| live.contains(entity));
+    let (indices, next) = scan_window(entities.len(), baseline.cursor, TYPED_CONFIG_SCAN_WINDOW);
+    baseline.cursor = next;
+
+    let Some(registry) = world.get_resource::<ClassRegistry>() else {
+        return Vec::new();
+    };
+    let mut edited = Vec::new();
+    for index in indices {
+        let (entity, class) = entities[index].clone();
+        let Some(spawner) = registry.get(class) else {
+            continue;
+        };
+        let exported = spawner.export_to_toml(&*world, entity);
+        let Some(toml::Value::Table(props)) = exported.get("properties") else {
+            continue;
+        };
+        if props.is_empty() {
+            continue;
+        }
+        let text = toml::to_string(props).unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        if let Some(previous) = baseline.fingerprints.insert(entity, fingerprint) {
+            if previous != fingerprint {
+                edited.push(entity);
+            }
+        }
+    }
+    edited
 }
 
 /// The mirror's change-detection filter. `Changed<Instance>` catches
@@ -1326,6 +1433,7 @@ pub fn register(app: &mut App) {
                 super::residency::sys_residency_load,
                 super::hlod::sys_hlod_plan,
                 // Play sessions are transient: nothing they move persists.
+                mark_typed_config_edits.run_if(super::world_db_plugin::outside_play_session),
                 mirror_binary_ecs_changes.run_if(super::world_db_plugin::outside_play_session),
                 super::residency::sys_residency_evict,
                 super::hlod::sys_hlod_visibility,
@@ -1605,5 +1713,75 @@ mod tests {
             !def.extra.contains_key("properties"),
             "fold must be a no-op when no typed config spawner is registered"
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_config_scan_tests {
+    use super::scan_window;
+
+    /// Three windows of four cover all ten entities, and an empty world scans
+    /// nothing.
+    #[test]
+    fn scans_cover_every_entity_in_turn() {
+        let mut cursor = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            let (indices, next) = scan_window(10, cursor, 4);
+            assert!(indices.len() <= 4);
+            seen.extend(indices);
+            cursor = next;
+        }
+        assert_eq!(seen.len(), 10, "three windows of four cover ten");
+        assert_eq!(scan_window(0, 5, 4), (Vec::new(), 0));
+    }
+}
+
+#[cfg(test)]
+mod typed_config_edit_tests {
+    use super::*;
+    use eustress_common::class_registry::ClassRegistry;
+    use eustress_common::classes::{ClassName, Instance, UICorner};
+    use eustress_common::ui_types::UDim;
+
+    /// A typed config edit (a UICorner's radius, changed in place and nothing
+    /// else) on a binary-ECS entity marks it for the save mirror. Before the
+    /// scan, the mirror never saw the edit and the entity never re-baked.
+    #[test]
+    fn a_typed_config_edit_marks_its_entity_for_the_mirror() {
+        let mut world = World::new();
+        let mut registry = ClassRegistry::default();
+        registry.register(crate::spawners::ui_layout::UICornerSpawner);
+        world.insert_resource(registry);
+        let entity = world
+            .spawn((
+                Instance {
+                    name: "Round".to_string(),
+                    class_name: ClassName::UICorner,
+                    archivable: true,
+                    id: 0,
+                    uuid: String::new(),
+                    ai: false,
+                },
+                Transform::default(),
+                UICorner {
+                    corner_radius: UDim::new(0.0, 8.0),
+                },
+                BinaryEcsInstance {
+                    stored_id: 1,
+                    morton_pos: [0.0; 3],
+                    last_rot: [0.0, 0.0, 0.0, 1.0],
+                    last_scale: [1.0; 3],
+                },
+            ))
+            .id();
+        // The first look records the baseline and marks nothing.
+        mark_typed_config_edits(&mut world);
+        assert!(world.get::<BinaryDirty>(entity).is_none(), "the first look only records a baseline");
+        // Edit in place, and let the next look come due.
+        world.get_mut::<UICorner>(entity).unwrap().corner_radius = UDim::new(0.0, 12.0);
+        world.resource_mut::<TypedConfigBaseline>().last_scan = None;
+        mark_typed_config_edits(&mut world);
+        assert!(world.get::<BinaryDirty>(entity).is_some(), "the edit marks the entity");
     }
 }

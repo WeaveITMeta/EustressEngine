@@ -4571,15 +4571,40 @@ pub enum NormalId {
 }
 
 impl NormalId {
+    /// Every face, in Roblox's `NormalId` number order (0 Right, 1 Top,
+    /// 2 Back, 3 Left, 4 Bottom, 5 Front).
+    pub const ALL: [NormalId; 6] =
+        [NormalId::Right, NormalId::Top, NormalId::Back, NormalId::Left, NormalId::Bottom, NormalId::Front];
+
+    /// The face's outward normal in the part's frame, as in Roblox: Front is
+    /// -Z (the part's look direction), Back +Z, Top +Y, Bottom -Y, Right +X,
+    /// Left -X. Every face mapping (SurfaceGui, Decal, lights, particles)
+    /// derives from this one.
     pub fn to_normal(&self) -> Vec3 {
         match self {
-            NormalId::Front => Vec3::new(0.0, 0.0, 1.0),
-            NormalId::Back => Vec3::new(0.0, 0.0, -1.0),
-            NormalId::Top => Vec3::new(0.0, 1.0, 0.0),
-            NormalId::Bottom => Vec3::new(0.0, -1.0, 0.0),
-            NormalId::Right => Vec3::new(1.0, 0.0, 0.0),
-            NormalId::Left => Vec3::new(-1.0, 0.0, 0.0),
+            NormalId::Front => Vec3::NEG_Z,
+            NormalId::Back => Vec3::Z,
+            NormalId::Top => Vec3::Y,
+            NormalId::Bottom => Vec3::NEG_Y,
+            NormalId::Right => Vec3::X,
+            NormalId::Left => Vec3::NEG_X,
         }
+    }
+
+    /// A face by name in any case, with or without an `Enum.NormalId.` or
+    /// `NormalId.` prefix, or by Roblox's number. `None` for anything else.
+    pub fn parse(raw: &str) -> Option<NormalId> {
+        let s = raw.trim();
+        let s = s.rsplit('.').next().unwrap_or(s);
+        Some(match s.to_ascii_lowercase().as_str() {
+            "right" | "0" => NormalId::Right,
+            "top" | "1" => NormalId::Top,
+            "back" | "2" => NormalId::Back,
+            "left" | "3" => NormalId::Left,
+            "bottom" | "4" => NormalId::Bottom,
+            "front" | "5" => NormalId::Front,
+            _ => return None,
+        })
     }
     
     pub fn as_str(&self) -> &'static str {
@@ -4591,6 +4616,26 @@ impl NormalId {
             NormalId::Left => "Left",
             NormalId::Right => "Right",
         }
+    }
+}
+
+impl From<Face> for NormalId {
+    fn from(face: Face) -> Self {
+        match face {
+            Face::Top => NormalId::Top,
+            Face::Bottom => NormalId::Bottom,
+            Face::Front => NormalId::Front,
+            Face::Back => NormalId::Back,
+            Face::Left => NormalId::Left,
+            Face::Right => NormalId::Right,
+        }
+    }
+}
+
+impl Face {
+    /// The face's outward normal in the part's frame (`NormalId::to_normal`).
+    pub fn to_normal(&self) -> Vec3 {
+        NormalId::from(*self).to_normal()
     }
 }
 
@@ -7626,12 +7671,14 @@ impl MoonPhase {
 pub enum MoonPlacement {
     /// Where the real moon would be for its phase: a full moon rises at
     /// sunset, a new moon stands beside the sun, and a phase picked in the
-    /// daytime can be below the horizon.
+    /// daytime can be below the horizon. Its lit side faces the real sun. The
+    /// default.
+    #[default]
     Realistic,
     /// Opposite the sun, as a full moon stands: up all night, whatever its
     /// phase. The drawn phase follows `lunar_day` (the Phase property), so
-    /// picking a phase changes the moon's shape at once.
-    #[default]
+    /// picking a phase changes the moon's shape at once. Its lit side does not
+    /// face the sun.
     OppositeSun,
 }
 
@@ -7716,7 +7763,7 @@ impl Default for Moon {
             enabled: true,
             lunar_day: 14.76,  // Full moon
             sync_with_sun: true,
-            placement: MoonPlacement::OppositeSun,
+            placement: MoonPlacement::Realistic,
             // The disc as drawn, degrees across (McKale, 2026-09-26: 2). The
             // true 0.52 degree disc is eight pixels across at a 70 degree field
             // of view, too few to show the maria or a crescent. Its light sets

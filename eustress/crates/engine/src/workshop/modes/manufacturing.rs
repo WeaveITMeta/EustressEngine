@@ -37,22 +37,24 @@ impl ToolHandler for NormalizeBriefTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        // Nothing in the engine consumes a tool's result to start the
+        // normalizer: it runs from the Workshop panel's "Generate brief"
+        // action, which holds the conversation. This used to create an empty
+        // `Workspace/<product>` folder (a stray Folder in the Explorer) and
+        // report that normalization was requested, which never happened.
+        let _ = ctx;
         let product_name = input.get("product_name").and_then(|v| v.as_str()).unwrap_or("Product");
-        let safe_name = product_name.replace(' ', "_").replace('/', "_").replace(':', "_");
-        let output_dir = ctx.space_root.join("Workspace").join(&safe_name);
-        let _ = std::fs::create_dir_all(&output_dir);
-
         ToolResult {
             tool_name: "normalize_brief".to_string(),
             tool_use_id: String::new(),
-            success: true,
-            content: format!("Normalization requested for '{}'. The pipeline will convert the conversation into ideation_brief.toml at {}", product_name, output_dir.display()),
-            structured_data: Some(serde_json::json!({
-                "action": "normalize_brief",
-                "product_name": product_name,
-                "output_dir": output_dir.to_string_lossy(),
-            })),
-            stream_topic: Some("workshop.tool.normalize_brief".to_string()),
+            success: false,
+            content: format!(
+                "No brief was written for '{product_name}': normalize_brief cannot start the normalizer from a tool \
+                 call. Use the Manufacturing panel's Generate Brief button, which converts the open conversation \
+                 into ideation_brief.toml."
+            ),
+            structured_data: None,
+            stream_topic: None,
         }
     }
 }
@@ -220,15 +222,94 @@ impl ToolHandler for QueryInvestorsTool {
         }
     }
 
-    fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        // The Space's own investors (`DataService/Investors`), read here for
+        // the reason `query_manufacturers` reads its vendors: tools run off
+        // the main thread and cannot reach the ECS registry.
+        use crate::manufacturing::{InvestorStatus, InvestorType, ManufacturingProgramRegistry};
+        let registry = ManufacturingProgramRegistry::load_space(&ctx.space_root);
+        let norm = |s: &str| s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        let vertical = input.get("vertical").and_then(|v| v.as_str()).map(norm).filter(|v| !v.is_empty());
+        let investor_type = input.get("investor_type").and_then(|v| v.as_str()).map(norm).filter(|v| !v.is_empty());
+        let min_check = input.get("min_check_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+        let type_name = |t: &InvestorType| match t {
+            InvestorType::Individual => "individual",
+            InvestorType::VentureFund => "venture_fund",
+            InvestorType::FamilyOffice => "family_office",
+            InvestorType::StrategicCorporate => "strategic_corporate",
+        };
+        let matches: Vec<&crate::manufacturing::Investor> = registry
+            .investors
+            .iter()
+            .filter(|i| i.status == InvestorStatus::Active)
+            .filter(|i| {
+                vertical.as_ref().map_or(true, |v| {
+                    i.focus.verticals.iter().any(|x| norm(x) == *v || norm(x) == "any")
+                        && !i.focus.excluded_verticals.iter().any(|x| norm(x) == *v)
+                })
+            })
+            .filter(|i| investor_type.as_ref().map_or(true, |t| type_name(&i.investor_type) == t.as_str()))
+            // "At least this large a check": the investor can write one.
+            .filter(|i| i.capacity.max_check_usd >= min_check)
+            .collect();
+
+        let rows: Vec<serde_json::Value> = matches
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "id": i.id,
+                    "name": i.name,
+                    "type": type_name(&i.investor_type),
+                    "verticals": i.focus.verticals,
+                    "geography": i.focus.geography_preference,
+                    "min_check_usd": i.capacity.min_check_usd,
+                    "max_check_usd": i.capacity.max_check_usd,
+                    "available_capital_usd": i.capacity.available_capital_usd,
+                })
+            })
+            .collect();
+
+        let investors_dir = ctx.space_root.join(crate::manufacturing::INVESTORS_DIR);
+        let content = if registry.investors.is_empty() {
+            format!(
+                "No investors are registered in this Space ({}). Register them there, then query again.",
+                investors_dir.display()
+            )
+        } else if matches.is_empty() {
+            format!("None of the {} registered investors match these filters.", registry.investors.len())
+        } else {
+            let lines: Vec<String> = matches
+                .iter()
+                .map(|i| {
+                    format!(
+                        "- {} ({}): checks ${:.0} to ${:.0}, ${:.0} available",
+                        i.name,
+                        type_name(&i.investor_type),
+                        i.capacity.min_check_usd,
+                        i.capacity.max_check_usd,
+                        i.capacity.available_capital_usd
+                    )
+                })
+                .collect();
+            format!(
+                "{} of {} registered investors match:\n{}",
+                matches.len(),
+                registry.investors.len(),
+                lines.join("\n")
+            )
+        };
+
         ToolResult {
             tool_name: "query_investors".to_string(),
             tool_use_id: String::new(),
             success: true,
-            content: "Querying investor registry...".to_string(),
+            content,
             structured_data: Some(serde_json::json!({
                 "action": "query_investors",
                 "filters": input,
+                "registered": registry.investors.len(),
+                "investors": rows,
             })),
             stream_topic: Some("workshop.tool.query_investors".to_string()),
         }
@@ -263,21 +344,45 @@ impl ToolHandler for AllocateProductTool {
     }
 
     fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        // The scoring functions exist (`score_manufacturer`,
+        // `matching_investors`, `greedy_investor_cover`), but nothing a tool
+        // returns starts them: the old body reported "Running allocation
+        // engine" and stopped. A caller that believes it can wait for a
+        // decision that will never arrive, so this says so. query_manufacturers
+        // and query_investors return the candidates the allocator would score.
         let product_name = input.get("product_name").and_then(|v| v.as_str()).unwrap_or("Product");
-        let capital = input.get("target_capital_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
         ToolResult {
             tool_name: "allocate_product".to_string(),
             tool_use_id: String::new(),
-            success: true,
-            content: format!("Running allocation engine for '{}' (${:.0} target capital)...", product_name, capital),
-            structured_data: Some(serde_json::json!({
-                "action": "allocate_product",
-                "product_name": product_name,
-                "target_capital_usd": capital,
-                "filters": input,
-            })),
-            stream_topic: Some("workshop.tool.allocate_product".to_string()),
+            success: false,
+            content: format!(
+                "No allocation was made for '{product_name}': allocate_product is not wired to the allocation \
+                 engine yet. Use query_manufacturers and query_investors to list the candidates."
+            ),
+            structured_data: None,
+            stream_topic: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::modes::test_context;
+    use serde_json::json;
+
+    #[test]
+    fn the_stub_tools_no_longer_claim_success() {
+        let ctx = test_context();
+        assert!(!AllocateProductTool.execute(json!({ "product_name": "p", "target_capital_usd": 1.0 }), &ctx).success);
+        assert!(!NormalizeBriefTool.execute(json!({ "product_name": "p" }), &ctx).success);
+    }
+
+    #[test]
+    fn query_investors_with_no_registry_says_so() {
+        let r = QueryInvestorsTool.execute(json!({ "vertical": "energy_storage" }), &test_context());
+        assert!(r.success);
+        assert!(r.content.contains("No investors are registered"));
+        assert_eq!(r.structured_data.unwrap()["registered"], 0);
     }
 }

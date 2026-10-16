@@ -61,6 +61,7 @@ fn region_action(name: &str) -> Option<RegionOp> {
         .find(|(label, _)| *label == name)
         .map(|(_, op)| *op)
 }
+use crate::ui::display_text::{bound_line, shown_line};
 use crate::ui::slint_ui::{StudioWindow, TerrainMaterialTile, TerrainToolsUi};
 use crate::ui::SetTerrainBrushEvent;
 
@@ -140,6 +141,9 @@ fn load_brush_settings(mut brush: ResMut<TerrainBrush>, mut presets: ResMut<Terr
         Ok(file) => {
             *brush = file.brush;
             *presets = file.presets;
+            for (was, now) in bound_preset_names(&mut presets) {
+                warn!("terrain brush preset {was:?} is now {now:?}: shortened, its name read the same as another's");
+            }
         }
         Err(error) => warn!("terrain brush settings at {} unreadable, using defaults: {error}", path.display()),
     }
@@ -413,9 +417,59 @@ fn apply_setting(brush: &mut TerrainBrush, hover: &TerrainBrushHover, key: &str,
     }
 }
 
+/// Give every preset its name as `apply_preset` keeps it, one bounded line.
+/// Two that then read the same both stay: the later one is renamed
+/// ([`unique_preset_name`]). Returns each rename, from its bounded name to
+/// its new one.
+fn bound_preset_names(presets: &mut TerrainBrushPresets) -> Vec<(String, String)> {
+    let mut taken = std::collections::HashSet::new();
+    let mut renamed = Vec::new();
+    for preset in presets.presets.iter_mut() {
+        let bounded = bound_line(&preset.name);
+        let name = unique_preset_name(&bounded, &taken);
+        if name != bounded {
+            renamed.push((bounded, name.clone()));
+        }
+        taken.insert(name.clone());
+        preset.name = name;
+    }
+    presets.active = presets.active.as_deref().map(bound_line);
+    renamed
+}
+
+/// `name` (a bounded line) if no preset in `taken` has it, otherwise the
+/// first of `name (2)`, `name (3)`, ... that is free, its end shortened so
+/// the suffix still fits the bound.
+fn unique_preset_name(name: &str, taken: &std::collections::HashSet<String>) -> String {
+    if !taken.contains(name) {
+        return name.to_string();
+    }
+    let stem = name.trim_end_matches('…');
+    for n in 2u32.. {
+        let suffix = format!(" ({n})");
+        let mut base = stem.to_string();
+        let candidate = loop {
+            let candidate = format!("{base}{suffix}");
+            // A line within the bound bounds to itself.
+            if bound_line(&candidate) == candidate || base.is_empty() {
+                break candidate;
+            }
+            base.pop();
+        };
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("some suffix is free among finitely many names")
+}
+
 /// `preset(op, name)`: apply, save or delete a named brush. Applying keeps
-/// the active tool; a preset holds everything else.
+/// the active tool; a preset holds everything else. A name is one bounded
+/// line ([`bound_line`]): the bar shows a name and sends the same one back,
+/// and a stored name bounds to itself, so applying and deleting find it.
 fn apply_preset(brush: &mut TerrainBrush, presets: &mut TerrainBrushPresets, op: &str, name: &str) {
+    let name = bound_line(name);
+    let name = name.as_str();
     if name.is_empty() {
         return;
     }
@@ -704,7 +758,7 @@ fn sync_terrain_tools_to_slint(
     if cache.readout.as_ref() != Some(&*readout) {
         g.set_readout_x(readout.x);
         g.set_readout_y(readout.y);
-        g.set_readout_text(readout.text.as_str().into());
+        g.set_readout_text(shown_line(&readout.text));
         if let Some(family) = readout.family {
             g.set_readout_accent(slint_rgb(family_rgb(family)));
         }
@@ -770,7 +824,9 @@ fn sync_terrain_tools_to_slint(
                 let pixels = pixels_for(slot);
                 TerrainMaterialTile {
                     slot_id: i32::from(slot),
-                    name: def.name.as_str().into(),
+                    // A Space's own name for it: shown, never sent back
+                    // (picking sends the slot).
+                    name: shown_line(&def.name),
                     swatch: slint_rgb(def.swatch_srgb()),
                     thumbnail: pixels.as_ref().map(thumbnail_image).unwrap_or_default(),
                     has_thumbnail: pixels.is_some(),
@@ -839,7 +895,7 @@ fn sync_terrain_tools_to_slint(
     let material = brush.paint_material;
     let material_pixels = pixels_for(material);
     g.set_material(i32::from(material));
-    g.set_material_name(slot_name(material).into());
+    g.set_material_name(shown_line(&slot_name(material)));
     g.set_material_swatch(slot_swatch(material));
     g.set_material_has_thumbnail(material_pixels.is_some());
     g.set_material_thumbnail(material_pixels.as_ref().map(thumbnail_image).unwrap_or_default());
@@ -847,7 +903,7 @@ fn sync_terrain_tools_to_slint(
     let source = brush.source_material;
     let source_pixels = pixels_for(source);
     g.set_source_material(i32::from(source));
-    g.set_source_name(slot_name(source).into());
+    g.set_source_name(shown_line(&slot_name(source)));
     g.set_source_swatch(slot_swatch(source));
     g.set_source_has_thumbnail(source_pixels.is_some());
     g.set_source_thumbnail(source_pixels.as_ref().map(thumbnail_image).unwrap_or_default());
@@ -905,6 +961,48 @@ mod tests {
         assert_eq!(brush.tool, TerrainTool::Paint, "applying keeps the active tool");
         assert_eq!(brush.surface_size, 40.0);
         apply_preset(&mut brush, &mut presets, "delete", "Wide");
+        assert!(presets.presets.is_empty() && presets.active.is_none());
+    }
+
+    #[test]
+    fn stored_presets_that_shorten_alike_are_all_kept() {
+        let shared = "p".repeat(400);
+        let preset = |name: String| BrushPreset { name, brush: TerrainBrush::default() };
+        let mut presets = TerrainBrushPresets {
+            presets: vec![preset(format!("{shared}A")), preset(format!("{shared}B")), preset(format!("{shared}C")), preset("Wide".into())],
+            active: Some(format!("{shared}B")),
+        };
+        let renamed = bound_preset_names(&mut presets);
+        let names: Vec<&str> = presets.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names.len(), 4, "nothing is dropped");
+        assert_eq!(renamed.len(), 2, "the second and third are renamed: {names:?}");
+        assert!(names[1].ends_with(" (2)") && names[2].ends_with(" (3)"));
+        assert_eq!(names[3], "Wide", "a short name is untouched");
+        for name in &names {
+            assert_eq!(bound_line(name), *name, "{name:?} is within the bound");
+            assert_eq!(names.iter().filter(|n| *n == name).count(), 1, "{name:?} is unique");
+        }
+        assert_eq!(presets.active.as_deref(), Some(names[0]), "the active name is bounded the same way");
+    }
+
+    #[test]
+    fn a_long_preset_name_is_kept_as_the_bar_shows_and_sends_it() {
+        let mut brush = TerrainBrush::default();
+        let mut presets = TerrainBrushPresets::default();
+        let long = format!("{}\nsecond line", "w".repeat(5_000));
+        apply_preset(&mut brush, &mut presets, "save", &long);
+        let stored = presets.presets[0].name.clone();
+        assert!(stored.len() < 1_000 && !stored.contains('\n'), "stored as one bounded line");
+        assert_eq!(presets.active.as_deref(), Some(stored.as_str()));
+        // The bar shows the stored name and sends it back: it applies and deletes.
+        assert_eq!(shown_line(&stored).as_str(), stored);
+        brush.set_size(9.0);
+        apply_preset(&mut brush, &mut presets, "apply", &stored);
+        assert_ne!(brush.surface_size, 9.0, "the stored name applies its preset");
+        // Saving the long name again replaces it rather than adding a second.
+        apply_preset(&mut brush, &mut presets, "save", &long);
+        assert_eq!(presets.presets.len(), 1);
+        apply_preset(&mut brush, &mut presets, "delete", &stored);
         assert!(presets.presets.is_empty() && presets.active.is_none());
     }
 

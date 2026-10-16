@@ -33,6 +33,9 @@ use super::instance_loader::InstanceDefinition;
 /// so an export can never be re-ingested as a second copy of the scene.
 pub const DEFAULT_EXPORT_SUBDIR: &str = ".eustress/exports/instances";
 
+/// The one folder in `.eustress` an export may write: `.eustress/exports`.
+const EXPORTS_FOLDER: &str = "exports";
+
 /// Filename used by [`ExportLayout::SingleFile`].
 pub const SINGLE_FILE_NAME: &str = "instances.toml";
 
@@ -132,6 +135,31 @@ pub fn resolve_output_dir(space_root: &Path, requested: Option<&str>) -> Result<
             root.display()
         ));
     }
+    // Inside the Space: never the Space's own database or `.eustress`
+    // folder, which the engine writes, except the export folder
+    // (`.eustress/exports`, where DEFAULT_EXPORT_SUBDIR lands), which only
+    // exports write and the loader and watcher skip. Then the rules every tool path follows
+    // (`eustress_tools::sandbox::resolve`): no `.git` folder, no file the
+    // engine keeps for itself, and links on disk followed before the
+    // containment check, which the textual check above cannot do. A
+    // `.eustress` folder deeper in the Space (`Sub/.eustress/`) is refused
+    // only for the engine's own file names there, not as a whole folder.
+    let inside = normalised.strip_prefix(&root).unwrap_or(Path::new(""));
+    let mut names = inside.components().filter_map(|c| match c {
+        Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+        _ => None,
+    });
+    if let Some(first) = names.next() {
+        let exports = first.eq_ignore_ascii_case(".eustress")
+            && names.next().is_some_and(|second| second.eq_ignore_ascii_case(EXPORTS_FOLDER));
+        if !exports && [".eustress", "world.fjalldb"].iter().any(|owned| first.eq_ignore_ascii_case(owned)) {
+            return Err(format!(
+                "output_dir '{raw}' is inside {first}, which the engine keeps for itself; choose another folder in the Space"
+            ));
+        }
+    }
+    eustress_tools::sandbox::resolve(&root, &inside.to_string_lossy())
+        .map_err(|why| format!("output_dir '{raw}' refused: {why}"))?;
     Ok(normalised)
 }
 
@@ -308,6 +336,20 @@ mod tests {
         std::fs::write(out.join("probe.txt"), b"ok").expect("resolved dir must be writable");
     }
 
+    /// The export folder is the one place in `.eustress` an export goes; the
+    /// rest of `.eustress` and the database stay the engine's.
+    #[test]
+    fn only_the_export_folder_in_eustress_is_allowed() {
+        let space = temp_space("eustress_folder");
+        for ok in [".eustress/exports/mine", ".eustress/exports", ".EUSTRESS/Exports/a"] {
+            assert!(resolve_output_dir(&space, Some(ok)).is_ok(), "{ok}");
+        }
+        for refused in [".eustress", ".eustress/assets", ".eustress/exportsx", ".eustress/exports/../world", "world.fjalldb/x"] {
+            let err = resolve_output_dir(&space, Some(refused)).expect_err(refused);
+            assert!(err.contains("keeps for itself"), "{refused}: {err}");
+        }
+    }
+
     #[test]
     fn escaping_paths_are_rejected() {
         let space = temp_space("escape");
@@ -320,6 +362,17 @@ mod tests {
         // containment is per-component, not a string prefix.
         let sibling = format!("{}-evil", space.display());
         assert!(resolve_output_dir(&space, Some(&sibling)).is_err());
+    }
+
+    /// Inside the Space, a `.git` folder, the live database and the
+    /// `.eustress` folder are never export targets, in any case.
+    #[test]
+    fn git_and_engine_folders_are_never_targets() {
+        let space = temp_space("owned");
+        for bad in [".git/refs/heads", ".GIT", "Sub/.git/x", "world.fjalldb", "World.FjallDB/x", ".eustress", ".Eustress/assets"] {
+            assert!(resolve_output_dir(&space, Some(bad)).is_err(), "{bad}");
+        }
+        assert!(resolve_output_dir(&space, Some("Exports/run2")).is_ok());
     }
 
     #[test]

@@ -120,6 +120,8 @@ impl ModalTool for AttachmentEditor {
             color_rgba: Some([1.0, 0.6, 0.0, 1.0]), // orange — match Roblox convention
             material: None,
             anchored: true,
+            scale_kind: None,
+            mesh_fold: Vec::new(),
         };
 
         let _ = std::mem::replace(&mut (), ()); // anchor

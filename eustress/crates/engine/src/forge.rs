@@ -43,6 +43,9 @@ pub struct ForgeState {
     pub deployment: Option<DeploymentInfo>,
     /// Forge API URL
     pub url: String,
+    /// The connection was made with an API key. One made without says so in
+    /// its status, so it is never mistaken for a signed-in one.
+    pub authenticated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +65,7 @@ impl Default for ForgeState {
             error: None,
             deployment: None,
             url: "https://forge.eustress.dev".to_string(),
+            authenticated: false,
         }
     }
 }
@@ -73,6 +77,7 @@ impl ForgeState {
         self.status = ForgeConnectionStatus::Disconnected;
         self.error = None;
         self.deployment = None;
+        self.authenticated = false;
     }
 }
 
@@ -99,7 +104,11 @@ fn apply_forge_outcomes(
                 forge.status = ForgeConnectionStatus::Connected;
                 forge.error = None;
                 if let Some(out) = output.as_mut() {
-                    out.info(format!("Connected to Forge at {}", forge.url));
+                    out.info(if forge.authenticated {
+                        format!("Connected to Forge at {}", forge.url)
+                    } else {
+                        format!("Connected to Forge without a key at {}", forge.url)
+                    });
                 }
             }
             ForgeOutcome::ConnectFailed(e) => {
@@ -135,12 +144,15 @@ pub fn connect_to_forge(
     let url = url.trim().to_string();
     forge_state.url = url.clone();
     forge_state.error = None;
-    if url.is_empty() {
+    // An empty URL, another scheme, or plain http to a public host: no
+    // connection, and the key goes nowhere.
+    if let Err(why) = eustress_forge_sdk::connect_policy::check_url(&url) {
         forge_state.status = ForgeConnectionStatus::Failed;
-        forge_state.error = Some("Enter the Forge server URL.".to_string());
+        forge_state.error = Some(why);
         return;
     }
     forge_state.status = ForgeConnectionStatus::Connecting;
+    forge_state.authenticated = !api_key.is_empty();
 
     let client_arc = forge_state.client.clone();
     let outcomes = forge_state.outcomes.clone();

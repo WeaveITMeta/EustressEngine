@@ -342,7 +342,7 @@ fn cell_origin(cell: Cell) -> Vec3 {
 // primitive meshers (`Cuboid`/`Sphere`/`Cylinder`) produce the identical unit
 // shapes the glbs were authored from; wedge / corner-wedge / cone get a
 // purpose-built unit mesh (the engine's primitive glbs for those, see
-// `instance_loader::PRIMITIVE_MESHES`). All meshes are emitted at LOW
+// `eustress_common::space_read::primitive_shape`). All meshes are emitted at LOW
 // resolution — these are seen only from far away, so a sphere is an icosphere
 // at subdivision 1 and a cylinder is an 8-gon, keeping the merged vertex count
 // modest even for a dense cell.
@@ -1140,18 +1140,22 @@ pub fn sys_hlod_visibility(
 /// despawns one — see `sys_hlod_visibility`, which hides/shows in place).
 pub fn sys_hlod_reset_on_space_change(
     space_root: Res<SpaceRoot>,
-    mut last_root: Local<Option<std::path::PathBuf>>,
+    // The open this last ran for: the path and its `SpaceLoadGeneration`, so
+    // a reopen of the same path tears down and plans again.
+    mut last_root: Local<Option<(std::path::PathBuf, u64)>>,
     mut commands: Commands,
     proxies: Query<Entity, With<MergedCellProxy>>,
     mut state: ResMut<HlodState>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
 ) {
-    if last_root.as_deref() == Some(space_root.0.as_path()) {
+    let this_open = (space_root.0.clone(), generation.0);
+    if last_root.as_ref() == Some(&this_open) {
         return;
     }
     // First run latches without tearing down (nothing to tear down yet); a
-    // later genuine path change clears the prior Space's proxies + state.
+    // later open clears the prior open's proxies + state.
     let had_prior = last_root.is_some();
-    *last_root = Some(space_root.0.clone());
+    *last_root = Some(this_open);
     if !had_prior {
         return;
     }

@@ -76,6 +76,12 @@ pub struct AssetReference {
     /// glTF scene name (usually "Scene0")
     #[serde(default = "default_scene")]
     pub scene: String,
+    /// How the part's `[transform] scale` fills its mesh
+    /// (`eustress_common::scale_kind`): `"length"`, a unit-sized mesh drawn at
+    /// the part's Size, or `"multiplier"`, a ratio on the mesh's own size (the
+    /// meaning when absent). A primitive's scale is always its Size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_kind: Option<String>,
 }
 
 fn default_scene() -> String {
@@ -232,13 +238,10 @@ pub(crate) fn safe_collider_from(
     let fx = (half.x * 2.0).abs().max(MIN_HALF);
     let fy = (half.y * 2.0).abs().max(MIN_HALF);
     let fz = (half.z * 2.0).abs().max(MIN_HALF);
-    Some(match part_shape {
-        eustress_common::classes::PartType::Ball => Collider::sphere(fx * 0.5),
-        eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-            Collider::cylinder(fx * 0.5, fy)
-        }
-        _ => Collider::cuboid(fx, fy, fz),
-    })
+    // `shape_collider` is the one place a shape becomes a collider: Avian's
+    // primitives for a block, ball, cylinder and cone, and a convex hull of the
+    // drawn corners for a wedge or corner wedge.
+    Some(eustress_common::part_draw::shape_collider(part_shape, Vec3::new(fx, fy, fz), transform.scale))
 }
 
 /// EVERY `can_collide` part gets a REAL Avian collider, at any scale —
@@ -1563,6 +1566,36 @@ pub struct InstanceFile {
 #[derive(Component, Debug)]
 pub struct NeedsMeshSize;
 
+/// Marker on a custom-mesh part whose `Transform.scale` is a ratio on the
+/// mesh's own size (`scale_kind` "multiplier", or no key), not a length. Its
+/// `BasePart.size` is the natural size times the ratio, so a resize writes
+/// `size / natural` (`scale_tool::ratio_scale`) and a save writes the ratio.
+/// Kept for the part's life, unlike [`NeedsMeshSize`].
+#[derive(Component, Debug)]
+pub struct MeshRatio;
+
+/// A part's folded DataMesh adjustment, its file's top-level `mesh_scale` and
+/// `mesh_offset`: what its render transform adds to its own pose and size.
+/// `spawn_instance` takes both out of the definition, so this is where the
+/// scale tool (a resize keeps `size x scale`) and the save paths (a saved
+/// position never includes `rotation x offset`) find them.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct MeshFold {
+    /// Multiplies the part's size in the render transform.
+    pub scale: Vec3,
+    /// Added to the part's position in its own frame, in metres.
+    pub offset: Vec3,
+}
+
+/// The position a part's file holds: its render translation without the
+/// fold's offset, which the render transform adds in the part's own frame.
+pub(crate) fn file_position(render_translation: Vec3, rotation: Quat, fold: Option<&MeshFold>) -> Vec3 {
+    match fold {
+        Some(fold) => render_translation - rotation * fold.offset,
+        None => render_translation,
+    }
+}
+
 /// Load an instance definition from a `_instance.toml` / `.glb.toml` /
 /// `.part.toml` file on disk, routed through the common-crate schema pipeline:
 ///
@@ -1781,8 +1814,24 @@ pub fn write_instance_definition(
         return Ok(());
     }
 
-    // Only what changed, in the file's own layout (`planned_write`).
-    let toml_str = match planned_write(toml_path, instance)? {
+    // Only what changed, in the record's own layout (`planned_write_text`),
+    // stored back where the record lives: an instance whose only copy is the
+    // Space database's (a migrated Space, or an entity loaded from the tree)
+    // is saved there, never as a new loose file.
+    let stored = stored_text(toml_path);
+    if let StoredText::Tree(_) = stored {
+        // Stored only if the record still holds the text the edit was planned
+        // against (`update_instance_text` re-plans when it changed), so a
+        // record trashed or moved meanwhile is never written back.
+        crate::space::active_db::update_instance_text(toml_path, |current| {
+            Ok(match planned_write_text(Some(current), instance)? {
+                PlannedWrite::Unchanged => None,
+                PlannedWrite::Text(text) => Some(text),
+            })
+        })?;
+        return Ok(());
+    }
+    let toml_str = match planned_write_text(stored.text(), instance)? {
         PlannedWrite::Unchanged => return Ok(()),
         PlannedWrite::Text(text) => text,
     };
@@ -1793,6 +1842,38 @@ pub fn write_instance_definition(
         .map_err(|e| format!("Failed to write {}: {}", toml_path.display(), e))?;
 
     Ok(())
+}
+
+/// Where an instance's record lives now.
+enum StoredText {
+    /// Its loose file on disk.
+    Disk(String),
+    /// Only in the Space database: a migrated Space, or an entity loaded
+    /// from the tree with no disk file.
+    Tree(String),
+    /// Nowhere yet: a new instance.
+    Neither,
+}
+
+impl StoredText {
+    fn text(&self) -> Option<&str> {
+        match self {
+            StoredText::Disk(text) | StoredText::Tree(text) => Some(text),
+            StoredText::Neither => None,
+        }
+    }
+}
+
+/// An instance's current record: its loose file, else the Space database's
+/// copy of it.
+fn stored_text(toml_path: &Path) -> StoredText {
+    if let Ok(text) = std::fs::read_to_string(toml_path) {
+        return StoredText::Disk(text);
+    }
+    match crate::space::active_db::get_instance_text(toml_path) {
+        Some(text) => StoredText::Tree(text),
+        None => StoredText::Neither,
+    }
 }
 
 /// What a typed write does to its file (see [`planned_write`]).
@@ -1814,11 +1895,17 @@ enum PlannedWrite {
 /// added only when its value differs from what the file loads as. A new or
 /// unreadable file gets the whole instance.
 fn planned_write(toml_path: &Path, instance: &InstanceDefinition) -> Result<PlannedWrite, String> {
+    planned_write_text(stored_text(toml_path).text(), instance)
+}
+
+/// [`planned_write`] against a record's current text, wherever it is stored
+/// (`None`: there is none yet).
+fn planned_write_text(current: Option<&str>, instance: &InstanceDefinition) -> Result<PlannedWrite, String> {
     let typed = typed_document(instance)?;
-    if let Ok(text) = std::fs::read_to_string(toml_path) {
-        let loaded = load_instance_definition_from_str(&text).ok().and_then(|d| typed_document(&d).ok());
+    if let Some(text) = current {
+        let loaded = load_instance_definition_from_str(text).ok().and_then(|d| typed_document(&d).ok());
         let colour = Some(instance.properties.color);
-        if let Some(edit) = loaded.and_then(|old| edit_document(&text, &old, &typed, NAMED_SECTIONS, colour)) {
+        if let Some(edit) = loaded.and_then(|old| edit_document(text, &old, &typed, NAMED_SECTIONS, colour)) {
             return Ok(edit.map_or(PlannedWrite::Unchanged, PlannedWrite::Text));
         }
     }
@@ -2101,6 +2188,32 @@ pub fn write_instance_definition_signed(
     if matches!(planned_write(toml_path, instance)?, PlannedWrite::Unchanged) {
         return Ok(());
     }
+    apply_stamp(instance, stamp);
+    write_instance_definition(toml_path, instance)
+}
+
+/// [`write_instance_definition_signed`] for a record whose current text is
+/// `current`, wherever it is stored (`None`: there is none yet): the text to
+/// store, or `None` when the record already holds this instance (and then no
+/// stamp is added either).
+pub(crate) fn signed_write_text(
+    current: Option<&str>,
+    instance: &mut InstanceDefinition,
+    stamp: Option<&CreatorStamp>,
+) -> Result<Option<String>, String> {
+    if matches!(planned_write_text(current, instance)?, PlannedWrite::Unchanged) {
+        return Ok(None);
+    }
+    apply_stamp(instance, stamp);
+    Ok(match planned_write_text(current, instance)? {
+        PlannedWrite::Unchanged => None,
+        PlannedWrite::Text(text) => Some(text),
+    })
+}
+
+/// A signed write's audit entry: the creator when there is none yet, the
+/// modification, and `last_modified` (the stamp's time, else now).
+fn apply_stamp(instance: &mut InstanceDefinition, stamp: Option<&CreatorStamp>) {
     match stamp {
         Some(s) => {
             if instance.metadata.created_by.is_none() {
@@ -2113,7 +2226,6 @@ pub fn write_instance_definition_signed(
             instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
         }
     }
-    write_instance_definition(toml_path, instance)
 }
 
 /// Convert a raw `toml::Value` (the `value` field extracted from a rich-schema
@@ -2147,20 +2259,6 @@ fn attributes_from_toml_table(
     attrs
 }
 
-/// Known primitive mesh filenames that map to engine asset parts
-// ORDER MATTERS: the lookup takes the FIRST hint that appears anywhere in the
-// mesh filename, so any hint that is a substring of another must come first.
-// `corner_wedge` contains `wedge`, so listing `wedge` first would classify
-// every `corner_wedge.glb` as `PartType::Wedge` — wrong mesh semantics, wrong
-// Avian collider, and wrong replacement mesh when the scale tool rebuilds it.
-const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
-    ("corner_wedge", "parts/corner_wedge.glb", eustress_common::classes::PartType::CornerWedge),
-    ("block", "parts/block.glb", eustress_common::classes::PartType::Block),
-    ("ball", "parts/ball.glb", eustress_common::classes::PartType::Ball),
-    ("cylinder", "parts/cylinder.glb", eustress_common::classes::PartType::Cylinder),
-    ("wedge", "parts/wedge.glb", eustress_common::classes::PartType::Wedge),
-    ("cone", "parts/cone.glb", eustress_common::classes::PartType::Cone),
-];
 
 /// Bevy system — once a custom-mesh Part's asset finishes loading, compute
 /// the mesh AABB and set `BasePart.size` to the AABB dimensions. Removes
@@ -2326,6 +2424,17 @@ pub fn part_half_extent(scale: Vec3) -> f32 {
 /// edit takes effect immediately. Changed-gated → does nothing on a
 /// frame where no service property was edited (honours "nothing per
 /// frame"); the one-time part re-stamp on a deliberate edit is fine.
+/// A service property as a number, whether the file wrote it as a float or
+/// a whole number (`render_distance = 2000` loads as an Int).
+fn property_number(v: Option<&crate::space::service_loader::PropertyValue>) -> Option<f64> {
+    use crate::space::service_loader::PropertyValue;
+    match v? {
+        PropertyValue::Float(f) => Some(*f),
+        PropertyValue::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
 pub fn sync_workspace_render_distance(
     mut commands: Commands,
     service_q: Query<
@@ -2340,12 +2449,12 @@ pub fn sync_workspace_render_distance(
         if svc.class_name != "Workspace" {
             continue;
         }
-        if let Some(PropertyValue::Float(v)) = svc.properties.get("render_distance") {
-            set_workspace_render_distance(*v as f32);
+        if let Some(v) = property_number(svc.properties.get("render_distance")) {
+            set_workspace_render_distance(v as f32);
             // Terrain scatter (trees above all) streams no farther than the
             // parts draw.
             if let Some(distance) = scatter_distance.as_deref_mut() {
-                let metres = Some((*v as f32).clamp(1.0, 1_000_000.0));
+                let metres = Some((v as f32).clamp(1.0, 1_000_000.0));
                 if distance.0 != metres {
                     distance.0 = metres;
                 }
@@ -2359,6 +2468,72 @@ pub fn sync_workspace_render_distance(
             }
         }
     }
+}
+
+/// `p` with every `.` dropped and every `..` applied, by text. Not
+/// `canonicalize()`, which on Windows prepends the `\\?\` verbatim prefix
+/// that would then fail a `strip_prefix(&space_root)`. Without it a
+/// folder-based part's `../meshes/Foo.glb` (V-Cell's sub-parts all use the
+/// shape) reached the `space://` reader with its `..` and failed to load.
+fn normalize_path(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            _ => out.push(comp.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The file a custom mesh entry names, looked for as a reader would: beside
+/// the part's file (`../meshes/Foo.glb` is usual), then, for an `assets/...`
+/// path, in the Space and in the Universe (`<Universe>/assets/meshes` holds
+/// the shared meshes Workshop and imports write). Every candidate passes
+/// [`mesh_may_be_opened_in`] before anything stats it, so a `mesh` naming a
+/// drive, share, root or `:` is never looked for. The first candidate on
+/// disk, with `true`; else the one beside the part, with `false`, which the
+/// missing-mesh warning names. `toml_path` is absolute, as the scanner's and
+/// the database's paths are.
+pub(crate) fn resolve_custom_mesh(toml_path: &Path, mesh: &str) -> (PathBuf, bool) {
+    resolve_custom_mesh_in(toml_path, mesh, &super::space_asset_source::space_asset_roots())
+}
+
+/// [`resolve_custom_mesh`] against the given roots.
+fn resolve_custom_mesh_in(toml_path: &Path, mesh: &str, roots: &super::space_asset_source::AssetRoots) -> (PathBuf, bool) {
+    let allowed = roots.allowed();
+    let allowed: Vec<&Path> = allowed.iter().map(PathBuf::as_path).collect();
+    let beside = normalize_path(&toml_path.parent().unwrap_or(Path::new(".")).join(mesh));
+    let mut candidates = vec![beside.clone()];
+    if mesh.replace('\\', "/").trim_start_matches("./").to_ascii_lowercase().starts_with("assets/") {
+        candidates.push(normalize_path(&roots.space.join(mesh)));
+        if let Some(universe) = roots.universe() {
+            candidates.push(normalize_path(&universe.join(mesh)));
+        }
+    }
+    for candidate in candidates {
+        if mesh_may_be_opened_in(mesh, &candidate, &allowed) && candidate.exists() {
+            return (candidate, true);
+        }
+    }
+    (beside, false)
+}
+
+/// Whether a custom mesh may be opened at all: its `mesh` entry names no
+/// drive, share or root of its own (a `..` is fine: V-Cell's parts use
+/// `../meshes/...`), and `resolved` lies in one of `roots` (the Space and its
+/// Universe's shared asset folders, the folders the `space://` reader reads).
+/// Checked before anything stats or reads the file.
+fn mesh_may_be_opened_in(mesh: &str, resolved: &Path, roots: &[&Path]) -> bool {
+    let names_its_own_root = mesh.contains(':')
+        || Path::new(mesh)
+            .components()
+            .any(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir));
+    !names_its_own_root && eustress_common::space_path::resolve_in_roots(roots, resolved).is_some()
 }
 
 pub fn spawn_instance(
@@ -2454,6 +2629,7 @@ pub fn spawn_instance(
         instance.asset = Some(AssetReference {
             mesh: "parts/block.glb".to_string(),
             scene: default_scene(),
+            scale_kind: None,
         });
     }
 
@@ -2516,9 +2692,18 @@ pub fn spawn_instance(
             instance.transform.position = eustress_common::units::convert_vec3_f32(
                 instance.transform.position, from_unit, to_unit,
             );
-            instance.transform.scale = eustress_common::units::convert_vec3_f32(
-                instance.transform.scale, from_unit, to_unit,
-            );
+            // A custom mesh's scale is a length only when it says so
+            // (`scale_kind`: a Roblox import's unit-sized mesh drawn at the
+            // part's Size); a multiplier is a ratio and stays as written,
+            // as save writes it back.
+            let scale_is_length = instance.asset.as_ref().map_or(true, |asset| {
+                eustress_common::scale_kind::is_length_of(Some(&asset.mesh), asset.scale_kind.as_deref())
+            });
+            if scale_is_length {
+                instance.transform.scale = eustress_common::units::convert_vec3_f32(
+                    instance.transform.scale, from_unit, to_unit,
+                );
+            }
             // `mesh_offset` (a DataMesh `Offset`) is a length in the file's
             // authored unit, and it is added to the already-converted
             // translation below, so it must be converted too. Left in feet,
@@ -2545,38 +2730,7 @@ pub fn spawn_instance(
 
         // Seed from the typed `[attributes]` table, then layer any
         // rich-schema `extra` sections on top.
-        let mut attrs = base_attributes.clone();
-        for (_section_name, section_val) in &instance.extra {
-            // A class's own field table is read into its component (below),
-            // never folded into user attributes: `[gaussian_splats]` (a
-            // SplatCloud, surfaced as built-in Appearance properties), the
-            // particle and terrain-layer sections, a light's `[light]` and a
-            // KeyframeSequence's `[keyframe_sequence]`. One list, which a
-            // Player's tree reader shares, so both trees agree.
-            if eustress_common::datamodel::record::class_owned_section(class_name, _section_name) {
-                continue;
-            }
-            // Each top-level entry under [extra] is a section table (e.g. [Appearance])
-            if let toml::Value::Table(props) = section_val {
-                for (prop_key, prop_val) in props {
-                    // Rich schema: { type = "...", value = ..., description = "..." }
-                    let raw_value = if let toml::Value::Table(inline) = prop_val {
-                        inline.get("value").cloned().unwrap_or(prop_val.clone())
-                    } else {
-                        prop_val.clone()
-                    };
-                    let attr_val = rich_toml_value_to_attribute(&raw_value);
-                    if let Some(av) = attr_val {
-                        attrs.set(prop_key, av);
-                    }
-                }
-            } else {
-                // Flat value at section level
-                if let Some(av) = rich_toml_value_to_attribute(section_val) {
-                    attrs.set(_section_name, av);
-                }
-            }
-        }
+        let attrs = fold_class_sections(&base_attributes, &instance.extra, class_name);
 
         let entity = commands.spawn((
             eustress_common::classes::Instance {
@@ -2719,45 +2873,31 @@ pub fn spawn_instance(
     let asset_ref = instance.asset.as_ref().unwrap();
     // Resolve the mesh path: check if it's a known primitive or a custom GLB
     let mesh_ref = asset_ref.mesh.to_lowercase();
-    let primitive = PRIMITIVE_MESHES.iter().find(|(hint, _, _)| {
-        let fname = mesh_ref.rsplit('/').next().unwrap_or(&mesh_ref);
-        fname.contains(hint)
-    });
+    // Exactly the engine's unit meshes, as the Player reads them: a custom
+    // mesh merely named like one (`meshes/block.glb`) stays custom.
+    let primitive = eustress_common::space_read::primitive_shape(&asset_ref.mesh);
     
-    let (is_custom_mesh, part_shape) = if let Some((_, _, shape)) = primitive {
-        (false, *shape)
+    let (is_custom_mesh, part_shape) = if let Some(shape) = primitive {
+        (false, shape)
     } else {
         // Custom mesh — default to Block shape for bounding-box purposes
         (true, eustress_common::classes::PartType::Block)
     };
     
-    // Determine the absolute path for the GLB mesh file. We normalize the
-    // result so `..` segments (common when a folder-based Part references
-    // `../meshes/Foo.glb`) don't leak into the asset URL. Without this,
-    // Bevy's `space://` reader treats the `..` literally on some platforms
-    // and the mesh fails to load silently — V-Cell's sub-parts all use this
-    // relative shape, so they were the visible symptom.
-    //
-    // We normalize manually instead of using `canonicalize()` because on
-    // Windows canonicalize prepends the `\\?\` verbatim prefix, which would
-    // then fail `strip_prefix(&space_root)` downstream.
-    fn normalize_path(p: &Path) -> PathBuf {
-        use std::path::Component;
-        let mut out = PathBuf::new();
-        for comp in p.components() {
-            match comp {
-                Component::ParentDir => { out.pop(); }
-                Component::CurDir => {} // skip "."
-                _ => out.push(comp.as_os_str()),
-            }
-        }
-        out
-    }
-    let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
-    let absolute_mesh_path = normalize_path(&toml_dir.join(&asset_ref.mesh));
+    // The custom mesh's file, beside the part, then (for an `assets/...`
+    // path) in the Space and the Universe (`resolve_custom_mesh`). Nothing
+    // stats or reads a candidate that may not be opened: an absolute or UNC
+    // `mesh` replaces the folder in a join, and for `//host/share/x.glb` even
+    // an `exists()` opens SMB and sends the user's credentials. Such a mesh
+    // draws as the block fallback.
+    let (absolute_mesh_path, mesh_on_disk) = if is_custom_mesh {
+        resolve_custom_mesh(&toml_path, &asset_ref.mesh)
+    } else {
+        (normalize_path(&toml_path.parent().unwrap_or(Path::new(".")).join(&asset_ref.mesh)), false)
+    };
     
     debug!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
-        name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
+        name, mesh_ref, is_custom_mesh, absolute_mesh_path, mesh_on_disk);
     
     // Build material from properties — registry-first, enum fallback
     let [r, g, b, a] = instance.properties.color;
@@ -2841,8 +2981,13 @@ pub fn spawn_instance(
     } else {
         transform
     };
+    // The fold itself, kept on the part (`MeshFold`).
+    let mesh_fold = (mesh_visual_scale.is_some() || mesh_visual_offset.is_some()).then(|| MeshFold {
+        scale: mesh_visual_scale.unwrap_or(Vec3::ONE),
+        offset: mesh_visual_offset.unwrap_or(Vec3::ZERO),
+    });
 
-    if is_custom_mesh && absolute_mesh_path.exists() {
+    if mesh_on_disk {
         // Check for Draco compression before loading
         if super::draco_decoder::is_draco_compressed(&absolute_mesh_path) {
             super::draco_decoder::warn_draco_file(&absolute_mesh_path);
@@ -2910,15 +3055,22 @@ pub fn spawn_instance(
             // `spawn::spawn_part_glb` stores on freshly-spawned parts
             // so both entry points produce identical components.
             crate::spawn::MeshSource::new(asset_ref.mesh.clone()),
-            // Mark this entity so `update_base_part_size_from_mesh` computes
-            // `BasePart.size` from the mesh AABB once the asset finishes
-            // loading. Works for any custom-mesh part, not just V-Cell.
-            NeedsMeshSize,
         )).id();
         let part_id = format!("{}v{}", entity.index(), entity.generation());
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
         ec.insert(measure_unit);
+        // A multiplier mesh's `BasePart.size` is its bounds times its scale,
+        // computed once the asset loads (`update_base_part_size_from_mesh`).
+        // A length mesh's IS its Size, the scale it loaded with: its bounds
+        // are the unit cube, and the render transform carries a folded
+        // FileMesh's `mesh_scale`, which must never reach the size.
+        if !eustress_common::scale_kind::is_length_of(Some(&asset_ref.mesh), asset_ref.scale_kind.as_deref()) {
+            ec.insert((NeedsMeshSize, MeshRatio));
+        }
+        if let Some(fold) = mesh_fold {
+            ec.insert(fold);
+        }
         // Domain-scoped Parameters, mirrored from `[parameters]` on disk so the
         // live component is the faithful in-memory copy — the same contract
         // `attributes_from_toml_table` establishes for Attributes. Inserted
@@ -3025,7 +3177,7 @@ pub fn spawn_instance(
     // like an importer geometry bug. Warn ONCE per distinct mesh path
     // (a 10K-part import referencing one missing mesh must not emit 10K
     // lines) — subsequent hits stay at the existing debug! above.
-    if is_custom_mesh && !absolute_mesh_path.exists() {
+    if is_custom_mesh && !mesh_on_disk {
         use std::sync::{Mutex, OnceLock};
         static WARNED_MISSING_MESHES: OnceLock<Mutex<std::collections::HashSet<String>>> =
             OnceLock::new();
@@ -3035,7 +3187,7 @@ pub fn spawn_instance(
         let first_hit = warned.lock().map(|mut s| s.insert(key)).unwrap_or(false);
         if first_hit {
             warn!(
-                "Custom mesh missing on disk — rendering block fallback: {:?} \
+                "Custom mesh missing on disk, or outside the Space and its shared assets — rendering block fallback: {:?} \
                  (first hit: instance '{}' from {:?}; further parts referencing \
                  this mesh fall back silently)",
                 absolute_mesh_path, name, toml_path
@@ -3045,8 +3197,8 @@ pub fn spawn_instance(
 
     // Fallback to primitive mesh (either Draco-compressed or no custom mesh)
     // ── Primitive mesh: load from engine assets/parts/ ──
-    let glb_path = if let Some((_, asset_path, _)) = primitive {
-        *asset_path
+    let glb_path = if let Some(shape) = primitive {
+        eustress_common::part_draw::part_type_to_glb_path(&shape)
     } else {
         "parts/block.glb" // fallback
     };
@@ -3091,6 +3243,9 @@ pub fn spawn_instance(
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
     ec.insert(measure_unit);
+    if let Some(fold) = mesh_fold {
+        ec.insert(fold);
+    }
     // See the sibling spawn path above: Parameters mirror `[parameters]` from
     // disk into the live component.
     ec.insert(super::parameters_runtime::loaded_parameters(
@@ -3482,13 +3637,13 @@ fn color_u8_array_to_rgba(v: Option<&toml::Value>, fallback: [f32; 4]) -> [f32; 
     if arr.len() != 3 && arr.len() != 4 {
         return fallback;
     }
+    // The rule every colour reader shares (`light_classes::color_from_toml`):
+    // all integers are 0-255 channels, any float makes the array 0-1.
+    let all_int = arr.iter().all(|c| c.is_integer());
     let channel = |i: usize, def: f32| -> f32 {
-        match arr.get(i) {
-            Some(c) => c
-                .as_integer()
-                .map(|n| n as f32 / 255.0)
-                .or_else(|| c.as_float().map(|f| f as f32))
-                .unwrap_or(def),
+        match arr.get(i).and_then(|c| c.as_float().or_else(|| c.as_integer().map(|n| n as f64))) {
+            Some(c) if all_int => c as f32 / 255.0,
+            Some(c) => c as f32,
             None => def,
         }
     };
@@ -3612,7 +3767,7 @@ fn attach_decal_mesh_component(
             // We only attach the `Texture` component here (onto the instance
             // entity itself, which is already `ChildOf` the part); the
             // dedicated `sync_texture_surfaces` system lazily builds the
-            // tiled quad visual + drives the live UV mapping every frame, so
+            // tiled quad visual + keeps the live UV mapping in step with edits, so
             // this loader path needs no mesh/material assets. See
             // `decal_place_tool::sync_texture_surfaces`.
             let Some(sec) = section_table(extra, "texture") else { return; };
@@ -3785,10 +3940,22 @@ pub fn load_disk_gaussian_splats_on_open(
     mut decal_materials: ResMut<Assets<ForwardDecalMaterial<StandardMaterial>>>,
     mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
     space_root: Res<super::SpaceRoot>,
-    mut last_space: Local<Option<PathBuf>>,
+    // The open the scan last ran for: the Space's path and its
+    // `SpaceLoadGeneration`, so a reopen of the same path scans again.
+    mut last_space: Local<Option<(PathBuf, u64)>>,
     // Discovery in flight for `last_space`, if any. Polled each frame.
     mut in_flight: Local<Option<std::sync::mpsc::Receiver<GsDiscovery>>>,
+    generation: Res<super::file_loader::SpaceLoadGeneration>,
 ) {
+    let this_open = (space_root.0.clone(), generation.0);
+    // A discovery started for an earlier open belongs to that open: landing
+    // it would spawn the old Space's clouds into this one after a switch, or
+    // repeat this open's own scan after a reopen. Drop it (the worker's send
+    // then fails quietly) and let the latch below scan for this open.
+    if in_flight.is_some() && last_space.as_ref() != Some(&this_open) {
+        *in_flight = None;
+    }
+
     // ── Phase B (main thread): a finished discovery → spawn its hits ─────
     //
     // PERF (load time): discovery used to run synchronously inside this
@@ -3821,8 +3988,8 @@ pub fn load_disk_gaussian_splats_on_open(
         }
         return;
     }
-    // Run once per genuine Space open (mirrors the binary boot-load latch).
-    if last_space.as_deref() == Some(space_root.0.as_path()) {
+    // Run once per Space open (mirrors the binary boot-load latch).
+    if last_space.as_ref() == Some(&this_open) {
         return;
     }
     let workspace = space_root.0.join("Workspace");
@@ -3837,14 +4004,14 @@ pub fn load_disk_gaussian_splats_on_open(
     }
     if super::skip_disk_scans() {
         // Stamp the Space so this does not re-attempt every frame.
-        *last_space = Some(space_root.0.clone());
+        *last_space = Some(this_open);
         info!(
             "🌫️ GS persistence scan SKIPPED (EUSTRESS_SKIP_DISK_SCANS) — disk-authored \
              splat clouds will not be re-spawned for this open"
         );
         return;
     }
-    *last_space = Some(space_root.0.clone());
+    *last_space = Some(this_open);
 
     // ── Phase A (worker thread): discovery ──────────────────────────────
     //
@@ -4205,6 +4372,7 @@ pub fn write_instance_changes_system(
         &InstanceFile,
         Option<&eustress_common::classes::BasePart>,
         Option<&eustress_common::units::MeasureUnit>,
+        Option<&MeshFold>,
     ), Without<BeingDragged>>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
@@ -4270,6 +4438,8 @@ pub fn write_instance_changes_system(
         /// the mesh bounding box and would clobber the user's value with
         /// whatever the mesh happens to measure in scene units).
         is_custom_mesh: bool,
+        /// The part's `BasePart.size`, which a length mesh's scale is.
+        size: Option<[f32; 3]>,
     }
     let mut jobs: Vec<WriteJob> = Vec::new();
 
@@ -4280,7 +4450,7 @@ pub fn write_instance_changes_system(
     candidates.dedup();
 
     for candidate in candidates {
-        let Ok((entity, transform, instance_file, base_part, _measure_unit)) = current.get(candidate) else {
+        let Ok((entity, transform, instance_file, base_part, _measure_unit, fold)) = current.get(candidate) else {
             // Despawned, or picked up by a new drag (whose own release
             // writes it): nothing to do here.
             continue;
@@ -4328,6 +4498,10 @@ pub fn write_instance_changes_system(
         // the engine alive.
         let safe_transform = sanitize_transform(*transform);
         let mut td = TransformData::from(safe_transform);
+        // The file holds the part's own position: the render transform adds
+        // a folded DataMesh offset, which a save must not write back (it
+        // would be added again on reload, a drift on every save).
+        td.position = file_position(safe_transform.translation, safe_transform.rotation, fold).to_array();
         // Detect custom mesh: a primitive mesh path ends with parts/*.glb;
         // anything else is a user-supplied GLB (V-Cell, CAD exports, etc.)
         let is_custom_mesh = {
@@ -4351,11 +4525,13 @@ pub fn write_instance_changes_system(
             locked: None,
             physics_density: None,
             is_custom_mesh,
+            size: None,
         };
         if let Some(bp) = base_part {
             // Same guard for `BasePart.size` — sanitize_size clamps each
             // axis to [0.1, +∞) and replaces NaN with the floor.
             let safe_size = sanitize_size(bp.size);
+            job.size = Some([safe_size.x, safe_size.y, safe_size.z]);
             // Custom-mesh parts: do NOT overwrite `scale` from BasePart.size.
             // The scale in the TOML is the user's multiplier; BasePart.size
             // comes from the mesh bounding box at spawn time. If the mesh
@@ -4424,6 +4600,9 @@ pub fn write_instance_changes_system(
                 let unit = file_unit(
                     doc.get("metadata").and_then(|m| m.get("unit")).and_then(|u| u.as_str()),
                 );
+                // Whether the scale is a length (`scale_kind`): a primitive's
+                // always is, a custom mesh's when its `[asset]` says so.
+                let scale_is_length = eustress_common::scale_kind::is_length(doc.get("asset"));
 
                 let root = doc.as_table_mut()
                     .ok_or_else(|| format!("TOML root is not a table: {:?}", job.path))?;
@@ -4452,8 +4631,18 @@ pub fn write_instance_changes_system(
                     toml::Value::Float(rz as f64),
                     toml::Value::Float(rw as f64),
                 ]));
-                if !job.is_custom_mesh {
-                    let [sx, sy, sz] = authored_vec3(Vec3::from_array(job.transform.scale), unit);
+                // A custom mesh's scale is written only when it is a length,
+                // from its BasePart.size (its Size); a multiplier is the
+                // user's ratio and is never overwritten.
+                let scale = if !job.is_custom_mesh {
+                    Some(job.transform.scale)
+                } else if scale_is_length {
+                    job.size
+                } else {
+                    None
+                };
+                if let Some(scale) = scale {
+                    let [sx, sy, sz] = authored_vec3(Vec3::from_array(scale), unit);
                     tf.insert("scale".into(), toml::Value::Array(vec![
                         toml::Value::Float(sx as f64),
                         toml::Value::Float(sy as f64),
@@ -4557,6 +4746,115 @@ pub fn write_instance_changes_system(
 // Properties panel, or future MCP-ECS-mediated paths would live only in
 // the ECS and disappear on restart.
 
+/// The top-level keys of an instance file that are not class sections
+/// (`InstanceDefinition`'s named fields). Every other key is `extra`.
+const NAMED_FILE_KEYS: &[&str] = &[
+    "asset", "transform", "properties", "metadata", "material", "thermodynamic", "electrochemical", "plasma", "ui",
+    "attributes", "tags", "parameters",
+];
+
+/// A file's `[attributes]` with its class sections folded on top, as the
+/// Properties panel shows them: each entry of a section (its `value` when
+/// it is a rich `{ type, value, description }` table) is an attribute, and
+/// a flat top-level value is one by its own name. A class's own field table
+/// (`class_owned_section`) is read into its component instead. A Player's
+/// reader shares the rule.
+pub(crate) fn fold_class_sections(
+    base: &Attributes,
+    extra: &std::collections::HashMap<String, toml::Value>,
+    class_name: eustress_common::classes::ClassName,
+) -> Attributes {
+    let mut attrs = base.clone();
+    for (section_name, section_val) in extra {
+        if eustress_common::datamodel::record::class_owned_section(class_name, section_name) {
+            continue;
+        }
+        if let toml::Value::Table(props) = section_val {
+            for (prop_key, prop_val) in props {
+                let raw_value = if let toml::Value::Table(inline) = prop_val {
+                    inline.get("value").cloned().unwrap_or(prop_val.clone())
+                } else {
+                    prop_val.clone()
+                };
+                if let Some(av) = rich_toml_value_to_attribute(&raw_value) {
+                    attrs.set(prop_key, av);
+                }
+            }
+        } else if let Some(av) = rich_toml_value_to_attribute(section_val) {
+            attrs.set(section_name, av);
+        }
+    }
+    attrs
+}
+
+/// Write each attribute that came from a class section back into that
+/// section (only its `value` when the entry is a rich table), and return
+/// the rest for `[attributes]`. The loader folds sections over
+/// `[attributes]`, so an edit written to `[attributes]` alone was lost on
+/// the next load. An attribute is a section's when its key is exactly the
+/// key the fold gave it: the entry's name as the schema heal spells it
+/// (`pascal_to_snake`). A user attribute such as Roblox's `Volume` stays
+/// the user's even beside a `[sound] volume`. A file with an `[asset]`
+/// folds nothing, and neither does one whose class is unknown; its
+/// attributes are all its own.
+fn route_section_attributes(
+    root: &mut toml::value::Table,
+    attrs: std::collections::HashMap<String, toml::Value>,
+) -> std::collections::HashMap<String, toml::Value> {
+    let healed = eustress_common::class_schema::pascal_to_snake;
+    let entry = |table: &toml::value::Table, name: &str| -> Option<toml::Value> {
+        table.iter().find(|(k, _)| healed(k) == name).map(|(_, v)| v.clone())
+    };
+    if entry(root, "asset").is_some() {
+        return attrs;
+    }
+    let Some(class) = entry(root, "metadata")
+        .and_then(|m| m.as_table().and_then(|m| entry(m, "class_name")))
+        .and_then(|c| c.as_str().map(str::to_string))
+        .and_then(|c| eustress_common::classes::ClassName::from_str(&c).ok())
+    else {
+        return attrs;
+    };
+    // The sections the loader folds, by their spelling in the file.
+    let foldable: Vec<String> = root
+        .keys()
+        .filter(|k| {
+            let k = healed(k);
+            !NAMED_FILE_KEYS.contains(&k.as_str())
+                && !eustress_common::datamodel::record::class_owned_section(class, &k)
+        })
+        .cloned()
+        .collect();
+    let mut rest = std::collections::HashMap::new();
+    for (key, value) in attrs {
+        let mut written = false;
+        for section in &foldable {
+            match root.get_mut(section) {
+                Some(toml::Value::Table(props)) => {
+                    let Some(entry_key) = props.keys().find(|k| healed(k) == key).cloned() else { continue };
+                    match props.get_mut(&entry_key) {
+                        Some(toml::Value::Table(inline)) if inline.contains_key("value") => {
+                            inline.insert("value".into(), value.clone());
+                        }
+                        Some(slot) => *slot = value.clone(),
+                        None => continue,
+                    }
+                    written = true;
+                }
+                Some(flat) if healed(section) == key => {
+                    *flat = value.clone();
+                    written = true;
+                }
+                _ => {}
+            }
+        }
+        if !written {
+            rest.insert(key, value);
+        }
+    }
+    rest
+}
+
 /// Patch a single `_instance.toml` with the entity's current tags and
 /// attributes. Pure on-disk operation — no Bevy types in or out. Runs
 /// on a background thread.
@@ -4567,10 +4865,24 @@ pub(crate) fn patch_tags_attributes_toml(
 ) -> Result<(), String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("read {:?}: {}", path, e))?;
+    let out = patch_tags_attributes_text(&raw, tags, attributes)
+        .map_err(|e| format!("{:?}: {}", path, e))?;
+    super::gui_loader::write_atomic(path, out.as_bytes())
+        .map_err(|e| format!("write {:?}: {}", path, e))?;
+    Ok(())
+}
+
+/// [`patch_tags_attributes_toml`] on a record's text, wherever the record is
+/// stored: the patched text.
+pub(crate) fn patch_tags_attributes_text(
+    raw: &str,
+    tags: Option<Vec<String>>,
+    attributes: Option<std::collections::HashMap<String, toml::Value>>,
+) -> Result<String, String> {
     let mut doc: toml::Value = raw.parse()
-        .map_err(|e| format!("parse {:?}: {}", path, e))?;
+        .map_err(|e| format!("parse: {}", e))?;
     let Some(root) = doc.as_table_mut() else {
-        return Err(format!("{:?}: top-level is not a table", path));
+        return Err("top-level is not a table".to_string());
     };
 
     if let Some(tags) = tags {
@@ -4591,6 +4903,9 @@ pub(crate) fn patch_tags_attributes_toml(
     }
 
     if let Some(attrs) = attributes {
+        // A value a class section holds goes back to that section; the
+        // rest are the file's own attributes.
+        let attrs = route_section_attributes(root, attrs);
         // Merged into what the file holds: an entry the engine cannot read (a
         // kind the reader does not model) stays as written, and a readable
         // entry missing from the component is one the user deleted.
@@ -4615,11 +4930,7 @@ pub(crate) fn patch_tags_attributes_toml(
         );
     }
 
-    let out = toml::to_string_pretty(&doc)
-        .map_err(|e| format!("serialize {:?}: {}", path, e))?;
-    super::gui_loader::write_atomic(path, out.as_bytes())
-        .map_err(|e| format!("write {:?}: {}", path, e))?;
-    Ok(())
+    toml::to_string_pretty(&doc).map_err(|e| format!("serialize: {}", e))
 }
 
 /// Ensure every entity with an `InstanceFile` carries default-empty
@@ -4928,6 +5239,54 @@ mod authored_transform_tests {
 
 /// The typed writer against the file it writes onto (`planned_write`).
 #[cfg(test)]
+mod value_form_tests {
+    use super::*;
+    use crate::space::service_loader::PropertyValue;
+
+    fn rgba(text: &str) -> [f32; 4] {
+        let v: toml::Value = toml::from_str::<toml::Table>(&format!("c = {text}")).unwrap()["c"].clone();
+        color_u8_array_to_rgba(Some(&v), [9.0, 9.0, 9.0, 9.0])
+    }
+
+    /// One rule for the whole array: all integers are 0-255, any float 0-1.
+    #[test]
+    fn a_colour_is_read_whole_not_per_channel() {
+        assert_eq!(rgba("[255, 0, 0]"), [1.0, 0.0, 0.0, 9.0]);
+        assert_eq!(rgba("[1, 0.5, 0]"), [1.0, 0.5, 0.0, 9.0], "a float makes every channel 0-1");
+        assert_eq!(rgba("[0.2, 0.4, 0.6, 0.5]"), [0.2, 0.4, 0.6, 0.5]);
+        assert_eq!(rgba("[51, 102, 153, 255]"), [0.2, 0.4, 0.6, 1.0]);
+        assert_eq!(rgba("[1, 2]"), [9.0, 9.0, 9.0, 9.0], "not a colour: the fallback");
+    }
+
+    /// `render_distance = 2000` and `render_distance = 2000.0` are the same.
+    #[test]
+    fn a_whole_number_is_a_number() {
+        assert_eq!(property_number(Some(&PropertyValue::Int(2000))), Some(2000.0));
+        assert_eq!(property_number(Some(&PropertyValue::Float(2000.0))), Some(2000.0));
+        assert_eq!(property_number(Some(&PropertyValue::Bool(true))), None);
+        assert_eq!(property_number(None), None);
+    }
+}
+
+#[cfg(test)]
+mod mesh_fold_tests {
+    use super::*;
+
+    /// A fold's offset is drawn in the part's own frame and never saved: the
+    /// file position is the render translation minus rotation x offset.
+    #[test]
+    fn a_saved_position_never_includes_the_fold_offset() {
+        let quarter = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let fold = MeshFold { scale: Vec3::splat(2.0), offset: Vec3::new(1.0, 0.0, 0.0) };
+        let own = Vec3::new(10.0, 5.0, 0.0);
+        let drawn = own + quarter * fold.offset;
+        let saved = file_position(drawn, quarter, Some(&fold));
+        assert!((saved - own).length() < 1e-5, "{saved:?}");
+        assert_eq!(file_position(drawn, quarter, None), drawn, "no fold, no change");
+    }
+}
+
+#[cfg(test)]
 mod density_tests {
     use super::*;
 
@@ -5015,6 +5374,38 @@ mod density_tests {
         let cleared = toml::to_string(&doc).unwrap();
         assert_eq!(resolved(&cleared), 900.0, "{cleared}");
         assert!(cleared.contains("roblox_note"), "{cleared}");
+    }
+}
+
+#[cfg(test)]
+mod stored_text_tests {
+    use super::*;
+
+    const RECORD: &str = "[metadata]\nclass_name = \"Part\"\nname = \"Crate\"\n\n[transform]\nposition = [1.0, 2.0, 3.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 1.0, 2.0]\n\n[properties]\nmaterial = \"Wood\"\n# kept\n";
+
+    /// The planner edits whatever text the record has now, wherever it is
+    /// stored: unchanged writes nothing, an edit keeps the record's layout,
+    /// and only a record with no text yet is written whole.
+    #[test]
+    fn a_record_is_planned_against_its_current_text() {
+        let def = load_instance_definition_from_str(RECORD).unwrap();
+        assert!(matches!(planned_write_text(Some(RECORD), &def).unwrap(), PlannedWrite::Unchanged));
+        let mut moved = def.clone();
+        moved.transform.position = [5.0, 2.0, 3.0];
+        let PlannedWrite::Text(text) = planned_write_text(Some(RECORD), &moved).unwrap() else {
+            panic!("a move is written");
+        };
+        assert!(text.contains("# kept"), "the record's own layout: {text}");
+        let saved = load_instance_definition_from_str(&text).unwrap();
+        assert_eq!(saved.transform.position, [5.0, 2.0, 3.0], "{text}");
+        assert!(matches!(planned_write_text(None, &def).unwrap(), PlannedWrite::Text(_)));
+    }
+
+    /// A path with no loose file and no active database is a new instance.
+    #[test]
+    fn a_missing_record_is_stored_nowhere() {
+        let path = std::env::temp_dir().join("eustress_stored_text_missing").join("_instance.toml");
+        assert!(matches!(stored_text(&path), StoredText::Neither));
     }
 }
 
@@ -5308,5 +5699,203 @@ scale = [
         let _ = std::fs::remove_dir_all(&temp);
         eprintln!("{}: {checked} files saved without an edit, {} changed", sample.display(), changed.len());
         assert!(changed.is_empty(), "changed: {:?}", &changed[..changed.len().min(10)]);
+    }
+}
+
+#[cfg(test)]
+mod section_attribute_tests {
+    use super::*;
+
+    fn temp_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress_sections_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("_instance.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn reload(path: &std::path::Path) -> Attributes {
+        let text = std::fs::read_to_string(path).unwrap();
+        let def = load_instance_definition_from_str(&text).unwrap();
+            let class = eustress_common::classes::ClassName::from_str(&def.metadata.class_name).unwrap();
+        fold_class_sections(&attributes_from_toml_table(def.attributes.as_ref()), &def.extra, class)
+    }
+
+    fn text_of(attrs: &Attributes, key: &str) -> Option<String> {
+        match attrs.get(key) {
+            Some(eustress_common::AttributeValue::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_edited_section_value_survives_a_reload() {
+        let path = temp_file(
+            "decal",
+            "[metadata]\nclass_name = \"Decal\"\nname = \"Sign\"\n\n[decal]\nface = \"Front\"\ntexture = \"sign.png\"\n\n[attributes]\nOwner = \"me\"\n",
+        );
+        assert_eq!(text_of(&reload(&path), "face").as_deref(), Some("Front"));
+        let mut edit = std::collections::HashMap::new();
+        edit.insert("face".to_string(), toml::Value::String("Back".into()));
+        edit.insert("Owner".to_string(), toml::Value::String("me".into()));
+        edit.insert("Added".to_string(), toml::Value::String("new".into()));
+        patch_tags_attributes_toml(&path, None, Some(edit)).unwrap();
+
+        let doc: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["decal"]["face"].as_str(), Some("Back"), "the section holds the edit");
+        assert_eq!(doc["decal"]["texture"].as_str(), Some("sign.png"));
+        let own = doc["attributes"].as_table().unwrap();
+        assert!(own.get("face").is_none(), "no stale copy in [attributes]");
+        assert_eq!(own.get("Added").and_then(|v| v.as_str()), Some("new"));
+        let attrs = reload(&path);
+        assert_eq!(text_of(&attrs, "face").as_deref(), Some("Back"), "the edit survives a reload");
+        assert_eq!(text_of(&attrs, "Owner").as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn a_rich_entry_keeps_its_form() {
+        let path = temp_file(
+            "rich",
+            "[metadata]\nclass_name = \"Folder\"\nname = \"Panel\"\n\n[Appearance]\nTint = { type = \"string\", value = \"red\", description = \"The tint\" }\n",
+        );
+        // The schema heal spells a section entry in snake_case, so the row
+        // (the attribute the Properties panel edits) is `tint`; the file
+        // keeps its own spelling.
+        assert_eq!(text_of(&reload(&path), "tint").as_deref(), Some("red"));
+        let mut edit = std::collections::HashMap::new();
+        edit.insert("tint".to_string(), toml::Value::String("blue".into()));
+        patch_tags_attributes_toml(&path, None, Some(edit)).unwrap();
+        let doc: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let tint = &doc["Appearance"]["Tint"];
+        assert_eq!(tint["value"].as_str(), Some("blue"));
+        assert_eq!(tint["type"].as_str(), Some("string"));
+        assert_eq!(tint["description"].as_str(), Some("The tint"));
+        assert_eq!(text_of(&reload(&path), "tint").as_deref(), Some("blue"));
+        assert!(doc.get("attributes").and_then(|a| a.get("tint")).is_none(), "no copy in [attributes]");
+    }
+
+    #[test]
+    fn a_user_attribute_beside_a_section_key_stays_the_users() {
+        // Roblox attributes are case-sensitive: "Volume" is the user's,
+        // "volume" is the Sound's own field.
+        let path = temp_file(
+            "sound",
+            "[metadata]
+class_name = \"Sound\"
+name = \"Hum\"
+
+[sound]
+volume = 0.5
+
+[attributes]
+Volume = 7
+",
+        );
+        let patch = |user: i64, own: f64| {
+            let mut edit = std::collections::HashMap::new();
+            edit.insert("Volume".to_string(), toml::Value::Integer(user));
+            edit.insert("volume".to_string(), toml::Value::Float(own));
+            patch_tags_attributes_toml(&path, None, Some(edit)).unwrap();
+            std::fs::read_to_string(&path).unwrap().parse::<toml::Value>().unwrap()
+        };
+        let doc = patch(8, 0.5);
+        assert_eq!(doc["sound"]["volume"].as_float(), Some(0.5));
+        assert_eq!(doc["attributes"]["Volume"].as_integer(), Some(8));
+        let doc = patch(8, 0.25);
+        assert_eq!(doc["sound"]["volume"].as_float(), Some(0.25));
+        assert!(doc["attributes"].get("volume").is_none(), "the Sound's own field never lands in [attributes]");
+        assert_eq!(doc["attributes"]["Volume"].as_integer(), Some(8));
+    }
+
+    #[test]
+    fn a_file_with_an_asset_keeps_every_attribute_its_own() {
+        let mut root: toml::value::Table =
+            "[asset]\nmesh = \"a.glb\"\n[metadata]\nclass_name = \"Decal\"\n[decal]\nface = \"Front\"\n"
+                .parse()
+                .unwrap();
+        let mut edit = std::collections::HashMap::new();
+        edit.insert("face".to_string(), toml::Value::String("Back".into()));
+        let rest = route_section_attributes(&mut root, edit);
+        assert!(rest.contains_key("face"));
+        assert_eq!(root["decal"]["face"].as_str(), Some("Front"));
+    }
+}
+
+#[cfg(test)]
+mod mesh_path_tests {
+    use super::*;
+    use crate::space::space_asset_source::AssetRoots;
+
+    /// A Universe holding the Space `Garage` (a V-Cell mesh and a part
+    /// folder), a Workshop mesh in `assets/meshes`, an Assets panel mesh in
+    /// `.eustress/assets/meshes`, and a sibling Space.
+    fn universe() -> (PathBuf, PathBuf) {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let universe = std::env::temp_dir().join(format!("eustress_mesh_path_{}_{nanos}", std::process::id()));
+        let space = universe.join("Spaces").join("Garage");
+        std::fs::create_dir_all(space.join("meshes")).unwrap();
+        std::fs::write(space.join("meshes").join("VCell_Stack.glb"), b"glb").unwrap();
+        std::fs::create_dir_all(space.join("Workspace").join("V-Cell").join("Core")).unwrap();
+        std::fs::create_dir_all(universe.join("assets").join("meshes").join("Drone")).unwrap();
+        std::fs::write(universe.join("assets").join("meshes").join("Drone").join("body.glb"), b"glb").unwrap();
+        std::fs::create_dir_all(universe.join(".eustress").join("assets").join("meshes")).unwrap();
+        std::fs::write(universe.join(".eustress").join("assets").join("meshes").join("crate.glb"), b"glb").unwrap();
+        std::fs::create_dir_all(universe.join("Spaces").join("Other")).unwrap();
+        std::fs::write(universe.join("Spaces").join("Other").join("secret.glb"), b"glb").unwrap();
+        (universe, space)
+    }
+
+    /// A custom mesh is opened only in the Space or its Universe's shared
+    /// asset folders, `..` included, and never when its `mesh` names a
+    /// drive, a share or a root, or climbs into a sibling Space.
+    #[test]
+    fn a_mesh_outside_the_space_is_never_opened() {
+        let (universe, space) = universe();
+        let allowed = AssetRoots::with_universe(space.clone(), &universe).allowed();
+        let roots: Vec<&Path> = allowed.iter().map(PathBuf::as_path).collect();
+
+        let own = space.join("meshes").join("VCell_Stack.glb");
+        let workshop = universe.join("assets").join("meshes").join("Drone").join("body.glb");
+        let panel = universe.join(".eustress").join("assets").join("meshes").join("crate.glb");
+        assert!(mesh_may_be_opened_in("../../meshes/VCell_Stack.glb", &own, &roots), "a `..` mesh in the Space");
+        assert!(mesh_may_be_opened_in("assets/meshes/Drone/body.glb", &workshop, &roots), "a Workshop mesh");
+        assert!(mesh_may_be_opened_in("../../../../.eustress/assets/meshes/crate.glb", &panel, &roots), "an Assets panel mesh");
+        let sibling = universe.join("Spaces").join("Other").join("secret.glb");
+        assert!(!mesh_may_be_opened_in("../../../Other/secret.glb", &sibling, &roots), "a sibling Space");
+        for hostile in ["//attacker.example/share/x.glb", r"\\attacker.example\share\x.glb", "C:/Windows/x.glb", "/Windows/x.glb", "C:x.glb", "meshes/x.glb:stream"] {
+            assert!(!mesh_may_be_opened_in(hostile, Path::new(hostile), &roots), "{hostile:?}");
+            assert!(!mesh_may_be_opened_in(hostile, &own, &roots), "{hostile:?} named its own root");
+        }
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// A mesh is found beside its part first; an `assets/...` mesh then in
+    /// the Space and the Universe; a hostile one never; a missing one names
+    /// where beside the part it was looked for.
+    #[test]
+    fn a_custom_mesh_is_found_beside_the_part_then_the_space_then_the_universe() {
+        let (universe, space) = universe();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        let part = space.join("Workspace").join("V-Cell").join("Core").join("_instance.toml");
+
+        let beside = resolve_custom_mesh_in(&part, "../../../meshes/VCell_Stack.glb", &roots);
+        assert_eq!(beside, (space.join("meshes").join("VCell_Stack.glb"), true));
+
+        let workshop = resolve_custom_mesh_in(&part, "assets/meshes/Drone/body.glb", &roots);
+        assert_eq!(workshop, (universe.join("assets").join("meshes").join("Drone").join("body.glb"), true), "the Universe's shared mesh");
+
+        std::fs::create_dir_all(space.join("assets").join("meshes").join("Drone")).unwrap();
+        std::fs::write(space.join("assets").join("meshes").join("Drone").join("body.glb"), b"glb").unwrap();
+        let in_space = resolve_custom_mesh_in(&part, "assets/meshes/Drone/body.glb", &roots);
+        assert_eq!(in_space, (space.join("assets").join("meshes").join("Drone").join("body.glb"), true), "the Space before the Universe");
+
+        let missing = resolve_custom_mesh_in(&part, "assets/meshes/Gone.glb", &roots);
+        assert_eq!(missing, (part.parent().unwrap().join("assets").join("meshes").join("Gone.glb"), false));
+
+        for hostile in ["//attacker.example/share/assets/x.glb", "C:/assets/x.glb", "/assets/x.glb", "assets/x.glb:s"] {
+            assert!(!resolve_custom_mesh_in(&part, hostile, &roots).1, "{hostile:?}");
+        }
+        let _ = std::fs::remove_dir_all(&universe);
     }
 }

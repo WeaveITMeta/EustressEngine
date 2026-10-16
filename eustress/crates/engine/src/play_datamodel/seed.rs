@@ -629,7 +629,8 @@ mod parity {
     //! `spawn_instance` for every Part folder and every flat file (parse,
     //! heal, class, units, pose, BasePart, attributes, tags), and
     //! `spawn_general_entity` for a folder of any other class (name, pose,
-    //! attributes, tags, a Model's pivot, a disabled script). Then the pose
+    //! attributes, tags, a Model's pivot, a disabled script, a Sound's
+    //! component), but the file loader's light arm for a light folder. Then the pose
     //! anchors under sized parts (`PoseAnchorPlugin`), Bevy's transform
     //! propagation, [`super::seed_scene`] and the Play session's
     //! `workspace.Terrain`. The file loader's walk around them is copied by
@@ -697,6 +698,22 @@ mod parity {
                 "[metadata]\nclass_name = \"Attachment\"\n\n\
                  [transform]\nposition = [0.5, 0.0, 0.0]\nrotation = [0.0, 0.7071068, 0.0, 0.7071068]\n\n\
                  [attachment]\nvisible = true\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Base/Glow/_instance.toml".into(),
+                "[metadata]\nclass_name = \"PointLight\"\n\n\
+                 [light]\nbrightness = 2.5\nrange = 12.0\ncolor = [255, 200, 120]\nshadows = true\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Base/Beacon/_instance.toml".into(),
+                "[metadata]\nclass_name = \"SpotLight\"\n\n[light]\nbrightness = 4.0\nangle = 60.0\nface = \"Top\"\n".into(),
+            ),
+            (
+                "Workspace/Ball/Bounce/_instance.toml".into(),
+                "[metadata]\nclass_name = \"Sound\"\n\n\
+                 [sound]\nsound_id = \"sounds/bounce.ogg\"\nvolume = 0.3\nlooped = true\n"
                     .into(),
             ),
             (
@@ -925,13 +942,37 @@ mod parity {
                     modified: std::time::SystemTime::UNIX_EPOCH,
                     children: Vec::new(),
                 };
-                let e = spawn_general_entity(commands, &meta, doc.as_ref(), class, String::new());
+                // A light folder takes the file loader's light arm
+                // (`FolderLoad::Light`), every other class its general branch.
+                let e = match (class, doc.as_ref()) {
+                    (ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight, Some(doc)) => {
+                        light_entity(commands, &meta.name, doc, class)
+                    }
+                    _ => spawn_general_entity(commands, &meta, doc.as_ref(), class, String::new()),
+                };
                 commands.entity(e).insert(ChildOf(parent));
                 e
             }
         };
         dirs.insert(dir.to_string(), e);
         e
+    }
+
+    /// Studio's light folder arm (`file_loader`'s `FolderLoad::Light`), copied
+    /// as the walk is: the authoring component from
+    /// `LightSection::from_document`, posed by its file, spawned by
+    /// `crate::spawn`'s light spawners and named by its folder.
+    fn light_entity(commands: &mut Commands, name: &str, doc: &toml::Value, class: ClassName) -> Entity {
+        use eustress_common::plugins::light_classes::{light_transform_from_document, LightSection};
+        let section = LightSection::from_document(doc);
+        let transform = light_transform_from_document(doc);
+        let instance =
+            Instance { name: name.to_string(), class_name: class, archivable: true, id: 0, ai: false, uuid: String::new() };
+        match class {
+            ClassName::PointLight => crate::spawn::spawn_point_light(commands, instance, section.point(), transform),
+            ClassName::SpotLight => crate::spawn::spawn_spot_light(commands, instance, section.spot(), transform),
+            _ => crate::spawn::spawn_surface_light(commands, instance, section.surface(), transform),
+        }
     }
 
     type Entry = (String, BTreeMap<String, String>, BTreeMap<String, String>, Vec<String>);
@@ -1072,8 +1113,11 @@ mod parity {
                 "Workspace.Arena",
                 "Workspace.Arena.Net",
                 "Workspace.Ball",
+                "Workspace.Ball.Bounce",
                 "Workspace.Base",
+                "Workspace.Base.Beacon",
                 "Workspace.Base.Flag",
+                "Workspace.Base.Glow",
                 "Workspace.Base.Grip",
                 "Workspace.Clock",
                 "Workspace.Decor",
@@ -1093,6 +1137,12 @@ mod parity {
                 "Workspace.Wheel.Mesh",
             ]
         );
+        // A light and a Sound carry their files' values, not their class
+        // defaults: equal trees alone would not tell the two apart.
+        let player_prop = |name: &str, key: &str| b.get(name).and_then(|(_, props, _, _)| props.get(key)).cloned();
+        assert_eq!(player_prop("Workspace.Base.Glow", "Brightness"), Some(render(&DmValue::Number(2.5))));
+        assert_eq!(player_prop("Workspace.Base.Beacon", "Angle"), Some(render(&DmValue::Number(60.0))));
+        assert_eq!(player_prop("Workspace.Ball.Bounce", "Looped"), Some(render(&DmValue::Bool(true))));
         // The density each part weighs at, which replication leaves out: the
         // same in both trees, and the Floor's authored override, not Slate's.
         let (studio_densities, player_densities) = (densities(&studio.lock()), densities(&player.dm));

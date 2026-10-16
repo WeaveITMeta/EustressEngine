@@ -9,13 +9,16 @@
 //! - 10-node ForgeCluster, sharded publish (no subscriber)
 //! - 10-node ForgeCluster, sharded publish (1 subscriber per node)
 //!
+//! Every client logs in over TLS 1.3 before its first frame, as every
+//! production client does, so the numbers include TLS record overhead.
+//!
 //! Run with:
 //! ```
 //! cargo bench -p eustress-stream-node
 //! ```
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -23,11 +26,61 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use tokio::runtime::Runtime;
 
 use eustress_stream::StreamConfig;
-use eustress_stream_node::{ForgeCluster, NodeConfig, StreamNode, StreamNodeClient};
+use eustress_stream_node::{ClientAuth, ForgeCluster, NodeConfig, StreamNode, StreamNodeClient};
+
+#[path = "../tests/common/mod.rs"]
+mod common;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Every topic a benchmark touches. The benchmark party holds publish and
+/// subscribe grants on all of them.
+fn bench_topics() -> Vec<String> {
+    let mut topics: Vec<String> = [
+        "bench_no_sub",
+        "bench_1_sub",
+        "bench_8_subs",
+        "batch_topic",
+        "batch_topic_compact",
+        "no_ack_single",
+        "no_ack_batch",
+        "quic_bench",
+        "quic_batch",
+    ]
+    .iter()
+    .map(|t| t.to_string())
+    .collect();
+    for i in 0..10 {
+        topics.push(format!("cluster_bench_{i}"));
+        topics.push(format!("cluster_sub_{i}"));
+    }
+    topics
+}
+
+/// The certificate, owner-only key and parties file every benchmark node
+/// uses, and the credentials every benchmark client logs in with.
+struct BenchAuth {
+    fixture: common::Fixture,
+    client: ClientAuth,
+}
+
+fn bench_auth() -> &'static BenchAuth {
+    static AUTH: OnceLock<BenchAuth> = OnceLock::new();
+    AUTH.get_or_init(|| {
+        let fixture = common::Fixture::new();
+        let topics = bench_topics();
+        let topics: Vec<&str> = topics.iter().map(String::as_str).collect();
+        let party = common::TestParty::new("bench")
+            .subscribe(&topics)
+            .publish(&topics)
+            .max_subscriptions(64);
+        fixture.write_parties(&[&party]);
+        let client = party.client_auth(fixture.cert.pin);
+        BenchAuth { fixture, client }
+    })
+}
 
 fn fast_config(ring_cap: usize) -> NodeConfig {
     NodeConfig {
@@ -35,7 +88,7 @@ fn fast_config(ring_cap: usize) -> NodeConfig {
         stream_config: StreamConfig::default()
             .in_memory()
             .with_ring_capacity(ring_cap),
-        ..NodeConfig::default()
+        ..bench_auth().fixture.config()
     }
 }
 
@@ -50,7 +103,9 @@ async fn start_node() -> (StreamNode, SocketAddr) {
 async fn connect(addr: SocketAddr) -> StreamNodeClient {
     // listen_addr() returns 0.0.0.0:PORT; connect needs a reachable address.
     let loopback: SocketAddr = format!("127.0.0.1:{}", addr.port()).parse().unwrap();
-    StreamNodeClient::connect(loopback).await.expect("connect")
+    StreamNodeClient::connect(loopback, &bench_auth().client)
+        .await
+        .expect("connect and log in")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -414,11 +469,9 @@ fn bench_quic_single_publish(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
 
-    let (quic_node, cert) = rt.block_on(async {
+    let quic_node = rt.block_on(async {
         let cfg = fast_config(65536);
-        let n = QuicNode::start(cfg).await.expect("quic node");
-        let cert = n.cert_der().clone();
-        (n, cert)
+        QuicNode::start(cfg).await.expect("quic node")
     });
 
     let quic_addr: SocketAddr = format!("127.0.0.1:{}", quic_node.listen_addr().port())
@@ -426,7 +479,9 @@ fn bench_quic_single_publish(c: &mut Criterion) {
         .unwrap();
 
     let client = rt.block_on(async {
-        QuicNodeClient::connect(quic_addr, &cert).await.expect("quic connect")
+        QuicNodeClient::connect(quic_addr, &bench_auth().client)
+            .await
+            .expect("quic connect and log in")
     });
 
     let payload_100b = Bytes::from(vec![0u8; 100]);
@@ -449,11 +504,9 @@ fn bench_quic_batch_publish(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
 
-    let (quic_node, cert) = rt.block_on(async {
+    let quic_node = rt.block_on(async {
         let cfg = fast_config(65536);
-        let n = QuicNode::start(cfg).await.expect("quic node");
-        let cert = n.cert_der().clone();
-        (n, cert)
+        QuicNode::start(cfg).await.expect("quic node")
     });
 
     let quic_addr: SocketAddr = format!("127.0.0.1:{}", quic_node.listen_addr().port())
@@ -461,7 +514,9 @@ fn bench_quic_batch_publish(c: &mut Criterion) {
         .unwrap();
 
     let client = rt.block_on(async {
-        QuicNodeClient::connect(quic_addr, &cert).await.expect("quic connect")
+        QuicNodeClient::connect(quic_addr, &bench_auth().client)
+            .await
+            .expect("quic connect and log in")
     });
 
     let payload_100b = Bytes::from(vec![0u8; 100]);

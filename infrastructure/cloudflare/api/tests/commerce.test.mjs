@@ -143,7 +143,8 @@ function world() {
     env.SOCIAL.store.set(`sim:${id}`, { value: JSON.stringify({
       id, name: `Sim ${id.slice(0, 4)}`, author_id: author, author_name: author, is_public: true,
       r2_key: `universes/${id}/universe.pak`, space_names: ['Lobby', 'Arena'],
-      moderation: { status: 'approved' }, published_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-02T00:00:00Z',
+      // Rated all_ages: a listing with no rating is adult content, playable (and sold in) only with Adult content on.
+      moderation: { status: 'approved', rating: 'all_ages' }, published_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-02T00:00:00Z',
       ...extra,
     }) });
     env.SOCIAL.store.set(`sim-author:${author}:${id}`, { value: id });
@@ -164,6 +165,9 @@ const deps = {
   json: (value, status, headers) => new Response(JSON.stringify(value), { status, headers }),
   isListable,
   resolveAttribution,
+  // Sessions here stand for identity-file sessions; a passkey session's refusal is tested
+  // through the real Worker in tests/passkeys.test.mjs.
+  requireIdentityFileSession: async () => null,
 };
 
 function ctx() {

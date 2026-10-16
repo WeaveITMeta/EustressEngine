@@ -4,18 +4,17 @@
 
 use bevy::prelude::*;
 
-use eustress_common::datamodel::{DataModel, OutputLevel, SharedDataModel};
+use eustress_common::datamodel::{session_of, OutputLevel, SharedDataModel};
 use eustress_common::terrain::api::TerrainCommand;
 
 use super::PlayDataModel;
 use crate::terrain_commands::{apply_terrain_commands, TerrainCommandOrigin};
 
-/// The terrain refusal the Output last showed, and the session it was in.
-/// The session's tree is held weakly: that keeps its allocation, so a later
-/// session's tree never lands at the same address and reads as the same one.
+/// The terrain refusal the Output last showed, and the session it was in
+/// (`session_of` its tree, a number no later session repeats).
 #[derive(Default)]
 pub struct ReportedTerrainRefusal {
-    session: std::sync::Weak<parking_lot::Mutex<DataModel>>,
+    session: u64,
     line: String,
 }
 
@@ -55,11 +54,11 @@ fn apply_edits(
         reported.line.clear();
         return;
     };
-    if std::ptr::eq(reported.session.as_ptr(), std::sync::Arc::as_ptr(dm)) && reported.line == first {
+    if reported.session == session_of(dm) && reported.line == first {
         return;
     }
     let line = if refused > 1 { format!("{first} (and {} more this frame)", refused - 1) } else { first.clone() };
-    reported.session = std::sync::Arc::downgrade(dm);
+    reported.session = session_of(dm);
     reported.line = first;
     dm.lock().print(OutputLevel::Warn, "Terrain", line);
 }

@@ -1,10 +1,16 @@
 # Eustress Engine
 # https://eustress.dev/robots.txt
 #
-# Every public page is open to every crawler. Which AI crawlers are admitted
-# is decided at the Cloudflare edge, not here. The paths below are account
-# pages: nothing on them exists without a session, so there is nothing to
-# index.
+# Search crawlers: every public page is open. The paths in the general group
+# are account pages: nothing on them exists without a session, so there is
+# nothing to index.
+#
+# AI crawlers (GPTBot, ClaudeBot, CCBot, Google-Extended, Applebot-Extended)
+# may read the docs and the pages that say what Eustress is and how it is
+# licensed, and nothing else. Each of their groups lists the Allow lines first
+# and Disallow: / last, so the longest-match rule (Google, RFC 9309) and a
+# parser that takes the first matching line give the same answer. /learn has
+# no trailing slash because the Learn index is /learn itself.
 
 User-agent: *
 Allow: /
@@ -18,5 +24,60 @@ Disallow: /purchases
 Disallow: /settings
 Disallow: /tickets
 Disallow: /verify
+
+User-agent: GPTBot
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /docs/
+Allow: /learn
+Allow: /about
+Allow: /license
+Allow: /download
+Allow: /downloads/player
+Disallow: /
+
+User-agent: ClaudeBot
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /docs/
+Allow: /learn
+Allow: /about
+Allow: /license
+Allow: /download
+Allow: /downloads/player
+Disallow: /
+
+User-agent: CCBot
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /docs/
+Allow: /learn
+Allow: /about
+Allow: /license
+Allow: /download
+Allow: /downloads/player
+Disallow: /
+
+User-agent: Google-Extended
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /docs/
+Allow: /learn
+Allow: /about
+Allow: /license
+Allow: /download
+Allow: /downloads/player
+Disallow: /
+
+User-agent: Applebot-Extended
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /docs/
+Allow: /learn
+Allow: /about
+Allow: /license
+Allow: /download
+Allow: /downloads/player
+Disallow: /
 
 Sitemap: https://eustress.dev/sitemap.xml

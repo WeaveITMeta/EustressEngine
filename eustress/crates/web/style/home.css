@@ -1,0 +1,378 @@
+/* home.css (p18): the home page.
+   Loaded after main.css so these rules win at equal specificity. Covers the
+   hero and closing-band backdrops, the larger hero capture, the reference-build
+   cards with their image slots, the folded game-engine comparison and the
+   merged proof section. No new motion: the one transition below is wrapped in
+   prefers-reduced-motion: no-preference. */
+
+/* ------------------------------------------------------------------------
+   Hero backdrop
+   A night city turning into a wireframe twin. It is a CSS background, never an
+   element, so a screen reader announces nothing for it. Dark empty space sits
+   on the left of the picture; the gradient from the left makes sure the
+   headline reads on any width. The scrim strengths were estimated from a pixel simulation over the
+   picture: the 18px grey description line stays above 4.5:1 against the
+   brightest 0.5% of the backdrop behind it at 1440, 1100, 800 and phone widths.
+   ------------------------------------------------------------------------ */
+
+.hero-industrial.hero-city {
+    background-color: #0a0a12;
+    background-image:
+        linear-gradient(90deg,
+            rgba(10, 10, 18, 0.97) 0%,
+            rgba(10, 10, 18, 0.94) 45%,
+            rgba(10, 10, 18, 0.74) 65%,
+            rgba(10, 10, 18, 0.25) 100%),
+        linear-gradient(180deg,
+            rgba(10, 10, 18, 0.50) 0%,
+            rgba(10, 10, 18, 0) 22%,
+            rgba(10, 10, 18, 0) 78%,
+            #12141a 100%),
+        url("/assets/home/hero-city.webp");
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: right center;
+}
+
+/* Narrow screens stack the text over the capture, so the text spans the whole
+   width and a gradient from the left is not enough. A flat, strong scrim does
+   the job instead. */
+@media (max-width: 768px) {
+    .hero-industrial.hero-city {
+        background-image:
+            linear-gradient(180deg,
+                rgba(10, 10, 18, 0.95) 0%,
+                rgba(10, 10, 18, 0.90) 55%,
+                rgba(10, 10, 18, 0.95) 100%),
+            url("/assets/home/hero-city.webp");
+        background-position: 68% center;
+    }
+}
+
+/* The Studio capture, a little larger: a wider container and a bigger share of
+   the split. */
+@media (min-width: 1100px) {
+    .hero-industrial.hero-city .hero-main {
+        max-width: 1560px;
+        grid-template-columns: minmax(0, 0.74fr) minmax(0, 1.26fr);
+    }
+}
+
+/* Over a busy backdrop the panel needs a deeper shadow to stay separate. */
+.hero-industrial.hero-city .hero-render-img {
+    box-shadow:
+        0 30px 76px rgba(0, 0, 0, 0.62),
+        0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+/* ------------------------------------------------------------------------
+   Reference builds: cards with an image slot
+   ------------------------------------------------------------------------ */
+
+/* The featured build is a wide band on top, the other four sit under it in a
+   row of four (two by two on a tablet, one column on a phone). */
+.showcase-grid-industrial {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-rows: auto;
+    max-width: 1100px;
+    align-items: stretch;
+}
+
+.showcase-grid-industrial .showcase-card {
+    display: flex;
+    flex-direction: column;
+    text-align: left;
+}
+
+/* The slot keeps a fixed 16:10 frame, the same ratio as a capture, so a card
+   does not change height when its image arrives. */
+.showcase-grid-industrial .card-visual {
+    position: relative;
+    display: block;
+    height: auto;
+    aspect-ratio: 16 / 10;
+    background: none;
+    overflow: hidden;
+}
+
+.showcase-grid-industrial .showcase-card.featured {
+    grid-column: 1 / -1;
+    grid-row: auto;
+    flex-direction: row;
+}
+
+.showcase-grid-industrial .showcase-card.featured .card-visual {
+    flex: 0 0 58%;
+    aspect-ratio: 16 / 10;
+    min-height: 0;
+}
+
+.showcase-grid-industrial .showcase-card.featured .card-info {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    padding: var(--space-xl);
+}
+
+.showcase-grid-industrial .showcase-card.featured .card-info h4 {
+    font-size: var(--text-2xl);
+}
+
+.showcase-grid-industrial .showcase-card.featured .card-info p {
+    font-size: var(--text-base);
+}
+
+@media (max-width: 1000px) {
+    .showcase-grid-industrial { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.showcase-grid-industrial .build-shot,
+.showcase-grid-industrial .build-slot {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.showcase-grid-industrial .build-shot {
+    display: block;
+    object-fit: cover;
+}
+
+/* No capture yet: quiet diagonal stripes and the build's name. */
+.build-slot-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        repeating-linear-gradient(135deg,
+            rgba(128, 144, 160, 0.07) 0,
+            rgba(128, 144, 160, 0.07) 10px,
+            transparent 10px,
+            transparent 20px),
+        linear-gradient(135deg, #1a1d24 0%, #14161c 100%);
+    border-bottom: 1px solid rgba(128, 144, 160, 0.1);
+}
+
+.build-slot-name {
+    padding: 0 var(--space-md);
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+}
+
+.showcase-grid-industrial .card-info {
+    flex-shrink: 0;
+}
+
+.showcase-grid-industrial .card-info p {
+    margin: 0;
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+}
+
+.showcase-grid-industrial .card-info h4 {
+    margin-bottom: var(--space-xs);
+}
+
+/* The figures under a build's line: a figure in the mono face with tabular
+   numbers, a label under it. They wrap into as many columns as fit, so a
+   phone gets two and the rows never overflow. */
+.build-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: var(--space-md) var(--space-lg);
+    width: 100%;
+    margin: var(--space-md) 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.build-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding-top: var(--space-sm);
+    border-top: 1px solid rgba(128, 144, 160, 0.18);
+}
+
+.build-stat-figure {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    font-size: var(--text-xl);
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: var(--color-text-primary);
+}
+
+.build-note {
+    margin: var(--space-sm) 0 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+}
+
+.build-stat-label {
+    font-size: var(--text-xs);
+    line-height: 1.35;
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+    .showcase-grid-industrial { grid-template-columns: 1fr; }
+    .showcase-grid-industrial .showcase-card.featured { flex-direction: column; }
+    .showcase-grid-industrial .showcase-card.featured .card-visual { flex: none; }
+    .showcase-grid-industrial .showcase-card.featured .card-info { padding: var(--space-md); }
+}
+
+/* ------------------------------------------------------------------------
+   Comparison: the game engine table folds away
+   ------------------------------------------------------------------------ */
+
+.comparison-more {
+    margin-top: var(--space-xl);
+    margin-bottom: var(--space-xl);
+}
+
+.comparison-more > summary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 12px 22px;
+    list-style: none;
+    cursor: pointer;
+    border: 1px solid rgba(128, 144, 160, 0.3);
+    border-radius: var(--radius-md);
+    color: var(--color-text-primary);
+    font-weight: 600;
+    font-size: var(--text-base);
+    text-align: center;
+}
+
+.comparison-more > summary::-webkit-details-marker { display: none; }
+
+/* A chevron drawn with borders: it points down when closed, up when open. */
+.comparison-more > summary::after {
+    content: "";
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin-top: -3px;
+    border-right: 2px solid var(--color-eustress-green);
+    border-bottom: 2px solid var(--color-eustress-green);
+    transform: rotate(45deg);
+}
+
+.comparison-more[open] > summary::after {
+    margin-top: 3px;
+    transform: rotate(225deg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .comparison-more > summary,
+    .comparison-more > summary::after {
+        transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+}
+
+.comparison-more > summary:hover {
+    border-color: rgba(60, 186, 84, 0.5);
+}
+
+.comparison-more > summary:focus-visible {
+    outline: 2px solid var(--color-eustress-green);
+    outline-offset: 3px;
+}
+
+.comparison-more[open] > summary {
+    margin-bottom: var(--space-md);
+}
+
+/* ------------------------------------------------------------------------
+   The proof and the invitation
+   ------------------------------------------------------------------------ */
+
+.proof-section .section-tag {
+    text-transform: uppercase;
+}
+
+.proof-points {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0.4rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.proof-points li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    font-size: 1.02rem;
+    line-height: 1.55;
+    color: var(--color-text-secondary);
+}
+
+.proof-points strong {
+    color: var(--color-text-primary);
+}
+
+.proof-points .feature-check {
+    flex: none;
+    margin-top: 0.1em;
+}
+
+/* ------------------------------------------------------------------------
+   Closing band: the same treatment as the hero
+   A dark horizon grid with a green horizon line and a wireframe globe at the
+   right. A CSS background, so nothing is announced. The centre of the picture
+   is empty and the scrim keeps the text on it readable.
+   ------------------------------------------------------------------------ */
+
+.cta-industrial.cta-horizon {
+    background-color: #0a0a12;
+    background-image:
+        radial-gradient(ellipse at 50% 46%,
+            rgba(10, 10, 18, 0.60) 0%,
+            rgba(10, 10, 18, 0) 72%),
+        linear-gradient(180deg,
+            rgba(10, 10, 18, 0.55) 0%,
+            rgba(10, 10, 18, 0.20) 50%,
+            rgba(10, 10, 18, 0.45) 100%),
+        url("/assets/home/cta-horizon.webp");
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: right 80%;
+}
+
+/* Text sits on a picture here, so the muted grey steps up one level. */
+.cta-horizon .cta-subtext,
+.cta-horizon .cta-feature {
+    color: var(--color-text-secondary);
+}
+
+@media (max-width: 768px) {
+    .cta-industrial.cta-horizon {
+        background-image:
+            linear-gradient(180deg,
+                rgba(10, 10, 18, 0.80) 0%,
+                rgba(10, 10, 18, 0.72) 55%,
+                rgba(10, 10, 18, 0.82) 100%),
+            url("/assets/home/cta-horizon.webp");
+        background-position: 72% 80%;
+    }
+}

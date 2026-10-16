@@ -65,6 +65,9 @@ use eustress_common::play_session::{
 use eustress_play_runtime::material_registry::{register_space_materials, MaterialRegistry};
 
 use super::net_replica::SceneKeys;
+use super::join_notice;
+use eustress_networking::session::EndSession;
+use eustress_play_runtime::screen_notice::{Notice, ScreenNotice};
 use eustress_common::terrain::disk::hydrate_terrain_from_disk;
 use eustress_common::terrain::layer_instances::{
     read_layer_instances, spawn_layer_instances, TerrainFlattenPad, TerrainMaterialFill, TerrainNoise, TerrainScatter,
@@ -291,6 +294,8 @@ fn open_requested_space(
     old_layers: Query<Entity, TerrainLayerFilter>,
     live: Option<Res<super::live_world::LiveWorld>>,
     join: Option<Res<super::net_play::JoinTarget>>,
+    mut screen: ResMut<ScreenNotice>,
+    mut ends: MessageWriter<EndSession>,
 ) {
     let Some(request) = requests.read().last().cloned() else { return };
     for e in &existing {
@@ -301,14 +306,30 @@ fn open_requested_space(
     for e in &old_layers {
         commands.entity(e).try_despawn();
     }
+    let network = live.is_some();
     let source = match live {
         Some(_) => PartSource::Tree { player_name: join.as_deref().map_or("Player", |j| j.name.as_str()) },
         None => PartSource::Files,
     };
     let parts =
         open_space_at(&request.root, source, &mut commands, &mut meshes, &mut materials, &mut open, &mut terrain);
-    if let Some(parts) = parts {
-        opened.write(SpaceOpened { root: request.root, parts });
+    match parts {
+        Some(parts) => {
+            opened.write(SpaceOpened { root: request.root, parts });
+        }
+        // A world that was sent but cannot be read. Nothing else sends
+        // `SpaceOpened` for it, so the avatar would wait on it forever and the
+        // host would keep this player in Downloading. Say why, and leave the
+        // session so the host lets go (C2).
+        None if network => {
+            let reason = "the Space could not be read; its files may be incomplete or damaged";
+            let n = join_notice::world_failed(reason);
+            screen.show(Notice { title: n.title, detail: n.detail, hint: n.hint });
+            if join.is_some() {
+                ends.write(EndSession { reason: reason.to_string() });
+            }
+        }
+        None => {}
     }
 }
 

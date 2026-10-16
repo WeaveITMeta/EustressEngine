@@ -1,7 +1,7 @@
 //! TOML-driven theme engine.
 //!
 //! A theme is a flat map of design-token → color/length, authored as a
-//! `*.toml` file. Two built-ins (`classic`, `modern`) ship compiled into the
+//! `*.toml` file. Two built-ins (`classic`, `voltec`) ship compiled into the
 //! binary via `include_str!` (they double as copy-me templates); any number of
 //! user themes are scanned from `%LOCALAPPDATA%/Eustress/Themes/` — that folder
 //! IS the v1 "marketplace": drop a `.toml` in, rescan, it appears.
@@ -113,7 +113,7 @@ pub const KNOWN_TOKENS: &[&str] = &[
 
 /// A parsed, validated theme palette. `tokens` holds only *known* token names
 /// (unknown ones stripped during validation); missing tokens are filled at
-/// apply-time from the Modern base palette, so a theme author only specifies
+/// apply-time from the Voltec base palette, so a theme author only specifies
 /// what they want to change.
 #[derive(Debug, Clone)]
 pub struct ThemePalette {
@@ -165,7 +165,7 @@ pub fn parse_theme_toml(text: &str, builtin: bool) -> Result<ThemePalette, Strin
             continue;
         }
         // Sanity-check the value now so a malformed hex/length is dropped at
-        // parse time (falls back to Modern base) rather than silently applied.
+        // parse time (falls back to Voltec base) rather than silently applied.
         let is_len = k.starts_with("radius-") || k.ends_with("-blur") || k == "backdrop-blur-lg";
         let ok = if is_len {
             parse_len(&v).is_some()
@@ -237,13 +237,13 @@ pub fn parse_len(s: &str) -> Option<f32> {
     t.trim().parse::<f32>().ok()
 }
 
-/// The two compiled-in palettes. These are authoritative for Classic/Modern
+/// The two compiled-in palettes. These are authoritative for Classic/Voltec
 /// and double as the copy-me templates users clone into the Themes folder.
 pub fn load_builtin_themes() -> Vec<ThemePalette> {
     let mut out = Vec::new();
     for (text, id) in [
         (include_str!("../themes/classic.toml"), "classic"),
-        (include_str!("../themes/modern.toml"), "modern"),
+        (include_str!("../themes/voltec.toml"), "voltec"),
     ] {
         match parse_theme_toml(text, true) {
             Ok(p) => out.push(p),
@@ -333,6 +333,13 @@ impl ThemeRegistry {
     }
 }
 
+/// The id a saved choice resolves to now. Voltec replaced Modern, so a saved
+/// "modern" (an `active_theme_id` written before, or `theme_modern = true`)
+/// opens Voltec. Every other id is its own.
+pub fn migrate_theme_id(id: &str) -> &str {
+    if id == "modern" { "voltec" } else { id }
+}
+
 /// Loads the theme registry at startup and resolves the initial active theme
 /// from `EditorSettings` (with a `theme_modern` back-compat migration).
 pub struct StudioThemePlugin;
@@ -349,13 +356,15 @@ fn init_theme_registry(
     settings: Option<Res<crate::editor_settings::EditorSettings>>,
 ) {
     // Resolve initial active id: explicit active_theme_id wins; else migrate
-    // the legacy theme_modern bool (true→modern, false→classic).
+    // the legacy theme_modern bool (true→voltec, false→classic). A saved
+    // "modern" opens Voltec, which replaced it; this runs before the reload
+    // below, which would otherwise fall back to the first theme.
     if let Some(settings) = settings {
         registry.active_id = match settings.active_theme_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
+            Some(id) if !id.is_empty() => migrate_theme_id(id).to_string(),
             _ => {
                 if settings.theme_modern {
-                    "modern".to_string()
+                    "voltec".to_string()
                 } else {
                     "classic".to_string()
                 }
@@ -394,7 +403,7 @@ mod tests {
     #[test]
     fn builtins_parse_and_are_complete() {
         let themes = load_builtin_themes();
-        assert_eq!(themes.len(), 2, "classic + modern must both parse");
+        assert_eq!(themes.len(), 2, "classic + voltec must both parse");
         for t in &themes {
             // A built-in must specify EVERY known token (it's the base others
             // fall back to; incompleteness would leak the compiled-in default).
@@ -406,6 +415,70 @@ mod tests {
                     tok
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_saved_modern_choice_opens_voltec() {
+        assert_eq!(migrate_theme_id("modern"), "voltec");
+        assert_eq!(migrate_theme_id("voltec"), "voltec");
+        assert_eq!(migrate_theme_id("classic"), "classic");
+        assert_eq!(migrate_theme_id("my-own-theme"), "my-own-theme");
+    }
+
+    /// The Slint presets are what a theme falls back to and what a click
+    /// applies at once, so they must say what the TOML files say.
+    #[test]
+    fn the_slint_presets_equal_the_toml_palettes() {
+        const SLINT: &str = include_str!("../ui/slint/theme.slint");
+        for theme in load_builtin_themes() {
+            let head = format!("out property <ThemeData> preset-{}: {{", theme.id);
+            let at = SLINT.find(&head).unwrap_or_else(|| panic!("theme.slint has no preset-{}", theme.id));
+            let body = &SLINT[at + head.len()..];
+            let body = &body[..body.find("};").expect("preset block ends")];
+            let mut preset: HashMap<&str, &str> = HashMap::new();
+            for line in body.lines() {
+                if let Some((k, v)) = line.trim().trim_end_matches(',').split_once(':') {
+                    preset.insert(k.trim(), v.trim());
+                }
+            }
+            for tok in KNOWN_TOKENS {
+                let want = theme.tokens.get(*tok).map(String::as_str);
+                assert_eq!(preset.get(tok).copied(), want, "preset-{} and {}.toml disagree on '{}'", theme.id, theme.id, tok);
+            }
+            assert_eq!(preset.len(), KNOWN_TOKENS.len(), "preset-{} has tokens the TOML does not", theme.id);
+        }
+    }
+
+    /// WCAG contrast of two opaque colours.
+    fn contrast(a: [u8; 4], b: [u8; 4]) -> f64 {
+        let lum = |c: [u8; 4]| {
+            let l = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * l(c[0]) + 0.7152 * l(c[1]) + 0.0722 * l(c[2])
+        };
+        let (hi, lo) = if lum(a) > lum(b) { (lum(a), lum(b)) } else { (lum(b), lum(a)) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Voltec's text is readable where it is drawn, and its primary buttons
+    /// (which hard-code a white label) are readable too.
+    #[test]
+    fn voltec_is_readable() {
+        let voltec = load_builtin_themes().into_iter().find(|t| t.id == "voltec").expect("voltec is built in");
+        let c = |k: &str| parse_hex(&voltec.tokens[k]).unwrap_or_else(|| panic!("{k} is a colour"));
+        let white = [255, 255, 255, 255];
+        for surface in ["background-primary", "background-secondary", "background-tertiary", "panel-background", "header-background", "dialog-background", "input-background", "ribbon-background"] {
+            for (text, min) in [("text-primary", 7.0), ("text-secondary", 4.5), ("text-accent", 4.5), ("text-error", 4.5), ("text-warning", 4.5), ("text-success", 4.5)] {
+                let r = contrast(c(text), c(surface));
+                assert!(r >= min, "{text} on {surface} is {r:.2}, under {min}");
+            }
+        }
+        for fill in ["button-primary", "button-primary-hover", "accent-eustress"] {
+            let r = contrast(white, c(fill));
+            assert!(r >= 4.5, "a white label on {fill} is {r:.2}, under 4.5");
         }
     }
 

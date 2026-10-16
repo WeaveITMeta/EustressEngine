@@ -42,6 +42,77 @@ pub const KNOWN_ICON_IDS: &[&str] = &[
 pub const KNOWN_LAYOUT_PRESETS: &[&str] =
     &["Default", "Scripting", "Building", "Minimal", "Wide Panels"];
 
+/// Dock zones a layout table may name, in the order a parsed table lists them.
+/// `left`, `right` and `bottom` are drawn today; the rest are accepted so a
+/// table can be written ahead of the dock host that places them (the layout
+/// resolver reports the zones it cannot place yet). `center` is the viewport
+/// and is never authored.
+pub const LAYOUT_ZONE_KEYS: &[&str] = &[
+    "left", "right", "bottom", "top", "inner_left", "inner_right", "upper_bottom",
+    "bottom_left", "bottom_right", "right_top", "right_bottom", "left_top", "left_bottom",
+];
+
+/// Panel ids a layout table can place or hide by name. A tool set is the panel
+/// `toolset:<id>` for a `[[toolsets]]` entry of the same mode.
+pub const KNOWN_PANEL_IDS: &[&str] = &[
+    "explorer", "assets", "universe", "toolbox", "terrain", "properties", "history",
+    "soul", "workshop", "script_editor", "output", "preview", "inspector",
+];
+
+/// Prefix of a tool-set panel id (`toolset:water-pipe-gen`).
+pub const TOOLSET_PANEL_PREFIX: &str = "toolset:";
+
+/// An authored panel layout: which panels sit in which dock zone and in what
+/// tab order, which one leads each zone, how big each zone is, and which
+/// panels the layout hides. A mode carries one (`[layout]`) and each
+/// discipline may carry its own (`[[submode_layouts]]`); a discipline's table
+/// REPLACES the mode's whole, with no merge rules. The user's own moves are
+/// kept separately by the layout system and applied on top.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayoutTable {
+    /// `(zone, panel ids in tab order)` in `LAYOUT_ZONE_KEYS` order; a zone
+    /// with no panels is omitted.
+    pub zones: Vec<(String, Vec<String>)>,
+    /// Zone size in logical px: the width of a side zone, the height of a
+    /// bottom zone.
+    pub sizes: std::collections::HashMap<String, f32>,
+    /// The panel shown first in a zone; absent = the zone's first tab.
+    pub active: std::collections::HashMap<String, String>,
+    /// Panels this layout hides.
+    pub hidden: Vec<String>,
+}
+
+impl LayoutTable {
+    /// The panel ids in `zone`, in tab order.
+    pub fn zone(&self, zone: &str) -> Option<&[String]> {
+        self.zones
+            .iter()
+            .find(|(z, _)| z == zone)
+            .map(|(_, tabs)| tabs.as_slice())
+    }
+}
+
+/// A tabbed tool panel the user can dock: a named list of tool ids. Dockable as
+/// the panel `toolset:<id>`; `zone` is where it opens when a layout does not
+/// place it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolsetSpec {
+    pub id: String,
+    pub name: String,
+    pub zone: String,
+    pub tools: Vec<String>,
+}
+
+/// Written once each time the active (mode, discipline) pair changes: at the
+/// startup restore, on a Modes-dropdown pick, and on any other switch. The
+/// layout system listens to swap in the new mode's table. `discipline` is
+/// empty for a mode without submodes.
+#[derive(Event, Message, Debug, Clone, PartialEq, Eq)]
+pub struct ModeChanged {
+    pub mode: String,
+    pub discipline: String,
+}
+
 /// One entry in a mode's secondary "submodes" menu (e.g. Military's six
 /// service branches, Justice's Civil/Criminal/Judge). Selecting a submode
 /// activates the PARENT mode and records which submode is active. A submode
@@ -132,10 +203,32 @@ pub struct ModeManifest {
     /// A submode absent from this map falls back to `custom_tabs` — see
     /// [`ModeManifest::effective_custom_tabs`].
     pub submode_tabs: std::collections::HashMap<String, Vec<CustomTab>>,
+    /// The mode's authored panel layout (`[layout]` zones, sizes, active and
+    /// hidden). `None` = none authored; fall back to `layout_preset`.
+    pub layout_table: Option<LayoutTable>,
+    /// Per-discipline layout tables, keyed by submode id. A discipline's table
+    /// replaces `layout_table` whole — see [`ModeManifest::effective_layout`].
+    pub submode_layouts: std::collections::HashMap<String, LayoutTable>,
+    /// Tool sets this mode offers as dockable panels (`toolset:<id>`).
+    pub toolsets: Vec<ToolsetSpec>,
     pub builtin: bool,
 }
 
 impl ModeManifest {
+    /// The layout table to apply for the active discipline: that discipline's
+    /// own table when it has one, else the mode's. `None` = nothing authored
+    /// at either level; fall back to `layout_preset`. A discipline table
+    /// replaces the mode table whole (no merge), the same way
+    /// [`ModeManifest::effective_custom_tabs`] replaces tabs.
+    pub fn effective_layout(&self, submode_id: &str) -> Option<&LayoutTable> {
+        if !submode_id.is_empty() {
+            if let Some(t) = self.submode_layouts.get(submode_id) {
+                return Some(t);
+            }
+        }
+        self.layout_table.as_ref()
+    }
+
     /// The custom-tab set to actually render given the currently active
     /// submode: that submode's own override when one exists, else the
     /// parent mode's `custom_tabs`. `submode_id` empty (no submode active,
@@ -167,6 +260,10 @@ struct ModeFile {
     tabs: Vec<TabSection>,
     #[serde(default)]
     submode_tabs: Vec<SubmodeTabSection>,
+    #[serde(default)]
+    submode_layouts: Vec<SubmodeLayoutSection>,
+    #[serde(default)]
+    toolsets: Vec<ToolsetSection>,
 }
 
 #[derive(Deserialize)]
@@ -196,6 +293,44 @@ struct RibbonSection {
 struct LayoutSection {
     #[serde(default)]
     preset: Option<String>,
+    #[serde(default)]
+    hidden: Vec<String>,
+    /// `[layout.zones]`: zone name -> panel ids in tab order.
+    #[serde(default)]
+    zones: std::collections::BTreeMap<String, Vec<String>>,
+    /// `[layout.sizes]`: zone name -> logical px.
+    #[serde(default)]
+    sizes: std::collections::BTreeMap<String, f32>,
+    /// `[layout.active]`: zone name -> the panel shown first.
+    #[serde(default)]
+    active: std::collections::BTreeMap<String, String>,
+}
+
+/// One `[[submode_layouts]]` entry: the same four keys as `[layout]`, for the
+/// discipline named by `submode`.
+#[derive(Deserialize)]
+struct SubmodeLayoutSection {
+    submode: String,
+    #[serde(default)]
+    hidden: Vec<String>,
+    #[serde(default)]
+    zones: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    sizes: std::collections::BTreeMap<String, f32>,
+    #[serde(default)]
+    active: std::collections::BTreeMap<String, String>,
+}
+
+/// One `[[toolsets]]` entry.
+#[derive(Deserialize)]
+struct ToolsetSection {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    zone: Option<String>,
+    #[serde(default)]
+    tools: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -452,6 +587,70 @@ pub fn parse_mode_toml(text: &str, builtin: bool) -> Result<ModeManifest, String
         submodes.push(SubmodeMeta { id: s.id, name: s.name, required_role, color, icon });
     }
 
+    // Tool sets, then the layout tables that place them. Lenient like the rest
+    // of the manifest: a bad entry warns and is dropped, never fatal. The
+    // built-ins are held to a stricter standard by a test.
+    let mut toolsets: Vec<ToolsetSpec> = Vec::new();
+    for t in f.toolsets {
+        let id = t.id.trim().to_string();
+        if id.is_empty() {
+            warn!("mode '{}': toolset with empty id skipped", f.mode.id);
+            continue;
+        }
+        if toolsets.iter().any(|x| x.id == id) {
+            warn!("mode '{}': duplicate toolset id '{}' skipped", f.mode.id, id);
+            continue;
+        }
+        let tools: Vec<String> = t
+            .tools
+            .iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if tools.is_empty() {
+            warn!("mode '{}': toolset '{}' has no tools — skipped", f.mode.id, id);
+            continue;
+        }
+        let zone = match t.zone {
+            Some(z) if LAYOUT_ZONE_KEYS.contains(&z.as_str()) => z,
+            Some(z) => {
+                warn!("mode '{}': toolset '{}' unknown zone '{}' — using 'left'", f.mode.id, id, z);
+                "left".to_string()
+            }
+            None => "left".to_string(),
+        };
+        let name = if t.name.trim().is_empty() { id.clone() } else { t.name.trim().to_string() };
+        toolsets.push(ToolsetSpec { id, name, zone, tools });
+    }
+
+    let layout_table = build_layout_table(
+        &f.mode.id,
+        "[layout]",
+        &f.layout.hidden,
+        &f.layout.zones,
+        &f.layout.sizes,
+        &f.layout.active,
+        &toolsets,
+    );
+    let mut submode_layouts: std::collections::HashMap<String, LayoutTable> =
+        std::collections::HashMap::new();
+    for l in f.submode_layouts {
+        if !submodes.iter().any(|sm| sm.id == l.submode) {
+            warn!("mode '{}': submode_layouts for unknown submode '{}' skipped", f.mode.id, l.submode);
+            continue;
+        }
+        if submode_layouts.contains_key(&l.submode) {
+            warn!("mode '{}': duplicate submode_layouts for '{}' skipped", f.mode.id, l.submode);
+            continue;
+        }
+        let label = format!("[[submode_layouts]] '{}'", l.submode);
+        if let Some(t) =
+            build_layout_table(&f.mode.id, &label, &l.hidden, &l.zones, &l.sizes, &l.active, &toolsets)
+        {
+            submode_layouts.insert(l.submode, t);
+        }
+    }
+
     let required_role = f.mode.required_role.filter(|r| !r.trim().is_empty());
 
     Ok(ModeManifest {
@@ -468,8 +667,93 @@ pub fn parse_mode_toml(text: &str, builtin: bool) -> Result<ModeManifest, String
         submodes,
         custom_tabs,
         submode_tabs,
+        layout_table,
+        submode_layouts,
+        toolsets,
         builtin,
     })
+}
+
+/// Turn one raw layout section into a [`LayoutTable`]. Zones come out in
+/// `LAYOUT_ZONE_KEYS` order whatever order the file wrote them in; unknown
+/// zones, empty and repeated panel ids, non-positive sizes and an `active`
+/// that is not one of its zone's tabs each warn and are dropped. Returns
+/// `None` when nothing is authored, so the preset stays in force.
+fn build_layout_table(
+    mode_id: &str,
+    label: &str,
+    hidden: &[String],
+    zones: &std::collections::BTreeMap<String, Vec<String>>,
+    sizes: &std::collections::BTreeMap<String, f32>,
+    active: &std::collections::BTreeMap<String, String>,
+    toolsets: &[ToolsetSpec],
+) -> Option<LayoutTable> {
+    for z in zones.keys().chain(sizes.keys()).chain(active.keys()) {
+        if !LAYOUT_ZONE_KEYS.contains(&z.as_str()) {
+            warn!("mode '{}': {} unknown zone '{}' — ignored", mode_id, label, z);
+        }
+    }
+
+    let mut placed: HashSet<String> = HashSet::new();
+    let mut out_zones: Vec<(String, Vec<String>)> = Vec::new();
+    for key in LAYOUT_ZONE_KEYS {
+        let Some(ids) = zones.get(*key) else { continue };
+        let mut tabs: Vec<String> = Vec::new();
+        for id in ids.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !placed.insert(id.to_string()) {
+                warn!("mode '{}': {} panel '{}' placed twice — keeping the first", mode_id, label, id);
+                continue;
+            }
+            if let Some(ts) = id.strip_prefix(TOOLSET_PANEL_PREFIX) {
+                if !toolsets.iter().any(|t| t.id == ts) {
+                    warn!("mode '{}': {} names undeclared toolset '{}'", mode_id, label, ts);
+                }
+            }
+            tabs.push(id.to_string());
+        }
+        if !tabs.is_empty() {
+            out_zones.push(((*key).to_string(), tabs));
+        }
+    }
+
+    let out_hidden: Vec<String> = hidden
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for h in &out_hidden {
+        if placed.contains(h) {
+            warn!("mode '{}': {} panel '{}' is both placed and hidden", mode_id, label, h);
+        }
+    }
+
+    let mut out_sizes: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+    for (z, v) in sizes {
+        if !LAYOUT_ZONE_KEYS.contains(&z.as_str()) {
+            continue;
+        }
+        if v.is_finite() && *v > 0.0 {
+            out_sizes.insert(z.clone(), *v);
+        } else {
+            warn!("mode '{}': {} size for '{}' must be positive — ignored", mode_id, label, z);
+        }
+    }
+
+    let mut out_active: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (z, a) in active {
+        let a = a.trim();
+        match out_zones.iter().find(|zt| zt.0 == *z) {
+            Some((_, tabs)) if tabs.iter().any(|t| t == a) => {
+                out_active.insert(z.clone(), a.to_string());
+            }
+            _ => warn!("mode '{}': {} active '{}' is not a tab of zone '{}' — ignored", mode_id, label, a, z),
+        }
+    }
+
+    if out_zones.is_empty() && out_hidden.is_empty() && out_sizes.is_empty() && out_active.is_empty() {
+        return None;
+    }
+    Some(LayoutTable { zones: out_zones, sizes: out_sizes, active: out_active, hidden: out_hidden })
 }
 
 /// The compiled-in modes, in display order (Rust source order = dropdown
@@ -622,7 +906,42 @@ impl Plugin for StudioModesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ModeRegistry>()
             .init_resource::<UserRoles>()
-            .add_systems(Startup, (init_user_roles, init_mode_registry).chain());
+            .add_message::<ModeChanged>()
+            .add_systems(Startup, (init_user_roles, init_mode_registry).chain())
+            .add_systems(Update, emit_mode_changed);
+    }
+}
+
+/// True (and remembers the pair) when `(mode, discipline)` differs from the
+/// last pair reported. Kept apart from the system so the once-per-change rule
+/// can be tested without a Bevy `App`.
+fn note_mode_change(last: &mut Option<(String, String)>, mode: &str, discipline: &str) -> bool {
+    if let Some((m, d)) = last.as_ref() {
+        if m == mode && d == discipline {
+            return false;
+        }
+    }
+    *last = Some((mode.to_string(), discipline.to_string()));
+    true
+}
+
+/// Watches the registry and writes [`ModeChanged`] once per actual change. One
+/// detector covers every way the mode can move (the startup restore, the Modes
+/// dropdown, anything added later), so no caller has to remember to send the
+/// message. The first pass after the Startup load reports the restored mode.
+fn emit_mode_changed(
+    registry: Res<ModeRegistry>,
+    mut last: Local<Option<(String, String)>>,
+    mut writer: MessageWriter<ModeChanged>,
+) {
+    if registry.modes.is_empty() {
+        return; // the Startup load has not run yet
+    }
+    if note_mode_change(&mut last, &registry.active_id, &registry.active_submode_id) {
+        writer.write(ModeChanged {
+            mode: registry.active_id.clone(),
+            discipline: registry.active_submode_id.clone(),
+        });
     }
 }
 
@@ -1031,6 +1350,237 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn layout_tables_parse() {
+        let text = r#"
+[mode]
+id = "t"
+name = "T"
+
+[ribbon]
+tabs = ["home"]
+
+[layout]
+preset = "Default"
+hidden = ["history", " "]
+
+[layout.zones]
+bottom = ["output"]
+left = ["explorer", "toolset:tools-a", "explorer", "bogus_panel"]
+sideways = ["explorer"]
+inner_left = ["toolset:nope"]
+
+[layout.sizes]
+left = 300
+bottom = -5
+
+[layout.active]
+left = "toolset:tools-a"
+bottom = "missing"
+
+[[toolsets]]
+id = "tools-a"
+name = "Tools A"
+zone = "inner_left"
+tools = ["data:chart", " "]
+
+[[toolsets]]
+id = "tools-a"
+tools = ["data:grid"]
+
+[[toolsets]]
+id = "empty"
+tools = []
+
+[[submodes]]
+id = "d1"
+name = "D1"
+
+[[submode_layouts]]
+submode = "d1"
+[submode_layouts.zones]
+right = ["properties"]
+[submode_layouts.sizes]
+right = 320.5
+
+[[submode_layouts]]
+submode = "ghost"
+[submode_layouts.zones]
+right = ["properties"]
+"#;
+        let m = parse_mode_toml(text, false).unwrap();
+        assert_eq!(m.layout_preset, "Default", "the preset stays as the fallback");
+
+        let t = m.layout_table.as_ref().expect("mode table parsed");
+        let order: Vec<&str> = t.zones.iter().map(|(z, _)| z.as_str()).collect();
+        assert_eq!(order, vec!["left", "bottom", "inner_left"], "canonical zone order; unknown zone dropped");
+        assert_eq!(
+            t.zone("left").unwrap(),
+            ["explorer", "toolset:tools-a", "bogus_panel"],
+            "a repeated panel keeps its first place; an unknown id is kept for the resolver to report"
+        );
+        assert_eq!(t.hidden, vec!["history"], "blank hidden ids dropped");
+        assert_eq!(t.sizes.get("left"), Some(&300.0), "an integer size reads as a number");
+        assert!(!t.sizes.contains_key("bottom"), "a non-positive size is dropped");
+        assert_eq!(t.active.get("left").map(String::as_str), Some("toolset:tools-a"));
+        assert!(!t.active.contains_key("bottom"), "an active panel that is not a tab is dropped");
+
+        assert_eq!(m.toolsets.len(), 1, "duplicate and empty toolsets are skipped");
+        assert_eq!(m.toolsets[0].id, "tools-a");
+        assert_eq!(m.toolsets[0].name, "Tools A");
+        assert_eq!(m.toolsets[0].zone, "inner_left");
+        assert_eq!(m.toolsets[0].tools, vec!["data:chart"]);
+
+        assert_eq!(m.submode_layouts.len(), 1, "a layout for an undeclared submode is skipped");
+        let d1 = m.effective_layout("d1").expect("discipline table");
+        assert_eq!(d1.zone("right").unwrap(), ["properties"]);
+        assert_eq!(d1.sizes.get("right"), Some(&320.5));
+        assert!(d1.zone("left").is_none(), "a discipline table replaces the mode table whole");
+        assert_eq!(m.effective_layout("").unwrap(), t, "no discipline: the mode table");
+        assert_eq!(m.effective_layout("other").unwrap(), t, "a discipline without a table: the mode table");
+    }
+
+    #[test]
+    fn no_layout_table_means_the_preset_decides() {
+        let m = parse_mode_toml("[mode]\nid = \"t\"\nname = \"T\"\n[ribbon]\ntabs = [\"home\"]\n[layout]\npreset = \"Minimal\"\n", false).unwrap();
+        assert_eq!(m.layout_preset, "Minimal");
+        assert!(m.layout_table.is_none());
+        assert!(m.effective_layout("anything").is_none());
+    }
+
+    #[test]
+    fn mode_change_reported_once_per_change() {
+        let mut last = None;
+        assert!(note_mode_change(&mut last, "civil", "water-resources"), "first pair reports");
+        assert!(!note_mode_change(&mut last, "civil", "water-resources"), "the same pair reports nothing");
+        assert!(note_mode_change(&mut last, "civil", "structural"), "a new discipline reports");
+        assert!(note_mode_change(&mut last, "gaming", ""), "a mode without submodes reports");
+        assert!(!note_mode_change(&mut last, "gaming", ""));
+    }
+
+    #[test]
+    fn builtin_layout_tables_are_valid() {
+        let modes = load_builtin_modes();
+        let mut tables = 0;
+        for m in &modes {
+            let mut all: Vec<(String, &LayoutTable)> = Vec::new();
+            if let Some(t) = &m.layout_table {
+                all.push((m.id.clone(), t));
+            }
+            for (sid, t) in &m.submode_layouts {
+                assert!(
+                    m.submodes.iter().any(|s| &s.id == sid),
+                    "{}: layout for unknown submode '{sid}'",
+                    m.id
+                );
+                all.push((format!("{}/{sid}", m.id), t));
+            }
+            for (label, t) in all {
+                tables += 1;
+                let mut seen: HashSet<&str> = HashSet::new();
+                for (zone, tabs) in &t.zones {
+                    assert!(LAYOUT_ZONE_KEYS.contains(&zone.as_str()), "{label}: unknown zone '{zone}'");
+                    for p in tabs {
+                        assert!(seen.insert(p.as_str()), "{label}: panel '{p}' placed twice");
+                        match p.strip_prefix(TOOLSET_PANEL_PREFIX) {
+                            Some(ts) => assert!(
+                                m.toolsets.iter().any(|x| x.id == ts),
+                                "{label}: toolset '{ts}' is not declared in {}",
+                                m.id
+                            ),
+                            None => assert!(
+                                KNOWN_PANEL_IDS.contains(&p.as_str()),
+                                "{label}: unknown panel id '{p}'"
+                            ),
+                        }
+                    }
+                }
+                for h in &t.hidden {
+                    assert!(!seen.contains(h.as_str()), "{label}: panel '{h}' is both placed and hidden");
+                }
+            }
+            for ts in &m.toolsets {
+                for tool in &ts.tools {
+                    assert!(
+                        crate::tool_metadata::tool_meta(tool).is_some(),
+                        "{}: toolset '{}' lists '{tool}', which has no metadata",
+                        m.id, ts.id
+                    );
+                }
+            }
+        }
+        assert!(tables > 0, "no built-in mode carries a layout table");
+
+        // McKale's example: Water Resources reshapes the layout and offers a
+        // dockable Water Pipe Gen tool set.
+        let civil = modes.iter().find(|m| m.id == "civil").unwrap();
+        let wr = civil.effective_layout("water-resources").expect("water-resources has its own table");
+        assert_ne!(Some(wr), civil.layout_table.as_ref(), "the discipline table is its own, not the mode's");
+        assert_eq!(wr.active.get("left").map(String::as_str), Some("terrain"));
+        let pipes = civil.toolsets.iter().find(|t| t.id == "water-pipe-gen").expect("Water Pipe Gen toolset");
+        assert_eq!(pipes.name, "Water Pipe Gen");
+        assert_eq!(pipes.tools.len(), 3);
+
+        // The AI Corpus tool set is the one whose every button really works.
+        let ai = modes.iter().find(|m| m.id == "ai").unwrap();
+        let corpus = ai.toolsets.iter().find(|t| t.id == "corpus").expect("corpus toolset");
+        assert_eq!(corpus.tools.len(), 10);
+        for tool in &corpus.tools {
+            let meta = crate::tool_metadata::tool_meta(tool).unwrap();
+            assert!(meta.wired, "corpus tool '{tool}' must stay wired");
+        }
+        assert_eq!(ai.effective_layout("training").unwrap().sizes.get("bottom"), Some(&300.0));
+        assert_eq!(
+            ai.effective_layout("acquisition").unwrap().sizes.get("bottom"),
+            Some(&200.0),
+            "a discipline with no table uses the mode's"
+        );
+    }
+
+    #[test]
+    fn marketing_send_tools_stay_dream_until_the_send_stack_lands() {
+        // Campaign sending, contact discovery and postal mail move money and
+        // other people's inboxes. None of these tools may dispatch or charge
+        // before the send stack exists. Wiring one is a deliberate edit to
+        // this test, reviewed against the anti-spam rules, never a side
+        // effect of a manifest change.
+        const SEND_TOOLS: &[&str] = &[
+            "mktg:campaign_composer",
+            "mktg:template_library",
+            "mktg:approval_queue",
+            "mktg:schedule_send",
+            "mktg:cancel_scheduled",
+            "mktg:postal_compose",
+            "mktg:postal_send",
+            "mktg:audience_definition",
+            "mktg:source_provenance",
+            "mktg:discover_contacts",
+            "mktg:audience_build",
+            "mktg:lookalike_finder",
+            "mktg:verify_addresses",
+            "mktg:consent_check",
+            "mktg:sender_identity",
+            "mktg:warmup_schedule",
+            "mktg:rate_limits",
+            "mktg:suppression_list",
+            "mktg:unsubscribe_handling",
+            "mktg:postal_address_footer",
+        ];
+        let modes = load_builtin_modes();
+        let business = modes.iter().find(|m| m.id == "business").unwrap();
+        let tabs = business.effective_custom_tabs("marketing");
+        for id in SEND_TOOLS {
+            assert!(
+                tabs.iter().any(|t| t.sections.iter().any(|sec| sec.tools.iter().any(|x| x.as_str() == *id))),
+                "{id} is not in the marketing discipline"
+            );
+            let meta = crate::tool_metadata::tool_meta(id)
+                .unwrap_or_else(|| panic!("{id} has no generated metadata"));
+            assert!(!meta.wired, "{id} is wired; the send stack must land before a send tool dispatches");
+            assert!(!meta.premium, "{id} is premium; the send stack must land before a send tool charges");
+        }
+    }
+
     #[test]
     fn ai_mode_shape() {
         // AI sits between Legal and Civil in the dropdown — source order in

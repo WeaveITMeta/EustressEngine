@@ -21,6 +21,8 @@
 //     GET  /api/guest/allowance                                 -> what is left
 // =============================================================================
 
+import { simWithLegalLock } from './moderation.mjs';
+
 export const MAX_SIMS = 3;
 export const DAILY_SECONDS = 60 * 60;
 export const LEASE_MAX_SECONDS = 60 * 60;
@@ -371,7 +373,7 @@ export async function handleGuest(request, env, cors, deps) {
     if (body.character !== 'M' && body.character !== 'F') return json({ error: 'character must be M or F', code: 'bad_request' }, 400, cors);
 
     const raw = await env.SOCIAL.get(`sim:${body.sim_id}`);
-    const sim = raw ? JSON.parse(raw) : null;
+    const sim = raw ? await simWithLegalLock(env, JSON.parse(raw)) : null;
     // A listing that is not public answers like one that does not exist.
     if (!sim || !isListable(sim)) return json({ error: 'Simulation not found' }, 404, cors);
     if (sim.moderation?.rating !== 'all_ages') {

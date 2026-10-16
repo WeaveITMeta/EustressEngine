@@ -41,7 +41,6 @@ pub fn rebuild_collider_on_size_change(
         (Changed<eustress_common::classes::BasePart>, With<avian3d::prelude::Collider>),
     >,
 ) {
-    use avian3d::prelude::Collider;
     use eustress_common::classes::PartType;
 
     for (entity, base_part, part_opt, transform, built) in changed.iter() {
@@ -63,13 +62,8 @@ pub fn rebuild_collider_on_size_change(
         // spawning, or a resize would silently change the part's collision
         // size relative to how it loaded.
         let half = eustress_common::part_draw::collider_local_half(safe_size, transform.scale);
-        let collider = match part_opt.map(|p| p.shape) {
-            Some(PartType::Ball) => Collider::sphere(half.x),
-            Some(PartType::Cylinder) | Some(PartType::Cone) => {
-                Collider::cylinder(half.x, half.y * 2.0)
-            }
-            _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
-        };
+        let shape = part_opt.map_or(PartType::Block, |p| p.shape);
+        let collider = eustress_common::part_draw::shape_collider(shape, half * 2.0, transform.scale);
         commands.entity(entity).insert(collider);
     }
 }

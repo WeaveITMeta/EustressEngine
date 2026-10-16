@@ -631,6 +631,10 @@ pub fn process_file_changes(
         // Skip files that were recently written by the engine (prevents hot-reload loops)
         if recently_written.was_recently_written(&event.path) {
             debug!("Skipping hot-reload for recently written file: {:?}", event.path);
+            // Not reloaded into the ECS, but its bytes still reach the tree:
+            // nothing else keeps the tree current for the engine's own disk
+            // writes, and F9's export and the panels' DB-first reads use it.
+            sync_engine_write_into_tree(&event.path);
             continue;
         }
 
@@ -778,6 +782,61 @@ pub fn process_file_changes(
             path: event.path.clone(),
             kind,
         });
+    }
+}
+
+/// A reloaded part's transform in metres, as the loader reads it with
+/// `units_v1`: the position converted from the file's unit, the scale too
+/// when it is a length (`scale_kind::is_length_of`; a multiplier stays a
+/// ratio). With whether the scale is a length.
+fn reloaded_transform(def: &crate::space::instance_loader::InstanceDefinition) -> (crate::space::instance_loader::TransformData, bool) {
+    let scale_is_length = def.asset.as_ref().map_or(true, |asset| {
+        eustress_common::scale_kind::is_length_of(Some(&asset.mesh), asset.scale_kind.as_deref())
+    });
+    #[allow(unused_mut)]
+    let mut data = def.transform.clone();
+    #[cfg(feature = "units_v1")]
+    {
+        let from = def
+            .metadata
+            .unit
+            .as_deref()
+            .and_then(eustress_common::units::Unit::from_symbol)
+            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+        let to = eustress_common::units::ENGINE_NATIVE_UNIT;
+        if from != to {
+            data.position = eustress_common::units::convert_vec3_f32(data.position, from, to);
+            if scale_is_length {
+                data.scale = eustress_common::units::convert_vec3_f32(data.scale, from, to);
+            }
+        }
+    }
+    (data, scale_is_length)
+}
+
+/// An engine write's disk-to-tree half: the file's bytes into the tree, or
+/// its key out when the file is gone. Never a hidden path (`.eustress/`) or
+/// a folder.
+fn sync_engine_write_into_tree(path: &Path) {
+    // Hidden is judged inside the Space only, so a Space kept under a
+    // dot-folder still syncs.
+    let Some(root) = super::active_db::root() else {
+        return;
+    };
+    let Ok(rel) = path.strip_prefix(&root) else {
+        return;
+    };
+    if rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')) || path.is_dir() {
+        return;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            super::active_db::put_tree_file(path, &bytes);
+        }
+        Err(_) if !path.exists() => {
+            super::active_db::delete_tree_file(path);
+        }
+        Err(_) => {}
     }
 }
 
@@ -1005,7 +1064,11 @@ fn handle_file_modified(
                                         // here at reload time too —
                                         // single source of truth lives
                                         // in `instance_loader`.
-                                        let raw: Transform = instance_def.transform.into();
+                                        // In metres, as the loader reads it: the
+                                        // position from the file's unit, the scale
+                                        // too when it is a length (`scale_kind`).
+                                        let (data, scale_is_length) = reloaded_transform(&instance_def);
+                                        let raw: Transform = data.into();
                                         let transform = crate::space::instance_loader::sanitize_transform(raw);
                                         if !raw_transform_is_finite(&raw) {
                                             warn!(
@@ -1071,9 +1134,24 @@ fn handle_file_modified(
                                         // height after a restart). The marker is a
                                         // no-op on non-mesh instances (the
                                         // recompute query requires Mesh3d + BasePart).
-                                        commands
-                                            .entity(entity)
-                                            .insert(crate::space::instance_loader::NeedsMeshSize);
+                                        if scale_is_length {
+                                            // A primitive's or a length mesh's size
+                                            // IS its scale, as at spawn: never its
+                                            // bounds times a render transform that
+                                            // may carry a fold.
+                                            let size = transform.scale;
+                                            commands.entity(entity).queue(move |mut entity: EntityWorldMut| {
+                                                if let Some(mut part) = entity.get_mut::<eustress_common::classes::BasePart>() {
+                                                    part.size = size;
+                                                }
+                                                entity.remove::<crate::space::instance_loader::MeshRatio>();
+                                            });
+                                        } else {
+                                            commands.entity(entity).insert((
+                                                crate::space::instance_loader::NeedsMeshSize,
+                                                crate::space::instance_loader::MeshRatio,
+                                            ));
+                                        }
 
                                         // Gap 4 — mesh hot-swap. Re-resolve the
                                         // Mesh3d handle on a TOML reload so an
@@ -1087,41 +1165,17 @@ fn handle_file_modified(
                                         // keeps its current mesh); the NeedsMeshSize
                                         // insert above re-derives BasePart.size.
                                         if let Some(asset_ref) = instance_def.asset.as_ref() {
-                                            let mesh_lc = asset_ref.mesh.to_lowercase();
-                                            let fname =
-                                                mesh_lc.rsplit('/').next().unwrap_or(&mesh_lc);
-                                            let is_primitive = [
-                                                "block", "ball", "cylinder", "wedge",
-                                                "corner_wedge", "cone",
-                                            ]
-                                            .iter()
-                                            .any(|hint| fname.contains(hint));
+                                            let is_primitive =
+                                                eustress_common::space_read::primitive_shape(&asset_ref.mesh).is_some();
                                             if !is_primitive {
-                                                let toml_dir = event
-                                                    .path
-                                                    .parent()
-                                                    .unwrap_or_else(|| std::path::Path::new("."));
-                                                // Inline `..`/`.` normalisation —
-                                                // canonicalize would add the Windows
-                                                // \\?\ verbatim prefix and break the
-                                                // strip_prefix below.
-                                                let joined = toml_dir.join(&asset_ref.mesh);
-                                                let mut absolute_mesh_path =
-                                                    std::path::PathBuf::new();
-                                                for comp in joined.components() {
-                                                    match comp {
-                                                        std::path::Component::ParentDir => {
-                                                            absolute_mesh_path.pop();
-                                                        }
-                                                        std::path::Component::CurDir => {}
-                                                        _ => absolute_mesh_path
-                                                            .push(comp.as_os_str()),
-                                                    }
-                                                }
-                                                if absolute_mesh_path.exists()
-                                                    && !super::draco_decoder::is_draco_compressed(
-                                                        &absolute_mesh_path,
-                                                    )
+                                                // Found and checked as spawn_instance does
+                                                // (`resolve_custom_mesh`): nothing stats or
+                                                // reads a mesh outside the Space and its
+                                                // Universe's shared asset folders.
+                                                let (absolute_mesh_path, on_disk) =
+                                                    super::instance_loader::resolve_custom_mesh(&event.path, &asset_ref.mesh);
+                                                if on_disk
+                                                    && !super::draco_decoder::is_draco_compressed(&absolute_mesh_path)
                                                 {
                                                     let space_root =
                                                         super::space_asset_source::space_asset_root();
@@ -2267,6 +2321,8 @@ fn handle_file_renamed(
     registry.unregister_file(old_path);
     meta.path = new_path.to_path_buf();
     registry.register(new_path.to_path_buf(), entity, meta);
+    // A renamed pair reaches no FileChanged, so the tree follows here.
+    super::active_db::rekey_subtree(old_path, new_path);
 
     // Update `LoadedFromFile.path` on the entity so stale-entity
     // cleanup and any downstream reload logic point to the new file.
@@ -2438,5 +2494,42 @@ mod unknown_class_tests {
         ] {
             assert_eq!(general(text), expected, "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reload_unit_tests {
+    use super::*;
+
+    fn def(text: &str) -> crate::space::instance_loader::InstanceDefinition {
+        crate::space::instance_loader::load_instance_definition_from_str(text).unwrap()
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
+    }
+
+    /// A reload reads a file's units as the loader does: a length mesh's and
+    /// a primitive's scale converts, a multiplier's does not, and the
+    /// position always does.
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn a_reload_reads_units_as_the_loader_does() {
+        let import = def("[metadata]\nclass_name = \"Part\"\nunit = \"stud\"\n\n[asset]\nmesh = \"assets/meshes/rbx.glb\"\nscale_kind = \"length\"\n\n[transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 0.5, 0.5]\n");
+        let (data, length) = reloaded_transform(&import);
+        assert!(length);
+        assert!(close(data.scale, [0.28, 0.14, 0.14]), "{:?}", data.scale);
+        assert!(close(data.position, [2.8, 0.0, 0.0]), "{:?}", data.position);
+
+        let native = def("[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[asset]\nmesh = \"meshes/vent.glb\"\n\n[transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [2.0, 3.0, 4.0]\n");
+        let (data, length) = reloaded_transform(&native);
+        assert!(!length);
+        assert_eq!(data.scale, [2.0, 3.0, 4.0], "a multiplier is a ratio");
+        assert!(close(data.position, [3.048, 0.0, 0.0]), "{:?}", data.position);
+
+        let block = def("[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[asset]\nmesh = \"parts/block.glb\"\n\n[transform]\nposition = [0.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [10.0, 10.0, 10.0]\n");
+        let (data, length) = reloaded_transform(&block);
+        assert!(length);
+        assert!(close(data.scale, [3.048, 3.048, 3.048]), "{:?}", data.scale);
     }
 }

@@ -71,6 +71,9 @@ pub mod plasma;
 // Particle simulations: the solver and Bevy integration behind the
 // `ParticleSimulation` / `ParticleSpecies` classes.
 pub mod particle_sim;
+// The Terrain's moving sea: stepping, the wave textures, CPU water queries
+// and buoyancy, over the `eustress-ocean` solver.
+pub mod ocean;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -307,6 +310,7 @@ impl Plugin for RealismPlugin {
             propulsion::PropulsionPlugin,
             plasma::PlasmaPlugin,
             particle_sim::ParticleSimulationPlugin,
+            ocean::OceanPlugin,
         ));
         
         #[cfg(feature = "realism-symbolic")]

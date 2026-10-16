@@ -833,7 +833,7 @@ overwriting the listing takes the Space out of the gallery.
 |---|---|
 | `ETag` | `"{publish_hash}"` from R2 `customMetadata` |
 | `Cache-Control`, unpinned | `public, max-age=300, stale-while-revalidate=86400` |
-| `Cache-Control`, pinned | `public, max-age=31536000, immutable` |
+| `Cache-Control`, pinned | `public, max-age=3600` |
 | `Vary` | `X-Eustress-Key` |
 | `Access-Control-Allow-Origin` | `*` |
 | `Access-Control-Allow-Methods` | `GET, OPTIONS` |
@@ -879,6 +879,29 @@ so serving a different state under that promise is worse than refusing: the cons
 pinned precisely because it must not drift. Drop `?v=` to follow the current
 manifest, or pin again to the current hash. Both sides normalise the `sha256:`
 prefix, so pinning with or without it works.
+
+**A manifest follows its listing.** A listing under a legal hold, or one a review decided
+against (`rejected`, `changes_requested`, `appealed`, held for a person), publishes no
+manifest: the read answers `404 manifest_not_found`, the same as for a manifest that was
+never published, and says nothing about why. A listing still in review or approved serves
+its manifest. A pinned response is cached for an hour, not longer, because nothing can
+recall a copy a consumer holds: a takedown is visible to a consumer within an hour, and the
+`404` that carries it is never cached (`Cache-Control: no-store`).
+
+**A manifest's values are untrusted until its listing is approved.** A manifest of a listing
+that is still in review is served, so a site can be built right after publishing, but nobody has
+read what it says yet, and the manifest is the one author-controlled public object an approval does
+not bind: its author can replace the values later, and the listing stays approved. So the manifest is
+**data, never prose a person reads on the Gallery.** A consumer MUST:
+
+- render every value as text, never as HTML or markup, escaped for the place it goes (an attribute, a URL);
+- never evaluate a value, and never use one as a link or a source URL unless its scheme is on an
+  allowlist (`https` only);
+- never present a manifest string on a page of its own as content that reads as coming from Eustress or
+  from a person (a title, a description, a notice).
+
+A page that shows manifest strings to the public as content is not allowed to do so without binding or
+re-reviewing the manifest first; tell Security before building one.
 
 > **One open point, stated rather than hidden.**
 >

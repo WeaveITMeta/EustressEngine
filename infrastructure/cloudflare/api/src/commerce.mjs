@@ -52,6 +52,8 @@
 
 import { cleanText, cleanIcon, isAccountId, recordPurchase } from './purchases.mjs';
 import { creditValueScore } from './bliss.mjs';
+import { simWithLegalLock } from './moderation.mjs';
+import { isAdultListing, mayView, refusalOf, viewerFor } from './adult_content.mjs';
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -342,7 +344,8 @@ export async function loadSimulation(env, simId) {
   const raw = await env.SOCIAL.get(`sim:${simId}`);
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    // Through the legal lock, so a listing under a hold is not listed for sale.
+    return await simWithLegalLock(env, JSON.parse(raw));
   } catch {
     return null;
   }
@@ -1724,8 +1727,9 @@ const listLimit = (url) => url.searchParams.get('limit');
 
 /// Route `/api/commerce/*` and `/api/keys*`. Returns null for anything else.
 ///
-/// `deps`: `verifyAuth`, `json`, `isListable` and `resolveAttribution` from
-/// index.js and its modules, injected so this file has no copy of them.
+/// `deps`: `verifyAuth`, `json`, `isListable`, `resolveAttribution` and
+/// `requireIdentityFileSession` from index.js and its modules, injected so this
+/// file has no copy of them.
 export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
   const path = url.pathname;
   if (!path.startsWith('/api/commerce/') && path !== '/api/keys' && !path.startsWith('/api/keys/')) return null;
@@ -1757,6 +1761,9 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
     if (!sim) return error(404, 'Simulation not found', 'resource_missing');
     const isAuthor = !caller.error && caller.account_id === sim.author_id;
     if (!isAuthor && !deps.isListable(sim)) return error(404, 'Simulation not found', 'resource_missing');
+    // Not gated on the viewer's Adult content setting (src/adult_content.mjs): the Player reads the catalog in game with no
+    // session (crates/client systems/commerce.rs ask_and_buy), so a gate here would close every shop in an adult listing
+    // to the players who may play it. The live purchase below is gated; it always carries a session.
     const r = await callObject(hubStub(env, sim.author_id), 'list_products', { account_id: sim.author_id, sim_id: sim.id, all: true });
     if (!r.ok) return fromObject(r);
     const data = isAuthor ? r.data : r.data.filter((p) => p.active);
@@ -1802,6 +1809,9 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
       }));
     }
     if (path === '/api/keys' && method === 'POST') {
+      // A key acts as the account and outlives the session: a passkey session does not mint one.
+      const refused = await deps.requireIdentityFileSession(request, env, headers);
+      if (refused) return refused;
       const body = await readJson(request);
       if (!body) return error(400, 'Body must be JSON', 'invalid_json');
       const name = cleanText(body.name ?? '', LIMITS.key_name) || 'API key';
@@ -2038,6 +2048,12 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
     return fromObject(await call(hub, 'list_endpoints', { livemode }), strip);
   }
   if (path === '/api/commerce/webhook_endpoints' && method === 'POST') {
+    // An endpoint receives the account's events until it is deleted, whatever happens to the
+    // session (a key replacement revokes it like an API key): a passkey session does not make one.
+    if (caller.via === 'session') {
+      const refused = await deps.requireIdentityFileSession(request, env, headers);
+      if (refused) return refused;
+    }
     const body = await readJson(request);
     if (!body) return error(400, 'Body must be JSON', 'invalid_json');
     const target = cleanWebhookUrl(body.url);
@@ -2133,6 +2149,16 @@ async function createPurchase(request, env, ctx, caller, deps, { reply, error, f
       return error(403, 'Creators cannot buy their own products with real Tickets; test them in test mode', 'self_purchase');
     }
     if (!deps.isListable(sim)) return error(409, 'This simulation is not approved for sale yet', 'simulation_not_listed');
+    // Adult content is playable only by an account the gate lets see it (src/adult_content.mjs mayView: it turned Adult
+    // content on, and for adult_21 its verified age is 21 or over), so only such an account buys in it. Refused before
+    // anything is reserved or charged.
+    if (isAdultListing(sim)) {
+      const buyer = await viewerFor(env, caller.account_id);
+      if (!mayView(sim, buyer)) {
+        const refusal = refusalOf(buyer);
+        return error(403, refusal.error, refusal.code, { signed_in: true });
+      }
+    }
   } else if (caller.account_id !== seller) {
     return error(403, 'Only the simulation\'s creator can make test purchases; a player buying for real sends Eustress-Mode: live', 'test_purchase_not_owner');
   }

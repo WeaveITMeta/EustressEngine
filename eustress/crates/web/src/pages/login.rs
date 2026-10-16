@@ -10,7 +10,8 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use crate::api::{self, ApiClient};
 use crate::components::{CentralNav, QrCodeSvg};
-use crate::state::AppState;
+use crate::state::{AppState, User};
+use crate::webauthn;
 
 /// Global minimum age. Bliss pays out real USD, so accounts are gated on age
 /// before an identity is ever created. The server enforces this again against
@@ -22,6 +23,23 @@ const MIN_AGE: u32 = 18;
 ///
 /// Returns `None` for an absent, malformed, or impossible date so callers can
 /// distinguish "not filled in yet" from "too young".
+/// The query string of the page in front of the visitor. The prerender has no
+/// page.
+#[cfg(not(feature = "ssr"))]
+fn current_query() -> String {
+    web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+}
+
+#[cfg(feature = "ssr")]
+fn current_query() -> String {
+    String::new()
+}
+
+/// Whether the query asks for the Create Account tab: `?register=1`.
+fn wants_register(search: &str) -> bool {
+    search.trim_start_matches('?').split('&').any(|pair| pair == "register=1")
+}
+
 fn age_from_dob(dob: &str) -> Option<u32> {
     let d = dob.trim();
     let parts: Vec<&str> = d.split('-').collect();
@@ -48,14 +66,25 @@ fn age_from_dob(dob: &str) -> Option<u32> {
     u32::try_from(age.max(0)).ok()
 }
 
+/// The account as a passkey sign-in left it. The answer of `/api/passkeys/login` is the same shape as
+/// the identity-file sign-in's, so this session is marked here; `/api/auth/me` says the same on the
+/// next page load. A passkey session cannot change keys (Settings, Security).
+pub(crate) fn as_passkey_session(mut user: User) -> User {
+    user.auth_method = Some("passkey".to_string());
+    user
+}
+
+/// The button's words. It signs in with a passkey the device holds for this site.
+const PASSKEY_BUTTON: &str = "Sign in with a passkey";
+
 /// Login/Register page with tabs.
 #[component]
 pub fn LoginPage() -> impl IntoView {
     let app_state = expect_context::<AppState>();
     let navigate = use_navigate();
 
-    // Tab state
-    let is_register = RwSignal::new(false);
+    // Tab state. `/login?register=1` opens on Create Account.
+    let is_register = RwSignal::new(wants_register(&current_query()));
 
     let loading = RwSignal::new(false);
     let error = RwSignal::new(Option::<String>::None);
@@ -79,12 +108,22 @@ pub fn LoginPage() -> impl IntoView {
     let reg_id_back_uploaded = RwSignal::new(false);
     let reg_id_needs_back = RwSignal::new(false); // passport = no back needed
     let reg_step = RwSignal::new(1_u32); // 1=form, 2=verify, 3=done
-    let kyc_session_id = RwSignal::new(uuid::Uuid::new_v4().to_string()); // links uploads to registration
+    // The verification session, from POST /api/kyc/start on first use: a
+    // server-chosen id, its claim secret and its upload-only token. Memory only:
+    // never storage, never a log, never a URL. The upload token uploads, submits
+    // and starts the phone hand-off; the claim secret goes to registration and
+    // nowhere else, so the phone link can never make an account.
+    let kyc_session_id = RwSignal::new(String::new());
+    let kyc_claim_secret = RwSignal::new(String::new());
+    let kyc_upload_token = RwSignal::new(String::new());
     let kyc_status_text = RwSignal::new(String::new()); // "Verifying...", "Verified as John Doe", "Rejected"
     let kyc_verified = RwSignal::new(false);
     let kyc_rejected = RwSignal::new(false);
     let kyc_verified_name = RwSignal::new(String::new()); // name extracted by Grok
     let kyc_reject_reason = RwSignal::new(String::new());
+    // The Worker's sentence when verification could not run (503 kyc_unavailable):
+    // not a verdict. The uploads are kept, and "Try again" submits the same session.
+    let kyc_unavailable = RwSignal::new(String::new());
 
     // Desktop -> mobile handoff. Desktops rarely have a camera good enough to
     // resolve the small print on an ID, so the applicant can scan a QR code and
@@ -100,17 +139,29 @@ pub fn LoginPage() -> impl IntoView {
     // through the QR payload or the phone's URL bar.
     let start_handoff = move || {
         qr_error.set(String::new());
-        let session = kyc_session_id.get_untracked();
-        let payload = serde_json::json!({
-            "session_id": session,
-            "id_type": reg_id_type.get_untracked(),
-            "needs_back": reg_id_needs_back.get_untracked(),
-            "full_name": reg_username.get_untracked(),
-            "birthday": reg_birthday.get_untracked(),
-            "username": reg_username.get_untracked(),
-        });
+        let id_type = reg_id_type.get_untracked();
+        let needs_back = reg_id_needs_back.get_untracked();
+        let full_name = reg_username.get_untracked();
+        let birthday = reg_birthday.get_untracked();
 
         spawn_local(async move {
+            let (session, upload_token) = match ensure_kyc_session(kyc_session_id, kyc_claim_secret, kyc_upload_token).await {
+                Ok(started) => started,
+                Err(e) => {
+                    qr_error.set(e);
+                    return;
+                }
+            };
+            // The upload token, never the claim secret: the phone can upload, never register.
+            let payload = serde_json::json!({
+                "session_id": session,
+                "upload_token": upload_token,
+                "id_type": id_type,
+                "needs_back": needs_back,
+                "full_name": full_name,
+                "birthday": birthday,
+                "username": full_name,
+            });
             let result = gloo_net::http::Request::post(&format!("{}/api/kyc/handoff", crate::state::api_base()))
                 .header("Content-Type", "application/json")
                 .body(payload.to_string())
@@ -149,6 +200,8 @@ pub fn LoginPage() -> impl IntoView {
             return;
         }
         let session = kyc_session_id.get_untracked();
+        // The session's details need its token, sent in a header (never the URL).
+        let token = kyc_upload_token.get_untracked();
 
         spawn_local(async move {
             // 30 minutes at 3s intervals matches the handoff TTL, so the loop
@@ -162,7 +215,7 @@ pub fn LoginPage() -> impl IntoView {
                 }
 
                 let url = format!("{}/api/kyc/session/{}", crate::state::api_base(), session);
-                let Ok(resp) = gloo_net::http::Request::get(&url).send().await else {
+                let Ok(resp) = gloo_net::http::Request::get(&url).header("X-KYC-Token", &token).send().await else {
                     continue;
                 };
                 if resp.status() != 200 {
@@ -298,6 +351,37 @@ pub fn LoginPage() -> impl IntoView {
     let app_state_stored = StoredValue::new(app_state.clone());
     let nav_fn = StoredValue::new(navigate.clone());
 
+    // Passkeys: the button shows only where the browser has WebAuthn, and that is known only in the
+    // browser, so the prerendered page never shows it.
+    let passkey_supported = RwSignal::new(false);
+    Effect::new(move |_| passkey_supported.set(webauthn::webauthn_available()));
+    let passkey_sign_in = move |_| {
+        loading.set(true);
+        error.set(None);
+        let api_url = api_url_stored.get_value();
+        let app_state_c = app_state_stored.get_value();
+        let nav = nav_fn.get_value();
+        spawn_local(async move {
+            let client = ApiClient::new(&api_url);
+            let outcome: Result<api::AuthResponse, String> = async {
+                let begin = api::passkey_login_begin(&client).await.map_err(|e| api::failure_sentence(&e))?;
+                let options = webauthn::RequestOptions::from_begin(&begin)?;
+                let asserted = webauthn::get_credential(&options).await?;
+                let body = webauthn::login_body(&begin.challenge, &asserted);
+                api::passkey_login(&client, &body).await.map_err(|e| api::failure_sentence(&e))
+            }
+            .await;
+            loading.set(false);
+            match outcome {
+                Ok(response) => {
+                    app_state_c.login_with_token(response.token, as_passkey_session(response.user));
+                    nav("/dashboard", Default::default());
+                }
+                Err(why) => error.set(Some(why)),
+            }
+        });
+    };
+
     view! {
         <div class="page page-login">
             <CentralNav active="".to_string() />
@@ -309,40 +393,34 @@ pub fn LoginPage() -> impl IntoView {
             </div>
 
             <div class="login-wrapper">
-                // Left side - showcase
-                <div class="login-showcase">
-                    <div class="blueprint-grid">
-                        <div class="blueprint-icon tilt-1">
-                            <img src="/assets/icons/cube.svg" alt="3D Objects" />
-                        </div>
-                        <div class="blueprint-icon tilt-2">
-                            <img src="/assets/icons/dog.svg" alt="Dog" />
-                        </div>
-                        <div class="blueprint-icon tilt-3">
-                            <img src="/assets/icons/sparkles.svg" alt="Effects" />
-                        </div>
-                        <div class="blueprint-icon tilt-4">
-                            <img src="/assets/icons/gamepad.svg" alt="Games" />
-                        </div>
-                        <div class="blueprint-icon tilt-5">
-                            <img src="/assets/icons/rocket.svg" alt="Launch" />
-                        </div>
-                        <div class="blueprint-icon tilt-6">
-                            <img src="/assets/icons/users.svg" alt="Multiplayer" />
-                        </div>
-                        <div class="blueprint-icon tilt-7">
-                            <img src="/assets/icons/network.svg" alt="Connect" />
-                        </div>
-                        <div class="blueprint-icon tilt-8">
-                            <img src="/assets/icons/settings.svg" alt="Tools" />
-                        </div>
-                        <div class="blueprint-icon tilt-9">
-                            <img src="/assets/icons/trending.svg" alt="Growth" />
+                // Left side - showcase: the build plate, nine pillars around the core; style/login.css draws and animates it
+                <div class="login-showcase ls-showcase">
+                    <div class="ls-stage" aria-hidden="true">
+                        <div class="ls-plate">
+                            <div class="ls-pillar" style="--i:0;--d:0;--h:2"><span class="ls-top"><img src="/assets/icons/physics.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:1;--d:1;--h:1"><span class="ls-top"><img src="/assets/icons/code.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:2;--d:2;--h:3"><span class="ls-top"><img src="/assets/icons/network.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:7;--d:1;--h:1"><span class="ls-top"><img src="/assets/icons/brain.svg" alt="" /></span></div>
+                            <div class="ls-pillar core" style="--i:8;--d:2;--h:4"><span class="ls-top"><img src="/assets/icons/eustress-gear.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:3;--d:3;--h:2"><span class="ls-top"><img src="/assets/icons/perspective.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:6;--d:2;--h:3"><span class="ls-top"><img src="/assets/icons/cube.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:5;--d:3;--h:1"><span class="ls-top"><img src="/assets/icons/audio.svg" alt="" /></span></div>
+                            <div class="ls-pillar" style="--i:4;--d:4;--h:2"><span class="ls-top"><img src="/assets/icons/animation.svg" alt="" /></span></div>
                         </div>
                     </div>
+                    <ul class="ls-readout" aria-label="What a Space is built from">
+                        <li style="--i:0"><b>"01"</b>" Physics"</li>
+                        <li style="--i:1"><b>"02"</b>" Scripting"</li>
+                        <li style="--i:2"><b>"03"</b>" Multiplayer"</li>
+                        <li style="--i:3"><b>"04"</b>" 2D and 3D"</li>
+                        <li style="--i:4"><b>"05"</b>" Animation"</li>
+                        <li style="--i:5"><b>"06"</b>" Audio"</li>
+                        <li style="--i:6"><b>"07"</b>" Building"</li>
+                        <li style="--i:7"><b>"08"</b>" AI"</li>
+                    </ul>
                     <div class="showcase-tagline">
-                        <h2>"Create Without Limits"</h2>
-                        <p>"Build games, simulations, and experience the power of Eustress"</p>
+                        <h2>"Create Excellence"</h2>
+                        <p>"Build simulations, connect real data, and run them in the engine."</p>
                     </div>
                 </div>
 
@@ -375,9 +453,7 @@ pub fn LoginPage() -> impl IntoView {
                         // ── SIGN IN TAB ──
                         <div class="auth-panel" class:hidden=move || is_register.get()>
                             <p class="identity-desc">
-                                "Load your "
-                                <code>"identity.toml"</code>
-                                " to sign in with Ed25519 challenge-response."
+                                "Load your identity file to sign in. There is no password."
                             </p>
 
                             // File picker
@@ -427,7 +503,7 @@ pub fn LoginPage() -> impl IntoView {
                                                                 identity_status.set("Identity loaded".to_string());
                                                                 error.set(None);
                                                             } else {
-                                                                error.set(Some("Invalid identity.toml — missing public_key or private_key".to_string()));
+                                                                error.set(Some("Invalid identity.toml: missing public_key or private_key.".to_string()));
                                                                 identity_file_loaded.set(false);
                                                             }
                                                         }
@@ -442,13 +518,14 @@ pub fn LoginPage() -> impl IntoView {
                                     <div class="file-drop-label">
                                         {move || {
                                             if identity_file_loaded.get() {
-                                                "Identity loaded — ready to sign in"
+                                                "Identity loaded. Ready to sign in."
                                             } else {
                                                 "Choose eustress-username.toml or drag here"
                                             }
                                         }}
                                     </div>
                                 </div>
+                                <p class="form-hint"><a href="/replacement-key">"Lost your identity file?"</a></p>
                             </div>
 
                             // Identity info
@@ -515,7 +592,11 @@ pub fn LoginPage() -> impl IntoView {
 
                                         identity_status.set("Signing challenge...".to_string());
 
-                                        let signature = match sign_challenge_ed25519(&priv_key, &challenge_resp.challenge) {
+                                        // The signature covers the login message, which names
+                                        // the API this sign-in is for; the Worker checks the
+                                        // origin the request actually reached.
+                                        let message = api::login_message(&api::api_origin(&api_url), &challenge_resp.challenge);
+                                        let signature = match sign_challenge_ed25519(&priv_key, &message) {
                                             Ok(sig) => sig,
                                             Err(e) => {
                                                 loading.set(false);
@@ -546,6 +627,20 @@ pub fn LoginPage() -> impl IntoView {
                                 {move || if loading.get() { "Authenticating..." } else { "Sign In" }}
                             </button>
 
+                            <Show when=move || passkey_supported.get()>
+                                <div class="passkey-signin">
+                                    <p class="form-hint">"Added a passkey to your account on this device? Use it instead of the file."</p>
+                                    <button
+                                        type="button"
+                                        class="btn btn-secondary"
+                                        disabled=move || loading.get()
+                                        on:click=passkey_sign_in
+                                    >
+                                        {PASSKEY_BUTTON}
+                                    </button>
+                                </div>
+                            </Show>
+
                             <div class="identity-help">
                                 <p>
                                     "Your private key never leaves the browser. "
@@ -559,7 +654,7 @@ pub fn LoginPage() -> impl IntoView {
                             // Step 1: Basic info
                             {move || (reg_step.get() == 1).then(|| view! {
                                 <div class="register-step">
-                                    <p class="step-indicator">"Step 1 of 3 — Basic Info"</p>
+                                    <p class="step-indicator">"Step 1 of 3: Basic Info"</p>
 
                                     <div class="form-field">
                                         <label class="form-label">
@@ -644,7 +739,7 @@ pub fn LoginPage() -> impl IntoView {
                             // Step 2: ID Verification
                             {move || (reg_step.get() == 2).then(|| view! {
                                 <div class="register-step">
-                                    <p class="step-indicator">"Step 2 of 3 — Identity Verification"</p>
+                                    <p class="step-indicator">"Step 2 of 3: Identity Verification"</p>
 
                                     <div class="form-field">
                                         <label class="form-label">
@@ -694,7 +789,7 @@ pub fn LoginPage() -> impl IntoView {
                                         <label class="form-label">
                                             {move || {
                                                 if reg_id_needs_back.get() {
-                                                    "Upload ID — Front"
+                                                    "Upload ID: front"
                                                 } else {
                                                     "Upload ID Document"
                                                 }
@@ -717,24 +812,33 @@ pub fn LoginPage() -> impl IntoView {
                                                             let id_number = reg_id_number.get();
                                                             let birthday = reg_birthday.get();
                                                             let uname = reg_username.get();
-                                                            let sess = kyc_session_id.get();
                                                             let needs_back = reg_id_needs_back.get();
                                                             kyc_status_text.set("Uploading document...".to_string());
                                                             kyc_verified.set(false);
                                                             kyc_rejected.set(false);
+                                                            kyc_unavailable.set(String::new());
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "front", &id_type, &id_number, &birthday, &uname, &sess).await {
+                                                                // The session's id and upload token, from /api/kyc/start on first use.
+                                                                let (sess, upload_token) = match ensure_kyc_session(kyc_session_id, kyc_claim_secret, kyc_upload_token).await {
+                                                                    Ok(started) => started,
+                                                                    Err(e) => {
+                                                                        error.set(Some(e));
+                                                                        kyc_status_text.set(String::new());
+                                                                        return;
+                                                                    }
+                                                                };
+                                                                match upload_id_document(&file, "front", &id_type, &id_number, &birthday, &uname, &sess, &upload_token).await {
                                                                     Ok(_resp) => {
                                                                         reg_id_front_uploaded.set(true);
                                                                         // If no back needed (passport), submit for verification now
                                                                         if !needs_back {
                                                                             kyc_status_text.set("Submitting for verification...".to_string());
                                                                             submit_kyc_verification(
-                                                                                sess.clone(), false, uname.clone(),
-                                                                                kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason,
+                                                                                sess.clone(), upload_token.clone(), false, uname.clone(),
+                                                                                kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason, kyc_unavailable,
                                                                             ).await;
                                                                         } else {
-                                                                            kyc_status_text.set("Front uploaded — now upload back side".to_string());
+                                                                            kyc_status_text.set("Front uploaded. Now upload the back.".to_string());
                                                                         }
                                                                     }
                                                                     Err(e) => {
@@ -766,7 +870,7 @@ pub fn LoginPage() -> impl IntoView {
                                     // ID Document Upload — Back (only for non-passport IDs)
                                     <div class="form-field" class:hidden=move || !reg_id_needs_back.get()>
                                         <label class="form-label">
-                                            "Upload ID — Back"
+                                            "Upload ID: back"
                                             <span class="required">"*"</span>
                                         </label>
                                         <div class="identity-file-drop">
@@ -785,16 +889,24 @@ pub fn LoginPage() -> impl IntoView {
                                                             let id_number = reg_id_number.get();
                                                             let birthday = reg_birthday.get();
                                                             let uname = reg_username.get();
-                                                            let sess = kyc_session_id.get();
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "back", &id_type, &id_number, &birthday, &uname, &sess).await {
+                                                                // The session's id and upload token, from /api/kyc/start on first use.
+                                                                let (sess, upload_token) = match ensure_kyc_session(kyc_session_id, kyc_claim_secret, kyc_upload_token).await {
+                                                                    Ok(started) => started,
+                                                                    Err(e) => {
+                                                                        error.set(Some(e));
+                                                                        kyc_status_text.set(String::new());
+                                                                        return;
+                                                                    }
+                                                                };
+                                                                match upload_id_document(&file, "back", &id_type, &id_number, &birthday, &uname, &sess, &upload_token).await {
                                                                     Ok(_) => {
                                                                         reg_id_back_uploaded.set(true);
                                                                         // Both sides uploaded — submit for verification
                                                                         kyc_status_text.set("Submitting for verification...".to_string());
                                                                         submit_kyc_verification(
-                                                                            sess.clone(), true, uname.clone(),
-                                                                            kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason,
+                                                                            sess.clone(), upload_token.clone(), true, uname.clone(),
+                                                                            kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason, kyc_unavailable,
                                                                         ).await;
                                                                     }
                                                                     Err(e) => {
@@ -894,6 +1006,34 @@ pub fn LoginPage() -> impl IntoView {
                                                 </div>
                                             </div>
                                         </Show>
+                                        <Show when=move || !kyc_unavailable.get().is_empty()>
+                                            <div class="kyc-status kyc-unavailable" role="alert">
+                                                <span class="kyc-icon">"!"</span>
+                                                <div>
+                                                    <strong>"Verification is temporarily unavailable"</strong>
+                                                    <p>{move || kyc_unavailable.get()}</p>
+                                                    <button
+                                                        type="button"
+                                                        class="btn btn-secondary kyc-retry-btn"
+                                                        on:click=move |_| {
+                                                            // The same session: the Worker kept its uploads, so nothing is uploaded again.
+                                                            let sess = kyc_session_id.get_untracked();
+                                                            let upload_token = kyc_upload_token.get_untracked();
+                                                            let needs_back = reg_id_needs_back.get_untracked();
+                                                            let uname = reg_username.get_untracked();
+                                                            kyc_unavailable.set(String::new());
+                                                            kyc_status_text.set("Submitting for verification...".to_string());
+                                                            spawn_local(async move {
+                                                                submit_kyc_verification(
+                                                                    sess, upload_token, needs_back, uname,
+                                                                    kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason, kyc_unavailable,
+                                                                ).await;
+                                                            });
+                                                        }
+                                                    >"Try again"</button>
+                                                </div>
+                                            </div>
+                                        </Show>
                                         <Show when=move || !kyc_status_text.get().is_empty() && !kyc_verified.get() && !kyc_rejected.get()>
                                             <div class="kyc-status kyc-processing">
                                                 <span class="kyc-spinner"></span>
@@ -932,7 +1072,7 @@ pub fn LoginPage() -> impl IntoView {
                                 let id_number = reg_id_number.get();
                                 view! {
                                     <div class="register-step">
-                                        <p class="step-indicator">"Step 3 of 3 — Create Your Identity"</p>
+                                        <p class="step-indicator">"Step 3 of 3: Create Your Identity"</p>
 
                                         <div class="identity-info">
                                             <div class="identity-field">
@@ -966,7 +1106,7 @@ pub fn LoginPage() -> impl IntoView {
                                                 let idt = id_type.clone();
                                                 let idn = id_number.clone();
 
-                                                match generate_identity_toml(&uname, &bday, &idt, &idn) {
+                                                match generate_identity_toml(&uname) {
                                                     Ok((toml_content, pub_key, priv_key)) => {
                                                         let pub_key_clone = pub_key.clone();
                                                         let uname_clone = uname.clone();
@@ -987,6 +1127,8 @@ pub fn LoginPage() -> impl IntoView {
                                                         spawn_local(async move {
                                                             let client = ApiClient::new(&api_url);
                                                             let sess = kyc_session_id.get();
+                                                            // The claim secret goes to registration and nowhere else.
+                                                            let claim = kyc_claim_secret.get_untracked();
                                                             // Pass `email` + `toml_content` into the
                                                             // register request so the Worker auto-relays
                                                             // the welcome email in-line. Saves a round
@@ -1012,10 +1154,13 @@ pub fn LoginPage() -> impl IntoView {
                                                                 Some(&idt_clone),
                                                                 Some(&id_hash),
                                                                 Some(&sess),
+                                                                Some(&claim),
                                                                 email_for_register,
                                                                 toml_for_register,
                                                             ).await {
                                                                 Ok(response) => {
+                                                                    // Used: the claim secret is not kept.
+                                                                    kyc_claim_secret.set(String::new());
                                                                     // Registration succeeded — download both files
                                                                     let toml_filename = format!("eustress-{}.toml", uname_clone);
                                                                     download_file(&toml_filename, &toml_content);
@@ -1055,7 +1200,7 @@ pub fn LoginPage() -> impl IntoView {
                                                                     identity_file_loaded.set(true);
 
                                                                     loading.set(false);
-                                                                    identity_status.set("Registered — save your eustress identity file!".to_string());
+                                                                    identity_status.set("Registered. Save your Eustress identity file.".to_string());
                                                                     app_state_c.login_with_token(response.token, response.user);
                                                                     nav("/dashboard", Default::default());
                                                                 }
@@ -1079,7 +1224,7 @@ pub fn LoginPage() -> impl IntoView {
                                             "Your Ed25519 keypair is generated in the browser. "
                                             "The downloaded "
                                             <code>"identity.toml"</code>
-                                            " is your account — keep it safe."
+                                            " is your account. Keep it safe."
                                         </p>
 
                                         <button
@@ -1108,7 +1253,7 @@ pub fn LoginPage() -> impl IntoView {
 /// Called immediately when user selects a file.
 /// Upload response from KYC worker
 #[derive(Clone, Debug, serde::Deserialize)]
-struct KycUploadResponse {
+pub(crate) struct KycUploadResponse {
     verification_id: String,
     status: String,
 }
@@ -1122,7 +1267,7 @@ struct KycStatusResponse {
     decision: Option<serde_json::Value>,
 }
 
-async fn upload_id_document(
+pub(crate) async fn upload_id_document(
     file: &web_sys::File,
     side: &str,
     id_type: &str,
@@ -1130,6 +1275,7 @@ async fn upload_id_document(
     birthday: &str,
     username: &str,
     session_id: &str,
+    upload_token: &str,
 ) -> Result<KycUploadResponse, String> {
     let form_data = web_sys::FormData::new()
         .map_err(|_| "Failed to create FormData".to_string())?;
@@ -1142,6 +1288,7 @@ async fn upload_id_document(
     form_data.append_with_str("birthday", birthday).map_err(|_| "append birthday".to_string())?;
     form_data.append_with_str("username", username).map_err(|_| "append username".to_string())?;
     form_data.append_with_str("session_id", session_id).map_err(|_| "append session_id".to_string())?;
+    form_data.append_with_str("upload_token", upload_token).map_err(|_| "append upload_token".to_string())?;
 
     let api_url = crate::state::api_base();
 
@@ -1172,10 +1319,48 @@ async fn upload_id_document(
     }
 }
 
+/// What POST /api/kyc/start returns. No Debug: it holds the claim secret.
+#[derive(serde::Deserialize)]
+struct KycStarted {
+    session_id: String,
+    claim_secret: String,
+    upload_token: String,
+}
+
+/// The registration's verification session, started on first use: `(session id,
+/// upload token)`. The claim secret goes into its signal (memory) and nowhere
+/// else until registration sends it.
+pub(crate) async fn ensure_kyc_session(
+    session: RwSignal<String>,
+    claim: RwSignal<String>,
+    upload: RwSignal<String>,
+) -> Result<(String, String), String> {
+    let existing = session.get_untracked();
+    if !existing.is_empty() {
+        return Ok((existing, upload.get_untracked()));
+    }
+    let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/start", crate::state::api_base()))
+        .send()
+        .await
+        .map_err(|_| "Could not reach the verification service. Check your connection.".to_string())?;
+    if resp.status() != 200 {
+        return Err(format!("Could not start verification ({}). Try again in a minute.", resp.status()));
+    }
+    let started: KycStarted = resp
+        .json()
+        .await
+        .map_err(|_| "Unexpected answer from the verification service.".to_string())?;
+    session.set(started.session_id.clone());
+    claim.set(started.claim_secret);
+    upload.set(started.upload_token.clone());
+    Ok((started.session_id, started.upload_token))
+}
+
 /// Submit uploaded documents for verification and handle the result.
 /// Calls /api/kyc/submit which checks documents are present and marks verified.
-async fn submit_kyc_verification(
+pub(crate) async fn submit_kyc_verification(
     session_id: String,
+    upload_token: String,
     needs_back: bool,
     full_name: String,
     status_signal: RwSignal<String>,
@@ -1183,12 +1368,15 @@ async fn submit_kyc_verification(
     kyc_verified_signal: RwSignal<bool>,
     kyc_rejected_signal: RwSignal<bool>,
     reject_reason_signal: RwSignal<String>,
+    unavailable_signal: RwSignal<String>,
 ) {
+    unavailable_signal.set(String::new());
     let api_url = crate::state::api_base();
     let url = format!("{}/api/kyc/submit", api_url);
 
     let body = serde_json::json!({
         "session_id": session_id,
+        "upload_token": &upload_token,
         "needs_back": needs_back,
         "full_name": full_name,
     });
@@ -1215,10 +1403,17 @@ async fn submit_kyc_verification(
                 }
                 // Unexpected status — fall back to polling
                 let vid = format!("kyc-{}-front", session_id);
-                poll_kyc_status(vid, status_signal, verified_name_signal, kyc_verified_signal, kyc_rejected_signal, reject_reason_signal).await;
+                poll_kyc_status(vid, upload_token.clone(), status_signal, verified_name_signal, kyc_verified_signal, kyc_rejected_signal, reject_reason_signal).await;
+            } else if let Some(message) = crate::pages::verify::kyc_unavailable_message(resp.status(), &text) {
+                // Verification could not run: not a verdict. Nothing is rejected, the
+                // uploads are kept, and "Try again" submits this session again.
+                status_signal.set(String::new());
+                unavailable_signal.set(message);
             } else {
-                status_signal.set(format!("Verification error: {}", text));
-                reject_reason_signal.set(text);
+                // The Worker explains a refusal in `error`; show that, not its JSON.
+                let said = crate::api::worker_sentence(&text).unwrap_or(text);
+                status_signal.set(said.clone());
+                reject_reason_signal.set(said);
                 kyc_rejected_signal.set(true);
             }
         }
@@ -1232,6 +1427,7 @@ async fn submit_kyc_verification(
 /// Poll KYC verification status until resolved (verified/rejected/error)
 async fn poll_kyc_status(
     verification_id: String,
+    upload_token: String,
     status_signal: RwSignal<String>,
     verified_name_signal: RwSignal<String>,
     kyc_verified_signal: RwSignal<bool>,
@@ -1245,7 +1441,7 @@ async fn poll_kyc_status(
     for _ in 0..60 {
         gloo_timers::future::TimeoutFuture::new(2_000).await;
 
-        let resp = match gloo_net::http::Request::get(&url).send().await {
+        let resp = match gloo_net::http::Request::get(&url).header("X-KYC-Token", &upload_token).send().await {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -1281,7 +1477,7 @@ async fn poll_kyc_status(
                 return;
             }
             "error" => {
-                status_signal.set("Verification error — please retry".to_string());
+                status_signal.set("Verification error. Please try again.".to_string());
                 kyc_rejected_signal.set(true);
                 return;
             }
@@ -1293,7 +1489,7 @@ async fn poll_kyc_status(
     }
 
     // Timeout
-    status_signal.set("Verification timed out — please retry".to_string());
+    status_signal.set("Verification timed out. Please try again.".to_string());
     kyc_rejected_signal.set(true);
 }
 
@@ -1389,12 +1585,23 @@ fn extract_toml_value(line: &str) -> Option<String> {
     None
 }
 
-fn generate_identity_toml(
-    username: &str,
-    birthday: &str,
-    id_type: &str,
-    id_number: &str,
-) -> Result<(String, String, String), String> {
+// The Worker mails this file from identity@eustress.dev, so it accepts only a
+// file in this shape (validIdentityFile in
+// infrastructure/cloudflare/api/src/index.js): these sections and keys, these
+// two header comments, no other text. A new key or comment here needs the same
+// change there, or the backup email stops being sent.
+//
+// The file carries the account, the keys and whether the account is verified,
+// and nothing about the person: no birthday, no ID type, no ID hash. Anyone who
+// reads a leaked file would otherwise hold everything but the ID number, which
+// is a small space to search. Sign-in and Studio read only the keys.
+fn generate_identity_toml(username: &str) -> Result<(String, String, String), String> {
+    generate_identity_toml_for(username, None)
+}
+
+/// [`generate_identity_toml`] for a known account: the file names the account's
+/// own id (a replacement key's file), or a fresh one when `user_id` is `None`.
+pub(crate) fn generate_identity_toml_for(username: &str, user_id: Option<&str>) -> Result<(String, String, String), String> {
     use bliss_crypto::KeyPair;
 
     let keypair = KeyPair::generate();
@@ -1402,9 +1609,7 @@ fn generate_identity_toml(
     let priv_hex = keypair.private_key().to_hex();
 
     let now = chrono::Utc::now().to_rfc3339();
-    let user_id = uuid::Uuid::new_v4().to_string();
-
-    let id_hash = sha256_hex(&format!("{}:{}:{}", id_type, id_number, birthday));
+    let user_id = user_id.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let toml_content = format!(
 r#"# Eustress Identity — generated {now}
@@ -1418,12 +1623,7 @@ public_key = "{pub_hex}"
 private_key = "{priv_hex}"
 issued_at = "{now}"
 
-[profile]
-birthday = "{birthday}"
-
 [verification]
-id_type = "{id_type}"
-id_hash = "{id_hash}"
 verified = false
 "#);
 
@@ -1435,7 +1635,8 @@ fn sha256_hex(input: &str) -> String {
     hash.to_hex()
 }
 
-fn sign_challenge_ed25519(private_key_hex: &str, challenge: &str) -> Result<String, String> {
+/// Signs `message` (the login message, see `api::login_message`) with the key.
+pub(crate) fn sign_challenge_ed25519(private_key_hex: &str, message: &str) -> Result<String, String> {
     use bliss_crypto::{PrivateKey, Signature};
 
     // Support both hex and base64 encoded keys for backwards compatibility
@@ -1451,7 +1652,7 @@ fn sign_challenge_ed25519(private_key_hex: &str, challenge: &str) -> Result<Stri
             .map_err(|e| format!("Invalid private key: {}", e))?
     };
 
-    let signature = Signature::sign(challenge.as_bytes(), &private_key)
+    let signature = Signature::sign(message.as_bytes(), &private_key)
         .map_err(|e| format!("Signing failed: {}", e))?;
 
     // Return signature as hex (matches what the Worker expects)
@@ -1462,7 +1663,7 @@ fn private_key_to_hex_sig(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn download_file(filename: &str, content: &str) {
+pub(crate) fn download_file(filename: &str, content: &str) {
     use wasm_bindgen::JsCast;
     if let Some(window) = web_sys::window() {
         if let Some(doc) = window.document() {
@@ -1496,4 +1697,214 @@ fn base64_encode(input: &[u8]) -> String {
     web_sys::window()
         .and_then(|w| w.btoa(&binary).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod login_signing_tests {
+    use super::*;
+
+    fn a_user() -> User {
+        serde_json::from_value(serde_json::json!({
+            "id": "11111111-2222-4333-8444-555555555555", "username": "ada", "email": null,
+            "avatar_url": null, "discord_id": null, "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_passkey_sign_in_marks_the_session_so_key_changes_are_off() {
+        let marked = as_passkey_session(a_user());
+        assert_eq!(marked.auth_method.as_deref(), Some("passkey"));
+        assert!(marked.signed_in_with_passkey());
+        assert!(!a_user().signed_in_with_passkey(), "an identity-file sign-in is not marked");
+        assert_eq!(marked.username, "ada", "nothing else changes");
+    }
+
+    #[test]
+    fn the_passkey_button_is_shown_only_when_the_browser_has_webauthn_and_signs_in_like_the_file_does() {
+        let source = include_str!("login.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap()];
+        let shown = source.find("<Show when=move || passkey_supported.get()>").expect("the button sits inside a Show on the WebAuthn flag");
+        let button = source[shown..].find("{PASSKEY_BUTTON}").expect("and the button is inside it");
+        assert!(button < 900, "the Show wraps the button");
+        assert_eq!(PASSKEY_BUTTON, "Sign in with a passkey");
+        assert!(source.contains("passkey_supported.set(webauthn::webauthn_available())"), "the flag is the browser's own answer");
+        assert!(source.contains("let passkey_supported = RwSignal::new(false);"), "hidden until the browser says yes");
+        // The same finish as the identity file: store the token and go to the dashboard.
+        let handler = &source[source.find("let passkey_sign_in").unwrap()..];
+        let handler = &handler[..handler.find("view! {").unwrap()];
+        assert!(handler.contains("login_with_token(response.token, as_passkey_session(response.user))"));
+        assert!(handler.contains("nav(\"/dashboard\", Default::default())"));
+        assert!(handler.contains("api::passkey_login_begin") && handler.contains("webauthn::get_credential") && handler.contains("api::passkey_login("));
+    }
+
+    const VECTORS: &str = include_str!("../../../../../docs/architecture/login-v1-vectors.json");
+
+    #[test]
+    fn signing_the_login_message_gives_the_shared_signatures() {
+        let v: serde_json::Value = serde_json::from_str(VECTORS).expect("the shared vectors are JSON");
+        let secret = v["secret_key"].as_str().unwrap();
+        for s in v["signatures"].as_array().unwrap() {
+            let message = api::login_message(s["origin"].as_str().unwrap(), s["challenge"].as_str().unwrap());
+            assert_eq!(sign_challenge_ed25519(secret, &message).unwrap(), s["signature"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn the_identity_file_carries_no_id_data() {
+        let (toml, public, private) = generate_identity_toml("someone").unwrap();
+        for leaked in ["birthday", "id_type", "id_hash", "[profile]"] {
+            assert!(!toml.contains(leaked), "the file mentions {leaked}");
+        }
+        assert!(toml.contains("[identity]"));
+        assert!(toml.contains("username = \"someone\""));
+        assert!(toml.contains(&format!("public_key = \"{public}\"")));
+        assert!(toml.contains(&format!("private_key = \"{private}\"")));
+        assert!(toml.contains("verified = false"));
+    }
+
+    #[test]
+    fn try_again_on_the_registration_page_resubmits_without_uploading() {
+        let src = include_str!("login.rs").replace("\r\n", "\n");
+        let button = src.split("class=\"btn btn-secondary kyc-retry-btn\"").nth(1).unwrap().split(">\"Try again\"<").next().unwrap();
+        assert!(button.contains("kyc_session_id.get_untracked()"));
+        assert!(button.contains("kyc_upload_token.get_untracked()"));
+        assert!(button.contains("submit_kyc_verification("));
+        assert!(!button.contains("upload_id_document"));
+        let submit = src.split("async fn submit_kyc_verification(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(submit.contains("kyc_unavailable_message(resp.status(), &text)"));
+        assert!(submit.contains("unavailable_signal.set(message)"));
+    }
+
+    #[test]
+    fn the_claim_secret_goes_to_registration_only_and_stays_in_memory() {
+        let src = include_str!("login.rs").replace("\r\n", "\n");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        // Read once, for registration; cleared once used.
+        assert_eq!(code.matches("kyc_claim_secret.get").count(), 1);
+        let register = code.split("let claim = kyc_claim_secret.get_untracked();").nth(1).unwrap();
+        assert!(register.split("email_for_register,").next().unwrap().contains("Some(&claim),"));
+        assert!(code.contains("kyc_claim_secret.set(String::new());"));
+        // The phone hand-off sends the upload token and nothing that can register.
+        let handoff = code.split("let start_handoff = move || {").nth(1).unwrap().split("\n    };\n").next().unwrap();
+        assert!(handoff.contains("\"upload_token\": upload_token"));
+        let payload = handoff.split("serde_json::json!({").nth(1).unwrap().split("});").next().unwrap();
+        assert!(payload.contains("\"upload_token\": upload_token"));
+        assert!(!payload.contains("claim"));
+        // No line that touches a claim secret logs it or stores it.
+        for line in code.lines().filter(|l| l.contains("claim")) {
+            for bad in ["log::", "console", "Storage", "storage", "format!("] {
+                assert!(!line.contains(bad), "{bad} next to the claim secret: {line}");
+            }
+        }
+        // The struct that carries it has no Debug.
+        assert!(code.contains("#[derive(serde::Deserialize)]\nstruct KycStarted {"));
+    }
+
+    #[test]
+    fn the_claim_secret_lives_in_page_memory_only_never_a_url_storage_or_a_log() {
+        let code = |src: &str| src.replace("\r\n", "\n").split("#[cfg(test)]").next().unwrap().to_string();
+        let login = code(include_str!("login.rs"));
+        let auth = code(include_str!("../api/auth.rs"));
+        let client = code(include_str!("../api/mod.rs"));
+        // Held in a signal (page memory), set from /api/kyc/start, read once for registration.
+        assert!(login.contains("let kyc_claim_secret = RwSignal::new(String::new());"));
+        assert!(login.contains("claim.set(started.claim_secret);"));
+        // No line that touches it builds a URL, stores it, or logs it, on the page or in the API client.
+        for (file, text) in [("pages/login.rs", &login), ("api/auth.rs", &auth)] {
+            for line in text.lines().filter(|l| l.to_lowercase().contains("claim")) {
+                for bad in ["log::", "console", "Storage", "storage", "format!", "url", "Url", "URL", "href", "location", "history", "query", "#t=", "?s="] {
+                    assert!(!line.contains(bad), "{file}: {bad} next to the claim secret: {line}");
+                }
+            }
+            assert!(!text.contains("SessionStorage") || !text.lines().any(|l| l.contains("SessionStorage") && l.to_lowercase().contains("claim")));
+        }
+        // It travels only in the JSON body of the sign-up POST, which the client does not log.
+        assert!(auth.contains("client.post(\"/api/auth/register\", &request)"));
+        let post = client.split("pub async fn post<").nth(1).unwrap().split("\n    }\n").next().unwrap();
+        assert!(post.contains(".json(body)") && !post.contains("log::") && !post.contains("console"));
+        // Its Debug never prints it.
+        assert!(auth.contains(".field(\"kyc_claim_secret\", &self.kyc_claim_secret.as_ref().map(|_| \"[redacted]\"))"));
+        assert!(!auth.contains("#[derive(Debug, Serialize)]\npub struct IdentityRegisterRequest"));
+    }
+
+    #[test]
+    fn the_session_reads_send_the_token_in_a_header_never_the_url() {
+        let src = include_str!("login.rs").replace("\r\n", "\n");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for route in ["/api/kyc/session/", "/api/kyc/status/"] {
+            let after = code.split(route).nth(1).unwrap_or_else(|| panic!("{route} is read"));
+            let read = after.split(".send()").next().unwrap();
+            assert!(read.contains(".header(\"X-KYC-Token\", "), "{route} sends X-KYC-Token");
+        }
+        for line in code.lines().filter(|l| l.contains("/api/kyc/")) {
+            assert!(!line.contains("?token") && !line.contains("&token") && !line.contains("?t="), "a token in a URL: {line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod visible_copy_tests {
+    /// The string literals of this file's code (its tests left out), skipping comments and the raw strings (r#"..."#),
+    /// which hold the downloaded identity file and its README rather than words on the page. The showcase (the build
+    /// plate, its readout and the tagline) is scanned like the rest.
+    fn page_strings() -> Vec<String> {
+        let src = include_str!("login.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        let code: Vec<char> = code.chars().collect();
+        let (mut out, mut i) = (Vec::new(), 0);
+        while i < code.len() {
+            match code[i] {
+                '/' if code.get(i + 1) == Some(&'/') => {
+                    while i < code.len() && code[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                'r' if code.get(i + 1) == Some(&'#') && code.get(i + 2) == Some(&'"') => {
+                    i += 3;
+                    while i + 1 < code.len() && !(code[i] == '"' && code[i + 1] == '#') {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                '\'' if code.get(i + 1) == Some(&'\\') => i += 4,
+                '\'' if code.get(i + 2) == Some(&'\'') => i += 3,
+                '"' => {
+                    let mut s = String::new();
+                    i += 1;
+                    while i < code.len() && code[i] != '"' {
+                        if code[i] == '\\' {
+                            s.push(code[i]);
+                            i += 1;
+                        }
+                        s.push(code[i]);
+                        i += 1;
+                    }
+                    i += 1;
+                    out.push(s);
+                }
+                _ => i += 1,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_words_on_the_login_page_carry_no_dashes_and_no_games_outside_the_showcase() {
+        let strings = page_strings();
+        assert!(strings.len() > 200, "the scan found the page's strings: {}", strings.len());
+        for step in ["Step 1 of 3: Basic Info", "Step 2 of 3: Identity Verification", "Step 3 of 3: Create Your Identity"] {
+            assert!(strings.iter().any(|s| s == step), "{step}");
+        }
+        for s in &strings {
+            assert!(!s.contains('\u{2014}') && !s.contains('\u{2013}'), "a dash in words on the page: {s}");
+            assert!(!s.to_lowercase().contains("games"), "Eustress is a simulation and data platform, not a game engine: {s}");
+        }
+        // the showcase's heading and tagline
+        assert!(strings.iter().any(|s| s == "Create Excellence"));
+        assert!(strings.iter().any(|s| s == "Build simulations, connect real data, and run them in the engine."));
+        // the sign-in line says what to do in plain words
+        assert!(strings.iter().any(|s| s == "Load your identity file to sign in. There is no password."));
+        assert!(!strings.iter().any(|s| s.contains("challenge-response")), "no jargon on the page");
+    }
 }

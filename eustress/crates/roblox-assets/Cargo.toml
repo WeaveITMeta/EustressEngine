@@ -36,3 +36,5 @@ tracing = "0.1"
 
 # `rbx_import` batch bin: per-place + aggregate import reports as JSON.
 serde_json = { workspace = true }
+# `rbx_import`'s batch table (`rbx_import_places.toml`).
+toml = "0.8"

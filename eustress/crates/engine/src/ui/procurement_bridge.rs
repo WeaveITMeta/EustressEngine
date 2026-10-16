@@ -28,6 +28,7 @@ use crate::manufacturing::{
 };
 use crate::manufacturing::purchase::LineDisplayType;
 
+use crate::ui::display_text::shown_line;
 use crate::ui::slint_ui::{ManufacturerOption, PurchaseOrderLineRow, PurchaseOrderRow};
 
 /// A record the Explorer asked the Procurement panels to reveal.
@@ -246,7 +247,12 @@ fn qty(value: f64) -> slint::SharedString {
 
 fn line_row(line: &PurchaseOrderLine) -> PurchaseOrderLineRow {
     PurchaseOrderLineRow {
+        // Whole: the RFQ builder's LineEdit saves this field back on every
+        // keystroke, so a shortened copy would overwrite the real text.
         description: line.name.clone().into(),
+        // Bounded copy for the read-only Text displays. A Text drawn past
+        // 32,767 px crashes the software renderer.
+        description_shown: shown_line(&line.name),
         product_id: line.product_id.clone().unwrap_or_default().into(),
         quantity: qty(line.product_qty),
         uom: line.product_uom.clone().into(),
@@ -275,13 +281,14 @@ pub fn order_row(order: &PurchaseOrder, vendor_name: &str) -> PurchaseOrderRow {
     let lines: Vec<PurchaseOrderLineRow> = order.order_line.iter().map(line_row).collect();
 
     PurchaseOrderRow {
+        // Whole: every procurement callback passes the reference back.
         reference: order.name.clone().into(),
         manufacturer_id: order.manufacturer_id.clone().into(),
-        manufacturer_name: if vendor_name.is_empty() {
-            order.manufacturer_id.clone().into()
+        manufacturer_name: shown_line(if vendor_name.is_empty() {
+            order.manufacturer_id.as_str()
         } else {
-            vendor_name.into()
-        },
+            vendor_name
+        }),
         state: serde_json::to_string(&order.state)
             .unwrap_or_default()
             .trim_matches('"')
@@ -289,13 +296,14 @@ pub fn order_row(order: &PurchaseOrder, vendor_name: &str) -> PurchaseOrderRow {
         state_label: state_label(order.state).into(),
         state_color: state_color(order.state),
         is_rfq: order.is_rfq(),
-        date_order: order.date_order.clone().into(),
-        date_planned: order.date_planned.clone().unwrap_or_else(|| "-".into()).into(),
-        currency: order.currency.clone().into(),
+        date_order: shown_line(&order.date_order),
+        date_planned: shown_line(order.date_planned.as_deref().unwrap_or("-")),
+        currency: shown_line(&order.currency),
         amount_untaxed: money(order.amount_untaxed()),
         amount_tax: money(order.amount_tax()),
         amount_total: money(order.amount_total()),
         invoice_status: invoice_label(order.invoice_status()).into(),
+        // Whole: a LineEdit saves it back through field-changed.
         partner_ref: order.partner_ref.clone().unwrap_or_default().into(),
         notes: order.notes.clone().unwrap_or_default().into(),
         line_count: lines.len() as i32,

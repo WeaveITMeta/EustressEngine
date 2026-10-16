@@ -348,9 +348,19 @@ fn handle_save_viewpoint(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     cameras: Query<&EustressCamera, With<Camera3d>>,
     mut names: ResMut<ViewpointNames>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     let Some(space) = space_root else { return };
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a save waits for Stop: it writes the Space's
+        // `.eustress/viewpoints.toml`. Refused where it is read, so the
+        // request is consumed.
+        if let Some(notice) = crate::keybindings::play_refusal(play_state, crate::keybindings::Action::SaveViewpoint) {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Some(cam) = cameras.iter().next() else {
             warn!("📷 Save viewpoint: no editor camera");
             continue;
@@ -375,6 +385,22 @@ fn handle_save_viewpoint(
     }
 }
 
+/// The viewpoint a load request names. The View menu shows each name through
+/// `display_text::shown_line` and sends the shown text back, so a name that is
+/// long or spans lines (a hand-edited or shared `viewpoints.toml`) arrives in
+/// its bounded form: the exact name wins, else the one that shows as the
+/// request.
+fn viewpoint_index(file: &ViewpointsFile, requested: &str) -> Option<usize> {
+    file.viewpoints
+        .iter()
+        .position(|v| v.name == requested)
+        .or_else(|| {
+            file.viewpoints
+                .iter()
+                .position(|v| crate::ui::display_text::bound_line(&v.name) == requested)
+        })
+}
+
 fn handle_load_viewpoint(
     mut events: MessageReader<LoadViewpointEvent>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
@@ -384,7 +410,7 @@ fn handle_load_viewpoint(
     let Some(space) = space_root else { return };
     for event in events.read() {
         let file = load_file(&space.0);
-        let Some(viewpoint) = file.viewpoints.iter().find(|v| v.name == event.name) else {
+        let Some(viewpoint) = viewpoint_index(&file, &event.name).map(|i| &file.viewpoints[i]) else {
             warn!("📷 Load viewpoint '{}': not found", event.name);
             continue;
         };
@@ -398,7 +424,7 @@ fn handle_load_viewpoint(
             continue;
         };
         cam.go_to(pose, event.animate);
-        names.last_loaded = Some(event.name.clone());
+        names.last_loaded = Some(viewpoint.name.clone());
         info!("📷 Viewpoint '{}'{}", event.name, if event.animate { "" } else { " (snap)" });
     }
 }
@@ -407,9 +433,17 @@ fn handle_delete_viewpoint(
     mut events: MessageReader<DeleteViewpointEvent>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     mut names: ResMut<ViewpointNames>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     let Some(space) = space_root else { return };
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a delete waits for Stop, as a save does.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "delete a viewpoint") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let mut file = load_file(&space.0);
         let before = file.viewpoints.len();
         file.viewpoints.retain(|v| v.name != event.name);
@@ -502,6 +536,25 @@ mod tests {
     }
 
     #[test]
+    fn a_menu_label_that_was_bounded_still_finds_its_viewpoint() {
+        let long = format!("{}\nsecond line", "x".repeat(900));
+        let mut file = ViewpointsFile::default();
+        for name in ["Lobby", long.as_str()] {
+            file.viewpoints.push(Viewpoint::capture(name.into(), sample_pose()));
+        }
+        // A plain name is found by itself.
+        assert_eq!(viewpoint_index(&file, "Lobby"), Some(0));
+        // The menu shows the long one bounded and sends that text back.
+        let shown = crate::ui::display_text::bound_line(&long);
+        assert_ne!(shown, long);
+        assert!(shown.chars().count() < 300 && !shown.contains('\n'));
+        assert_eq!(viewpoint_index(&file, &shown), Some(1));
+        // Exact still wins, and a stranger finds nothing.
+        assert_eq!(viewpoint_index(&file, &long), Some(1));
+        assert_eq!(viewpoint_index(&file, "Nowhere"), None);
+    }
+
+    #[test]
     fn next_viewpoint_wraps_around() {
         let mut names = ViewpointNames::default();
         names.names = vec!["A".into(), "B".into()];
@@ -510,5 +563,97 @@ mod tests {
         assert_eq!(names.next().as_deref(), Some("B"));
         names.last_loaded = Some("B".into());
         assert_eq!(names.next().as_deref(), Some("A"));
+    }
+}
+
+/// During Play the viewpoints file is not written: a save or a delete is
+/// consumed and refused with a notice. Loading is left alone.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A world in `state` over a fresh Space folder whose viewpoints file
+    /// holds "A".
+    fn world_in(state: PlayModeState, tag: &str) -> (World, std::path::PathBuf) {
+        let space = std::env::temp_dir().join(format!("eustress_viewpoints_play_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        let pose = ViewPose {
+            pivot: Vec3::new(4.0, 2.0, -6.0),
+            distance: 18.0,
+            yaw: 0.6,
+            pitch: 0.35,
+            dimension: ViewDimension::ThreeD,
+            projection: ProjectionMode::Orthographic,
+            view: CameraView::Custom,
+            plane: CameraView::Front,
+        };
+        save_file(
+            &space,
+            &ViewpointsFile {
+                viewpoints: vec![Viewpoint::capture("A".into(), pose)],
+            },
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.insert_resource(State::new(state));
+        world.insert_resource(crate::space::SpaceRoot(space.clone()));
+        // `new()`, not the derived default, which keeps no notice.
+        world.insert_resource(crate::notifications::NotificationManager::new());
+        world.init_resource::<crate::ui::OutputConsole>();
+        world.init_resource::<ViewpointNames>();
+        world.init_resource::<Messages<SaveViewpointEvent>>();
+        world.init_resource::<Messages<DeleteViewpointEvent>>();
+        // The editor camera a save reads its pose from, so a save that got
+        // past its refusal would write.
+        world.spawn((EustressCamera::default(), Camera3d::default()));
+        (world, space)
+    }
+
+    /// The toasts, each of which is also a line in the Output panel.
+    fn notices(world: &World) -> Vec<String> {
+        let toasts: Vec<String> = world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+        let output: Vec<String> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        assert_eq!(output, toasts, "the Output panel and the toasts disagree");
+        toasts
+    }
+
+    #[test]
+    fn play_writes_no_viewpoint() {
+        for (state, tag) in [(PlayModeState::Playing, "playing"), (PlayModeState::Paused, "paused")] {
+            let (mut world, space) = world_in(state, tag);
+            world.resource_mut::<Messages<SaveViewpointEvent>>().write(SaveViewpointEvent { name: "B".into() });
+            world.resource_mut::<Messages<DeleteViewpointEvent>>().write(DeleteViewpointEvent { name: "A".into() });
+            world.run_system_once(handle_save_viewpoint).expect("the system runs");
+            world.run_system_once(handle_delete_viewpoint).expect("the system runs");
+            assert_eq!(list_viewpoints(&space), ["A"], "{state:?}: the file changed");
+            assert_eq!(notices(&world), ["Stop Play to use Save Viewpoint.", "Stop Play to delete a viewpoint."], "{state:?}");
+            let _ = std::fs::remove_dir_all(&space);
+        }
+    }
+
+    /// The save runs while editing, with the same camera, so the test above
+    /// is not passing on a save that has nothing to write.
+    #[test]
+    fn editing_saves_a_viewpoint() {
+        let (mut world, space) = world_in(PlayModeState::Editing, "editing_save");
+        world.resource_mut::<Messages<SaveViewpointEvent>>().write(SaveViewpointEvent { name: "B".into() });
+        world.run_system_once(handle_save_viewpoint).expect("the system runs");
+        assert_eq!(list_viewpoints(&space), ["A", "B"]);
+        assert!(notices(&world).is_empty(), "{:?}", notices(&world));
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// The delete runs while editing, so the test above is not passing on a
+    /// handler that writes nothing anywhere.
+    #[test]
+    fn editing_deletes_a_viewpoint() {
+        let (mut world, space) = world_in(PlayModeState::Editing, "editing");
+        world.resource_mut::<Messages<DeleteViewpointEvent>>().write(DeleteViewpointEvent { name: "A".into() });
+        world.run_system_once(handle_delete_viewpoint).expect("the system runs");
+        assert!(list_viewpoints(&space).is_empty(), "{:?}", list_viewpoints(&space));
+        assert!(notices(&world).is_empty(), "{:?}", notices(&world));
+        let _ = std::fs::remove_dir_all(&space);
     }
 }

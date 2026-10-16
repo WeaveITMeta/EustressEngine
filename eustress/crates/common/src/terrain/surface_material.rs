@@ -748,6 +748,52 @@ pub fn swap_terrain_chunk_materials(
     }
 }
 
+/// A mesh that is ground (a road's earth wedges down its cut and fill
+/// slopes): it wears the terrain's surface material whenever the chunks do,
+/// so it reads the material map and shades exactly as the ground around it,
+/// and `fallback` otherwise. Its vertex colours carry the heightfield's shade
+/// (see `mesh::draped_vertex_color`).
+#[derive(Component, Clone, Debug)]
+pub struct TerrainDraped {
+    pub fallback: Handle<StandardMaterial>,
+}
+
+/// Put every [`TerrainDraped`] mesh on the terrain's surface material while
+/// it is drawable, as [`swap_terrain_chunk_materials`] does the chunks, and
+/// back on its fallback otherwise.
+pub fn swap_terrain_draped_materials(
+    mut commands: Commands,
+    roots: Query<Option<&TerrainSurface>, With<TerrainRoot>>,
+    draped: Query<(
+        Entity,
+        &TerrainDraped,
+        Has<MeshMaterial3d<StandardMaterial>>,
+        Option<&MeshMaterial3d<TerrainSurfaceMaterial>>,
+    )>,
+) {
+    let drawable = roots.iter().flatten().find(|surface| surface.is_drawable()).map(TerrainSurface::material);
+    for (entity, ground, has_standard, textured) in &draped {
+        match drawable {
+            Some(material) => {
+                if has_standard || textured.is_none_or(|current| current.0 != *material) {
+                    commands
+                        .entity(entity)
+                        .try_remove::<MeshMaterial3d<StandardMaterial>>()
+                        .try_insert(MeshMaterial3d(material.clone()));
+                }
+            }
+            None => {
+                if textured.is_some() || !has_standard {
+                    commands
+                        .entity(entity)
+                        .try_remove::<MeshMaterial3d<TerrainSurfaceMaterial>>()
+                        .try_insert(MeshMaterial3d(ground.fallback.clone()));
+                }
+            }
+        }
+    }
+}
+
 /// Give every terrain root a [`TerrainHeightTexture`] while
 /// [`TerrainHeightTextureRequest::wants`] it and keep it current (see the
 /// module docs); remove it when it is not wanted or the root has no raster
@@ -858,6 +904,14 @@ impl Plugin for TerrainSurfacePlugin {
                     .after(super::process_terrain_generation_queue)
                     .after(super::chunk_spawn_system)
                     .after(super::apply_terrain_dirty_chunks),
+            )
+            // After the road surfaces spawn their wedges, so none is drawn a
+            // frame in its fallback while the chunks are textured.
+            .add_systems(
+                Update,
+                swap_terrain_draped_materials
+                    .after(swap_terrain_chunk_materials)
+                    .after(super::road_surface::sync_road_surfaces),
             );
         // The far field's material shares this one's map, slot records and
         // arrays; it never adds this plugin back, so the guard is enough.
@@ -937,6 +991,34 @@ mod tests {
     use crate::terrain::TerrainRebake;
     use bevy::render::render_resource::encase::UniformBuffer;
     use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn draped_ground_wears_the_terrain_surface_while_the_chunks_can() {
+        use bevy::ecs::system::RunSystemOnce;
+        // A road's earth wedge wears the terrain's surface material while
+        // it is drawable, and its own grass fallback otherwise.
+        let mut world = World::new();
+        let fallback: Handle<StandardMaterial> = Handle::default();
+        let surface_material: Handle<TerrainSurfaceMaterial> = Handle::default();
+        let surface = |textured: bool| TerrainSurface {
+            material: surface_material.clone(),
+            material_map: Handle::default(),
+            map_size: UVec2::ONE,
+            uploaded_cache: 0,
+            textured,
+            age_frames: SURFACE_SETTLE_FRAMES,
+        };
+        let root = world.spawn((TerrainRoot, surface(true))).id();
+        let wedge = world.spawn((TerrainDraped { fallback: fallback.clone() }, MeshMaterial3d(fallback.clone()))).id();
+        world.run_system_once(swap_terrain_draped_materials).expect("the swap runs");
+        assert!(world.get::<MeshMaterial3d<StandardMaterial>>(wedge).is_none(), "the grass look stays on");
+        assert_eq!(world.get::<MeshMaterial3d<TerrainSurfaceMaterial>>(wedge).map(|m| m.0.clone()), Some(surface_material.clone()));
+        // The surface stops being drawable: back on the fallback.
+        world.entity_mut(root).insert(surface(false));
+        world.run_system_once(swap_terrain_draped_materials).expect("the swap runs");
+        assert!(world.get::<MeshMaterial3d<TerrainSurfaceMaterial>>(wedge).is_none(), "the surface stays on");
+        assert_eq!(world.get::<MeshMaterial3d<StandardMaterial>>(wedge).map(|m| m.0.clone()), Some(fallback));
+    }
 
     const SHADER: &str = include_str!("terrain_surface.wgsl");
 

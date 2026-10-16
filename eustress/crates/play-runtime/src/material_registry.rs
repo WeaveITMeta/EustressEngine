@@ -706,6 +706,36 @@ pub fn build_standard_material(
     mat
 }
 
+/// The file a material's texture path names, and its asset path: 1. relative
+/// to the .mat.toml directory, inside the Space (`space://...`), else 2. in the
+/// bundled library (`bundled://materials/textures/brick_base_color.png`). A
+/// path is the Space's own: one that leaves its folder (`..`, a drive or share,
+/// a `:`) or reaches out through a link is refused (`space_paths`). The `Err`
+/// is the warning to log.
+fn texture_source(
+    mat_toml_dir: &Path,
+    relative_path: &str,
+    space_root: &Path,
+    bundled_root: &Path,
+) -> Result<(PathBuf, String), String> {
+    let Some(rel) = eustress_common::animation::content::safe_relative(relative_path) else {
+        return Err(format!("Texture path {relative_path:?} leaves its folder; not loaded"));
+    };
+    let in_space = mat_toml_dir.join(&rel);
+    if in_space.exists() && crate::space_paths::is_within(&in_space, space_root) {
+        let asset_path = match in_space.strip_prefix(space_root) {
+            Ok(inside) => format!("space://{}", inside.to_string_lossy().replace('\\', "/")),
+            Err(_) => in_space.to_string_lossy().into_owned(),
+        };
+        return Ok((in_space, asset_path));
+    }
+    let bundled = bundled_root.join(&rel);
+    if bundled.exists() && crate::space_paths::is_within(&bundled, bundled_root) {
+        return Ok((bundled, format!("bundled://{rel}")));
+    }
+    Err(format!("Texture not found: {in_space:?} (not in space or bundled assets)"))
+}
+
 /// Load a material map relative to the .mat.toml directory (the Space), falling
 /// back to the bundled library (`common/assets/`). One image per file and
 /// filtering kind, shared through `cache`.
@@ -717,22 +747,12 @@ fn load_texture(
     space_root: &Path,
     kind: MapKind,
 ) -> Option<Handle<Image>> {
-    // 1. Relative to the .mat.toml directory (user space), 2. the bundled
-    //    library, e.g. "materials/textures/brick_base_color.png" →
-    //    "bundled://materials/textures/brick_base_color.png".
-    let in_space = mat_toml_dir.join(relative_path);
-    let bundled = eustress_common::assets_dir().join(relative_path);
-    let (disk, asset_path) = if in_space.exists() {
-        let asset_path = match in_space.strip_prefix(space_root) {
-            Ok(rel) => format!("space://{}", rel.to_string_lossy().replace('\\', "/")),
-            Err(_) => in_space.to_string_lossy().into_owned(),
-        };
-        (in_space, asset_path)
-    } else if bundled.exists() {
-        (bundled, format!("bundled://{}", relative_path.replace('\\', "/")))
-    } else {
-        warn!("Texture not found: {:?} (not in space or bundled assets)", in_space);
-        return None;
+    let (disk, asset_path) = match texture_source(mat_toml_dir, relative_path, space_root, &eustress_common::assets_dir()) {
+        Ok(found) => found,
+        Err(why) => {
+            warn!("{why}");
+            return None;
+        }
     };
     let handle = cache
         .entry((disk.clone(), kind))
@@ -850,6 +870,33 @@ pub fn spawn_material_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A texture path loads from the Space or the bundled library, and never
+    /// from anywhere else: `..` and an absolute path are refused even when
+    /// the file they name exists.
+    #[test]
+    fn a_texture_path_stays_inside_the_space() {
+        let base = std::env::temp_dir().join(format!("eustress_texture_source_{}", std::process::id()));
+        let space = base.join("space");
+        let mats = space.join("MaterialService");
+        let bundled = base.join("bundled");
+        std::fs::create_dir_all(mats.join("textures")).unwrap();
+        std::fs::create_dir_all(bundled.join("materials")).unwrap();
+        std::fs::write(mats.join("textures/brick.png"), b"x").unwrap();
+        std::fs::write(bundled.join("materials/stone.png"), b"x").unwrap();
+        std::fs::write(base.join("secret.png"), b"x").unwrap();
+
+        let (disk, url) = texture_source(&mats, "textures/brick.png", &space, &bundled).expect("in the Space");
+        assert_eq!((disk, url.as_str()), (mats.join("textures/brick.png"), "space://MaterialService/textures/brick.png"));
+        let (_, url) = texture_source(&mats, "materials/stone.png", &space, &bundled).expect("bundled");
+        assert_eq!(url, "bundled://materials/stone.png");
+
+        let absolute = base.join("secret.png").to_string_lossy().into_owned();
+        for bad in ["../../secret.png", "textures/../../../secret.png", absolute.as_str(), r"\\host\share\x.png", "textures/brick.png:zone"] {
+            assert!(texture_source(&mats, bad, &space, &bundled).is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // R2.1 — the dedup key is the scale lever: two parts share ONE
     // Handle<StandardMaterial> (→ Bevy batches them) iff their keys are equal.

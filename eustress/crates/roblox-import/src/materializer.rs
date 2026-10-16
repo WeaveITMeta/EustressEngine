@@ -743,6 +743,28 @@ impl<'dom> Materializer<'dom> {
         for miss in bag.unmapped.drain(..) {
             report.record_unmapped_property(inst.class.as_str(), &miss.property, &miss.variant_type);
         }
+        // A SurfaceGui draws on the part it sits in: its canvas and density
+        // come from that part's size. Its Adornee is not followed; a different
+        // target is recorded as an approximation.
+        if eustress_class == ClassName::SurfaceGui {
+            let parent_size = self.dom.get_by_ref(inst.parent()).and_then(|parent| {
+                match props_to_string_map(parent).remove("Size") {
+                    Some(rbx_dom_weak::types::Variant::Vector3(v)) => Some([v.x, v.y, v.z]),
+                    _ => None,
+                }
+            });
+            surface_gui_canvas(&mut bag, &string_props, parent_size);
+            if let Some(rbx_dom_weak::types::Variant::Ref(target)) = string_props.get("Adornee") {
+                if target.is_some() && *target != inst.parent() {
+                    report.record_approximation(
+                        parent_relpath,
+                        inst.class.as_str(),
+                        "SurfaceGui",
+                        "Adornee names another instance: the SurfaceGui is drawn on the part it sits in, and the Adornee is not imported",
+                    );
+                }
+            }
+        }
 
         // Choose the on-disk folder name. `inst.class` is a `Ustr` in
         // rbx_dom_weak 4.x; project to String to match `inst.name`.
@@ -2069,6 +2091,15 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
             t.insert("mesh".to_string(), toml::Value::String(mesh.clone()));
             t.entry("scene".to_string())
                 .or_insert_with(|| toml::Value::String("Scene0".to_string()));
+            // Every custom mesh an import writes is unit-sized and drawn at
+            // the part's Size (resolved meshes, textured bakes, unions and
+            // their unit-cube stand-in), so its scale is a length.
+            if eustress_common::space_read::primitive_shape(mesh).is_none() {
+                t.insert(
+                    eustress_common::scale_kind::KEY.to_string(),
+                    toml::Value::String(eustress_common::scale_kind::LENGTH.to_string()),
+                );
+            }
         }
     }
 
@@ -2247,7 +2278,7 @@ pub fn import_into_space(
     };
     // Before the first instance file: a Space whose import stops partway
     // never holds parent-relative files without the key that says so.
-    mark_parent_pose_rule(space_root);
+    mark_space_rules(space_root);
     let materializer = Materializer::new(dom.dom(), space_root, options)?;
     materializer.run(&mut report)?;
     write_import_readme(space_root);
@@ -2284,13 +2315,195 @@ fn write_import_readme(space_root: &Path) {
     let _ = std::fs::write(&path, text);
 }
 
-/// Set `[space] transform_rule = "parent_pose"` in the Space's `space.toml`,
-/// creating the file when there is none and keeping everything else in it.
-/// An imported instance's `[transform]` is relative to its parent's pose.
-fn mark_parent_pose_rule(space_root: &Path) {
+/// A Roblox property's default in `class`, from the reflection database, the
+/// same source the importer reads enum names from. `None` when it has none.
+fn roblox_default(class: &str, property: &str) -> Option<rbx_dom_weak::types::Variant> {
+    rbx_reflection_database::get()
+        .ok()?
+        .classes
+        .get(class)?
+        .default_properties
+        .get(property)
+        .cloned()
+}
+
+/// A numeric Roblox value, a float or a whole number, as `f64`.
+fn roblox_number(v: &rbx_dom_weak::types::Variant) -> Option<f64> {
+    use rbx_dom_weak::types::Variant;
+    match v {
+        Variant::Float32(f) => Some(*f as f64),
+        Variant::Float64(f) => Some(*f),
+        Variant::Int32(i) => Some(*i as f64),
+        Variant::Int64(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+fn gui_bool(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    match v {
+        rbx_dom_weak::types::Variant::Bool(b) => Some(toml::Value::Boolean(*b)),
+        _ => None,
+    }
+}
+
+fn gui_float(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    roblox_number(v).map(toml::Value::Float)
+}
+
+/// A world length in studs, as metres.
+fn gui_studs_to_m(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    roblox_number(v).map(|s| toml::Value::Float(s * eustress_common::units::Unit::Stud.to_meters()))
+}
+
+/// The distance a SurfaceGui's no-limit MaxDistance (0) is written as: far
+/// beyond any Space, so a renderer draws it the same whichever way it reads 0.
+const UNLIMITED_DISTANCE_M: f64 = 1_000_000.0;
+
+/// A SurfaceGui's MaxDistance in metres; 0 (no limit) is UNLIMITED_DISTANCE_M.
+fn gui_max_distance(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    let studs = roblox_number(v)?;
+    if studs <= 0.0 {
+        return Some(toml::Value::Float(UNLIMITED_DISTANCE_M));
+    }
+    Some(toml::Value::Float(studs * eustress_common::units::Unit::Stud.to_meters()))
+}
+
+fn gui_face(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    match v {
+        rbx_dom_weak::types::Variant::Enum(e) => {
+            let label = match e.to_u32() {
+                0 => "Right",
+                1 => "Top",
+                2 => "Back",
+                3 => "Left",
+                4 => "Bottom",
+                _ => "Front",
+            };
+            Some(toml::Value::String(label.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn gui_sizing_mode(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    match v {
+        rbx_dom_weak::types::Variant::Enum(e) => {
+            let label = if e.to_u32() == 1 { "PixelsPerStud" } else { "FixedSize" };
+            Some(toml::Value::String(label.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn gui_z_index_behavior(v: &rbx_dom_weak::types::Variant) -> Option<toml::Value> {
+    match v {
+        rbx_dom_weak::types::Variant::Enum(e) => {
+            let label = if e.to_u32() == 0 { "Global" } else { "Sibling" };
+            Some(toml::Value::String(label.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Writes `key` from the Roblox value `default` when the file has no such key.
+fn fill_default(
+    gui: &mut HashMap<String, toml::Value>,
+    key: &str,
+    default: Option<rbx_dom_weak::types::Variant>,
+    convert: fn(&rbx_dom_weak::types::Variant) -> Option<toml::Value>,
+) {
+    if !gui.contains_key(key) {
+        if let Some(v) = default.as_ref().and_then(convert) {
+            gui.insert(key.to_string(), v);
+        }
+    }
+}
+
+/// A SurfaceGui's `[gui]` canvas and density, and the settings the file lacks,
+/// as the loader draws them (docs/architecture/ROBLOX_IMPORT_SPEC.md §9.1).
+///
+/// Roblox sizes the canvas two ways (`SizingMode`): `FixedSize` gives
+/// `CanvasSize`, and `PixelsPerStud` gives the face's size in studs times
+/// `PixelsPerStud`. Either way the canvas covers the face, so the density
+/// (`pixels_per_unit`, pixels per metre of face) is the canvas width over the
+/// face's width in metres. `parent_size` is the part's `Size` in studs; with no
+/// part, the canvas is `CanvasSize` at `PixelsPerStud` per stud. A key the file
+/// lacks takes the reflection database's default.
+fn surface_gui_canvas(
+    bag: &mut PropertyBag,
+    props: &HashMap<String, rbx_dom_weak::types::Variant>,
+    parent_size: Option<[f32; 3]>,
+) {
+    use rbx_dom_weak::types::Variant;
+    let value = |name: &str| props.get(name).cloned().or_else(|| roblox_default("SurfaceGui", name));
+    // NormalId: 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front.
+    let face = match value("Face") {
+        Some(Variant::Enum(e)) => e.to_u32(),
+        _ => 5,
+    };
+    let pixels_per_stud = value("PixelsPerStud").as_ref().and_then(roblox_number).unwrap_or(50.0);
+    let per_stud = matches!(value("SizingMode"), Some(Variant::Enum(e)) if e.to_u32() == 1);
+    let canvas_size = match value("CanvasSize") {
+        Some(Variant::Vector2(v)) => (f64::from(v.x), f64::from(v.y)),
+        _ => (800.0, 600.0),
+    };
+    let stud_m = eustress_common::units::Unit::Stud.to_meters();
+    // The face's width and height in studs: the part's X, Y and Z, by face.
+    let face_studs = parent_size.map(|[x, y, z]| {
+        let (w, h) = match face {
+            0 | 3 => (z, y),
+            1 | 4 => (x, z),
+            _ => (x, y),
+        };
+        (f64::from(w), f64::from(h))
+    });
+    let (canvas, density) = match face_studs {
+        Some((w, h)) if per_stud && w > 0.0 && h > 0.0 => {
+            let canvas = (w * pixels_per_stud, h * pixels_per_stud);
+            (canvas, canvas.0 / (w * stud_m))
+        }
+        Some((w, _)) if w > 0.0 => (canvas_size, canvas_size.0 / (w * stud_m)),
+        _ => (canvas_size, pixels_per_stud / stud_m),
+    };
+    let gui = bag.section_props.entry("gui".to_string()).or_default();
+    gui.insert(
+        "canvas_size".to_string(),
+        toml::Value::Array(vec![toml::Value::Float(canvas.0), toml::Value::Float(canvas.1)]),
+    );
+    gui.insert("pixels_per_unit".to_string(), toml::Value::Float(density));
+    // The settings the file lacks take Roblox's own defaults.
+    fill_default(gui, "face", value("Face"), gui_face);
+    fill_default(gui, "active", value("Active"), gui_bool);
+    fill_default(gui, "enabled", value("Enabled"), gui_bool);
+    fill_default(gui, "always_on_top", value("AlwaysOnTop"), gui_bool);
+    fill_default(gui, "clips_descendants", value("ClipsDescendants"), gui_bool);
+    fill_default(gui, "reset_on_spawn", value("ResetOnSpawn"), gui_bool);
+    fill_default(gui, "brightness", value("Brightness"), gui_float);
+    fill_default(gui, "light_influence", value("LightInfluence"), gui_float);
+    // The generic MaxDistance write (the Roblox value) is replaced here: Roblox's
+    // 0 is no limit, and the file never takes a 0 metre limit.
+    if let Some(v) = value("MaxDistance").as_ref().and_then(gui_max_distance) {
+        gui.insert("max_distance".to_string(), v);
+    }
+    fill_default(gui, "z_index_behavior", value("ZIndexBehavior"), gui_z_index_behavior);
+    fill_default(gui, "sizing_mode", value("SizingMode"), gui_sizing_mode);
+    fill_default(gui, "pixels_per_stud", value("PixelsPerStud"), gui_float);
+    fill_default(gui, "z_offset", value("ZOffset"), gui_float);
+    fill_default(gui, "tool_punch_through_distance", value("ToolPunchThroughDistance"), gui_studs_to_m);
+}
+
+/// Set the Space's rules in its `space.toml`, keeping everything else in it:
+/// `[space] transform_rule = "parent_pose"` (an imported instance's
+/// `[transform]` is relative to its parent's pose) and, for a Space this
+/// import creates, `[space] format = space_format::CURRENT`: every wedge an
+/// import writes already fits the current meshes. An existing `space.toml`
+/// keeps its own format number, since the Space may still hold native wedges
+/// that the next open moves.
+fn mark_space_rules(space_root: &Path) {
     let path = space_root.join("space.toml");
-    let mut doc: toml::Value = std::fs::read_to_string(&path)
-        .ok()
+    let existing = std::fs::read_to_string(&path).ok();
+    let new_space = existing.is_none();
+    let mut doc: toml::Value = existing
         .and_then(|text| text.parse().ok())
         .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
     if let Some(root) = doc.as_table_mut() {
@@ -2299,6 +2512,12 @@ fn mark_parent_pose_rule(space_root: &Path) {
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
         if let Some(space) = space.as_table_mut() {
             space.insert("transform_rule".to_string(), toml::Value::String("parent_pose".to_string()));
+            if new_space {
+                space.insert(
+                    "format".to_string(),
+                    toml::Value::Integer(eustress_common::space_format::CURRENT as i64),
+                );
+            }
         }
     }
     let _ = std::fs::create_dir_all(space_root);
@@ -2681,6 +2900,34 @@ mod tests {
             toml.contains("csg_op"),
             "TOML should record the csg_op: {toml}"
         );
+        let doc: toml::Value = toml.parse().unwrap();
+        assert_eq!(
+            doc["asset"]["scale_kind"].as_str(),
+            Some("length"),
+            "a union's mesh is unit-sized and drawn at its Size"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A primitive's scale is always its Size: its `[asset]` names no kind.
+    #[test]
+    fn a_primitive_names_no_scale_kind() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Part")
+                    .with_name("Orb")
+                    .with_property("Shape", Variant::Enum(rbx_dom_weak::types::Enum::from_u32(0))),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new());
+        let space_root = make_temp_root("primitive_kind");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let doc: toml::Value = std::fs::read_to_string(space_root.join("Workspace").join("Orb").join("_instance.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(asset_mesh_of(&doc), "parts/ball.glb");
+        assert!(doc["asset"].get("scale_kind").is_none(), "{doc}");
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
@@ -2980,6 +3227,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
+    /// A Space the import creates is stamped with the current format (its
+    /// wedges already fit the current meshes); an existing Space keeps its
+    /// own number and every other key.
+    #[test]
+    fn a_new_space_is_stamped_and_an_existing_one_keeps_its_format() {
+        let dm = || {
+            InstanceBuilder::new("DataModel")
+                .with_child(InstanceBuilder::new("Workspace").with_child(InstanceBuilder::new("Part").with_name("Pad")))
+        };
+        let rbx = |dm: InstanceBuilder| {
+            RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new())
+        };
+        let read = |root: &Path| -> toml::Value {
+            std::fs::read_to_string(root.join("space.toml")).expect("space.toml").parse().expect("parse")
+        };
+
+        let fresh = make_temp_root("format_fresh");
+        import_into_space(&rbx(dm()), &fresh, ImportOptions::default()).expect("import");
+        let space = read(&fresh);
+        assert_eq!(
+            space["space"]["format"].as_integer(),
+            Some(eustress_common::space_format::CURRENT as i64),
+            "a new Space is in the current format"
+        );
+        let _ = std::fs::remove_dir_all(&fresh);
+
+        let existing = make_temp_root("format_existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("space.toml"), "[space]\nname = \"Mine\"\nformat = 1\n").unwrap();
+        import_into_space(&rbx(dm()), &existing, ImportOptions::default()).expect("import");
+        let space = read(&existing);
+        assert_eq!(space["space"]["format"].as_integer(), Some(1), "an existing Space keeps its number");
+        assert_eq!(space["space"]["name"].as_str(), Some("Mine"));
+        assert_eq!(space["space"]["transform_rule"].as_str(), Some("parent_pose"));
+        let _ = std::fs::remove_dir_all(&existing);
+    }
+
     /// An Animation keeps its id where the engine reads it, a
     /// KeyframeSequence is one record with its keyframes inline, and a
     /// fetched clip is named in the id map the runtime reads.
@@ -3146,6 +3430,92 @@ mod tests {
         import_into_space(&place(), &space_root, ImportOptions::default()).expect("import");
         assert_eq!(std::fs::read_to_string(space_root.join("README.md")).unwrap(), "mine");
         let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A SurfaceGui draws with the canvas and density of its SizingMode: a
+    /// PixelsPerStud canvas is the face's size in studs times the density, a
+    /// FixedSize canvas is CanvasSize. A child's Position is the one UDim2 the
+    /// loader reads, and the keys the file lacks take the database's defaults.
+    #[test]
+    fn a_surface_gui_draws_with_its_sizing_mode() {
+        use rbx_dom_weak::types::{Enum, UDim, UDim2, Variant, Vector2};
+        // A 4 x 1 x 2 stud part; its SurfaceGui on the Front face (x by y),
+        // holding one TextLabel at (0.5, 10) by (0.25, -4).
+        fn import_surface(
+            sizing: Option<u32>,
+            extra: Vec<(&'static str, Variant)>,
+            tag: &str,
+        ) -> (toml::Value, toml::Value) {
+            let mut gui = InstanceBuilder::new("SurfaceGui")
+                .with_name("Screen")
+                .with_property("Face", Variant::Enum(Enum::from_u32(5)));
+            if let Some(s) = sizing {
+                gui = gui.with_property("SizingMode", Variant::Enum(Enum::from_u32(s)));
+            }
+            for (key, value) in extra {
+                gui = gui.with_property(key, value);
+            }
+            let label = InstanceBuilder::new("TextLabel")
+                .with_name("Title")
+                .with_property("Position", Variant::UDim2(UDim2::new(UDim::new(0.5, 10), UDim::new(0.25, -4))));
+            let pad = InstanceBuilder::new("Part")
+                .with_name("Pad")
+                .with_property("Size", Vector3::new(4.0, 1.0, 2.0))
+                .with_child(gui.with_child(label));
+            let dm = InstanceBuilder::new("DataModel")
+                .with_child(InstanceBuilder::new("Workspace").with_child(pad));
+            let rbx = RobloxDom::from_dom(WeakDom::new(dm), crate::parser::RobloxFormat::BinaryPlace, PathBuf::new());
+            let space_root = make_temp_root(tag);
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+            let read = |rel: &str| -> toml::Value {
+                std::fs::read_to_string(space_root.join(rel)).expect(rel).parse().expect("parse")
+            };
+            let docs = (
+                read("Workspace/Pad/Screen/_instance.toml"),
+                read("Workspace/Pad/Screen/Title/_instance.toml"),
+            );
+            let _ = std::fs::remove_dir_all(&space_root);
+            docs
+        }
+        let floats = |v: &toml::Value| -> Vec<f64> {
+            v.as_array().expect("an array").iter().map(|x| x.as_float().expect("a float")).collect()
+        };
+
+        // PixelsPerStud 70 on a 4 x 1 stud face: a 280 x 70 canvas, 250 px/m.
+        let (screen, title) = import_surface(Some(1), vec![("PixelsPerStud", Variant::Float32(70.0))], "surface_pps");
+        let gui = &screen["gui"];
+        assert_eq!(floats(&gui["canvas_size"]), vec![280.0, 70.0]);
+        assert!((gui["pixels_per_unit"].as_float().unwrap() - 250.0).abs() < 1e-6);
+        assert_eq!(gui["sizing_mode"].as_str(), Some("PixelsPerStud"));
+        assert_eq!(gui["face"].as_str(), Some("Front"));
+        assert_eq!(floats(&title["gui"]["position"]), vec![0.5, 10.0, 0.25, -4.0]);
+        assert!(title["gui"].get("position_scale").is_none(), "a dead split key is not written");
+
+        // FixedSize takes CanvasSize as the canvas, so the density is CanvasSize
+        // over the face's width: 400 / (4 x 0.28) m.
+        let (screen, _) = import_surface(
+            Some(0),
+            vec![("CanvasSize", Variant::Vector2(Vector2::new(400.0, 200.0)))],
+            "surface_fixed",
+        );
+        assert_eq!(floats(&screen["gui"]["canvas_size"]), vec![400.0, 200.0]);
+        assert!((screen["gui"]["pixels_per_unit"].as_float().unwrap() - 400.0 / 1.12).abs() < 1e-6);
+        assert_eq!(screen["gui"]["sizing_mode"].as_str(), Some("FixedSize"));
+
+        // Nothing given: the database's defaults (FixedSize, CanvasSize 800 x
+        // 600, PixelsPerStud 50), so the canvas is 800 x 600 at 800 / 1.12 px/m.
+        let (screen, _) = import_surface(None, vec![], "surface_defaults");
+        assert_eq!(floats(&screen["gui"]["canvas_size"]), vec![800.0, 600.0]);
+        assert!((screen["gui"]["pixels_per_unit"].as_float().unwrap() - 800.0 / 1.12).abs() < 1e-6);
+        assert_eq!(screen["gui"]["sizing_mode"].as_str(), Some("FixedSize"));
+        assert!((screen["gui"]["pixels_per_stud"].as_float().unwrap() - 50.0).abs() < 1e-9);
+
+        // MaxDistance 0 is Roblox's no limit: written as UNLIMITED_DISTANCE_M, so
+        // the file never carries a 0 metre limit. 100 studs is 28 m.
+        let (unlimited, _) = import_surface(Some(1), vec![("MaxDistance", Variant::Float32(0.0))], "surface_no_limit");
+        assert!((unlimited["gui"]["max_distance"].as_float().unwrap() - 1_000_000.0).abs() < 1e-6);
+        let (limited, _) = import_surface(Some(1), vec![("MaxDistance", Variant::Float32(100.0))], "surface_limit");
+        assert!((limited["gui"]["max_distance"].as_float().unwrap() - 28.0).abs() < 1e-6);
     }
 
     /// A Roblox Sky's sun and moon sizes land on the Space's Sun and Moon,

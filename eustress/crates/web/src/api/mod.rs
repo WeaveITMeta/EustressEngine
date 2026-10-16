@@ -9,24 +9,34 @@
 // =============================================================================
 
 pub mod auth;
+pub mod catalog;
 pub mod commerce;
 pub mod community;
+pub mod delta;
 pub mod friends;
 pub mod gallery;
+pub mod identity_keys;
+pub mod account_email;
 pub mod live;
 pub mod marketplace;
+pub mod passkeys;
 pub mod presence_ws;
 pub mod projects;
 pub mod purchases;
+pub mod release_notify;
 pub mod releases;
 
 pub use auth::*;
 pub use commerce::*;
 pub use community::*;
+pub use delta::*;
 pub use friends::*;
 pub use gallery::*;
+pub use identity_keys::*;
+pub use account_email::*;
 pub use live::*;
 pub use marketplace::*;
+pub use passkeys::*;
 pub use presence_ws::*;
 pub use projects::*;
 pub use purchases::*;
@@ -172,6 +182,23 @@ impl ApiClient {
         Self::handle_response(response).await
     }
     
+    /// PATCH request with JSON body.
+    pub async fn patch<T: DeserializeOwned, B: Serialize>(
+        &self,
+        endpoint: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let response = self
+            .build_request("PATCH", endpoint)
+            .json(body)
+            .map_err(|e| ApiError::Deserialize(e.to_string()))?
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        Self::handle_response(response).await
+    }
+
     /// DELETE request.
     pub async fn delete<T: DeserializeOwned>(&self, endpoint: &str) -> Result<T, ApiError> {
         let response = self

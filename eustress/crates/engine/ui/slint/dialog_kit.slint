@@ -509,6 +509,8 @@ export component KitField inherits Rectangle {
     in property <bool> enabled <=> text-input.enabled;
     in property <length> font-size: 11px;
     in property <length> inset: 6px;
+    // A key field passes InputType.password, so what is typed shows as dots.
+    in property <InputType> input-type: InputType.text;
     out property <bool> has-focus: text-input.has-focus;
 
     callback edited(text: string);
@@ -576,6 +578,7 @@ export component KitField inherits Rectangle {
 
             text-input := TextInput {
                 property <length> computed-x;
+                input-type: root.input-type;
 
                 x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
                 width: max(parent.width - self.text-cursor-width, self.preferred-width);

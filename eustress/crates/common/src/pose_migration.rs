@@ -136,7 +136,8 @@ pub fn plan(records: &[(String, Vec<u8>)], pristine: &dyn Fn(&str, &toml::Value)
         }
         let unit = file_unit(&doc);
         let before = written_transform(&doc);
-        let (position, scale) = to_file_unit(local.translation, local.scale, unit.as_deref());
+        let scale_is_length = crate::scale_kind::is_length(get_ci(&doc, "asset"));
+        let (position, scale) = to_file_unit(local.translation, local.scale, unit.as_deref(), scale_is_length);
         let q = local.rotation.normalize();
         out.rewrites.push(Rewrite {
             key: old.key.clone(),
@@ -248,17 +249,21 @@ fn written_transform(doc: &toml::Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
 }
 
 /// Metres back into the file's unit: the inverse of the loader's
-/// conversion (`space_read::authored_pose`), under the same gate.
-fn to_file_unit(translation: Vec3, scale: Vec3, unit: Option<&str>) -> ([f32; 3], [f32; 3]) {
+/// conversion (`space_read::authored_pose`), under the same gate. The scale
+/// converts only when it is a length (`scale_kind::is_length`); a custom
+/// mesh's multiplier is a ratio and is written as it is.
+fn to_file_unit(translation: Vec3, scale: Vec3, unit: Option<&str>, scale_is_length: bool) -> ([f32; 3], [f32; 3]) {
     #[cfg(feature = "units_v1")]
     if let Some(u) = unit.and_then(crate::units::Unit::from_symbol) {
-        return (
-            crate::units::engine_to_authored_vec3_f32(translation.to_array(), u),
-            crate::units::engine_to_authored_vec3_f32(scale.to_array(), u),
-        );
+        let scale = if scale_is_length {
+            crate::units::engine_to_authored_vec3_f32(scale.to_array(), u)
+        } else {
+            scale.to_array()
+        };
+        return (crate::units::engine_to_authored_vec3_f32(translation.to_array(), u), scale);
     }
     #[cfg(not(feature = "units_v1"))]
-    let _ = unit;
+    let _ = (unit, scale_is_length);
     (translation.to_array(), scale.to_array())
 }
 
@@ -443,6 +448,60 @@ mod tests {
         assert!((r.position[0] + 5.0).abs() < 1e-4 && r.position[1].abs() < 1e-4 && r.position[2].abs() < 1e-4, "{:?}", r.position);
         let s = r.scale.expect("a part's size");
         assert_close([s[0] as f64, s[1] as f64, s[2] as f64], [1.0, 1.0, 1.0], "its own size, in feet");
+    }
+
+    /// A nested custom mesh stays exactly where, and as large as, the legacy
+    /// rule drew it, whichever kind its scale is. The legacy rule composes a
+    /// child onto its parent's whole transform, so a child 10 ft along from
+    /// a 2 ft parent is drawn 0.6096 times that far: 6.096 ft along, 3.048 ft
+    /// across. The rewrite writes that position, and the size as drawn.
+    #[test]
+    fn a_custom_meshs_scale_is_written_in_its_own_kind() {
+        let mesh = |kind: &str| format!("\n[asset]\nmesh = \"meshes/Thing.glb\"\nscale_kind = \"{kind}\"\n");
+        let thing = "Workspace/Pad/Thing/_instance.toml";
+        for kind in ["multiplier", "length"] {
+            let records = space(&[
+                ("Workspace/Pad/_instance.toml", part(Some("ft"), [10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 2.0, 2.0], "")),
+                (thing, part(Some("ft"), [10.0, 0.0, 5.0], [0.0, 0.0, 0.0, 1.0], [2.0, 3.0, 4.0], &mesh(kind))),
+            ]);
+            let plan = plan(&records, &|_, _| false).unwrap();
+            let r = plan.rewrites.iter().find(|r| r.key == thing).expect("the child moves");
+            assert_close([r.position[0] as f64, r.position[1] as f64, r.position[2] as f64], [6.096, 0.0, 3.048], kind);
+            let s = r.scale.expect("its scale");
+            assert_close([s[0] as f64, s[1] as f64, s[2] as f64], [1.2192, 1.8288, 2.4384], kind);
+
+            // What is drawn does not change: the legacy walk of the old files
+            // and the ParentPose walk of the rewritten ones agree on the
+            // child's world position and size.
+            let drawn = |records: &[(String, Vec<u8>)], rule: TransformRule| {
+                let walk = posed_records(records, rule);
+                let world = walk.iter().find(|p| p.key == thing).expect("the child is walked").world;
+                let (scale, _, translation) = world.to_scale_rotation_translation();
+                [translation.x, translation.y, translation.z, scale.x, scale.y, scale.z].map(f64::from)
+            };
+            let before = drawn(&records, TransformRule::Legacy);
+            assert_close(before, drawn(&migrated(&records, &plan), TransformRule::ParentPose), kind);
+            // And what each kind IS drawn as, in metres, so a kind read the
+            // wrong way round cannot pass by agreeing with itself: a
+            // multiplier is the ratio times the parent's 0.6096 m, a length is
+            // 2, 3 and 4 ft (0.6096 m, 0.9144 m, 1.2192 m) times it.
+            let size = if kind == "multiplier" { [1.2192, 1.8288, 2.4384] } else { [0.37161216, 0.55741824, 0.74322432] };
+            assert_close([before[3], before[4], before[5]], size, kind);
+        }
+    }
+
+    /// Going back into a file's unit converts the position always and the
+    /// scale only when it is a length: a multiplier is a ratio. This is where
+    /// the two kinds differ.
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn a_multiplier_scale_is_not_converted_into_the_file_unit() {
+        let metres = Vec3::new(0.6096, 0.9144, 1.2192);
+        let (position, length) = to_file_unit(Vec3::new(0.3048, 0.0, 0.0), metres, Some("ft"), true);
+        assert_close(position.map(f64::from), [1.0, 0.0, 0.0], "a position is a length");
+        assert_close(length.map(f64::from), [2.0, 3.0, 4.0], "a length goes out in feet");
+        let (_, ratio) = to_file_unit(Vec3::new(0.3048, 0.0, 0.0), metres, Some("ft"), false);
+        assert_close(ratio.map(f64::from), [0.6096, 0.9144, 1.2192], "a multiplier is written as it is");
     }
 
     /// An Attachment keeps its file; the part holding it is not moved.

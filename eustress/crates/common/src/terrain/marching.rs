@@ -59,7 +59,9 @@
 //! and to any neighbour drawn as a heightfield: a volumetric chunk at LOD 1
 //! and coarser, or one whose march fell back. No skirt hangs where an edit
 //! touches the border, where a cave can cross into a marching-cubes
-//! neighbour and a skirt would hang across it.
+//! neighbour and a skirt would hang across it. The chunk drawn as a
+//! heightfield keeps the same rule (`mesh::generate_chunk_mesh_over`), so no
+//! skirt hangs through a tunnel at any level of detail.
 //!
 //! ## Holes
 //!
@@ -100,7 +102,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::height_query::{height_at_world, world_to_uv};
-use super::mesh::{generate_chunk_mesh, material_vertex_color, skirt_depth, HeightfieldShading};
+use super::mesh::{generate_chunk_mesh_over, material_vertex_color, skirt_depth, HeightfieldShading};
 use super::volume::{
     brick_lattice_origin, chunk_has_volume, lattice_cell_size, lattice_field_sample,
     lattice_surface_height, lattice_to_brick, material_at, sample_field_parts, FieldTerm,
@@ -1402,7 +1404,7 @@ pub fn generate_chunk_render_mesh(
             return meshes.add(geometry.into_mesh());
         }
     }
-    generate_chunk_mesh(chunk_pos, lod, config, data, meshes)
+    generate_chunk_mesh_over(chunk_pos, lod, config, data, volume, meshes)
 }
 
 /// [`generate_chunk_render_mesh`] for a chunk being spawned, also returning
@@ -1422,7 +1424,7 @@ pub fn generate_chunk_render_mesh_and_surface(
             return (meshes.add(geometry.into_mesh()), Some(surface));
         }
     }
-    (generate_chunk_mesh(chunk_pos, lod, config, data, meshes), None)
+    (generate_chunk_mesh_over(chunk_pos, lod, config, data, volume, meshes), None)
 }
 
 /// What marching `chunk_pos` costs, in heightfield builds: the cubes its
@@ -1483,6 +1485,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use crate::terrain::mesh::generate_chunk_mesh;
     use crate::terrain::volume::{apply_box, field_gradient, sample_field_lattice, CsgOp};
 
     // ------------------------------------------------------------------
@@ -2171,6 +2174,44 @@ mod tests {
             (r + 1) * (r + 1) + 4 * (r + 1),
             "a chunk without bricks keeps its heightfield mesh and skirts"
         );
+    }
+
+    #[test]
+    fn no_heightfield_skirt_hangs_through_an_edit() {
+        // A chunk holding edits is drawn as a heightfield at LOD 1: its
+        // skirts keep out of a tunnel that crosses its border under thin
+        // ground, as its marching-cubes skirts do, and still hang past it.
+        let config = test_config();
+        let data = rolling_data(&config);
+        let mut volume = TerrainVolume::new();
+        apply_box(&config, &mut volume, Vec3::new(32.0, 15.0, 12.0), Vec3::new(6.0, 2.5, 2.5), CsgOp::Carve, None);
+        assert!(!chunk_uses_marching_cubes(SHAFT_CHUNK, 1, &config, &volume), "LOD 1 draws the heightfield");
+        let mut meshes = Assets::<Mesh>::default();
+        let handle = generate_chunk_render_mesh(SHAFT_CHUNK, 1, &config, &data, &volume, &mut meshes);
+        let mesh = meshes.get(&handle).expect("mesh was just added");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+            panic!("positions are Float32x3");
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else { panic!("terrain mesh indices are U32") };
+        let stride = config.resolution_for_lod(1) + 1;
+        let border_x = chunk_world_position(PLAIN_CHUNK, &config).x - chunk_world_position(SHAFT_CHUNK, &config).x;
+        // The skirt segments on the +X side, by the z of their top edge.
+        let mut hung = Vec::new();
+        for t in indices.chunks_exact(3) {
+            if t.iter().any(|&i| i >= stride * stride) && t.iter().all(|&i| (positions[i as usize][0] - border_x).abs() < 1e-4) {
+                let zs: Vec<f32> = t.iter().map(|&i| positions[i as usize][2]).collect();
+                hung.push(zs.iter().copied().fold(f32::MAX, f32::min));
+            }
+        }
+        // The tunnel spans z 9.5..14.5 and its edit reaches four cells
+        // either side: no skirt from z 4 to 20, but the rest of the side hangs.
+        assert!(hung.iter().any(|&z| z > 24.0), "the side past the tunnel has no skirt");
+        assert!(hung.iter().all(|&z| !(4.0..20.0).contains(&z)), "a skirt hangs through the tunnel: {hung:?}");
+        // A terrain without edits keeps every skirt, bit for bit as before.
+        let plain = generate_chunk_mesh(SHAFT_CHUNK, 1, &config, &data, &mut meshes);
+        let none = generate_chunk_render_mesh(SHAFT_CHUNK, 1, &config, &data, &TerrainVolume::new(), &mut meshes);
+        let (plain, none) = (meshes.get(&plain).unwrap(), meshes.get(&none).unwrap());
+        assert_eq!(plain.indices().map(|i| i.len()), none.indices().map(|i| i.len()));
     }
 
     #[test]

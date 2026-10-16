@@ -1018,6 +1018,7 @@ mod tests {
             smoothing: 0.5,
             bed_material: None,
             shoulder_material: None,
+            design: None,
         }
     }
 

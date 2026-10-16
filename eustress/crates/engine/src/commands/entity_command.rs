@@ -57,9 +57,10 @@ impl DeleteCommand {
                         crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
                         crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                         crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
-                        crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::Cone => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
+                        // The shared shapes, as drawn everywhere else (wedges are Roblox's).
+                        crate::classes::PartType::Wedge | crate::classes::PartType::CornerWedge | crate::classes::PartType::Cone => {
+                            meshes.add(eustress_common::space_read::primitive_mesh(p.shape).scaled_by(bp.size))
+                        }
                     };
                     mesh_handles.push(mesh);
                 }
@@ -166,9 +167,10 @@ impl DuplicateCommand {
                         crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
                         crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                         crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
-                        crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::Cone => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
+                        // The shared shapes, as drawn everywhere else (wedges are Roblox's).
+                        crate::classes::PartType::Wedge | crate::classes::PartType::CornerWedge | crate::classes::PartType::Cone => {
+                            meshes.add(eustress_common::space_read::primitive_mesh(p.shape).scaled_by(bp.size))
+                        }
                     };
                     mesh_handles.push(mesh);
                 }
@@ -274,9 +276,10 @@ impl CreateCommand {
                     crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
                     crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                     crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
-                    crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
-                    crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),
-                    crate::classes::PartType::Cone => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
+                    // The shared shapes, as drawn everywhere else (wedges are Roblox's).
+                    crate::classes::PartType::Wedge | crate::classes::PartType::CornerWedge | crate::classes::PartType::Cone => {
+                        meshes.add(eustress_common::space_read::primitive_mesh(p.shape).scaled_by(bp.size))
+                    }
                 }
             };
             

@@ -58,6 +58,7 @@ use crate::datamodel::{
 };
 use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim2, LuauVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, Vector3};
+use crate::utils::script_profile;
 
 pub use instance::{handle, with_raycaster, LInst, RayHit, RayQuery, RaycastFn};
 pub use terrain::{with_terrain_reader, TerrainReadFn, TerrainView};
@@ -346,6 +347,17 @@ impl PlayLuau {
         // Metres in a stud, for the speeds Humanoid signals hand a script
         // written for Roblox.
         host_fns.raw_set("studMetres", studs::stud_metres())?;
+        // Whether the host is profiling; the prelude reads it once, here.
+        host_fns.raw_set("profArmed", script_profile::armed())?;
+        // `host.profRecord(script?, step, seconds)`: one handler resume's own time.
+        host_fns.raw_set(
+            "profRecord",
+            lua.create_function(|_, (script, step, seconds): (Option<String>, String, f64)| {
+                let elapsed = std::time::Duration::try_from_secs_f64(seconds).unwrap_or_default();
+                script_profile::record("luau", script.as_deref().unwrap_or("(host)"), &step, elapsed);
+                Ok(())
+            })?,
+        )?;
         {
             let dm = dm.clone();
             // `host.output(level, text, source?, chunk?, line?, stack?)`: the
@@ -538,6 +550,7 @@ impl PlayLuau {
     /// Start scripts. Each runs as its own thread with its own environment;
     /// a compile error is reported and the rest still start.
     pub fn run_scripts(&mut self, scripts: Vec<ScriptLaunch>, raycaster: &RaycastFn<'_>, terrain: &TerrainReadFn<'_>) {
+        let _scope = script_profile::scope();
         with_terrain_reader(terrain, || {
             with_raycaster(raycaster, || {
                 for s in scripts {
@@ -581,6 +594,8 @@ impl PlayLuau {
     /// Run one frame: input, queued events, RunService signals, the task
     /// scheduler and tweens, then the events scripts caused this frame.
     pub fn frame(&mut self, raycaster: &RaycastFn<'_>, terrain: &TerrainReadFn<'_>) {
+        let _scope = script_profile::scope();
+        let started = script_profile::armed().then(std::time::Instant::now);
         with_terrain_reader(terrain, || {
             with_raycaster(raycaster, || {
                 self.begin_entry();
@@ -614,6 +629,9 @@ impl PlayLuau {
                 }
             })
         });
+        if let Some(started) = started {
+            script_profile::record_driver("luau", started.elapsed());
+        }
     }
 
     /// Fire only events that something listens to. Returns once the queue
@@ -1346,6 +1364,41 @@ mod tests {
     /// What the scripts wrote, without the host's lifecycle lines.
     fn output(dm: &SharedDataModel) -> Vec<String> {
         dm.lock().output.iter().filter(|l| !l.lifecycle).map(|l| l.text.clone()).collect()
+    }
+
+    /// A Heartbeat handler is timed under its script and its event. The
+    /// frame's own time is one driver record.
+    #[test]
+    fn a_heartbeat_handler_is_timed_under_its_script_when_profiling_is_armed() {
+        let ((), captured) = crate::utils::script_profile::capture(|| {
+            let (mut vm, _dm, script) = session();
+            run(&mut vm, script, r#"
+                game:GetService("RunService").Heartbeat:Connect(function() end)
+            "#);
+            let no_terrain: &TerrainReadFn<'_> = &|_| {};
+            vm.frame(&no_rays, no_terrain);
+        });
+        assert!(
+            captured.records.iter().any(|r| r.script == "Shop" && r.step == "Heartbeat"),
+            "{:?}",
+            captured.records
+        );
+        assert_eq!(captured.drivers.len(), 1, "one frame, one driver record");
+    }
+
+    /// A VM made while profiling is off reads that when it is made, so it
+    /// times no handler, even when a frame runs under an armed capture. The
+    /// frame's own time still records: the Rust side asks on each call.
+    #[test]
+    fn a_vm_made_unarmed_times_no_handler() {
+        let (mut vm, _dm, script) = session();
+        run(&mut vm, script, r#"
+            game:GetService("RunService").Heartbeat:Connect(function() end)
+        "#);
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        let ((), captured) = crate::utils::script_profile::capture(|| vm.frame(&no_rays, no_terrain));
+        assert!(captured.records.is_empty(), "{:?}", captured.records);
+        assert_eq!(captured.drivers.len(), 1);
     }
 
     #[test]

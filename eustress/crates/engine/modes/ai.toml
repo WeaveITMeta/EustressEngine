@@ -41,6 +41,61 @@ tabs = ["home", "data", "test", "mindspace", "plugins"]
 [layout]
 preset = "Wide Panels"
 
+# Authored panel layout. Datasets live in the Explorer; Output carries run
+# logs, so it is taller than the default. Every discipline without a table of
+# its own uses this one. The Corpus tool set holds the ten data tools that
+# genuinely work today, and is placed in `inner_left`, which the layout system
+# reports as not yet drawn until its dock host supports that zone.
+[layout.zones]
+left = ["explorer", "assets"]
+right = ["properties", "history"]
+bottom = ["output"]
+inner_left = ["toolset:corpus"]
+
+[layout.active]
+left = "explorer"
+
+[layout.sizes]
+bottom = 200
+
+# Training: loss curves and run logs want the tallest Output.
+[[submode_layouts]]
+submode = "training"
+
+[submode_layouts.zones]
+left = ["explorer", "assets"]
+right = ["properties", "history"]
+bottom = ["output"]
+inner_left = ["toolset:corpus"]
+
+[submode_layouts.active]
+left = "explorer"
+
+[submode_layouts.sizes]
+bottom = 300
+
+# Publishing: the exported dataset directory is the work, so Assets leads.
+[[submode_layouts]]
+submode = "publishing"
+
+[submode_layouts.zones]
+left = ["assets", "explorer"]
+right = ["properties", "history"]
+bottom = ["output"]
+inner_left = ["toolset:corpus"]
+
+[submode_layouts.active]
+left = "assets"
+
+[submode_layouts.sizes]
+bottom = 160
+
+[[toolsets]]
+id = "corpus"
+name = "Corpus"
+zone = "inner_left"
+tools = ["data:import", "data:connect", "data:record", "data:grid", "data:chart", "data:stats", "data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
 [theme]
 # Indigo - deliberately distinct from Gaming's light violet (#c084fc) and
 # Student's deeper blue (#0D69AC), the two nearest neighbours in the dropdown.

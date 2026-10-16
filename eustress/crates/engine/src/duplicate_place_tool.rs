@@ -185,7 +185,7 @@ fn build_descriptor(
     space_root: &std::path::Path,
 ) -> NewPartDescriptor {
     // Pull inherited properties from the source TOML where available.
-    let (mesh, class_name, color, material, anchored) = source
+    let (mesh, class_name, color, material, anchored, (scale_kind, mesh_fold)) = source
         .source_toml
         .as_ref()
         .and_then(|p| crate::space::instance_loader::load_instance_definition(p).ok())
@@ -195,6 +195,7 @@ fn build_descriptor(
             Some(def.properties.color),
             Some(def.properties.material.clone()),
             def.properties.anchored,
+            crate::tools_smart::mesh_carry(&def),
         ))
         .unwrap_or_else(|| (
             "parts/block.glb".to_string(),
@@ -202,6 +203,7 @@ fn build_descriptor(
             None,
             None,
             false,
+            (None, Vec::new()),
         ));
 
     let parent_rel = source.source_toml.as_ref()
@@ -227,6 +229,8 @@ fn build_descriptor(
         color_rgba: color,
         material,
         anchored,
+        scale_kind,
+        mesh_fold,
     }
 }
 

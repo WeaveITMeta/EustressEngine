@@ -132,15 +132,19 @@ fn api_key_dialog(space_root: &Path) -> Outcome {
         .into_iter()
         .find(|s| s.profile == Profile::SamOpportunities)
         .and_then(|s| s.secret_ref)
+        // A Connector naming some other secret is ignored here, so the dialog
+        // can never be pointed at, and never show four characters of, a
+        // credential that is not a SAM key.
+        .filter(|n| super::credentials::is_sam_credential_name(n))
         .unwrap_or_else(|| super::credentials::DEFAULT_SAM_KEY.to_string());
-    let status = super::credentials::status(&name);
-    Outcome::OpenApiKeyDialog {
-        name: status.name.clone(),
-        status: status.summary(),
-        present: status.present,
-        from_environment: status.from_environment,
-    }
+    // The status waits on the system credential store, so it is not read
+    // here: the dialog opens at once and the caller asks the credential
+    // worker (`key_tasks`), whose answer fills it in.
+    Outcome::OpenApiKeyDialog { name, status: CHECKING.to_string(), present: false, from_environment: false }
 }
+
+/// The key dialog's status line until the credential worker answers.
+pub const CHECKING: &str = "Checking...";
 
 fn source_status(space_root: &Path) -> Result<Report, CaptureError> {
     let specs = super::poll::discover(space_root);
@@ -696,6 +700,19 @@ secret_ref = \"SAM_API_KEY_CLIENT_B\"
             panic!("expected the key dialog")
         };
         assert_eq!(name, "SAM_API_KEY_CLIENT_B");
+
+        // A Connector naming a non-SAM secret does not retarget the dialog.
+        std::fs::write(
+            ds.join("_instance.toml"),
+            "[metadata]\nclass_name = \"Connector\"\n\n[attributes]\nprofile = \"sam\"\nsecret_ref = \"GITHUB_TOKEN\"\n",
+        )
+        .unwrap();
+        let Some(Ok(Outcome::OpenApiKeyDialog { name, .. })) =
+            handle("pcap:api_key_status", &root)
+        else {
+            panic!("expected the key dialog")
+        };
+        assert_eq!(name, super::super::credentials::DEFAULT_SAM_KEY);
         let _ = std::fs::remove_dir_all(&root);
     }
 

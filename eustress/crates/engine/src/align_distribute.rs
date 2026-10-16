@@ -120,8 +120,18 @@ fn handle_align_events(
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     auth: Option<Res<crate::auth::AuthState>>,
     mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play an align waits for Stop: it moves the selection and
+        // writes each part's file. Refused where it is read, so the request
+        // is consumed and never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "align parts") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let axis = event.axis;
         let mode = event.mode;
 
@@ -261,8 +271,16 @@ fn handle_distribute_events(
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     auth: Option<Res<crate::auth::AuthState>>,
     mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a distribute waits for Stop, as an align does.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "distribute parts") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let axis = event.axis;
 
         // Snapshot selection sorted by center coordinate along axis.
@@ -360,5 +378,51 @@ fn handle_distribute_events(
                 axis_label(axis), n, step.abs(),
             ));
         }
+    }
+}
+
+/// During Play an align or a distribute is refused where it is read, and the
+/// request is consumed.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// Send one align and one distribute in `state` with three parts
+    /// selected, and return where the parts are, and the toasts and Output
+    /// lines left, each sorted (the two readers run in either order).
+    fn run(state: PlayModeState) -> (Vec<Vec3>, Vec<String>, Vec<String>) {
+        let mut app = App::new();
+        app.add_plugins(AlignDistributePlugin);
+        app.insert_resource(State::new(state));
+        app.init_resource::<crate::undo::UndoStack>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        let parts: Vec<Entity> = [0.0, 3.0, 10.0].into_iter().map(|x| app.world_mut().spawn((Transform::from_xyz(x, x, 0.0), Selected)).id()).collect();
+        app.world_mut().write_message(AlignEntitiesEvent {
+            axis: Axis3d::Y,
+            mode: AlignMode::Min,
+        });
+        app.world_mut().write_message(DistributeEntitiesEvent { axis: Axis3d::X });
+        app.update();
+        let world = app.world();
+        let at = parts.iter().map(|&e| world.get::<Transform>(e).unwrap().translation).collect();
+        let mut toasts: Vec<String> = world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+        let mut output: Vec<String> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        toasts.sort();
+        output.sort();
+        (at, toasts, output)
+    }
+
+    #[test]
+    fn play_refuses_align_and_distribute() {
+        let start = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(3.0, 3.0, 0.0), Vec3::new(10.0, 10.0, 0.0)];
+        let refused = vec!["Stop Play to align parts.".to_string(), "Stop Play to distribute parts.".to_string()];
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            assert_eq!(run(state), (start.clone(), refused.clone(), refused.clone()), "{state:?}");
+        }
+        // While editing both run, and the parts move.
+        assert_ne!(run(PlayModeState::Editing).0, start);
     }
 }

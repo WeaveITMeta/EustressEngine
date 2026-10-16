@@ -52,6 +52,9 @@ use bevy::prelude::*;
 use super::height_query::{ensure_material_cache, height_at_world};
 use super::material::{material_cell, paint_material_cell, MaterialCell, TerrainMaterial, MATERIAL_SLOT_NONE};
 use super::road::{build_road_path_with, dense_path_xz, smoothstep};
+use super::road_design::{ProfileMode, RoadSpec, RoadStandard, Zone, P2};
+use super::road_junction::{find_junctions, ground_target, GroundTarget, NetworkJunction};
+use super::road_mesh::{design_spline, section_height_with, DesignedRoad, Side};
 use super::worldgen::noise::fbm;
 use super::{HeightBand, TerrainConfig, TerrainData};
 
@@ -82,6 +85,9 @@ const MIN_KNOT_SPACING: f32 = 5.0;
 const KNOT_SPACING_RANGE: f32 = 35.0;
 /// Spline stations follow the raster's cell spacing within these limits.
 const MIN_STATION_SPACING: f32 = 0.5;
+/// A designed road that follows the ground keeps one of its ground readings
+/// as a profile knot about this often, metres.
+const DESIGN_KNOT_SPACING: f32 = 10.0;
 const MAX_STATION_SPACING: f32 = 4.0;
 /// Noise octaves past this add nothing a raster cell can show.
 const MAX_NOISE_OCTAVES: u32 = 12;
@@ -231,6 +237,13 @@ pub struct SplineLayer {
     pub bed_material: Option<u8>,
     /// Material slot painted over the shoulders, fading out across them.
     pub shoulder_material: Option<u8>,
+    /// The design a Road is built to (its class and where its profile comes
+    /// from), `None` for the plain corridor. A designed road is fitted with
+    /// tangents, spirals and arcs through its points, graded to its class
+    /// and laid with the class's whole cross-section, its cut and fill
+    /// slopes reaching at most `shoulder_width` beyond the formation;
+    /// `width` is its lanes' total width. Other modes ignore it.
+    pub design: Option<RoadSpec>,
 }
 
 impl SplineLayer {
@@ -242,9 +255,32 @@ impl SplineLayer {
         self.shoulder_width.max(0.0)
     }
 
+    /// The design this layer is baked to: a Road's, when it has one.
+    pub fn road_design(&self) -> Option<RoadSpec> {
+        self.design.filter(|_| self.mode == SplineMode::Road)
+    }
+
+    /// The standard a designed road is laid to, its lanes fitted to `width`.
+    pub fn road_standard(&self) -> Option<RoadStandard> {
+        self.road_design().map(|spec| spec.standard(f64::from(self.width)))
+    }
+
     /// Farthest from its centreline the corridor touches the ground.
     pub fn reach(&self) -> f32 {
-        self.half_width() + self.shoulder()
+        match self.road_standard() {
+            Some(standard) => standard.formation_half_width() as f32 + self.shoulder(),
+            None => self.half_width() + self.shoulder(),
+        }
+    }
+
+    /// Farthest from its centreline the corridor is road rather than ground
+    /// worked by it: a designed road's formation and a metre more (its cut
+    /// and fill slopes are ground), the whole reach of any other corridor.
+    pub fn corridor(&self) -> f32 {
+        match self.road_standard() {
+            Some(standard) => standard.formation_half_width() as f32 + 1.0,
+            None => self.reach(),
+        }
     }
 }
 
@@ -568,6 +604,115 @@ fn spline_cross_section(spline: &SplineLayer, lateral: f32, profile_y: f32, h: f
     (finite_or(shaped, h), paint.filter(|(slot, strength)| *slot != MATERIAL_SLOT_NONE && *strength > 0.0))
 }
 
+/// Fraction of a designed road's daylight band (its `shoulder_width` beyond
+/// the formation) over which slopes that have not met the ground by then
+/// fade into it.
+const DAYLIGHT_FADE_FRACTION: f32 = 0.3;
+
+/// Height and paint a designed road leaves at the point `closest`
+/// describes, over ground `h`. Its paved formation (lanes, median,
+/// shoulders, kerbs, sidewalks) lies [`ROAD_BED_SINK`] under the surface its
+/// meshes are laid on and wears the bed material; its ditches are carved as
+/// designed. Beyond, each side does what the design chose for it from the
+/// ground across it ([`super::road_mesh::choose_side`]): a slope out to the ground, wearing
+/// the shoulder material, or a retaining wall with the ground beyond left
+/// as it is. Anything that has not met the ground by the outer part of the
+/// daylight band fades into it there, and past either end the whole section
+/// fades into the ground over the same band. Where a bridge or tunnel
+/// carries the road the ground is left as it is.
+fn designed_cross_section(
+    spline: &SplineLayer,
+    design: &DesignedRoad,
+    closest: &Closest,
+    h: f32,
+    reach: f32,
+) -> (f32, Option<(u8, f32)>) {
+    let formation = design.standard.formation_half_width() as f32;
+    let band = spline.shoulder().max(1e-3);
+    // The offset across the road, without the part along it past an end.
+    let across = (closest.distance * closest.distance - closest.beyond * closest.beyond).max(0.0).sqrt();
+    if !(across <= formation + band) || !(closest.beyond <= band) {
+        return (h, None);
+    }
+    let last = design.sections.len().saturating_sub(1);
+    let i = (closest.segment + usize::from(closest.t >= 0.5)).min(last);
+    if design.structure_at(i).is_some() {
+        return (h, None);
+    }
+    let section = &design.sections[i];
+    let side = design
+        .sides
+        .get(i)
+        .map(|sides| sides[if closest.side >= 0.0 { 0 } else { 1 }])
+        .unwrap_or_else(|| Side::default_for(&design.standard, h > closest.y, false));
+    let (shaped, zone) = section_height_with(section, f64::from(closest.side * across), f64::from(closest.y), f64::from(h), &side);
+    // An unpaved shoulder is gravel on the ground: the ground stays flush
+    // under it (no bed sink) and keeps its own material.
+    let paved = match zone {
+        Some(Zone::Lane | Zone::Median | Zone::Kerb | Zone::Sidewalk) => true,
+        Some(Zone::Shoulder) => design.standard.shoulder_paved,
+        _ => false,
+    };
+    let shaped = shaped as f32 - if paved { ROAD_BED_SINK } else { 0.0 };
+    // The terrain renders bilinear between raster vertices, so a vertex
+    // within `reach` (one raster step's diagonal) of the road's drawn
+    // surface (lanes, shoulders, kerbs, sidewalks) stands below the lowest
+    // of it within that reach, less the grade over the reach: paving's bed
+    // `ROAD_BED_SINK` deeper, a gravel shoulder flush. No cell it shapes
+    // rises through the surface at a crease (a gutter, a kerb's foot, a
+    // crown's edge, the toe of a cut slope or a wall).
+    let cap = (reach > 0.0 && closest.beyond <= reach).then(|| {
+        let lateral = f64::from(closest.side * across);
+        let r = f64::from(reach);
+        let seg = closest.segment.min(design.stations.len().saturating_sub(2));
+        let grade = match (design.stations.get(seg), design.stations.get(seg + 1)) {
+            (Some(a), Some(b)) if b.s > a.s => ((design.profile.elevation(b.s) - design.profile.elevation(a.s)) / (b.s - a.s)).abs(),
+            _ => 0.0,
+        };
+        let is_paved = |z: Zone| match z {
+            Zone::Lane | Zone::Median | Zone::Kerb | Zone::Sidewalk => true,
+            Zone::Shoulder => design.standard.shoulder_paved,
+            _ => false,
+        };
+        // Across the reach, and either side of every break of the section
+        // in it, so no narrow stretch (a gutter, a shoulder) is stepped over.
+        let mut probes: Vec<f64> = [-1.0, -0.5, 0.0, 0.5, 1.0].iter().map(|k| lateral + k * r).collect();
+        for point in section.positive.iter().chain(&section.negative) {
+            if (point.offset - lateral).abs() <= r {
+                probes.extend([point.offset - 1e-3, point.offset + 1e-3]);
+            }
+        }
+        probes
+            .into_iter()
+            .filter(|o| (o - lateral).abs() <= r)
+            .filter_map(|o| match section_height_with(section, o, f64::from(closest.y), f64::from(h), &side) {
+                (v, Some(z @ (Zone::Lane | Zone::Median | Zone::Kerb | Zone::Sidewalk | Zone::Shoulder))) => {
+                    Some(v - if is_paved(z) { f64::from(ROAD_BED_SINK) } else { 0.0 })
+                }
+                _ => None,
+            })
+            .reduce(f64::min)
+            .map(|low| (low - grade * r) as f32)
+    });
+    // 0 at the formation's edge, 1 at the band's.
+    let out = ((across - formation) / band).clamp(0.0, 1.0);
+    let side_fade = smoothstep(((out - (1.0 - DAYLIGHT_FADE_FRACTION)) / DAYLIGHT_FADE_FRACTION).clamp(0.0, 1.0));
+    let end_fade = smoothstep(closest.beyond / band);
+    let weight = (1.0 - side_fade) * (1.0 - end_fade);
+    let height = lerp(h, shaped, weight);
+    let height = match cap.flatten() {
+        Some(cap) => height.min(cap),
+        None => height,
+    };
+    let paint = match zone {
+        _ if paved => spline.bed_material.map(|slot| (slot, weight)),
+        Some(Zone::Ditch) => spline.shoulder_material.map(|slot| (slot, weight)),
+        Some(Zone::CutSlope | Zone::FillSlope) => spline.shoulder_material.map(|slot| (slot, weight * (1.0 - out))),
+        _ => None,
+    };
+    (finite_or(height, h), paint.filter(|(slot, strength)| *slot != MATERIAL_SLOT_NONE && *strength > 0.0))
+}
+
 /// A crater's height at `rn` (distance over radius) as a fraction of the
 /// stamp's height: the bowl below zero, the rim above.
 fn crater_profile(rn: f32) -> f32 {
@@ -838,6 +983,26 @@ struct PreparedSpline {
     bounds: (Vec2, Vec2),
     /// Where each extra knot sampled the ground, and what it read there.
     knots: Vec<(Vec2, f32)>,
+    /// A designed road's design, its stations those of `stations`.
+    design: Option<Box<DesignedRoad>>,
+}
+
+/// Where a point lies against a spline's station polyline.
+#[derive(Clone, Copy, Debug)]
+struct Closest {
+    /// Distance to the closest point of the polyline.
+    distance: f32,
+    /// The profile there.
+    y: f32,
+    /// The segment it lies on (stations `segment` and `segment + 1`) and how
+    /// far along it, 0 to 1.
+    segment: usize,
+    t: f32,
+    /// +1 when the point lies to the right of travel, -1 to the left.
+    side: f32,
+    /// How far past the first or last station the point lies along the
+    /// road, 0 when it lies beside it.
+    beyond: f32,
 }
 
 impl PreparedSpline {
@@ -853,6 +1018,9 @@ impl PreparedSpline {
         // show, sparser cuts corners on tight bends.
         let cell = config.chunk_size / config.chunk_resolution.max(1) as f32;
         let station_spacing = if cell.is_finite() { cell.clamp(MIN_STATION_SPACING, MAX_STATION_SPACING) } else { MAX_STATION_SPACING };
+        if let Some(spec) = spline.road_design() {
+            return Self::designed(config, base, spline, spec, prefix, station_spacing, reach);
+        }
         let knot_spacing = MIN_KNOT_SPACING + KNOT_SPACING_RANGE * spline.smoothing.clamp(0.0, 1.0);
         let mut knots = Vec::new();
         let path = build_road_path_with(&spline.points, station_spacing, knot_spacing, |x, z| {
@@ -865,7 +1033,52 @@ impl PreparedSpline {
         let (lo, hi) = point_bounds(stations.iter().map(|p| Vec2::new(p.x, p.z)))?;
         let bounds = (lo - Vec2::splat(reach), hi + Vec2::splat(reach));
         let grid = SegmentGrid::new(&stations, reach);
-        Some(Self { stations, grid, bounds, knots })
+        Some(Self { stations, grid, bounds, knots, design: None })
+    }
+
+    /// A designed road: the alignment fitted through the points, stations
+    /// `spacing` apart, the profile its spec asks for over the ground the
+    /// layers before it leave. A profile that follows the ground (Auto,
+    /// Ground) records a station's reading as a knot about every
+    /// [`DESIGN_KNOT_SPACING`] metres, so a change of that ground re-designs
+    /// the road.
+    fn designed(
+        config: &TerrainConfig,
+        base: &TerrainData,
+        spline: &SplineLayer,
+        spec: RoadSpec,
+        prefix: &[PreparedLayer],
+        spacing: f32,
+        reach: f32,
+    ) -> Option<Self> {
+        let points: Vec<(P2, f64)> =
+            spline.points.iter().map(|p| (P2::new(f64::from(p.x), f64::from(p.z)), f64::from(p.y))).collect();
+        let follows_ground = spec.profile != ProfileMode::Explicit;
+        let stride = ((DESIGN_KNOT_SPACING / spacing).round() as usize).max(1);
+        let mut knots = Vec::new();
+        let mut station = 0usize;
+        let daylight = f64::from(spline.shoulder());
+        let design = design_spline(&points, spec, f64::from(spline.width), f64::from(spacing), daylight, |p| {
+            let at = Vec2::new(p.x as f32, p.z as f32);
+            let h = ground_through(prefix, config, base, at);
+            if follows_ground && station % stride == 0 {
+                knots.push((at, h));
+            }
+            station += 1;
+            f64::from(h)
+        })?;
+        let stations: Vec<Vec3> = design
+            .stations
+            .iter()
+            .map(|st| Vec3::new(st.pos.x as f32, design.profile.elevation(st.s) as f32, st.pos.z as f32))
+            .collect();
+        if stations.len() < 2 || stations.iter().any(|p| !p.is_finite()) || design.sections.len() != stations.len() {
+            return None;
+        }
+        let (lo, hi) = point_bounds(stations.iter().map(|p| Vec2::new(p.x, p.z)))?;
+        let bounds = (lo - Vec2::splat(reach), hi + Vec2::splat(reach));
+        let grid = SegmentGrid::new(&stations, reach);
+        Some(Self { stations, grid, bounds, knots, design: Some(Box::new(design)) })
     }
 
     /// Distance from `p` to the closest point of the station polyline, and
@@ -873,19 +1086,40 @@ impl PreparedSpline {
     /// true closest point (not the nearest station) keeps the inside of a
     /// hairpin from ridging.
     fn closest(&self, p: Vec2) -> Option<(f32, f32)> {
-        let mut best: Option<(f32, f32)> = None;
+        self.closest_detail(p).map(|c| (c.distance, c.y))
+    }
+
+    /// [`Self::closest`] with the segment, the side and how far past an end.
+    fn closest_detail(&self, p: Vec2) -> Option<Closest> {
+        let last = self.stations.len().checked_sub(2)?;
+        let mut best: Option<(f32, Closest)> = None;
         for &segment in self.grid.candidates(p) {
-            let (a, b) = (self.stations[segment as usize], self.stations[segment as usize + 1]);
+            let segment = segment as usize;
+            let (a, b) = (self.stations[segment], self.stations[segment + 1]);
             let (a2, b2) = (Vec2::new(a.x, a.z), Vec2::new(b.x, b.z));
             let ab = b2 - a2;
             let length_sq = ab.length_squared();
-            let t = if length_sq > 1e-12 { ((p - a2).dot(ab) / length_sq).clamp(0.0, 1.0) } else { 0.0 };
-            let distance_sq = p.distance_squared(a2 + ab * t);
+            let raw = if length_sq > 1e-12 { (p - a2).dot(ab) / length_sq } else { 0.0 };
+            let t = raw.clamp(0.0, 1.0);
+            let foot = a2 + ab * t;
+            let distance_sq = p.distance_squared(foot);
             if best.is_none_or(|(closest, _)| distance_sq < closest) {
-                best = Some((distance_sq, lerp(a.y, b.y, t)));
+                // Right of travel is the heading turned a quarter toward +Z
+                // from +X: (-dz, dx).
+                let to = p - foot;
+                let side = if -to.x * ab.y + to.y * ab.x >= 0.0 { 1.0 } else { -1.0 };
+                let length = length_sq.sqrt();
+                let beyond = if segment == 0 && raw < 0.0 {
+                    -raw * length
+                } else if segment == last && raw > 1.0 {
+                    (raw - 1.0) * length
+                } else {
+                    0.0
+                };
+                best = Some((distance_sq, Closest { distance: 0.0, y: lerp(a.y, b.y, t), segment, t, side, beyond }));
             }
         }
-        best.map(|(distance_sq, y)| (distance_sq.sqrt(), y))
+        best.map(|(distance_sq, closest)| Closest { distance: distance_sq.sqrt(), ..closest })
     }
 
     /// The extra knots still read the ground they did, re-sampled through
@@ -955,13 +1189,30 @@ impl PreparedLayer {
         }
     }
 
+    /// How far along its designed road world `p` lies (the stations'
+    /// measure, as junction legs are placed), when it lies beside it.
+    fn station_at(&self, p: Vec2) -> Option<f64> {
+        let prepared = self.spline.as_ref()?;
+        let design = prepared.design.as_deref()?;
+        let c = prepared.closest_detail(p)?;
+        let (a, b) = (design.stations.get(c.segment)?, design.stations.get(c.segment + 1)?);
+        Some(a.s + (b.s - a.s) * f64::from(c.t))
+    }
+
     /// Height the layer leaves at world `p` over ground `h`, and the material
     /// it paints there by geometry. A material fill paints by the finished
     /// ground's slope instead, in the material pass, and leaves heights alone.
-    fn sample(&self, p: Vec2, h: f32) -> (f32, Option<(u8, f32)>) {
+    fn sample(&self, p: Vec2, h: f32, reach: f32) -> (f32, Option<(u8, f32)>) {
         match &self.desc.kind {
-            LayerKind::Spline(spline) => match self.spline.as_ref().and_then(|prepared| prepared.closest(p)) {
-                Some((lateral, profile_y)) => spline_cross_section(spline, lateral, profile_y, h),
+            LayerKind::Spline(spline) => match self.spline.as_ref() {
+                Some(prepared) => match &prepared.design {
+                    Some(design) => prepared
+                        .closest_detail(p)
+                        .map_or((h, None), |closest| designed_cross_section(spline, design, &closest, h, reach)),
+                    None => prepared
+                        .closest(p)
+                        .map_or((h, None), |(lateral, profile_y)| spline_cross_section(spline, lateral, profile_y, h)),
+                },
                 None => (h, None),
             },
             LayerKind::Stamp(stamp) => (stamp_sample(stamp, self.frame.local(p), h), None),
@@ -977,7 +1228,7 @@ fn ground_through(prefix: &[PreparedLayer], config: &TerrainConfig, base: &Terra
     let mut h = height_at_world(config, base, p.x, p.y);
     for layer in prefix {
         if layer.contains(p) {
-            h = layer.sample(p, h).0;
+            h = layer.sample(p, h, 0.0).0;
         }
     }
     h
@@ -1085,6 +1336,97 @@ struct BakeScratch {
 #[derive(Clone, Debug, Default)]
 pub struct PreparedLayers {
     layers: Vec<PreparedLayer>,
+    /// Where the designed roads meet ([`find_junctions`]), each flattened
+    /// after every layer has applied.
+    junctions: Vec<PreparedJunction>,
+}
+
+/// How far beyond a junction's box its pad fades back into the ground, metres.
+const JUNCTION_FALLOFF: f32 = 6.0;
+
+/// A junction of the designed roads, with the triangles it paves (box,
+/// kerbs and sidewalk corners, draped over its roads) and the area its pad
+/// can change.
+#[derive(Clone, Debug)]
+struct PreparedJunction {
+    junction: NetworkJunction,
+    paved: Vec<[[f64; 3]; 3]>,
+    bounds: (Vec2, Vec2),
+}
+
+impl PreparedJunction {
+    fn new(junction: NetworkJunction) -> Option<Self> {
+        let paved = junction.paved_triangles();
+        let pts = paved.iter().flatten().map(|v| Vec2::new(v[0] as f32, v[2] as f32));
+        let (lo, hi) = point_bounds(pts)?;
+        let reach = Vec2::splat(JUNCTION_FALLOFF);
+        Some(Self { junction, paved, bounds: (lo - reach, hi + reach) })
+    }
+
+    fn contains(&self, p: Vec2) -> bool {
+        p.x >= self.bounds.0.x && p.x <= self.bounds.1.x && p.y >= self.bounds.0.y && p.y <= self.bounds.1.y
+    }
+
+    /// What the ground should do at `p` ([`ground_target`]).
+    fn target(&self, p: Vec2) -> Option<GroundTarget> {
+        ground_target(&self.junction, &self.paved, P2::new(f64::from(p.x), f64::from(p.y)))
+    }
+
+    /// Whether station `s` of road `road` lies in this junction's box, from
+    /// the meeting point out to that leg's setback: there the box is drawn,
+    /// not the road (see `road_surface::junction_zones`).
+    fn covers_station(&self, road: u64, s: f64) -> bool {
+        let j = &self.junction;
+        j.legs.iter().enumerate().any(|(k, leg)| {
+            let setback = j.junction.setbacks.get(k).copied().unwrap_or(0.0);
+            let end = leg.s + if leg.outward { setback } else { -setback };
+            leg.road == road && s >= leg.s.min(end) && s <= leg.s.max(end)
+        })
+    }
+
+    /// Distance from `p` to the junction's paving: 0 under it.
+    fn distance(&self, p: Vec2) -> f32 {
+        self.target(p).map_or(f32::INFINITY, |t| t.beyond as f32)
+    }
+
+    /// Ground height the pad leaves at `p` over `h`: under the junction's
+    /// paving, its draped surface sunk like a road's bed; beside it, flush
+    /// with the paving's edge (a sidewalk's back, a box's kerb), fading to
+    /// `h` over [`JUNCTION_FALLOFF`]. Its roads past their mouths keep what
+    /// their own bake carved.
+    fn pad(&self, p: Vec2, h: f32, reach: f32) -> f32 {
+        let Some(t) = self.target(p) else { return h };
+        // As a road's bed (see `designed_cross_section`): under the paving a
+        // vertex stands below the lowest paved surface within `reach` around
+        // it, so the rendered ground never rises through the box's creases;
+        // just past the paving's edge it stands below that edge.
+        let lowest = |from: f64| -> f64 {
+            let mut low = from;
+            if reach > 0.0 {
+                for k in 0..8 {
+                    let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                    for r in [reach * 0.5, reach] {
+                        if let Some(n) = self.target(p + Vec2::new(a.cos(), a.sin()) * r).filter(|n| n.paved) {
+                            low = low.min(n.surface);
+                        }
+                    }
+                }
+            }
+            low
+        };
+        if t.paved {
+            return finite_or(lowest(t.surface) as f32 - ROAD_BED_SINK, h);
+        }
+        let d = t.beyond as f32;
+        if !(d < JUNCTION_FALLOFF) {
+            return h;
+        }
+        let flush = finite_or(lerp(t.surface as f32, h, smoothstep(d / JUNCTION_FALLOFF)), h);
+        if d < reach {
+            return flush.min(finite_or(lowest(t.surface) as f32 - ROAD_BED_SINK, flush));
+        }
+        flush
+    }
 }
 
 impl PreparedLayers {
@@ -1099,7 +1441,17 @@ impl PreparedLayers {
                 prepared.push(layer);
             }
         }
-        Self { layers: prepared }
+        let designs: Vec<(u64, &DesignedRoad)> = prepared
+            .iter()
+            .filter_map(|l| Some((l.desc.id, l.spline.as_ref()?.design.as_deref()?)))
+            .collect();
+        let junctions = find_junctions(&designs).into_iter().filter_map(PreparedJunction::new).collect();
+        Self { layers: prepared, junctions }
+    }
+
+    /// Where the designed roads meet, as the bake flattened them.
+    pub fn junctions(&self) -> impl Iterator<Item = &NetworkJunction> + '_ {
+        self.junctions.iter().map(|j| &j.junction)
     }
 
     /// No layer can change anything.
@@ -1113,17 +1465,21 @@ impl PreparedLayers {
     }
 
     /// Whether world `p` lies on the corridor of a spline in one of `modes`,
-    /// its bed or shoulders: within the spline's reach of the stations it was
-    /// laid along. Scatter keeps off roads and paths through this, so it
+    /// its bed or shoulders (a designed road's formation): within
+    /// [`SplineLayer::corridor`] of the stations it was laid along. Scatter keeps off roads and paths through this, so it
     /// follows the very line the bake carved rather than a second evaluation
     /// of the spline.
     pub fn in_corridor(&self, p: Vec2, modes: &[SplineMode]) -> bool {
-        self.layers.iter().any(|layer| match (&layer.desc.kind, &layer.spline) {
+        let on_road = self.layers.iter().any(|layer| match (&layer.desc.kind, &layer.spline) {
             (LayerKind::Spline(spline), Some(prepared)) if modes.contains(&spline.mode) && layer.contains(p) => {
-                prepared.closest(p).is_some_and(|(lateral, _)| lateral <= spline.reach())
+                prepared.closest(p).is_some_and(|(lateral, _)| lateral <= spline.corridor())
             }
             _ => false,
-        })
+        });
+        // A junction's box is road too, out to a metre past its kerbs.
+        on_road
+            || (modes.contains(&SplineMode::Road)
+                && self.junctions.iter().any(|j| j.contains(p) && j.distance(p) <= 1.0))
     }
 
     /// Whether world `p` lies on the bed of a spline in one of `modes`,
@@ -1352,6 +1708,9 @@ impl PreparedLayers {
         if out_material {
             scratch.paints.resize(bw * bh * count, NO_PAINT);
         }
+        // What one raster vertex shapes: the cells around it, out to a step's
+        // diagonal (see `designed_cross_section`).
+        let reach = grid.step.length();
         for z in expanded.z0..=expanded.z1 {
             for x in expanded.x0..=expanded.x1 {
                 let p = grid.world(x, z);
@@ -1363,13 +1722,41 @@ impl PreparedLayers {
                     if !layer.contains(p) {
                         continue;
                     }
-                    let (next, paint) = layer.sample(p, h);
+                    let (next, paint) = layer.sample(p, h, reach);
                     if next != h {
                         h = next;
                         moved = true;
                     }
                     if let (Some(slot), Some(paint)) = (paint_slot, paint) {
                         scratch.paints[slot + k] = paint;
+                    }
+                }
+                // Junction pads after every layer: a box is level whatever
+                // the roads meeting there carved.
+                for junction in self.junctions.iter().filter(|j| j.contains(p)) {
+                    let next = junction.pad(p, h, reach);
+                    if next != h {
+                        h = next;
+                        moved = true;
+                    }
+                }
+                // Inside a junction's box the box is drawn, not its roads, so
+                // a road paints there only under the box's paving: past the
+                // kerb returns its straight formation would leave bed paint
+                // (dark patches) in the corners.
+                if let Some(slot) = paint_slot {
+                    for junction in self.junctions.iter().filter(|j| j.contains(p)) {
+                        if junction.target(p).is_some_and(|t| t.paved) {
+                            continue;
+                        }
+                        for (k, &li) in scratch.active.iter().enumerate() {
+                            let layer = &self.layers[li];
+                            if scratch.paints[slot + k] != NO_PAINT
+                                && layer.station_at(p).is_some_and(|s| junction.covers_station(layer.desc.id, s))
+                            {
+                                scratch.paints[slot + k] = NO_PAINT;
+                            }
+                        }
                     }
                 }
                 let e = (z - expanded.z0) * ew + (x - expanded.x0);
@@ -1560,6 +1947,16 @@ impl TerrainBaked {
         }
     }
 
+    /// The design spline layer `id` was last baked to, when it is a designed
+    /// road: its stations, profile, standard and cross-sections, the very
+    /// ones its formation was carved from, so its meshes lie on that
+    /// formation. `None` for any other layer, and when [`Self::baked_spline`]
+    /// is.
+    pub fn baked_design(&self, id: u64) -> Option<&DesignedRoad> {
+        let layer = self.prepared.as_ref()?.layers.iter().find(|layer| layer.desc.id == id)?;
+        layer.spline.as_ref()?.design.as_deref()
+    }
+
     /// The layer list as the last bake prepared it; `None` before the first
     /// bake, and from a replacement of the list until the next bake. Scatter
     /// reads the spline corridors from it ([`PreparedLayers::in_corridor`]).
@@ -1738,6 +2135,7 @@ mod tests {
             smoothing: 0.5,
             bed_material: Some(TerrainMaterial::Asphalt.to_u8()),
             shoulder_material: Some(TerrainMaterial::Rock.to_u8()),
+            design: None,
         }
     }
 
@@ -2143,6 +2541,412 @@ mod tests {
         let mut other = base.clone();
         other.resize_cache(&TerrainConfig { chunks_x: 2, ..config.clone() });
         assert!(std::ptr::eq(surface_data(&other, Some(&baked)), &other), "a stale layout falls back to the base");
+    }
+
+    /// A Collector designed along +X at z = 10, its daylight band 10 m, its
+    /// points at height `y`.
+    fn designed_road(profile: ProfileMode, y: f32) -> SplineLayer {
+        use crate::terrain::road_design::RoadClass;
+        SplineLayer {
+            shoulder_width: 10.0,
+            design: Some(RoadSpec::new(RoadClass::Collector, profile)),
+            ..road(vec![Vec3::new(-28.0, y, 10.0), Vec3::new(16.0, y, 10.0), Vec3::new(60.0, y, 10.0)])
+        }
+    }
+
+    /// Ground at 20 m under z = 10, climbing 0.3 m per metre toward +Z: a
+    /// road along +X cuts on its right (+Z) and fills on its left.
+    fn cross_slope_ground(config: &TerrainConfig) -> TerrainData {
+        base_with(config, |_, z| 20.0 + 0.3 * (z - 10.0))
+    }
+
+    #[test]
+    fn a_designed_road_lays_its_formation_and_daylights_to_the_ground() {
+        let config = config();
+        let base = cross_slope_ground(&config);
+        let spline = designed_road(ProfileMode::Auto, 0.0);
+        let standard = spline.road_standard().expect("a designed road");
+        let edge = standard.formation_half_width() as f32;
+        assert_eq!(spline.reach(), edge + 10.0);
+        let out = bake_whole(&config, &base, &[layer(1, 0, LayerKind::Spline(spline))]);
+        let asphalt = TerrainMaterial::Asphalt.to_u8();
+        // Under paving a vertex stands below the lowest surface within one
+        // raster step's diagonal (config(): 1 m cells), so the bed lies the
+        // sink under the surface and at most the crown's fall over that
+        // reach deeper.
+        let drop = standard.crown as f32 * std::f32::consts::SQRT_2;
+        // The lowest design surface within that reach of a lane point, either
+        // side (the lane's reach can run into a steeper shoulder).
+        let mut probe = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(designed_road(ProfileMode::Auto, 0.0)))]);
+        probe.rebake(&config, &base, &TerrainRebake::default());
+        let design = probe.baked_design(1).expect("a designed road").clone();
+        let lowest_near = |s: f64, d: f64| -> f32 {
+            let mut low = f64::MAX;
+            let mut o = d.abs() - std::f64::consts::SQRT_2;
+            while o <= d.abs() + std::f64::consts::SQRT_2 {
+                for sign in [-1.0, 1.0] {
+                    low = low.min(crate::terrain::road_junction::surface_at(&design, s, sign * o));
+                }
+                o += 0.05;
+            }
+            low as f32
+        };
+        for x in [-10.0f32, 0.0, 20.0, 40.0] {
+            // The crown: the profile (20 m, the ground under the centreline)
+            // at the centre, falling each way, sunk under the surface.
+            let centre = cell_height(&config, &out, x, 10.0);
+            let top = 20.0 - ROAD_BED_SINK;
+            assert!(centre <= top + 1e-3 && centre >= top - drop - 0.02, "centre at x {x} is {centre}");
+            for d in [-3.0f32, 3.0] {
+                let h = cell_height(&config, &out, x, 10.0 + d);
+                let expected = 20.0 - standard.crown as f32 * 3.0 - ROAD_BED_SINK;
+                // Less the grade over the reach, as the bake takes it.
+                let s_at = f64::from(x) + 28.0;
+                let grade = ((design.profile.elevation(s_at + 1.0) - design.profile.elevation(s_at - 1.0)) / 2.0).abs() * std::f64::consts::SQRT_2;
+                let floor = lowest_near(s_at, f64::from(d)) - grade as f32 - ROAD_BED_SINK;
+                // 0.04: the bake shapes from its own smoothed profile and the
+                // formation's section, the probe reads the design's surface,
+                // and both ends of the range carry that difference.
+                assert!(h <= expected + 1e-3 && h >= floor - 0.04, "lane at ({x}, {}) is {h}, not between {floor} and {expected}", 10.0 + d);
+                assert_eq!(material_at_world(&config, &out, x, 10.0 + d).map(|m| m.primary), Some(asphalt));
+            }
+            // Uphill a cut, downhill a fill.
+            let up = 10.0 + edge + 2.0;
+            let (cut, ground) = (cell_height(&config, &out, x, up), cell_height(&config, &base, x, up));
+            assert!(cut < ground - 0.1, "the cut at x {x} is {cut} under ground at {ground}");
+            let down = 10.0 - edge - 2.0;
+            let (fill, ground) = (cell_height(&config, &out, x, down), cell_height(&config, &base, x, down));
+            assert!(fill > ground + 0.1, "the fill at x {x} is {fill} over ground at {ground}");
+            // Both slopes meet the ground within the band; past it nothing changes.
+            for z in [10.0 + edge + 9.0, 10.0 - edge - 9.0, 10.0 + edge + 12.0] {
+                let (h, ground) = (cell_height(&config, &out, x, z), cell_height(&config, &base, x, z));
+                assert!((h - ground).abs() < 1e-3, "at ({x}, {z}) the ground is {h}, not {ground}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_profile_passes_through_the_points_heights() {
+        let config = config();
+        let base = cross_slope_ground(&config);
+        let spline = designed_road(ProfileMode::Explicit, 23.0);
+        let drop = spline.road_standard().unwrap().crown as f32 * std::f32::consts::SQRT_2;
+        let out = bake_whole(&config, &base, &[layer(1, 0, LayerKind::Spline(spline))]);
+        for x in [-10.0f32, 16.0, 40.0] {
+            let h = cell_height(&config, &out, x, 10.0);
+            let top = 23.0 - ROAD_BED_SINK;
+            assert!(h <= top + 1e-3 && h >= top - drop - 0.02, "centre at x {x} is {h}, the points are at 23 m");
+        }
+    }
+
+    #[test]
+    fn a_designed_road_hands_out_its_design_and_keeps_scatter_off_its_formation_only() {
+        let config = config();
+        let base = cross_slope_ground(&config);
+        let spline = designed_road(ProfileMode::Auto, 0.0);
+        let edge = spline.road_standard().unwrap().formation_half_width() as f32;
+        let mut baked = TerrainBaked::new(&base, vec![layer(3, 0, LayerKind::Spline(spline))]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+        let design = baked.baked_design(3).expect("a designed road hands out its design");
+        let (_, stations) = baked.baked_spline(3).expect("and its stations");
+        assert_eq!(design.stations.len(), stations.len());
+        assert_eq!(design.sections.len(), stations.len());
+        let prepared = baked.prepared().unwrap();
+        assert!(prepared.in_corridor(Vec2::new(0.0, 10.0 + edge), &[SplineMode::Road]));
+        assert!(!prepared.in_corridor(Vec2::new(0.0, 10.0 + edge + 3.0), &[SplineMode::Road]), "its slopes are ground");
+
+        let plain = road(vec![Vec3::new(-20.0, 20.0, 0.0), Vec3::new(20.0, 20.0, 0.0)]);
+        let mut plain = TerrainBaked::new(&base, vec![layer(4, 0, LayerKind::Spline(plain))]);
+        plain.rebake(&config, &base, &TerrainRebake::default());
+        assert!(plain.baked_spline(4).is_some() && plain.baked_design(4).is_none(), "a plain road has no design");
+    }
+
+    #[test]
+    fn a_base_edit_under_a_designed_road_redesigns_it_as_a_fresh_bake_would() {
+        let config = config();
+        let mut base = cross_slope_ground(&config);
+        let desc = layer(1, 0, LayerKind::Spline(designed_road(ProfileMode::Auto, 0.0)));
+        let mut baked = TerrainBaked::new(&base, vec![desc.clone()]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+
+        let (lo, hi) = (Vec2::new(-4.0, 7.0), Vec2::new(4.0, 13.0));
+        let grid = RasterGrid::of(&config, &base).unwrap();
+        for z in 0..grid.height {
+            for x in 0..grid.width {
+                let p = grid.world(x, z);
+                if p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y {
+                    set_height_at_world(&config, &mut base, p.x, p.y, 26.0, 1.0);
+                }
+            }
+        }
+        let outcome = baked.rebake(&config, &base, &TerrainRebake { whole: false, rects: vec![(lo, hi)] });
+        assert!(!outcome.remesh.is_empty(), "the ground under the profile moved");
+        let fresh = bake_whole(&config, &base, &[desc]);
+        assert_eq!(baked.data.height_cache, fresh.height_cache, "the rebake matches a bake from scratch");
+    }
+
+    /// A 2.5 m raster (the Space terrains' own): 240 m a side.
+    fn coarse_config() -> TerrainConfig {
+        TerrainConfig {
+            chunk_size: 80.0,
+            chunk_resolution: 32,
+            chunks_x: 1,
+            chunks_z: 1,
+            height_scale: 100.0,
+            height_offset: 0.0,
+            ..TerrainConfig::default()
+        }
+    }
+
+    /// The baked ground as the terrain renders it: bilinear between raster
+    /// vertices.
+    fn rendered_height(config: &TerrainConfig, data: &TerrainData, x: f32, z: f32) -> f32 {
+        let grid = RasterGrid::of(config, data).unwrap();
+        let fx = ((x - grid.origin.x) / grid.step.x).clamp(0.0, (grid.width - 2) as f32);
+        let fz = ((z - grid.origin.y) / grid.step.y).clamp(0.0, (grid.height - 2) as f32);
+        let (i, k) = (fx.floor() as usize, fz.floor() as usize);
+        let (tx, tz) = (fx - i as f32, fz - k as f32);
+        let h = |i: usize, k: usize| config.world_height(data.height_cache[k * grid.width + i]);
+        let a = h(i, k) + (h(i + 1, k) - h(i, k)) * tx;
+        let b = h(i, k + 1) + (h(i + 1, k + 1) - h(i, k + 1)) * tx;
+        a + (b - a) * tz
+    }
+
+    /// A kerbed avenue: two lanes each way, parking, sidewalks.
+    fn avenue(a: Vec3, b: Vec3) -> SplineLayer {
+        use crate::terrain::road_design::{EdgeChoice, RoadClass};
+        SplineLayer {
+            width: 14.0,
+            shoulder_width: 4.0,
+            design: Some(RoadSpec { lanes: 2, parking: true, edge: EdgeChoice::Sidewalk, ..RoadSpec::new(RoadClass::Arterial, ProfileMode::Explicit) }),
+            ..road(vec![a, b])
+        }
+    }
+
+    #[test]
+    fn the_rendered_ground_stays_under_a_kerbed_street() {
+        // An avenue at an angle to the raster, on gently rolling ground: the
+        // terrain, drawn bilinear between 2.5 m vertices, must stay under the
+        // road's surface everywhere across it, gutters and kerbs included.
+        let config = coarse_config();
+        let base = base_with(&config, |x, z| 20.0 + 0.4 * (x * 0.07).sin() + 0.3 * (z * 0.05).cos());
+        let street = avenue(Vec3::new(-110.0, 20.0, -9.0), Vec3::new(110.0, 20.0, 14.0));
+        let mut baked = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(street))]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+        let d = baked.baked_design(1).expect("a designed avenue").clone();
+        let reach = crate::terrain::road_junction::kerb_offset(&d.standard) + d.standard.sidewalk_width;
+        let total = d.stations.last().unwrap().s;
+        let mut worst = (f32::MIN, 0.0, 0.0);
+        let mut s = 20.0;
+        while s < total - 20.0 {
+            let i = d.stations.partition_point(|st| st.s < s).clamp(1, d.stations.len() - 1);
+            let (a, b) = (&d.stations[i - 1], &d.stations[i]);
+            let t = (s - a.s) / (b.s - a.s);
+            let (px, pz) = (a.pos.x + (b.pos.x - a.pos.x) * t, a.pos.z + (b.pos.z - a.pos.z) * t);
+            let n = crate::terrain::road_design::P2::normal(a.heading);
+            let mut o = -reach + 0.05;
+            while o < reach - 0.05 {
+                let surface = crate::terrain::road_junction::surface_at(&d, s, o) as f32;
+                let ground = rendered_height(&config, &baked.data, (px + n.x * o) as f32, (pz + n.z * o) as f32);
+                if ground - surface > worst.0 {
+                    worst = (ground - surface, s, o);
+                }
+                o += 0.1;
+            }
+            s += 0.5;
+        }
+        assert!(worst.0 < -0.005, "the ground shows through the street: {:+.3} m at {:.1} m along, {:.2} m across", worst.0, worst.1, worst.2);
+    }
+
+    #[test]
+    fn the_rendered_ground_stays_under_a_junction_box() {
+        // Two avenues crossing at an angle on graded ground: the terrain,
+        // drawn bilinear between 2.5 m vertices, stays under the box's
+        // draped paving everywhere (no grass along its creases).
+        let config = coarse_config();
+        let base = base_with(&config, |x, z| 20.0 + 0.04 * x - 0.03 * z);
+        let ew = avenue(Vec3::new(-110.0, 15.6, 6.0), Vec3::new(110.0, 24.4, -6.0));
+        let ns = avenue(Vec3::new(-14.0, 23.3, -110.0), Vec3::new(14.0, 16.7, 110.0));
+        let mut baked = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(ew)), layer(2, 0, LayerKind::Spline(ns))]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+        let j = baked.prepared().unwrap().junctions().next().expect("a crossroads").clone();
+        let tris = j.paved_triangles();
+        let mut worst = (f64::MIN, 0.0, 0.0);
+        for t in &tris {
+            let (lo_x, hi_x) = (t[0][0].min(t[1][0]).min(t[2][0]), t[0][0].max(t[1][0]).max(t[2][0]));
+            let (lo_z, hi_z) = (t[0][2].min(t[1][2]).min(t[2][2]), t[0][2].max(t[1][2]).max(t[2][2]));
+            let mut x = lo_x;
+            while x <= hi_x {
+                let mut z = lo_z;
+                while z <= hi_z {
+                    if let Some(target) = ground_target(&j, &tris, P2::new(x, z)).filter(|t| t.paved) {
+                        let ground = f64::from(rendered_height(&config, &baked.data, x as f32, z as f32));
+                        if ground - target.surface > worst.0 {
+                            worst = (ground - target.surface, x, z);
+                        }
+                    }
+                    z += 0.25;
+                }
+                x += 0.25;
+            }
+        }
+        assert!(worst.0 < -0.005, "the ground shows through the box: {:+.3} m at ({:.1}, {:.1})", worst.0, worst.1, worst.2);
+    }
+
+    #[test]
+    fn no_bed_paint_lies_outside_a_junctions_paving() {
+        // Two avenues crossing: every raster vertex the bake paints with the
+        // roads' bed lies under something paved that is drawn, a road's own
+        // surface past the box or the box's paving. Nothing dark shows in
+        // the corners past the kerb returns.
+        let config = coarse_config();
+        let base = base_with(&config, |_, _| 20.0);
+        let ew = avenue(Vec3::new(-110.0, 20.0, 6.0), Vec3::new(110.0, 20.0, -6.0));
+        let ns = avenue(Vec3::new(-14.0, 20.0, -110.0), Vec3::new(14.0, 20.0, 110.0));
+        let mut baked = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(ew)), layer(2, 0, LayerKind::Spline(ns))]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+        let prepared = baked.prepared().unwrap();
+        let j = prepared.junctions().next().expect("a crossroads").clone();
+        let mut paved = j.paved_triangles();
+        for id in [1, 2] {
+            let d = baked.baked_design(id).expect("a designed avenue");
+            let zones = crate::terrain::road_surface::junction_zones(id, prepared.junctions());
+            for (kind, m) in &crate::terrain::road_mesh::build_designed_zoned(d, 0.02, &zones).parts {
+                if matches!(kind, crate::terrain::road_mesh::Surface::MarkingWhite | crate::terrain::road_mesh::Surface::MarkingYellow) {
+                    continue;
+                }
+                for t in m.indices.chunks_exact(3) {
+                    let v = |i: u32| {
+                        let q = m.positions[i as usize];
+                        [f64::from(q[0]), f64::from(q[1]), f64::from(q[2])]
+                    };
+                    paved.push([v(t[0]), v(t[1]), v(t[2])]);
+                }
+            }
+        }
+        let covered = |x: f64, z: f64| {
+            paved.iter().any(|t| {
+                let (a, b, c) = (t[0], t[1], t[2]);
+                let den = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+                if den.abs() < 1e-12 {
+                    return false;
+                }
+                let w0 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / den;
+                let w1 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / den;
+                w0 >= -1e-6 && w1 >= -1e-6 && 1.0 - w0 - w1 >= -1e-6
+            })
+        };
+        let grid = RasterGrid::of(&config, &baked.data).unwrap();
+        let bed = TerrainMaterial::Asphalt.to_u8();
+        let mut stray = Vec::new();
+        for z in 0..grid.height {
+            for x in 0..grid.width {
+                let w = grid.world(x, z);
+                let near = (f64::from(w.x) - j.centre.x).hypot(f64::from(w.y) - j.centre.z) < 40.0;
+                if near && baked.data.material_cache[z * grid.width + x][0] == bed && !covered(f64::from(w.x), f64::from(w.y)) {
+                    stray.push((w.x, w.y));
+                }
+            }
+        }
+        assert!(stray.is_empty(), "{} bed-painted vertices lie outside the paving, e.g. {:?}", stray.len(), &stray[..stray.len().min(6)]);
+    }
+
+    #[test]
+    fn the_rendered_ground_stays_under_a_road_cut_into_a_hillside() {
+        // Roads across a steep hillside (the ground rising 1 in 2 across
+        // them), each class's own edge: a gravel-shouldered rural road, a
+        // mountain road, an arterial with paved shoulders and no kerb, a
+        // kerbed avenue, a local street, a driveway with no edge. The terrain, drawn bilinear between 2.5 m vertices,
+        // stays under each one's drawn surface (2 cm over its design
+        // surface) everywhere across it, the toe of its cut included.
+        use crate::terrain::road_design::{EdgeChoice, RoadClass};
+        let config = coarse_config();
+        let base = base_with(&config, |_, z| 40.0 + 0.5 * z);
+        let lift = crate::terrain::road_surface::DESIGNED_SURFACE_LIFT;
+        for (class, edge) in [
+            (RoadClass::Rural, EdgeChoice::Auto),
+            (RoadClass::Mountain, EdgeChoice::Auto),
+            (RoadClass::Arterial, EdgeChoice::None),
+            (RoadClass::Arterial, EdgeChoice::Sidewalk),
+            (RoadClass::Local, EdgeChoice::Auto),
+            (RoadClass::Driveway, EdgeChoice::None),
+        ] {
+            let spline = SplineLayer {
+                width: 7.0,
+                shoulder_width: 12.0,
+                design: Some(RoadSpec { edge, ..RoadSpec::new(class, ProfileMode::Explicit) }),
+                ..road(vec![Vec3::new(-110.0, 40.0, 0.0), Vec3::new(110.0, 40.0, 3.0)])
+            };
+            let mut baked = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(spline))]);
+            baked.rebake(&config, &base, &TerrainRebake::default());
+            let d = baked.baked_design(1).expect("a designed road").clone();
+            let half = crate::terrain::road_junction::kerb_offset(&d.standard)
+                + if d.standard.edge == crate::terrain::road_design::EdgeTreatment::KerbAndSidewalk { 0.15 + d.standard.sidewalk_width } else { 0.0 };
+            let total = d.stations.last().unwrap().s;
+            let mut worst = (f64::MIN, 0.0, 0.0);
+            let mut s = 20.0;
+            while s < total - 20.0 {
+                let i = d.stations.partition_point(|st| st.s < s).clamp(1, d.stations.len() - 1);
+                let (a, b) = (&d.stations[i - 1], &d.stations[i]);
+                let t = (s - a.s) / (b.s - a.s);
+                let (px, pz) = (a.pos.x + (b.pos.x - a.pos.x) * t, a.pos.z + (b.pos.z - a.pos.z) * t);
+                let n = crate::terrain::road_design::P2::normal(a.heading);
+                let mut o = -half + 0.02;
+                while o < half - 0.02 {
+                    let drawn = crate::terrain::road_junction::surface_at(&d, s, o) + lift;
+                    let ground = f64::from(rendered_height(&config, &baked.data, (px + n.x * o) as f32, (pz + n.z * o) as f32));
+                    if ground - drawn > worst.0 {
+                        worst = (ground - drawn, s, o);
+                    }
+                    o += 0.1;
+                }
+                s += 0.5;
+            }
+            assert!(worst.0 < 0.0, "{class:?} with {edge:?}: the ground shows through the road: {:+.3} m at {:.1} m along, {:.2} m across", worst.0, worst.1, worst.2);
+        }
+    }
+
+    #[test]
+    fn crossing_designed_roads_meet_at_a_levelled_junction() {
+        use crate::terrain::road_design::RoadClass;
+        let config = config();
+        // Gently rolling ground; both roads take the points' height, 22 m.
+        let base = base_with(&config, |x, z| 20.0 + 0.5 * (x * 0.1).sin() + 0.5 * (z * 0.1).cos());
+        let local = |a: Vec3, b: Vec3| SplineLayer {
+            shoulder_width: 6.0,
+            design: Some(RoadSpec::new(RoadClass::Local, ProfileMode::Explicit)),
+            ..road(vec![a, b])
+        };
+        let ew = local(Vec3::new(-30.0, 22.0, 16.0), Vec3::new(62.0, 22.0, 16.0));
+        let ns = local(Vec3::new(16.0, 22.0, -30.0), Vec3::new(16.0, 22.0, 62.0));
+        let mut baked = TerrainBaked::new(&base, vec![layer(1, 0, LayerKind::Spline(ew)), layer(2, 0, LayerKind::Spline(ns))]);
+        baked.rebake(&config, &base, &TerrainRebake::default());
+        let junctions: Vec<&NetworkJunction> = baked.prepared().unwrap().junctions().collect();
+        assert_eq!(junctions.len(), 1, "one crossroads");
+        let j = junctions[0];
+        assert_eq!(j.legs.len(), 4);
+        assert!((j.centre.x - 16.0).abs() < 0.5 && (j.centre.z - 16.0).abs() < 0.5);
+        assert!((j.elevation - 22.0).abs() < 1e-6);
+        // The box's ground is its draped paving (which follows each leg's
+        // crossfall, so it meets the roads without a step) sunk like a
+        // road's bed, even off both roads' formations (a corner of the box).
+        let centre = Vec2::new(j.centre.x as f32, j.centre.z as f32);
+        let off_roads = |p: Vec2| (p.x - centre.x).abs().min((p.y - centre.y).abs());
+        let far = j
+            .junction
+            .boundary
+            .iter()
+            .map(|p| Vec2::new(p.x as f32, p.z as f32))
+            .max_by(|a, b| off_roads(*a).total_cmp(&off_roads(*b)))
+            .unwrap();
+        let corner = far + (centre - far).normalize() * 1.0;
+        let h = cell_height(&config, &baked.data, corner.x, corner.y);
+        let paving = ground_target(j, &j.paved_triangles(), P2::new(f64::from(corner.x), f64::from(corner.y))).expect("the corner is on the box");
+        assert!(paving.paved, "the corner lies under the box's paving");
+        assert!((paving.surface - 22.0).abs() < 0.2, "the box drapes to {:.3}, more than crossfall off the roads' 22 m", paving.surface);
+        assert!((h - (paving.surface as f32 - ROAD_BED_SINK)).abs() < 0.05, "the box at {corner:?} is {h}, its paving {:.3}", paving.surface);
+        // Scatter keeps off the box.
+        assert!(baked.prepared().unwrap().in_corridor(corner, &[SplineMode::Road]));
     }
 
     #[test]

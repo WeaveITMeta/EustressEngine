@@ -1,0 +1,502 @@
+/* topbar.css (p30): the top bar, components/nav.rs.
+   Loaded last, so these rules win over main.css at equal specificity.
+   The gallery's family: glass over the page, steel hairlines, pill controls, mono numbers, one accent.
+   The one accent is the Eustress green line under the page you are on.
+   Nothing on the right of the bar is squeezed: the avatar is a fixed square, each currency pill is as wide as its
+   amount, and only the account name gives way, with an ellipsis (its title has the whole name).
+   Text on the bar: #eef2f7 and #b4bdc9 are above 9:1 on the bar's glass, the menu hints (#8a95a4) 5.9:1. */
+
+:root {
+    --tb-glass: rgba(9, 12, 17, 0.8);
+    --tb-panel: rgba(16, 21, 29, 0.97);
+    --tb-line: rgba(143, 160, 182, 0.18);
+    --tb-line-strong: rgba(143, 160, 182, 0.34);
+    --tb-fill: rgba(143, 160, 182, 0.07);
+    --tb-fill-hover: rgba(143, 160, 182, 0.15);
+    --tb-text: #eef2f7;
+    --tb-text-2: #b4bdc9;
+    --tb-muted: #8a95a4;
+    --tb-accent: #3cba54;
+    --tb-accent-bright: #5ee37a;
+    --tb-control: 34px;
+    --tb-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---- The bar ---- */
+.central-nav {
+    background: var(--tb-glass);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+    border-bottom: 1px solid var(--tb-line);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+}
+
+/* Logo, page links, right side. The logo and the links keep their whole width. The right side is never narrower than
+   --tb-right-min, room for the Downloads button, three pills of five characters and the avatar (nav.rs marks the bar
+   .signed-in); past that the account name truncates. With room to spare, the links sit in the middle of the page. */
+.central-nav {
+    --tb-right-min: 240px;
+}
+
+.central-nav.signed-in {
+    --tb-right-min: 470px;
+}
+
+@media (min-width: 769px) {
+    .central-nav {
+        grid-template-columns: minmax(max-content, 1fr) max-content minmax(var(--tb-right-min), 1fr);
+        column-gap: clamp(12px, 1.6vw, 28px);
+        min-height: 57px;
+        padding: 11px max(clamp(16px, 2vw, 32px), env(safe-area-inset-right, 0px)) 11px max(clamp(16px, 2vw, 32px), env(safe-area-inset-left, 0px));
+    }
+}
+
+.central-nav :focus-visible {
+    outline: 2px solid var(--tb-accent-bright);
+    outline-offset: 2px;
+}
+
+/* ---- Page links ---- */
+.central-nav .nav-links {
+    gap: 2px;
+}
+
+.central-nav .nav-links .central-nav-link {
+    position: relative;
+    padding: 7px clamp(8px, 0.85vw, 14px);
+    border-radius: 9px;
+    color: var(--tb-text-2);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.005em;
+    white-space: nowrap;
+    transition: color 0.18s ease, background 0.18s ease;
+}
+
+.central-nav .nav-links .central-nav-link:hover {
+    color: var(--tb-text);
+    background: var(--tb-fill);
+}
+
+.central-nav .nav-links .central-nav-link.active {
+    color: var(--tb-text);
+    background: transparent;
+}
+
+/* The page you are on: a green line on the bar's lower edge. */
+.central-nav .nav-links .central-nav-link.active::after {
+    content: "";
+    position: absolute;
+    left: clamp(8px, 0.85vw, 14px);
+    right: clamp(8px, 0.85vw, 14px);
+    bottom: -12px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--tb-accent);
+    box-shadow: 0 0 12px rgba(60, 186, 84, 0.55);
+}
+
+/* ---- Right side ---- */
+.nav-right {
+    gap: 8px;
+    min-width: 0;
+    margin-right: 0;
+    justify-self: stretch;
+    justify-content: flex-end;
+}
+
+.nav-right .nav-user-section {
+    gap: 8px;
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+
+/* The Downloads button and its menu */
+.nav-dl {
+    position: relative;
+    flex: none;
+}
+
+.nav-dl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--tb-control);
+    height: var(--tb-control);
+    border-radius: 999px;
+    border: 1px solid var(--tb-line);
+    background: var(--tb-fill);
+    color: var(--tb-text-2);
+    transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+}
+
+.nav-dl-btn:hover,
+.nav-dl-btn[aria-expanded="true"] {
+    color: var(--tb-text);
+    background: var(--tb-fill-hover);
+    border-color: var(--tb-line-strong);
+}
+
+.nav-dl-icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+}
+
+.central-nav .nav-dl-menu {
+    min-width: 232px;
+}
+
+.nav-dl-menu.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.central-nav .nav-dropdown-menu .nav-dl-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 9px 12px;
+}
+
+.nav-dl-name {
+    color: var(--tb-text);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.nav-dl-hint {
+    color: var(--tb-muted);
+    font-size: 12.5px;
+    font-weight: 500;
+}
+
+/* The currency pills: as wide as the amount, never wrapped, never clipped */
+.nav-right .nav-tickets,
+.nav-right .nav-bliss,
+.nav-right .nav-delta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    min-width: 58px;
+    height: var(--tb-control);
+    padding: 0 12px 0 9px;
+    border-radius: 999px;
+    border: 1px solid var(--tb-line);
+    background: var(--tb-fill);
+    box-shadow: none;
+    white-space: nowrap;
+    overflow: visible;
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.nav-right .nav-tickets:hover,
+.nav-right .nav-bliss:hover,
+.nav-right .nav-delta:hover {
+    background: var(--tb-fill-hover);
+    border-color: var(--tb-line-strong);
+    box-shadow: none;
+}
+
+/* Each currency keeps its own colour in its icon and in its edge on hover. */
+.nav-right .nav-bliss:hover {
+    border-color: rgba(255, 215, 0, 0.42);
+}
+
+.nav-right .nav-delta:hover {
+    border-color: rgba(229, 72, 77, 0.45);
+}
+
+.nav-right .ticket-amount,
+.nav-right .nav-bliss .bliss-amount,
+.nav-right .delta-amount {
+    color: var(--tb-text);
+    font-family: var(--tb-mono);
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+}
+
+.nav-right .ticket-icon,
+.nav-right .delta-icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+}
+
+.nav-right .nav-bliss .bliss-icon {
+    width: 18px;
+    height: 18px;
+    flex: none;
+}
+
+.nav-right .nav-bliss .bliss-label {
+    color: var(--tb-text);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.nav-right .nav-bliss-dropdown .bliss-chevron {
+    width: 12px;
+    height: 12px;
+    margin-left: 0;
+    flex: none;
+}
+
+/* Sign In, for a visitor: the family's primary button */
+.nav-right .nav-cta {
+    display: inline-flex;
+    align-items: center;
+    height: var(--tb-control);
+    padding: 0 16px;
+    border-radius: 999px;
+    background: var(--tb-accent);
+    color: #04120a;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.nav-right .nav-cta:hover {
+    background: var(--tb-accent-bright);
+    color: #04120a;
+}
+
+/* The account button: a fixed square avatar, then the name, which truncates instead */
+.nav-right .nav-user-dropdown {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.nav-right .nav-user-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    min-width: 0;
+    height: var(--tb-control);
+    padding: 0 10px 0 2px;
+    border-radius: 999px;
+    border: 1px solid var(--tb-line);
+    background: var(--tb-fill);
+    white-space: nowrap;
+}
+
+.nav-right .nav-user-trigger:hover {
+    background: var(--tb-fill-hover);
+    border-color: var(--tb-line-strong);
+}
+
+.nav-avatar {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: rgba(143, 160, 182, 0.16);
+    box-shadow: 0 0 0 1px var(--tb-line-strong);
+}
+
+.nav-avatar img {
+    display: block;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    object-fit: cover;
+}
+
+.nav-username {
+    display: block;
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 176px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--tb-text);
+    font-size: 13.5px;
+    font-weight: 500;
+}
+
+.nav-user-trigger .dropdown-chevron {
+    flex: none;
+}
+
+/* ---- The menus (account, Bliss, Downloads): a glass panel ---- */
+.central-nav .nav-dropdown-menu {
+    width: max-content;
+    min-width: 216px;
+    max-width: 320px;
+    padding: 6px;
+    border-radius: 14px;
+    border: 1px solid var(--tb-line-strong);
+    background: var(--tb-panel);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.central-nav .nav-dropdown-menu .dropdown-item {
+    border-radius: 9px;
+    padding: 8px 12px;
+    color: var(--tb-text-2);
+}
+
+.central-nav .nav-dropdown-menu .dropdown-item:hover,
+.central-nav .nav-dropdown-menu .dropdown-item:focus-visible {
+    background: var(--tb-fill-hover);
+    color: var(--tb-text);
+}
+
+.central-nav .nav-dropdown-menu .dropdown-item.logout {
+    color: #f47067;
+}
+
+.central-nav .nav-dropdown-menu .dropdown-item.logout:hover {
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.central-nav .nav-dropdown-menu .dropdown-divider {
+    background: var(--tb-line);
+}
+
+/* ---- Narrower screens ----
+   1280px and down: the page links sit closer and the wordmark is smaller.
+   1180px and down: the account name leaves the button (a screen reader still hears it); the avatar stays.
+   1100px and down: the page links move into the drawer behind the menu button, as on a phone; the Downloads button,
+   the pills and the account button stay in the bar. */
+@media (min-width: 769px) and (max-width: 1280px) {
+    .central-nav {
+        column-gap: 12px;
+        padding-left: max(16px, env(safe-area-inset-left, 0px));
+        padding-right: max(16px, env(safe-area-inset-right, 0px));
+    }
+
+    .central-nav .nav-links .central-nav-link {
+        padding: 7px 7px;
+        font-size: 13px;
+    }
+
+    .central-nav .nav-links .central-nav-link.active::after {
+        left: 7px;
+        right: 7px;
+    }
+
+    .nav-right,
+    .nav-right .nav-user-section {
+        gap: 6px;
+    }
+
+    .central-nav .nav-logo-svg {
+        height: 20px;
+    }
+
+    .nav-right .nav-tickets,
+    .nav-right .nav-bliss,
+    .nav-right .nav-delta {
+        padding: 0 10px 0 8px;
+    }
+
+    .nav-right .nav-user-trigger {
+        gap: 6px;
+        padding: 0 8px 0 2px;
+    }
+
+}
+
+@media (min-width: 769px) and (max-width: 1180px) {
+    .central-nav.signed-in {
+        --tb-right-min: 390px;
+    }
+
+    .nav-right .nav-username {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+}
+
+@media (min-width: 769px) and (max-width: 1100px) {
+    .central-nav {
+        grid-template-columns: auto auto minmax(0, 1fr);
+    }
+
+    .central-nav .nav-links.desktop-only {
+        display: none !important;
+    }
+
+    .central-nav .hamburger-btn.mobile-only {
+        display: flex !important;
+        order: -1;
+        width: 40px;
+        height: var(--tb-control);
+        margin-left: -8px;
+        padding: 8px;
+    }
+
+    .central-nav .hamburger-btn.mobile-only.is-open {
+        display: none !important;
+    }
+}
+
+/* The drawer's backdrop covers the page, not only the bar: the bar's backdrop-filter makes the bar the box a fixed
+   child is placed in. */
+.central-nav .mobile-backdrop {
+    bottom: auto;
+    height: 100vh;
+    height: 100dvh;
+}
+
+/* ---- The drawer slides in from the left, under the menu button that opens it ---- */
+/* Closed, it is also hidden, so its links are out of the tab order; visibility waits for the slide to finish. */
+.central-nav .mobile-drawer {
+    left: 0;
+    right: auto;
+    border-left: none;
+    border-right: 1px solid var(--color-border);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.3s;
+}
+
+.central-nav .mobile-drawer.open {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s;
+}
+
+/* The close button sits at the top left, where the menu button was; the logo follows it. */
+.central-nav .drawer-header {
+    justify-content: flex-start;
+    gap: var(--space-sm);
+    padding-left: var(--space-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .central-nav .mobile-drawer,
+    .central-nav .mobile-drawer.open {
+        transition: none;
+    }
+}
+
+/* ---- The drawer's two downloads, stacked ---- */
+.drawer-footer .drawer-download-btn + .drawer-download-btn {
+    margin-top: var(--space-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .central-nav .nav-links .central-nav-link,
+    .nav-dl-btn,
+    .nav-right .nav-tickets,
+    .nav-right .nav-bliss,
+    .nav-right .nav-delta {
+        transition: none;
+    }
+}

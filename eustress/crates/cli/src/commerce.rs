@@ -17,7 +17,7 @@
 //!
 //! ## Credentials
 //! `login` mints a commerce API key (`ek_test_...`, and `ek_live_...` with
-//! `--live`) from the Studio sign-in at `<local data>/EustressEngine/auth_token`
+//! `--live`) from the Studio sign-in saved for that API under `<local data>/EustressEngine/`
 //! (or `EUSTRESS_TOKEN`) and stores it in `<config>/eustress/cli.toml`.
 //! `--api-key` (or `EUSTRESS_API_KEY`) uses a key for one command.
 //! `EUSTRESS_API_URL` points at another API, such as `wrangler dev` on
@@ -26,8 +26,9 @@
 //!
 //! ## Which simulation
 //! `--sim <id>`, else `EUSTRESS_SIM_ID`, else the published id of the Universe
-//! the current folder is in (`<Universe>/.eustress/sync.toml`,
-//! `remote.experience_id`). Inside `<Universe>/Spaces/<Name>/`, `<Name>` is
+//! the current folder is in (`<Universe>/.eustress/sync.toml`: for production
+//! `remote.experience_id`, for another API `remote.listings."<origin>"`).
+//! Inside `<Universe>/Spaces/<Name>/`, `<Name>` is
 //! the default `--space`.
 
 use std::io::Write as _;
@@ -427,6 +428,12 @@ impl Opts {
             .to_string()
     }
 
+    /// The origin of the API in use: what sync.toml keys a listing by.
+    fn origin(&self) -> String {
+        let config = load_config().ok().flatten();
+        eustress_common::api_base::origin_of(&self.base_url(config.as_ref()))
+    }
+
     /// The client for commands that act as the account.
     fn api(&self) -> Result<Api> {
         let config = load_config()?;
@@ -437,9 +444,10 @@ impl Opts {
     /// The client for what only a signed-in person may do: manage API keys.
     fn session_api(&self) -> Result<Api> {
         let config = load_config()?;
-        let token = studio_token().ok_or_else(|| anyhow!(NO_SESSION))?;
+        let base = self.base_url(config.as_ref());
+        let token = studio_token(&base).ok_or_else(|| anyhow!(NO_SESSION))?;
         Api::new(
-            self.base_url(config.as_ref()),
+            base,
             Auth::Session(token),
             self.live,
         )
@@ -478,7 +486,7 @@ impl Opts {
         if self.live {
             bail!("Live mode needs a live key: run `eustress commerce login --live`, or pass --api-key ek_live_...");
         }
-        match studio_token() {
+        match studio_token(&self.base_url(config)) {
             Some(token) => Ok(Auth::Session(token)),
             None => bail!("Not logged in: sign in to Eustress Studio and run `eustress commerce login`, or pass --api-key"),
         }
@@ -714,8 +722,10 @@ fn save_config(config: Option<&CommerceConfig>) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The Studio sign-in: `EUSTRESS_TOKEN`, else the token Studio saved.
-fn studio_token() -> Option<String> {
+/// The Studio sign-in for `base`: `EUSTRESS_TOKEN`, else the login Studio
+/// saved for that API. Studio keeps one login per API, so another API never
+/// receives production's.
+fn studio_token(base: &str) -> Option<String> {
     if let Ok(token) = std::env::var("EUSTRESS_TOKEN") {
         if !token.trim().is_empty() {
             return Some(token.trim().to_string());
@@ -723,7 +733,7 @@ fn studio_token() -> Option<String> {
     }
     let path = dirs::data_local_dir()?
         .join("EustressEngine")
-        .join("auth_token");
+        .join(eustress_common::api_base::login_file_for(base));
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_string())
@@ -737,7 +747,7 @@ struct Here {
 }
 
 impl Here {
-    fn detect() -> Self {
+    fn detect(origin: &str) -> Self {
         let mut here = Here::default();
         let Ok(cwd) = std::env::current_dir() else {
             return here;
@@ -753,7 +763,7 @@ impl Here {
             }
             // A Space's own .eustress/sync.toml holds no published id; the
             // walk goes on up to the Universe's.
-            if let Some(id) = read_experience_id(&dir.join(".eustress").join("sync.toml")) {
+            if let Some(id) = read_listing_id(&dir.join(".eustress").join("sync.toml"), origin) {
                 here.sim_id = Some(id);
                 break;
             }
@@ -762,14 +772,24 @@ impl Here {
     }
 }
 
-fn read_experience_id(sync_toml: &Path) -> Option<String> {
+/// The listing id a Universe's sync.toml holds for the API at `origin`:
+/// `remote.experience_id` for production, `remote.listings."<origin>"` for
+/// any other API. A Universe published to one API never answers with its id
+/// on another. Read from the raw table, so a partial file still answers.
+fn read_listing_id(sync_toml: &Path, origin: &str) -> Option<String> {
     let text = std::fs::read_to_string(sync_toml).ok()?;
     let table: toml::Table = toml::from_str(&text).ok()?;
-    let id = table.get("remote")?.get("experience_id")?.as_str()?.trim();
+    let remote = table.get("remote")?;
+    let id = if origin == eustress_common::api_base::origin_of(DEFAULT_API_URL) {
+        remote.get("experience_id")?
+    } else {
+        remote.get("listings")?.get(origin)?
+    };
+    let id = id.as_str()?.trim();
     (!id.is_empty()).then(|| id.to_string())
 }
 
-fn resolve_sim(explicit: Option<String>, here: Option<&Here>) -> Result<String> {
+fn resolve_sim(explicit: Option<String>, here: Option<&Here>, origin: &str) -> Result<String> {
     if let Some(id) = explicit
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -783,7 +803,7 @@ fn resolve_sim(explicit: Option<String>, here: Option<&Here>) -> Result<String> 
     }
     let detected = match here {
         Some(h) => h.sim_id.clone(),
-        None => Here::detect().sim_id,
+        None => Here::detect(origin).sim_id,
     };
     detected.ok_or_else(|| {
         anyhow!(
@@ -811,7 +831,7 @@ async fn resolve_product_id(api: &Api, reference: &str, sim: Option<String>) -> 
     let number: u64 = reference
         .parse()
         .map_err(|_| anyhow!("'{reference}' is neither a prod_ id nor a product number"))?;
-    let sim = resolve_sim(sim, None)?;
+    let sim = resolve_sim(sim, None, &eustress_common::api_base::origin_of(&api.base))?;
     let catalog = api
         .get(&format!("/api/commerce/catalog/{sim}"), &[])
         .await?;
@@ -885,7 +905,7 @@ async fn login(opts: &Opts, name: Option<String>) -> Result<()> {
         return print_simulations(&account);
     }
 
-    let token = studio_token().ok_or_else(|| anyhow!(NO_SESSION))?;
+    let token = studio_token(&base).ok_or_else(|| anyhow!(NO_SESSION))?;
     let session = Api::new(base.clone(), Auth::Session(token), false)?;
     let account = session.get("/api/commerce/account", &[]).await?;
     let account_id = s(&account, "id").to_string();
@@ -963,7 +983,7 @@ async fn logout(opts: &Opts) -> Result<()> {
         .flatten()
         .collect();
     if !ids.is_empty() {
-        match studio_token() {
+        match studio_token(&opts.base_url(Some(&config))) {
             Some(token) => {
                 let session = Api::new(opts.base_url(Some(&config)), Auth::Session(token), false)?;
                 for id in &ids {
@@ -1066,7 +1086,7 @@ async fn balance(opts: &Opts) -> Result<()> {
 
 async fn catalog(opts: &Opts, sim: Option<String>) -> Result<()> {
     let api = opts.api()?;
-    let sim = resolve_sim(sim, None)?;
+    let sim = resolve_sim(sim, None, &opts.origin())?;
     let list = api
         .get(&format!("/api/commerce/catalog/{sim}"), &[])
         .await?;
@@ -1120,8 +1140,9 @@ async fn products(opts: &Opts, action: ProductsCommand) -> Result<()> {
             active,
             metadata,
         } => {
-            let here = Here::detect();
-            let sim = resolve_sim(sim, Some(&here))?;
+            let origin = opts.origin();
+            let here = Here::detect(&origin);
+            let sim = resolve_sim(sim, Some(&here), &origin)?;
             let space = space.or(here.space).ok_or_else(|| {
                 anyhow!("Which Space is it sold in? Pass --space <name> (`eustress commerce whoami` lists your published Spaces)")
             })?;
@@ -1309,7 +1330,7 @@ async fn purchases(opts: &Opts, action: PurchasesCommand) -> Result<()> {
             }
         }
         PurchasesCommand::Fulfill { id, sim } => {
-            let sim = resolve_sim(sim, None)?;
+            let sim = resolve_sim(sim, None, &opts.origin())?;
             let purchase = api
                 .post(
                     &format!("/api/commerce/purchases/{id}/fulfill"),
@@ -1329,8 +1350,9 @@ async fn purchases(opts: &Opts, action: PurchasesCommand) -> Result<()> {
             if opts.live {
                 bail!("Live purchases are made by players inside the simulation. Test your storefront in test mode.");
             }
-            let here = Here::detect();
-            let sim = resolve_sim(sim, Some(&here))?;
+            let origin = opts.origin();
+            let here = Here::detect(&origin);
+            let sim = resolve_sim(sim, Some(&here), &origin)?;
             let product = match product {
                 Some(p) => p,
                 None => first_product(&api, &sim).await?,
@@ -1580,7 +1602,7 @@ async fn trigger(opts: &Opts, args: TriggerArgs) -> Result<()> {
         bail!("event must be one of {}", TRIGGERS.join(", "));
     }
     let api = opts.api()?;
-    let sim = resolve_sim(args.sim, None)?;
+    let sim = resolve_sim(args.sim, None, &opts.origin())?;
     let product = match args.product {
         Some(p) => p,
         None => first_product(&api, &sim).await?,
@@ -2027,14 +2049,20 @@ mod tests {
     }
 
     #[test]
-    fn the_published_id_is_read_from_sync_toml() {
+    fn the_published_id_is_read_from_sync_toml_for_the_api_in_use() {
         let dir = std::env::temp_dir().join(format!("eustress-cli-sync-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sync.toml");
+        let production = eustress_common::api_base::origin_of(DEFAULT_API_URL);
+        let staging = "https://staging-api.eustress.dev";
         std::fs::write(&path, "[sync]\nmode = \"local_first\"\n\n[remote]\nprovider = \"cloudflare_r2\"\nexperience_id = \"abc-123\"\n").unwrap();
-        assert_eq!(read_experience_id(&path).as_deref(), Some("abc-123"));
+        assert_eq!(read_listing_id(&path, &production).as_deref(), Some("abc-123"));
+        assert_eq!(read_listing_id(&path, staging), None, "production's id is never another API's");
+        std::fs::write(&path, "[remote]\nexperience_id = \"abc-123\"\n\n[remote.listings]\n\"https://staging-api.eustress.dev\" = \"def-456\"\n").unwrap();
+        assert_eq!(read_listing_id(&path, staging).as_deref(), Some("def-456"));
+        assert_eq!(read_listing_id(&path, &production).as_deref(), Some("abc-123"));
         std::fs::write(&path, "[remote]\nprovider = \"cloudflare_r2\"\n").unwrap();
-        assert_eq!(read_experience_id(&path), None);
+        assert_eq!(read_listing_id(&path, &production), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

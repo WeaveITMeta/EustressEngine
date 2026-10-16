@@ -2,21 +2,40 @@
 // Eustress Web - Dashboard Page (Industrial Design)
 // =============================================================================
 // User dashboard with quick actions, stats, and recent activity
-// Recent projects populated from Cloudflare R2 Experience Bucket
+// Recent Spaces are the account's own listings (GET /api/projects), newest edit first
 // =============================================================================
 
 use leptos::prelude::*;
-use crate::state::{AppState, AuthState};
+use crate::api::ApiClient;
 use crate::components::{CentralNav, Footer};
+use crate::pages::projects::{ProjectsResponse, SpaceStatus};
+use crate::state::{AppState, AuthState};
 
-/// Recent project from R2 bucket
+/// How many Spaces the dashboard shows.
+const RECENT: usize = 6;
+
+/// One of the account's Spaces, as the dashboard shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecentProject {
     pub id: String,
     pub name: String,
     pub thumbnail_url: Option<String>,
     pub last_modified: String,
-    pub status: String, // "published", "draft", "edited"
+    /// The review state in words ("Published", "In review", ...).
+    pub status: String,
+    pub status_class: String,
+}
+
+/// The newest `RECENT` Spaces first. Edit times are ISO text, which sorts as time does.
+pub fn most_recent(mut rows: Vec<RecentProject>) -> Vec<RecentProject> {
+    rows.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    rows.truncate(RECENT);
+    rows
+}
+
+/// "2026-10-01T22:01:09Z" reads as "2026-10-01"; text that is not a date is shown as it is.
+pub fn day_of(iso: &str) -> String {
+    iso.split('T').next().unwrap_or(iso).to_string()
 }
 
 /// User dashboard page.
@@ -25,29 +44,44 @@ pub fn DashboardPage() -> impl IntoView {
     let app_state = expect_context::<AppState>();
     let auth = app_state.auth;
     
-    // Recent projects from R2 (would be fetched from API)
+    // The account's own Spaces: the same list the Projects page shows.
     let recent_projects = RwSignal::new(Vec::<RecentProject>::new());
     let is_loading = RwSignal::new(true);
-    
-    // Fetch recent projects from R2 on mount
+    let failed = RwSignal::new(false);
+    let api_url = app_state.api_url.clone();
     Effect::new(move |_| {
-        // TODO: Fetch from Cloudflare R2 API
-        // GET /api/projects/recent - returns projects from R2 bucket
-        // For now, simulate empty state or mock data
-        is_loading.set(false);
-        
-        // Mock data for development - remove when API is ready
-        // recent_projects.set(vec![
-        //     RecentProject {
-        //         id: "proj_123".to_string(),
-        //         name: "My First Game".to_string(),
-        //         thumbnail_url: None,
-        //         last_modified: "2 hours ago".to_string(),
-        //         status: "edited".to_string(),
-        //     },
-        // ]);
+        if !matches!(auth.get(), AuthState::Authenticated(_)) {
+            return;
+        }
+        let api_url = api_url.clone();
+        leptos::task::spawn_local(async move {
+            let client = ApiClient::new(&api_url);
+            match client.get::<ProjectsResponse>("/api/projects").await {
+                Ok(response) => {
+                    let rows = response
+                        .projects
+                        .into_iter()
+                        .map(|p| {
+                            let status = SpaceStatus::from_api(&p.status);
+                            RecentProject {
+                                id: p.id,
+                                name: p.name,
+                                thumbnail_url: p.thumbnail_url.filter(|u| u.starts_with("https://") || u.starts_with('/')),
+                                last_modified: p.last_edited,
+                                status: status.display_name().to_string(),
+                                status_class: status.as_str().to_string(),
+                            }
+                        })
+                        .collect();
+                    recent_projects.set(most_recent(rows));
+                    failed.set(false);
+                }
+                Err(_) => failed.set(true),
+            }
+            is_loading.set(false);
+        });
     });
-    
+
     let username = move || {
         match auth.get() {
             AuthState::Authenticated(user) => user.username,
@@ -177,90 +211,72 @@ pub fn DashboardPage() -> impl IntoView {
                     </div>
                 </section>
                 
-                // Recent Projects (from Cloudflare R2)
+                // Recent Spaces: the account's own listings
                 <section class="dashboard-section">
                     <div class="section-header-industrial">
-                        <img src="/assets/icons/clock.svg" alt="Recent" class="section-icon" />
-                        <h2>"Recent Projects"</h2>
+                        <img src="/assets/icons/clock.svg" alt="" class="section-icon" />
+                        <h2>"Recent Spaces"</h2>
+                        <a href="/projects" class="rp-all">"View all"</a>
                     </div>
-                    
+
                     <div class="recent-projects-card">
-                        <Show
-                            when=move || is_loading.get()
-                            fallback=move || {
-                                let projects = recent_projects.get();
-                                if projects.is_empty() {
-                                    view! {
-                                        <div class="empty-state">
-                                            <img src="/assets/icons/folder.svg" alt="No projects" class="empty-icon" />
-                                            <h3>"No projects yet"</h3>
-                                            <p>"Create your first project to get started!"</p>
-                                            <button 
-                                                class="btn-primary-steel"
-                                                on:click=move |_| {
-                                                    // Launch Eustress Engine with new project
-                                                    // Uses eustress:// protocol handler
-                                                    let _ = window().location().set_href("eustress://new-project");
-                                                }
-                                            >
-                                                "Create Project"
-                                            </button>
-                                        </div>
-                                    }.into_any()
-                                } else {
-                                    view! {
-                                        <div class="recent-projects-grid">
-                                            <For
-                                                each=move || recent_projects.get()
-                                                key=|project| project.id.clone()
-                                                children=move |project| {
-                                                    let project_id = project.id.clone();
-                                                    let project_name = project.name.clone();
-                                                    let last_modified = project.last_modified.clone();
-                                                    let status = project.status.clone();
-                                                    let status_class = format!("project-status status-{}", status);
-                                                    let thumbnail = project.thumbnail_url.clone();
-                                                    
-                                                    view! {
-                                                        <div class="recent-project-card">
-                                                            <div class="project-thumbnail">
-                                                                {match thumbnail {
-                                                                    Some(url) => view! { <img src=url alt="Thumbnail" /> }.into_any(),
-                                                                    None => view! { <div class="placeholder-thumb"><img src="/assets/icons/cube.svg" alt="Project" /></div> }.into_any(),
-                                                                }}
-                                                            </div>
-                                                            <div class="project-info">
-                                                                <h4>{project_name}</h4>
-                                                                <span class="project-modified">{last_modified}</span>
-                                                                <span class=status_class>{status}</span>
-                                                            </div>
-                                                            <button 
-                                                                class="btn-open-project"
-                                                                on:click=move |_| {
-                                                                    // Open project in Eustress Engine
-                                                                    let url = format!("eustress://open-project/{}", project_id);
-                                                                    let _ = window().location().set_href(&url);
-                                                                }
-                                                            >
-                                                                "Open"
-                                                            </button>
-                                                        </div>
-                                                    }
-                                                }
-                                            />
-                                        </div>
-                                    }.into_any()
-                                }
+                        {move || {
+                            if is_loading.get() {
+                                return view! {
+                                    <div class="loading-state" role="status">
+                                        <div class="spinner"></div>
+                                        <p>"Loading your Spaces..."</p>
+                                    </div>
+                                }.into_any();
                             }
-                        >
-                            <div class="loading-state">
-                                <div class="spinner"></div>
-                                <p>"Loading recent projects..."</p>
-                            </div>
-                        </Show>
+                            if failed.get() {
+                                return view! {
+                                    <div class="empty-state" role="alert">
+                                        <h3>"Your Spaces could not load"</h3>
+                                        <p>"Refresh the page to try again."</p>
+                                    </div>
+                                }.into_any();
+                            }
+                            let projects = recent_projects.get();
+                            if projects.is_empty() {
+                                return view! {
+                                    <div class="empty-state">
+                                        <img src="/assets/icons/folder.svg" alt="" class="empty-icon" />
+                                        <h3>"No Spaces yet"</h3>
+                                        <p>"Build one in Eustress Studio and publish it. It shows up here, and in the Gallery once it is approved."</p>
+                                        <a href="/download" class="btn-primary-steel">"Get Eustress Studio"</a>
+                                    </div>
+                                }.into_any();
+                            }
+                            view! {
+                                <div class="rp-grid">
+                                    {projects.into_iter().map(|project| {
+                                        let studio = format!("eustress://edit/{}", project.id);
+                                        let page = format!("/simulation/{}", project.id);
+                                        let status_class = format!("rp-status {}", project.status_class);
+                                        view! {
+                                            <article class="rp-card">
+                                                <a class="rp-thumb" href=page.clone() aria-label=format!("Open the page of {}", project.name)>
+                                                    {match project.thumbnail_url.clone() {
+                                                        Some(url) => view! { <img src=url alt="" loading="lazy" decoding="async" /> }.into_any(),
+                                                        None => view! { <span class="rp-thumb-empty"><img src="/assets/icons/cube.svg" alt="" /></span> }.into_any(),
+                                                    }}
+                                                </a>
+                                                <div class="rp-info">
+                                                    <h3><a href=page>{project.name.clone()}</a></h3>
+                                                    <span class="rp-when">{format!("Edited {}", day_of(&project.last_modified))}</span>
+                                                    <span class=status_class>{project.status.clone()}</span>
+                                                </div>
+                                                <a class="btn-open-project" href=studio>"Edit in Studio"</a>
+                                            </article>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            }.into_any()
+                        }}
                     </div>
                 </section>
-                
+
                 // Getting Started
                 <section class="dashboard-section">
                     <div class="section-header-industrial">
@@ -295,5 +311,30 @@ pub fn DashboardPage() -> impl IntoView {
             
             <Footer />
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, when: &str) -> RecentProject {
+        RecentProject { id: id.to_string(), name: id.to_string(), thumbnail_url: None, last_modified: when.to_string(), status: String::new(), status_class: String::new() }
+    }
+
+    #[test]
+    fn the_newest_edits_come_first_and_only_six_are_shown() {
+        let rows: Vec<RecentProject> = (1..=9).map(|d| row(&format!("s{d}"), &format!("2026-10-0{d}T10:00:00Z"))).collect();
+        let shown = most_recent(rows);
+        assert_eq!(shown.len(), RECENT);
+        assert_eq!(shown[0].id, "s9");
+        assert_eq!(shown[5].id, "s4");
+    }
+
+    #[test]
+    fn an_edit_time_reads_as_its_day_and_other_text_is_left_alone() {
+        assert_eq!(day_of("2026-10-01T22:01:09.945Z"), "2026-10-01");
+        assert_eq!(day_of("2 hours ago"), "2 hours ago");
+        assert_eq!(day_of(""), "");
     }
 }

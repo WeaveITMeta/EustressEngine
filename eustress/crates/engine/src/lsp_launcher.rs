@@ -243,6 +243,14 @@ fn maybe_spawn_lsp_child(
         return;
     }
 
+    // A running child serves the Universe it was started for until the
+    // open Space changes. Finding the Universe stats the disk once per
+    // ancestor folder, so it is skipped while nothing changed; a Universe
+    // folder made on disk mid-session is found at the next Space switch.
+    if lsp.child.is_some() && space_root.as_ref().is_some_and(|sr| !sr.is_changed()) {
+        return;
+    }
+
     // Resolve the current Universe. Preferred source: the live
     // `SpaceRoot` resource (picks up Universe-switch changes). Fallback:
     // the same function `SpaceRoot::default()` itself calls — this

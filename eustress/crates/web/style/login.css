@@ -1,0 +1,343 @@
+/* The sign-in and registration page (/login) in the Gallery's look: the near-black page, a quiet grid, one green glow,
+   a glass card, full-width pill buttons and mono labels. Every rule is scoped to .page-login, and this file loads after
+   main.css and gallery.css (it uses gallery.css's --g-* tokens), so nothing outside this page changes. */
+
+/* ---- Page and backdrop ---- */
+.page.page-login {
+    max-width: none;
+    margin: 0;
+    padding: 64px 0 0;
+    min-height: 100vh;
+    background: var(--g-bg);
+    color: var(--g-text);
+    font-family: var(--g-sans);
+}
+.page-login .login-background { background: var(--g-bg); }
+.page-login .bg-grid {
+    background-image: linear-gradient(rgba(143, 160, 182, 0.055) 1px, transparent 1px), linear-gradient(90deg, rgba(143, 160, 182, 0.055) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 25%, transparent 78%);
+    mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 25%, transparent 78%);
+}
+.page-login .bg-glow { filter: blur(90px); opacity: 1; animation: none; }
+.page-login .bg-glow-1 { width: 720px; height: 520px; top: 8%; right: 6%; background: radial-gradient(ellipse at center, rgba(60, 186, 84, 0.13), transparent 65%); }
+.page-login .bg-glow-2 { width: 560px; height: 460px; bottom: -8%; left: 4%; background: radial-gradient(ellipse at center, rgba(108, 182, 255, 0.06), transparent 65%); }
+
+.page-login .login-wrapper { min-height: calc(100vh - 64px); padding: 40px 32px; gap: 72px; max-width: 1180px; margin: 0 auto; }
+
+/* ---- Showcase: the build plate ----
+   Nine pillars on an isometric plate: the core (the gear) and eight systems a Space is built from. They rise and settle in a slow wave,
+   a green signal walks across them in order, and the readout under the plate names the lit one. Pure CSS: the
+   page runs no script for it. With reduced motion the plate holds still, the core lit, and the readout lists all eight. */
+
+@property --ls-lift { syntax: "<length>"; inherits: true; initial-value: 0px; }
+
+.page-login .ls-showcase { display: flex; flex-direction: column; align-items: center; gap: 0; max-width: 480px; padding: 0; }
+
+.page-login .ls-stage { position: relative; width: 470px; height: 400px; perspective: 1400px; perspective-origin: 50% 20%; }
+.page-login .ls-plate {
+    --tile: 86px;
+    --gap: 18px;
+    position: absolute;
+    left: 50%;
+    top: 47%;
+    width: calc(var(--tile) * 3 + var(--gap) * 2);
+    height: calc(var(--tile) * 3 + var(--gap) * 2);
+    margin: calc((var(--tile) * 3 + var(--gap) * 2) / -2) 0 0 calc((var(--tile) * 3 + var(--gap) * 2) / -2);
+    display: grid;
+    grid-template-columns: repeat(3, var(--tile));
+    gap: var(--gap);
+    transform-style: preserve-3d;
+    transform: rotateX(57deg) rotateZ(-45deg);
+}
+/* The plate's own grid, a little larger than the pillars, fading at its edges. */
+.page-login .ls-plate::before {
+    content: "";
+    position: absolute;
+    inset: -34px;
+    border: 1px solid rgba(60, 186, 84, 0.18);
+    border-radius: 6px;
+    background-image: linear-gradient(rgba(143, 160, 182, 0.09) 1px, transparent 1px), linear-gradient(90deg, rgba(143, 160, 182, 0.09) 1px, transparent 1px);
+    background-size: 23px 23px;
+    -webkit-mask-image: radial-gradient(closest-side, #000 62%, transparent 100%);
+    mask-image: radial-gradient(closest-side, #000 62%, transparent 100%);
+    transform: translateZ(-1px);
+}
+/* A light that sweeps the plate. */
+.page-login .ls-plate::after {
+    content: "";
+    position: absolute;
+    inset: -34px;
+    background: linear-gradient(90deg, transparent 0%, rgba(94, 227, 122, 0.10) 48%, rgba(94, 227, 122, 0.22) 50%, rgba(94, 227, 122, 0.10) 52%, transparent 100%) no-repeat;
+    background-size: 40% 100%;
+    animation: ls-sweep 5.6s linear infinite;
+    transform: translateZ(0);
+    pointer-events: none;
+}
+
+/* A pillar: its top face is the element, raised by --ls-lift; its two visible sides hang from the top's edges
+   and fade to nothing, so a pillar seems to rise out of the dark. */
+.page-login .ls-pillar {
+    --base: calc(var(--h, 1) * 16px);
+    position: relative;
+    transform-style: preserve-3d;
+    transform: translateZ(calc(var(--base) + var(--ls-lift)));
+    animation: ls-wave 5.6s ease-in-out infinite, ls-signal 5.6s ease-in-out infinite;
+    animation-delay: calc(var(--d) * 0.7s), calc(var(--i) * 0.7s);
+}
+.page-login .ls-top {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    border: 1px solid rgba(143, 160, 182, 0.32);
+    background: linear-gradient(135deg, rgba(31, 40, 53, 0.96), rgba(14, 19, 27, 0.96));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    transition: border-color 0.3s ease, background 0.3s ease;
+}
+.page-login .ls-top img {
+    width: 44%;
+    height: 44%;
+    /* Line art recoloured to the steel text tone; green while the pillar is lit. */
+    filter: brightness(0) invert(80%) sepia(8%) saturate(260%) hue-rotate(176deg);
+    transform: rotateZ(45deg);
+}
+.page-login .ls-pillar::before,
+.page-login .ls-pillar::after {
+    content: "";
+    position: absolute;
+    height: 120px;
+    transform-origin: top;
+    pointer-events: none;
+}
+/* Front-left side, hanging from the bottom edge. */
+.page-login .ls-pillar::before {
+    left: 6px;
+    right: 6px;
+    top: 100%;
+    background: linear-gradient(180deg, rgba(60, 186, 84, var(--glow, 0.14)), rgba(16, 21, 29, 0.85) 30%, transparent 100%);
+    transform: rotateX(-90deg);
+}
+/* Front-right side, hanging from the right edge. */
+.page-login .ls-pillar::after {
+    width: 120px;
+    height: auto;
+    top: 6px;
+    bottom: 6px;
+    left: 100%;
+    transform-origin: left;
+    background: linear-gradient(90deg, rgba(143, 160, 182, 0.16), rgba(10, 13, 19, 0.9) 30%, transparent 100%);
+    transform: rotateY(90deg);
+}
+
+/* The core (the gear): the tallest pillar, always green. */
+.page-login .ls-pillar.core .ls-top { border-color: rgba(60, 186, 84, 0.7); background: linear-gradient(135deg, rgba(60, 186, 84, 0.32), rgba(10, 40, 20, 0.92)); box-shadow: 0 0 34px rgba(60, 186, 84, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
+.page-login .ls-pillar.core .ls-top img { filter: brightness(0) invert(84%) sepia(40%) saturate(700%) hue-rotate(72deg) brightness(110%); width: 52%; height: 52%; }
+.page-login .ls-pillar.core::before { --glow: 0.45; }
+
+/* The readout: eight names stacked in one place; each shows while its pillar is lit. */
+.page-login .ls-readout { position: relative; height: 22px; width: 100%; margin: -18px 0 22px; padding: 0; list-style: none; text-align: center; font: 600 12px/22px var(--g-mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--g-muted); }
+.page-login .ls-readout::before { content: ""; position: absolute; left: 50%; top: -14px; width: 1px; height: 10px; background: linear-gradient(transparent, rgba(60, 186, 84, 0.6)); }
+.page-login .ls-readout li { position: absolute; inset: 0; opacity: 0; animation: ls-name 5.6s ease-in-out infinite; animation-delay: calc(var(--i) * 0.7s); }
+.page-login .ls-readout li b { color: var(--g-accent-bright); font-weight: 600; }
+
+@keyframes ls-wave {
+    0%, 100% { --ls-lift: 0px; }
+    50% { --ls-lift: 14px; }
+}
+/* One eighth of the cycle each: light up, hold, settle. */
+@keyframes ls-signal {
+    0%, 14%, 100% { --glow: 0.14; }
+    3%, 9% { --glow: 0.55; }
+}
+.page-login .ls-pillar:not(.core) .ls-top { animation: ls-top-lit 5.6s ease-in-out infinite; animation-delay: calc(var(--i) * 0.7s); }
+.page-login .ls-pillar:not(.core) .ls-top img { animation: ls-icon-lit 5.6s ease-in-out infinite; animation-delay: calc(var(--i) * 0.7s); }
+@keyframes ls-top-lit {
+    0%, 14%, 100% { border-color: rgba(143, 160, 182, 0.32); background: linear-gradient(135deg, rgba(31, 40, 53, 0.96), rgba(14, 19, 27, 0.96)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+    3%, 9% { border-color: rgba(94, 227, 122, 0.85); background: linear-gradient(135deg, rgba(60, 186, 84, 0.3), rgba(12, 34, 20, 0.95)); box-shadow: 0 0 28px rgba(60, 186, 84, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
+}
+@keyframes ls-icon-lit {
+    0%, 14%, 100% { filter: brightness(0) invert(80%) sepia(8%) saturate(260%) hue-rotate(176deg); }
+    3%, 9% { filter: brightness(0) invert(84%) sepia(40%) saturate(700%) hue-rotate(72deg) brightness(110%); }
+}
+@keyframes ls-name {
+    0%, 12.5%, 100% { opacity: 0; transform: translateY(4px); }
+    1%, 11.5% { opacity: 1; transform: translateY(0); }
+}
+@keyframes ls-sweep {
+    from { background-position: -60% 0; }
+    to { background-position: 160% 0; }
+}
+
+@media (max-width: 1100px) {
+    .page-login .ls-stage { width: 340px; height: 290px; }
+    .page-login .ls-plate { --tile: 60px; --gap: 13px; }
+}
+@media (max-width: 600px) {
+    .page-login .ls-showcase { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .page-login .ls-pillar, .page-login .ls-pillar .ls-top, .page-login .ls-pillar .ls-top img, .page-login .ls-plate::after { animation: none !important; }
+    .page-login .ls-readout { height: auto; margin-top: -10px; line-height: 1.8; letter-spacing: 0.12em; }
+    .page-login .ls-readout li { position: static; display: inline; opacity: 1; animation: none; }
+    .page-login .ls-readout li + li::before { content: " · "; color: var(--g-muted); }
+}
+
+.page-login .showcase-tagline { text-align: center; }
+.page-login .showcase-tagline h2 { margin: 0 0 10px; font-size: clamp(28px, 3vw, 40px); line-height: 1.08; letter-spacing: -0.025em; font-weight: 700; color: var(--g-text); }
+.page-login .showcase-tagline p { margin: 0 auto; max-width: 38ch; color: var(--g-text-2); font-size: 16px; }
+
+/* ---- Card (right) ---- */
+.page-login .login-container { max-width: 440px; }
+.page-login .login-card {
+    max-width: 420px;
+    padding: 34px 32px 30px;
+    background: var(--g-glass);
+    border: 1px solid var(--g-line);
+    border-radius: 20px;
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 30px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(60, 186, 84, 0.04);
+}
+.page-login .login-header { margin-bottom: 22px; }
+.page-login .login-logo { height: 30px; opacity: 0.95; }
+
+.page-login .login-tabs { margin-bottom: 22px; padding: 4px; background: rgba(143, 160, 182, 0.07); border: 1px solid var(--g-line); border-radius: 999px; }
+.page-login .login-tab { min-height: 36px; border-radius: 999px; color: var(--g-muted); font: 600 14px var(--g-sans); transition: color 0.18s ease, background 0.18s ease; }
+.page-login .login-tab:hover { color: var(--g-text); }
+.page-login .login-tab.active { background: var(--g-accent-soft); color: var(--g-accent-bright); box-shadow: inset 0 0 0 1px rgba(60, 186, 84, 0.45); }
+
+/* ---- Text, labels, fields ---- */
+.page-login .auth-panel { display: flex; flex-direction: column; gap: 14px; }
+.page-login .auth-panel.hidden { display: none !important; }
+.page-login .identity-desc { margin: 0; color: var(--g-text-2); font-size: 14px; line-height: 1.55; }
+.page-login .identity-desc code, .page-login .identity-create-hint code {
+    padding: 1px 7px;
+    border: 1px solid rgba(60, 186, 84, 0.35);
+    border-radius: 6px;
+    background: var(--g-accent-soft);
+    color: var(--g-accent-bright);
+    font: 500 12.5px var(--g-mono);
+}
+.page-login .form-field { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.page-login .form-label { margin: 0; color: var(--g-muted); font: 600 11px var(--g-mono); letter-spacing: 0.12em; text-transform: uppercase; }
+.page-login .form-label .required { color: var(--g-accent-bright); }
+.page-login .form-hint { margin: 2px 0 0; color: var(--g-muted); font-size: 13px; line-height: 1.5; }
+.page-login .form-hint a, .page-login .btn-link { color: var(--g-accent-bright); font-weight: 600; text-decoration: none; }
+.page-login .form-hint a:hover, .page-login .btn-link:hover { text-decoration: underline; }
+.page-login .form-input {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 14px;
+    background: rgba(7, 9, 13, 0.65);
+    border: 1px solid var(--g-line-strong);
+    border-radius: 12px;
+    color: var(--g-text);
+    font: 15px var(--g-sans);
+    color-scheme: dark; /* the date picker's calendar icon and the select arrow, light on the dark field */
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.page-login .form-input::placeholder { color: var(--g-muted); }
+.page-login .form-input:focus { outline: none; border-color: var(--g-accent); box-shadow: 0 0 0 3px rgba(60, 186, 84, 0.2); }
+.page-login select.form-input { cursor: pointer; }
+
+/* The identity file drop: a dashed target that lights green on hover and on keyboard focus. */
+.page-login .identity-file-drop { padding: 26px 18px; border: 1.5px dashed var(--g-line-strong); border-radius: 14px; background: rgba(7, 9, 13, 0.45); transition: border-color 0.18s ease, background 0.18s ease; }
+.page-login .identity-file-drop:hover, .page-login .identity-file-drop:focus-within { border-color: var(--g-accent); background: var(--g-accent-soft); }
+.page-login .identity-file-drop:focus-within { box-shadow: 0 0 0 3px rgba(60, 186, 84, 0.2); }
+.page-login .file-drop-label { color: var(--g-text-2); font-size: 14px; }
+.page-login .file-drop-label::before {
+    content: "";
+    display: block;
+    width: 26px;
+    height: 26px;
+    margin: 0 auto 10px;
+    background: var(--g-accent-bright);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M12 17v-6'/%3E%3Cpath d='m9 14 3-3 3 3'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M12 17v-6'/%3E%3Cpath d='m9 14 3-3 3 3'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.page-login .identity-info { margin: 0; padding: 14px 16px; gap: 8px; background: rgba(7, 9, 13, 0.5); border: 1px solid var(--g-line); border-radius: 12px; }
+.page-login .identity-field .field-label { color: var(--g-muted); font: 600 11px var(--g-mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.page-login .identity-field .field-value { color: var(--g-text); font-size: 14px; }
+.page-login .identity-field .field-value.mono { font: 500 12.5px var(--g-mono); }
+.page-login .identity-status-ok { color: var(--g-accent-bright) !important; }
+
+/* ---- Buttons: the Gallery's pills, full width in the card ---- */
+.page-login .login-card .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 46px;
+    margin: 0;
+    padding: 0 20px;
+    border-radius: 999px;
+    border: 1px solid var(--g-line-strong);
+    background: rgba(143, 160, 182, 0.08);
+    color: var(--g-text);
+    font: 600 15px var(--g-sans);
+    box-shadow: none;
+    cursor: pointer;
+    transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.page-login .login-card .btn:hover:not(:disabled) { background: rgba(143, 160, 182, 0.16); transform: translateY(-1px); }
+.page-login .login-card .btn-primary { background: var(--g-accent); border-color: var(--g-accent); color: #04120a; }
+.page-login .login-card .btn-primary:hover:not(:disabled) { background: var(--g-accent-bright); border-color: var(--g-accent-bright); box-shadow: 0 8px 26px rgba(60, 186, 84, 0.28); }
+.page-login .login-card .btn:disabled { opacity: 1; cursor: not-allowed; transform: none; background: rgba(143, 160, 182, 0.06); border-color: var(--g-line); color: var(--g-muted); box-shadow: none; }
+/* The main action stays green while it waits (for a file, or a filled step), only dimmer. */
+.page-login .login-card .btn-primary:disabled { background: rgba(60, 186, 84, 0.14); border-color: rgba(60, 186, 84, 0.32); color: rgba(94, 227, 122, 0.6); }
+.page-login .login-card .btn:focus-visible { outline: 2px solid var(--g-accent-bright); outline-offset: 2px; }
+.page-login .register-nav-buttons { gap: 10px; }
+.page-login .register-nav-buttons .btn { width: auto; flex: 1; }
+
+/* "Or use a passkey": a divider above it, so the second way in reads as an alternative. */
+.page-login .passkey-signin { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; padding-top: 16px; border-top: 1px solid var(--g-line); }
+.page-login .passkey-signin .form-hint { margin: 0; }
+
+/* The quiet note under the form, with a lock. */
+.page-login .identity-help { display: flex; gap: 10px; align-items: flex-start; margin: 2px 0 0; padding: 12px 14px; background: transparent; border: 1px solid var(--g-line); border-radius: 12px; }
+.page-login .identity-help::before {
+    content: "";
+    flex: none;
+    width: 16px;
+    height: 16px;
+    margin-top: 1px;
+    background: var(--g-accent-bright);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.page-login .identity-help p { color: var(--g-muted); font-size: 12.5px; line-height: 1.55; }
+
+/* ---- Registration ---- */
+.page-login .register-step { gap: 14px; }
+.page-login .step-indicator { margin: 0 0 2px; color: var(--g-accent-bright); font: 600 11.5px var(--g-mono); letter-spacing: 0.14em; text-transform: uppercase; }
+.page-login .identity-create-hint { color: var(--g-muted); font-size: 13px; }
+.page-login .kyc-status { border-radius: 12px; }
+.page-login .kyc-verified { background: var(--g-accent-soft); border-color: rgba(60, 186, 84, 0.45); color: var(--g-accent-bright); }
+.page-login .kyc-qr-panel { border-radius: 14px; }
+
+/* ---- Errors ---- */
+.page-login .form-error-banner { margin: 0 0 14px; padding: 10px 14px; border-radius: 12px; border-color: rgba(255, 120, 110, 0.45); background: rgba(255, 120, 110, 0.1); color: #ff9892; text-align: left; font-size: 14px; }
+.page-login .form-error-inline { color: #ff9892; }
+
+/* ---- Narrow screens ---- */
+@media (max-width: 1100px) {
+    .page-login .login-wrapper { gap: 36px; padding: 32px 24px; }
+    .page-login .login-showcase { order: 2; }
+}
+@media (max-width: 600px) {
+    .page-login .login-wrapper { padding: 16px 16px 40px; min-height: 0; }
+    .page-login .login-container { width: 100%; max-width: 100%; }
+    .page-login .login-card { border-radius: 18px; border-left: 1px solid var(--g-line); border-right: 1px solid var(--g-line); padding: 26px 20px 22px; }
+}
+
+/* Everything that moves stops for a reader who asks for less motion. */
+@media (prefers-reduced-motion: reduce) {
+    .page-login .bg-glow, .page-login .auth-panel, .page-login .register-step { animation: none !important; }
+    .page-login .login-card .btn { transition: none; }
+    .page-login .login-card .btn:hover:not(:disabled) { transform: none !important; }
+}

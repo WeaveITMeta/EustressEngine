@@ -549,30 +549,117 @@ pub fn hydrate_beam_visuals(
 /// beam was authored with no attachments at all) are left exactly as the
 /// spawner built them — this system only ever tightens a beam it can fully
 /// resolve, never collapses one it can't.
+///
+/// Each beam's two ends are kept between frames rather than found by hashing
+/// the uuid of every instance each frame (about 120,000 on a large Space). A
+/// beam is looked up again when its link changed, when a kept end stopped
+/// carrying its uuid (or was despawned, or lost its `Instance` or
+/// `GlobalTransform`), or when an instance took up one of its uuids since
+/// the last run: one spawned, one whose uuid was written, one that just got
+/// a `GlobalTransform`. Only then can the entity a uuid names change, so the
+/// kept ends are the ones the full lookup would find. A uuid that several
+/// entities carry goes to whichever of them the query visits last, which can
+/// change from frame to frame, so a beam naming one is looked up every frame
+/// while it lasts.
+///
+/// The transform is written only when a value changes, so `Changed<Transform>`
+/// readers wake only for a beam that moved.
+#[allow(clippy::type_complexity)]
 pub fn sync_beam_transforms(
-    mut beams: Query<(&BeamSegmentLink, &mut Transform), With<Beam>>,
-    targets: Query<(&Instance, &GlobalTransform)>,
+    mut beams: Query<(Entity, Ref<BeamSegmentLink>, &mut Transform), With<Beam>>,
+    targets: Query<(Entity, &Instance, &GlobalTransform)>,
+    arrivals: Query<&Instance, (With<GlobalTransform>, Or<(Changed<Instance>, Added<GlobalTransform>)>)>,
+    // Each beam's two ends, in order, or `None` when an end matched no
+    // entity at the last lookup.
+    mut ends: Local<bevy::ecs::entity::EntityHashMap<Option<(Entity, Entity)>>>,
 ) {
     if beams.is_empty() {
+        ends.clear();
         return;
     }
 
-    // Built once per frame, not once per beam — O(entities + beams) instead
-    // of O(entities * beams).
-    let mut positions: std::collections::HashMap<&str, Vec3> = std::collections::HashMap::new();
-    for (instance, gt) in &targets {
-        if !instance.uuid.is_empty() {
-            positions.insert(instance.uuid.as_str(), gt.translation());
-        }
-    }
+    // The uuids an entity may have taken up since the last run. Usually
+    // there are none.
+    let arrived: std::collections::HashSet<&str> = arrivals
+        .iter()
+        .map(|instance| instance.uuid.as_str())
+        .filter(|uuid| !uuid.is_empty())
+        .collect();
+    // Where `entity` is, while it still carries `uuid`.
+    let position = |entity: Entity, uuid: &str| {
+        targets
+            .get(entity)
+            .ok()
+            .filter(|(_, instance, _)| instance.uuid == uuid)
+            .map(|(_, _, gt)| gt.translation())
+    };
+    // Every instance by uuid, built only on a frame with a lookup to do. The
+    // entity the query visits last wins a uuid that several carry; those
+    // uuids are collected too.
+    let mut index: Option<(std::collections::HashMap<&str, (Entity, Vec3)>, std::collections::HashSet<&str>)> =
+        None;
+    let mut kept = 0;
 
-    for (link, mut transform) in &mut beams {
+    for (beam, link, mut transform) in &mut beams {
         let (Some(a_uuid), Some(b_uuid)) = (&link.attachment0_uuid, &link.attachment1_uuid) else {
+            ends.remove(&beam);
             continue;
         };
-        let (Some(&a_pos), Some(&b_pos)) =
-            (positions.get(a_uuid.as_str()), positions.get(b_uuid.as_str()))
-        else {
+        let (a_uuid, b_uuid) = (a_uuid.as_str(), b_uuid.as_str());
+
+        // The ends kept from an earlier frame, while they still hold.
+        let mut at = None;
+        let mut holds = false;
+        if !link.is_changed() && !arrived.contains(a_uuid) && !arrived.contains(b_uuid) {
+            match ends.get(&beam) {
+                // An end matched nothing, and no instance has taken up its
+                // uuid since.
+                Some(&None) => holds = true,
+                // Both ends still carry their uuids, and no other instance
+                // has taken up either since.
+                Some(&Some((a, b))) => {
+                    if let (Some(a_pos), Some(b_pos)) = (position(a, a_uuid), position(b, b_uuid)) {
+                        at = Some((a_pos, b_pos));
+                        holds = true;
+                    }
+                }
+                None => {}
+            }
+        }
+        if holds {
+            kept += 1;
+        } else {
+            let (by_uuid, shared) = index.get_or_insert_with(|| {
+                let mut by_uuid = std::collections::HashMap::new();
+                let mut shared = std::collections::HashSet::new();
+                for (entity, instance, gt) in &targets {
+                    if !instance.uuid.is_empty()
+                        && by_uuid.insert(instance.uuid.as_str(), (entity, gt.translation())).is_some()
+                    {
+                        shared.insert(instance.uuid.as_str());
+                    }
+                }
+                (by_uuid, shared)
+            });
+            match (by_uuid.get(a_uuid), by_uuid.get(b_uuid)) {
+                (Some(&(a, a_pos)), Some(&(b, b_pos))) => {
+                    at = Some((a_pos, b_pos));
+                    // Which entity wins a shared uuid can change from frame
+                    // to frame, so a beam naming one is not kept.
+                    if shared.contains(a_uuid) || shared.contains(b_uuid) {
+                        ends.remove(&beam);
+                    } else {
+                        ends.insert(beam, Some((a, b)));
+                        kept += 1;
+                    }
+                }
+                _ => {
+                    ends.insert(beam, None);
+                    kept += 1;
+                }
+            }
+        }
+        let Some((a_pos, b_pos)) = at else {
             continue;
         };
 
@@ -583,14 +670,33 @@ pub fn sync_beam_transforms(
         }
         let dir = delta / length;
 
-        transform.translation = (a_pos + b_pos) * 0.5;
+        let translation = (a_pos + b_pos) * 0.5;
         // Shortest-arc rotation from the cylinder mesh's local +Y (its long
         // axis) onto the live direction between the two attachments — same
         // convention the spawner used to build the beam once; this just
         // re-runs it continuously instead of only at spawn time.
-        transform.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
-        transform.scale.y = length;
+        let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+        // Compared bit for bit: `==` holds 0.0 equal to -0.0, so a write
+        // skipped on it could leave the other zero in place.
+        if !same_bits(&transform.translation.to_array(), &translation.to_array())
+            || !same_bits(&transform.rotation.to_array(), &rotation.to_array())
+            || transform.scale.y.to_bits() != length.to_bits()
+        {
+            transform.translation = translation;
+            transform.rotation = rotation;
+            transform.scale.y = length;
+        }
     }
+
+    // Forget the beams that were despawned or stopped being beams.
+    if ends.len() > kept {
+        ends.retain(|beam, _| beams.contains(*beam));
+    }
+}
+
+/// Whether two runs of floats hold the same bits.
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 // ============================================================================
@@ -754,5 +860,242 @@ mod tests {
                 "beam.texture_mode",
             ]
         );
+    }
+
+    // ---- sync_beam_transforms against its every-frame form ----
+
+    /// `sync_beam_transforms` without kept ends, hashing every instance by
+    /// uuid and writing every resolved beam every frame: the body it had
+    /// before, comments dropped. The kept-ends system must leave every beam
+    /// exactly as this one does.
+    fn sync_beam_transforms_every_frame(
+        mut beams: Query<(&BeamSegmentLink, &mut Transform), With<Beam>>,
+        targets: Query<(&Instance, &GlobalTransform)>,
+    ) {
+        if beams.is_empty() {
+            return;
+        }
+
+        let mut positions: std::collections::HashMap<&str, Vec3> = std::collections::HashMap::new();
+        for (instance, gt) in &targets {
+            if !instance.uuid.is_empty() {
+                positions.insert(instance.uuid.as_str(), gt.translation());
+            }
+        }
+
+        for (link, mut transform) in &mut beams {
+            let (Some(a_uuid), Some(b_uuid)) = (&link.attachment0_uuid, &link.attachment1_uuid) else {
+                continue;
+            };
+            let (Some(&a_pos), Some(&b_pos)) =
+                (positions.get(a_uuid.as_str()), positions.get(b_uuid.as_str()))
+            else {
+                continue;
+            };
+
+            let delta = b_pos - a_pos;
+            let length = delta.length();
+            if length < 1e-5 {
+                continue;
+            }
+            let dir = delta / length;
+
+            transform.translation = (a_pos + b_pos) * 0.5;
+            transform.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+            transform.scale.y = length;
+        }
+    }
+
+    fn attachment(uuid: &str, at: Vec3) -> (Instance, Transform, GlobalTransform) {
+        (
+            Instance { uuid: uuid.to_string(), ..Default::default() },
+            Transform::from_translation(at),
+            GlobalTransform::from_translation(at),
+        )
+    }
+
+    fn beam_between(uuid: &str, a: Option<&str>, b: Option<&str>) -> (Instance, Beam, BeamSegmentLink, Transform) {
+        (
+            Instance { uuid: uuid.to_string(), class_name: ClassName::Beam, ..Default::default() },
+            Beam::default(),
+            BeamSegmentLink {
+                attachment0_uuid: a.map(str::to_string),
+                attachment1_uuid: b.map(str::to_string),
+                ..Default::default()
+            },
+            Transform::default(),
+        )
+    }
+
+    /// Moves an attachment. A bare app has no transform propagation, so the
+    /// `GlobalTransform` the sync reads is written too.
+    fn move_end(world: &mut World, end: Entity, to: Vec3) {
+        world.entity_mut(end).insert((Transform::from_translation(to), GlobalTransform::from_translation(to)));
+    }
+
+    fn beam_app(kept: bool) -> App {
+        let mut app = App::new();
+        if kept {
+            app.add_systems(Update, sync_beam_transforms);
+        } else {
+            app.add_systems(Update, sync_beam_transforms_every_frame);
+        }
+        app
+    }
+
+    /// One app's entities, in the order the script spawned them.
+    #[derive(Default)]
+    struct BeamScene {
+        ends: Vec<Entity>,
+        beams: Vec<Entity>,
+    }
+
+    /// The edits made before frame `step`, the same in both apps.
+    fn beam_step(world: &mut World, step: usize, scene: &mut BeamScene) {
+        let BeamScene { ends, beams } = scene;
+        match step {
+            0 => {
+                for (uuid, at) in [
+                    ("a0", Vec3::ZERO),
+                    ("a1", Vec3::new(0.0, 4.0, 0.0)),
+                    ("a2", Vec3::new(3.0, 0.0, 4.0)),
+                    ("a3", Vec3::new(1.0, 1.0, 1.0)),
+                    ("a4", Vec3::new(-2.0, 5.0, 1.0)),
+                ] {
+                    ends.push(world.spawn(attachment(uuid, at)).id());
+                }
+                for (uuid, a, b) in [
+                    ("b0", Some("a0"), Some("a1")),
+                    ("b1", Some("a1"), Some("a2")),
+                    // Dangling until step 5.
+                    ("b2", Some("a0"), Some("late")),
+                    // Authored without ends until step 14.
+                    ("b3", None, None),
+                    // Zero length.
+                    ("b4", Some("a3"), Some("a3")),
+                    ("b5", Some("a2"), Some("a4")),
+                    ("b6", Some("a0"), None),
+                    ("b7", Some("a3"), Some("a4")),
+                ] {
+                    beams.push(world.spawn(beam_between(uuid, a, b)).id());
+                }
+            }
+            2 => move_end(world, ends[0], Vec3::new(-1.0, 0.5, 2.0)),
+            // A link edit on a beam whose ends are kept.
+            3 => world.get_mut::<BeamSegmentLink>(beams[1]).unwrap().attachment1_uuid = Some("a3".to_string()),
+            // b5 loses an end.
+            4 => world.entity_mut(ends[2]).despawn(),
+            // The late attachment b2 has waited for: ends[5].
+            5 => ends.push(world.spawn(attachment("late", Vec3::new(5.0, 5.0, 5.0))).id()),
+            // A uuid written in place: b0 and b1 lose "a1".
+            6 => world.get_mut::<Instance>(ends[1]).unwrap().uuid = "a1-renamed".to_string(),
+            // A second "a0", ends[6], spawned after the first: the query
+            // visits it last, so it wins b2's end.
+            7 => ends.push(world.spawn(attachment("a0", Vec3::new(9.0, 0.0, 0.0))).id()),
+            8 => move_end(world, ends[6], Vec3::new(9.0, 3.0, -2.0)),
+            // The first "a0" moves to a table of its own, created last, and
+            // the query now visits it last: it wins b2's end back.
+            9 => {
+                world.entity_mut(ends[0]).insert(Name::new("a0, in a new table"));
+            }
+            // "a0" is one entity again.
+            10 => world.entity_mut(ends[6]).despawn(),
+            // b7 loses an end with its GlobalTransform, then gets it back.
+            11 => {
+                world.entity_mut(ends[3]).remove::<GlobalTransform>();
+            }
+            12 => {
+                world.entity_mut(ends[3]).insert(GlobalTransform::from_translation(Vec3::new(2.0, -1.0, 0.0)));
+            }
+            // A write to a beam's transform from elsewhere.
+            13 => world.get_mut::<Transform>(beams[7]).unwrap().translation = Vec3::ZERO,
+            14 => {
+                let mut link = world.get_mut::<BeamSegmentLink>(beams[3]).unwrap();
+                link.attachment0_uuid = Some("a3".to_string());
+                link.attachment1_uuid = Some("late".to_string());
+            }
+            15 => world.entity_mut(beams[1]).despawn(),
+            // "a1" comes back: b0 is whole again.
+            16 => world.get_mut::<Instance>(ends[1]).unwrap().uuid = "a1".to_string(),
+            _ => {}
+        }
+    }
+
+    fn beam_transforms(app: &App, beams: &[Entity]) -> Vec<Option<[u32; 10]>> {
+        let world = app.world();
+        beams.iter().map(|&beam| world.get::<Transform>(beam).map(transform_bits)).collect()
+    }
+
+    fn transform_bits(transform: &Transform) -> [u32; 10] {
+        let [tx, ty, tz] = transform.translation.to_array();
+        let [rx, ry, rz, rw] = transform.rotation.to_array();
+        let [sx, sy, sz] = transform.scale.to_array();
+        [tx, ty, tz, rx, ry, rz, rw, sx, sy, sz].map(f32::to_bits)
+    }
+
+    #[test]
+    fn kept_beam_ends_leave_what_looking_them_up_every_frame_does() {
+        let mut every = beam_app(false);
+        let mut kept = beam_app(true);
+        let (mut every_scene, mut kept_scene) = (BeamScene::default(), BeamScene::default());
+        let mut history = Vec::new();
+        for step in 0..19 {
+            beam_step(every.world_mut(), step, &mut every_scene);
+            beam_step(kept.world_mut(), step, &mut kept_scene);
+            every.update();
+            kept.update();
+            let want = beam_transforms(&every, &every_scene.beams);
+            assert_eq!(beam_transforms(&kept, &kept_scene.beams), want, "frame {step}");
+            history.push(want);
+        }
+        // The script reached what it is for: b2 waits for its late end, then
+        // follows whichever "a0" the query visits last.
+        let b2_at = |frame: usize| {
+            let bits = history[frame][2].expect("b2 is never despawned");
+            Vec3::new(f32::from_bits(bits[0]), f32::from_bits(bits[1]), f32::from_bits(bits[2]))
+        };
+        assert_eq!(b2_at(4), Vec3::ZERO, "b2 is left as built while its end is missing");
+        assert_eq!(b2_at(7), Vec3::new(7.0, 2.5, 2.5), "the second \"a0\" wins");
+        assert_eq!(b2_at(9), Vec3::new(2.0, 2.75, 3.5), "the first \"a0\" wins back");
+        assert_eq!(history[18][1], None, "b1 was despawned");
+    }
+
+    /// The beams whose `Transform` changed since this last ran, per frame.
+    #[derive(Resource, Default)]
+    struct MovedBeams(Vec<usize>);
+
+    fn count_moved_beams(moved: Query<(), (With<Beam>, Changed<Transform>)>, mut counts: ResMut<MovedBeams>) {
+        counts.0.push(moved.iter().count());
+    }
+
+    #[test]
+    fn a_beam_at_rest_is_not_marked_changed() {
+        for kept in [false, true] {
+            let mut app = App::new();
+            app.init_resource::<MovedBeams>();
+            if kept {
+                app.add_systems(Update, (sync_beam_transforms, count_moved_beams).chain());
+            } else {
+                app.add_systems(Update, (sync_beam_transforms_every_frame, count_moved_beams).chain());
+            }
+            let world = app.world_mut();
+            let a = world.spawn(attachment("a", Vec3::ZERO)).id();
+            world.spawn(attachment("b", Vec3::new(0.0, 2.0, 0.0)));
+            world.spawn(attachment("c", Vec3::new(3.0, 0.0, 0.0)));
+            for (uuid, x, y) in [("ab", "a", "b"), ("bc", "b", "c"), ("ca", "c", "a"), ("ax", "a", "missing")] {
+                world.spawn(beam_between(uuid, Some(x), Some(y)));
+            }
+            for frame in 0..6 {
+                if frame == 4 {
+                    move_end(app.world_mut(), a, Vec3::new(0.0, 0.0, -1.0));
+                }
+                app.update();
+            }
+            // Frame 0 counts every beam, a new one counting as changed. After
+            // that the every-frame body writes the three it resolves each
+            // frame; the kept-ends one writes only the two that `a` moved.
+            let want: &[usize] = if kept { &[4, 0, 0, 0, 2, 0] } else { &[4, 3, 3, 3, 3, 3] };
+            assert_eq!(app.world().resource::<MovedBeams>().0, want, "kept: {kept}");
+        }
     }
 }

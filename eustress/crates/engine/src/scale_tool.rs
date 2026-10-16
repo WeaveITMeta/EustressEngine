@@ -174,6 +174,8 @@ fn handle_resize_part_events(
         Option<&crate::classes::Part>,
         Option<&mut Mesh3d>,
         Option<&crate::spawn::MeshSource>,
+        Option<&crate::space::instance_loader::MeshFold>,
+        bevy::ecs::query::Has<crate::space::instance_loader::MeshRatio>,
     )>,
     // Closes a multi-select gap: the Properties-panel Size handler
     // only checks the PRIMARY selected entity before deciding whether
@@ -206,7 +208,7 @@ fn handle_resize_part_events(
             }
             continue;
         }
-        let Ok((mut transform, base_part, part, mesh, mesh_source)) = entities.get_mut(event.entity)
+        let Ok((mut transform, base_part, part, mesh, mesh_source, mesh_fold, mesh_ratio)) = entities.get_mut(event.entity)
         else { continue };
         let has_mesh_source = mesh_source.is_some();
         let pos = transform.translation;
@@ -223,6 +225,8 @@ fn handle_resize_part_events(
             has_mesh_source,
             true,
             Vec3::ONE,
+            mesh_fold,
+            mesh_ratio,
         );
     }
 }
@@ -341,7 +345,7 @@ fn handle_scale_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
-    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>, Option<&crate::spawn::MeshSource>), With<Selected>>,
+    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>, Option<&crate::spawn::MeshSource>, Option<&crate::space::instance_loader::MeshFold>, bevy::ecs::query::Has<crate::space::instance_loader::MeshRatio>), With<Selected>>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     parent_query: Query<&ChildOf>,
@@ -382,7 +386,7 @@ fn handle_scale_interaction(
         if state.dragged_axis.is_some() {
             extras.cancel.consume();
             state.drag_live = false;
-            for (entity, _, mut transform, basepart_opt, _, _, _) in query.iter_mut() {
+            for (entity, _, mut transform, basepart_opt, _, _, _, _, _) in query.iter_mut() {
                 if let Some(initial_size) = state.initial_scales.get(&entity).copied() {
                     if let Some(mut bp) = basepart_opt {
                         bp.size = initial_size;
@@ -443,7 +447,7 @@ fn handle_scale_interaction(
     // query (and to side-step Bevy's `iter().map().clone()` constraints).
     let selected_snapshot: Vec<(Vec3, Quat, Vec3)> = query
         .iter()
-        .map(|(_, gt, _, bp, _, _, _)| {
+        .map(|(_, gt, _, bp, _, _, _, _, _)| {
             let t = gt.compute_transform();
             let size = bp.as_ref().map(|b| b.size).unwrap_or(t.scale);
             (t.translation, t.rotation, size)
@@ -484,7 +488,7 @@ fn handle_scale_interaction(
             state.initial_scales.clear();
             state.initial_positions.clear();
             state.initial_world.clear();
-            for (ent, gt, trans, bp_opt, _, _, _) in query.iter() {
+            for (ent, gt, trans, bp_opt, _, _, _, _, _) in query.iter() {
                 let ent_size = bp_opt.as_ref().map(|bp| bp.size).unwrap_or(Vec3::ONE);
                 state.initial_scales.insert(ent, ent_size);
                 state.initial_positions.insert(ent, trans.translation);
@@ -581,7 +585,7 @@ fn handle_scale_interaction(
 
             let selected_entities: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
 
-            for (entity, global_transform, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source) in query.iter_mut() {
+            for (entity, global_transform, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source, mesh_fold, mesh_ratio) in query.iter_mut() {
                 if is_descendant(entity, &selected_entities, &parent_query) { continue; }
 
                 if let (Some(initial_size), Some(initial_pos)) = (
@@ -609,7 +613,7 @@ fn handle_scale_interaction(
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
                             &mut meshes, final_size, *initial_pos, has_mesh_source,
-                            false, *initial_size,
+                            false, *initial_size, mesh_fold, mesh_ratio,
                         );
                     } else {
                         // One-sided: opposite face (in GIZMO frame) stays
@@ -656,7 +660,7 @@ fn handle_scale_interaction(
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
                             &mut meshes, final_size, new_pos, has_mesh_source,
-                            false, *initial_size,
+                            false, *initial_size, mesh_fold, mesh_ratio,
                         );
                     }
                 }
@@ -674,7 +678,7 @@ fn handle_scale_interaction(
             // a real mesh so save_space + selection adornments see the
             // correct geometry. File-system parts (has_mesh_source =
             // true) keep Transform.scale = size and skip this branch.
-            for (entity, _, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source) in query.iter_mut() {
+            for (entity, _, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source, mesh_fold, mesh_ratio) in query.iter_mut() {
                 let Some(initial_pos)  = state.initial_positions.get(&entity).copied() else { continue };
                 let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
                 let has_mesh_source = mesh_source.is_some();
@@ -719,11 +723,11 @@ fn handle_scale_interaction(
                 apply_size_to_entity(
                     &mut *transform, basepart_opt, part_opt, mesh_opt,
                     &mut meshes, final_size, final_pos, has_mesh_source,
-                    true, initial_size,
+                    true, initial_size, mesh_fold, mesh_ratio,
                 );
             }
 
-            for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
+            for (entity, _, transform, basepart_opt, _, _, _, _, _) in query.iter() {
                 // CadParts record their resize as a CadTreeEdit (via the
                 // variable events fired above) — a ScaleEntities entry
                 // here would be a second, conflicting undo step whose
@@ -753,7 +757,7 @@ fn handle_scale_interaction(
             // features.toml write (fired above) — this generic writer
             // would stamp a stale/meaningless scale into `_instance.toml`.
             let stamp = extras.auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
-            for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
+            for (entity, _, transform, basepart_opt, _, _, _, _, _) in query.iter() {
                 if extras.cad_parts.get(entity).is_ok() { continue; }
                 let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
                 let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
@@ -804,6 +808,8 @@ fn finalize_numeric_input_on_scale(
         Entity,
         &mut Transform,
         Option<&mut crate::classes::BasePart>,
+        Option<&crate::space::instance_loader::MeshFold>,
+        bevy::ecs::query::Has<crate::space::instance_loader::MeshRatio>,
     ), With<Selected>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
@@ -831,7 +837,7 @@ fn finalize_numeric_input_on_scale(
         let mut old_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
         let mut new_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
 
-        for (entity, mut transform, basepart_opt) in query.iter_mut() {
+        for (entity, mut transform, basepart_opt, mesh_fold, mesh_ratio) in query.iter_mut() {
             if is_descendant(entity, &selected_set, &parent_query) { continue; }
             let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
             let Some(initial_pos)  = state.initial_positions.get(&entity).copied() else { continue };
@@ -923,13 +929,20 @@ fn finalize_numeric_input_on_scale(
             }
 
             // Apply — file-system-first parts are unit-scale GLBs so
-            // size lands on Transform.scale. BasePart.size + cframe
-            // stay the authoritative source the TOML writer reads.
+            // size lands on Transform.scale (times a Roblox import's folded
+            // mesh scale). BasePart.size + cframe stay the authoritative
+            // source the TOML writer reads; the cframe is the authored
+            // position, without the fold's offset.
+            let current_size = basepart_opt.as_ref().map(|bp| bp.size);
             transform.translation = new_pos;
-            transform.scale = new_size;
+            transform.scale = if mesh_ratio {
+                ratio_scale(new_size, current_size.unwrap_or(new_size), transform.scale)
+            } else {
+                mesh_part_scale(new_size, mesh_fold)
+            };
             if let Some(mut bp) = basepart_opt {
                 bp.size = new_size;
-                bp.cframe.translation = new_pos;
+                bp.cframe.translation = crate::space::instance_loader::file_position(new_pos, transform.rotation, mesh_fold);
             }
         }
 
@@ -943,7 +956,7 @@ fn finalize_numeric_input_on_scale(
         // generic writer doesn't stamp a stale/meaningless scale into
         // `_instance.toml`.
         let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
-        for (entity, transform, basepart_opt) in query.iter() {
+        for (entity, transform, basepart_opt, _, _) in query.iter() {
             if cad_parts.get(entity).is_ok() { continue; }
             let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
             let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
@@ -1118,6 +1131,24 @@ fn apply_snap(size: Vec3, settings: &crate::editor_settings::EditorSettings) -> 
     }
 }
 
+/// What a resize of a unit-mesh part writes into `Transform.scale`: its size
+/// times the folded DataMesh scale when it has one. A Roblox import draws the
+/// mesh at native extents x `Scale` inside a Size-sized collider, and the
+/// loader folds that into `mesh_scale`, so a resize that wrote the bare size
+/// would drop it and stretch the mesh to the Size box.
+pub(crate) fn mesh_part_scale(size: Vec3, fold: Option<&crate::space::instance_loader::MeshFold>) -> Vec3 {
+    size * fold.map_or(Vec3::ONE, |fold| fold.scale)
+}
+
+/// The `Transform.scale` that draws a multiplier-kind custom mesh at `size`:
+/// the mesh's natural size is fixed (its current size over its current scale),
+/// so the ratio is `size / natural`. The same math as play-runtime's
+/// `scale_for_size`.
+pub(crate) fn ratio_scale(size: Vec3, current_size: Vec3, current_scale: Vec3) -> Vec3 {
+    let natural = (current_size / current_scale.max(Vec3::splat(1.0e-6))).max(Vec3::splat(1.0e-6));
+    size / natural
+}
+
 fn apply_size_to_entity(
     transform: &mut Transform,
     basepart_opt: Option<Mut<crate::classes::BasePart>>,
@@ -1138,6 +1169,11 @@ fn apply_size_to_entity(
     // `transform.scale = size / mesh_baked_size` and have the visual
     // dimensions match `size`. Pass `Vec3::ONE` if irrelevant.
     mesh_baked_size: Vec3,
+    // A Roblox import's folded DataMesh scale / offset, when the part has one.
+    fold: Option<&crate::space::instance_loader::MeshFold>,
+    // A multiplier-kind custom mesh: `Transform.scale` is a ratio on the
+    // mesh's own size, not the size.
+    ratio: bool,
 ) {
     // Defense-in-depth sanitize — callers should already pass clean values,
     // but a single NaN reaching Transform.translation panics Avian
@@ -1149,14 +1185,24 @@ fn apply_size_to_entity(
 
     transform.translation = pos;
 
+    // Read before the size changes: a ratio part's natural size is its size
+    // over its scale.
+    let current_size = basepart_opt.as_ref().map(|bp| bp.size);
     if let Some(mut bp) = basepart_opt {
         bp.size = size;
-        bp.cframe.translation = pos;
+        // The authored position: a folded mesh offset is part of the render
+        // translation only.
+        bp.cframe.translation = crate::space::instance_loader::file_position(pos, transform.rotation, fold);
     }
 
     if has_mesh_source {
-        // File-system-first: .glb mesh is unit-scale, apply size via Transform.scale.
-        transform.scale = size;
+        // File-system-first: .glb mesh is unit-scale, apply size via
+        // Transform.scale, times the folded mesh scale of an imported FileMesh.
+        transform.scale = if ratio {
+            ratio_scale(size, current_size.unwrap_or(size), transform.scale)
+        } else {
+            mesh_part_scale(size, fold)
+        };
     } else if regenerate_mesh {
         // Legacy + final commit: bake `size` into the mesh, scale = ONE.
         transform.scale = Vec3::ONE;
@@ -1275,4 +1321,92 @@ fn pick_scale_handle(
     }
 
     best.map(|(axis, _)| (axis, group_center, group_extent, rotation))
+}
+
+#[cfg(test)]
+mod fold_resize_tests {
+    use super::*;
+    use crate::space::instance_loader::MeshFold;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Resizing an imported FileMesh part keeps its proportions: the mesh is
+    /// still drawn at the same multiple of the new size on every axis.
+    #[test]
+    fn resizing_an_imported_filemesh_part_keeps_its_proportions() {
+        let fold = MeshFold { scale: Vec3::new(1.5, 0.5, 2.0), offset: Vec3::ZERO };
+        let mut meshes = Assets::<Mesh>::default();
+        let drawn_over_size = |scale: Vec3, size: Vec3| scale / size;
+
+        let first = Vec3::new(2.0, 4.0, 6.0);
+        let mut transform = Transform::from_scale(first * fold.scale);
+        let before = drawn_over_size(transform.scale, first);
+
+        let resized = Vec3::new(4.0, 2.0, 3.0);
+        apply_size_to_entity(&mut transform, None, None, None, &mut meshes, resized, Vec3::ZERO, true, true, Vec3::ONE, Some(&fold), false);
+        assert_eq!(transform.scale, Vec3::new(6.0, 1.0, 6.0));
+        assert!((drawn_over_size(transform.scale, resized) - before).abs().max_element() < 1e-6);
+
+        // No fold, no change from before: the scale is the size.
+        apply_size_to_entity(&mut transform, None, None, None, &mut meshes, resized, Vec3::ZERO, true, true, Vec3::ONE, None, false);
+        assert_eq!(transform.scale, resized);
+    }
+
+    /// The authored position (`BasePart.cframe`) never takes the fold's
+    /// offset, which belongs to the render translation only.
+    #[test]
+    fn a_resize_keeps_the_cframe_free_of_the_mesh_offset() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let fold = MeshFold { scale: Vec3::ONE, offset: Vec3::X };
+        let part = world
+            .spawn((
+                Transform::from_rotation(rotation),
+                crate::classes::BasePart::default(),
+                fold,
+            ))
+            .id();
+        let render_pos = Vec3::new(10.0, 5.0, 10.0);
+        world
+            .run_system_once(
+                move |mut query: Query<(&mut Transform, Option<&mut crate::classes::BasePart>, Option<&MeshFold>)>,
+                      mut meshes: ResMut<Assets<Mesh>>| {
+                    for (mut transform, base_part, fold) in query.iter_mut() {
+                        apply_size_to_entity(&mut transform, base_part, None, None, &mut meshes, Vec3::splat(2.0), render_pos, true, true, Vec3::ONE, fold, false);
+                    }
+                },
+            )
+            .unwrap();
+        let cframe = world.get::<crate::classes::BasePart>(part).unwrap().cframe.translation;
+        let authored = render_pos - rotation * Vec3::X;
+        assert!((cframe - authored).length() < 1e-5, "cframe {cframe:?} should be {authored:?}");
+        assert_eq!(world.get::<Transform>(part).unwrap().translation, render_pos);
+    }
+
+    /// A multiplier-kind mesh resizes as a ratio: its natural size stays
+    /// fixed, so the scale becomes size over natural, never the bare size.
+    #[test]
+    fn a_multiplier_mesh_resizes_as_a_ratio() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        // Natural size (2, 3, 4) drawn at ratio 2 is size (4, 6, 8).
+        let part = world
+            .spawn((
+                Transform::from_scale(Vec3::splat(2.0)),
+                crate::classes::BasePart { size: Vec3::new(4.0, 6.0, 8.0), ..Default::default() },
+            ))
+            .id();
+        world
+            .run_system_once(
+                move |mut query: Query<(&mut Transform, Option<&mut crate::classes::BasePart>)>, mut meshes: ResMut<Assets<Mesh>>| {
+                    for (mut transform, base_part) in query.iter_mut() {
+                        apply_size_to_entity(&mut transform, base_part, None, None, &mut meshes, Vec3::new(8.0, 6.0, 4.0), Vec3::ZERO, true, true, Vec3::ONE, None, true);
+                    }
+                },
+            )
+            .unwrap();
+        assert!((world.get::<Transform>(part).unwrap().scale - Vec3::new(4.0, 2.0, 1.0)).abs().max_element() < 1e-5);
+        assert_eq!(world.get::<crate::classes::BasePart>(part).unwrap().size, Vec3::new(8.0, 6.0, 4.0));
+        assert!((ratio_scale(Vec3::new(4.0, 6.0, 8.0), Vec3::new(8.0, 6.0, 4.0), Vec3::new(4.0, 2.0, 1.0)) - Vec3::splat(2.0)).abs().max_element() < 1e-5);
+    }
 }

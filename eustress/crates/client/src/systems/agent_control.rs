@@ -290,15 +290,39 @@ fn handle_conn(stream: TcpStream, tx: &Arc<Mutex<Sender<(AgentRequest, Sender<Ob
         Ok(s) => s,
         Err(_) => return,
     };
-    let reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream);
+    let mut frame = Vec::new();
+    let mut first = true;
 
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
+    // The engine bridge's rules (`eustress_common::wire_guard`): a web page
+    // can reach a loopback port, so an HTTP request closes at its first
+    // line, a frame that does not parse closes after its answer, and a
+    // frame is capped.
+    loop {
+        let within_cap = match eustress_common::wire_guard::read_frame(&mut reader, &mut frame, eustress_common::wire_guard::MAX_FRAME_BYTES) {
+            Ok(Some(within_cap)) => within_cap,
+            Ok(None) | Err(_) => break,
+        };
+        if !within_cap {
+            let obs = Observation {
+                ok: false,
+                error: Some(format!("bad request: larger than {} bytes", eustress_common::wire_guard::MAX_FRAME_BYTES)),
+                ..Default::default()
+            };
+            let _ = writeln!(out, "{}", serde_json::to_string(&obs).unwrap_or_default());
+            break;
+        }
+        let line = String::from_utf8_lossy(&frame);
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
+        if first && eustress_common::wire_guard::looks_like_http(line) {
+            break;
+        }
+        first = false;
 
-        let req: AgentRequest = match serde_json::from_str(&line) {
+        let req: AgentRequest = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
                 let obs = Observation {
@@ -307,7 +331,7 @@ fn handle_conn(stream: TcpStream, tx: &Arc<Mutex<Sender<(AgentRequest, Sender<Ob
                     ..Default::default()
                 };
                 let _ = writeln!(out, "{}", serde_json::to_string(&obs).unwrap_or_default());
-                continue;
+                break;
             }
         };
 

@@ -62,11 +62,7 @@ pub fn spawn_part_glb(
     // that scale. `collider_local_half` performs the cancellation; its
     // constructor args are FULL lengths, hence ×2.
     let half = collider_local_half(size, size);
-    let collider = match part.shape {
-        PartType::Ball => Collider::sphere(half.x),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y * 2.0),
-        _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
-    };
+    let collider = eustress_common::part_draw::shape_collider(part.shape, half * 2.0, size);
 
     // Create material with special handling for Glass
     let (roughness, metallic, reflectance) = base_part.material.pbr_params();

@@ -23,6 +23,7 @@ members = [
     "crates/geo",
     "crates/texture-gen",
     "crates/particle-sim",
+    "crates/ocean",
     "crates/workshop",
     "crates/tools",
     "crates/bridge-client",
@@ -102,7 +103,9 @@ fjall = "2"
 # Flamegraph rendering from `tracing` collapsed-stack output.
 # Wired into `eustress-worlddb::tracing_hooks` so per-frame DB cost feeds
 # the engine diagnostics overlay without going through a separate profiler.
-inferno = "0.11"
+# No default features: only the flamegraph renderer is used, and the
+# defaults would pull clap, env_logger, dashmap and crossbeam into every build.
+inferno = { version = "0.11", default-features = false }
 
 # CAD BRep kernel — `truck` is a pure-Rust parametric modeler (curves /
 # surfaces / topology / CSG / meshing / STEP I/O). Underpins the
@@ -190,6 +193,19 @@ gpu-allocator = { path = ".patches/gpu-allocator-fresh" }
 # crates.io releases so the patch resolves cleanly.
 fjall = { path = "vendor/fjall" }
 lsm-tree = { path = "vendor/lsm-tree" }
+# Avian 0.7.0 (2026-10-01): adding `JointCollisionDisabled` to a joint removes the
+# pair's contacts without unlinking them from their island, and the island's next
+# contact change panics. One function patched; `.patches/avian3d-0.7.0/PATCH.md` says
+# what, why and when to drop it.
+avian3d = { path = ".patches/avian3d-0.7.0" }
+
+# Slint's software renderer (2026-10-01): a Text or TextInput drawing past
+# 32,767 physical px panicked in an i16 conversion and aborted Studio. Two
+# functions patched; `.patches/slint-2447c697/PATCH.md` says what, why and when
+# to drop it. Only this crate is replaced; it takes the rest of Slint from the
+# same git source.
+[patch."https://github.com/slint-ui/slint"]
+i-slint-renderer-software = { path = ".patches/slint-2447c697/i-slint-renderer-software" }
 
 # codegen-units was 8. The Slint UI compiles to a single generated file of
 # over a million lines, and at 8 units rustc averaged 1.1 busy threads across a

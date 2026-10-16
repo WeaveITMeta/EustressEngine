@@ -36,6 +36,15 @@
 // its author uploaded afterwards, outside review.
 
 export const WORLD_FORMAT = 'echk';
+export const PAK_FORMAT = 'pak';
+
+/// Whether a listing's current content is its world: an .echk listing whose r2_key names the manifest it serves. A .pak publish
+/// moves r2_key and sets the format to pak; a world commit does the reverse. Both must hold, so the object an approval binds
+/// (r2_key) is the object the world routes send. Without this, a world that was never reviewed is served under the approval of a
+/// .pak published over it (Security's finding, 2026-10-08).
+export function worldIsCurrent(sim) {
+  return sim?.format === WORLD_FORMAT && !!sim.world?.manifest_key && sim.r2_key === sim.world.manifest_key;
+}
 /// Container versions a Player opens: 1 stores records raw, 2 as one zstd
 /// frame (`eustress_echk::MIN_VERSION..=VERSION`).
 export const WORLD_ENCODER_VERSIONS = [1, 2];
@@ -49,7 +58,21 @@ export const MAX_UPLOAD_CHUNK_BYTES = 95 * 1024 * 1024;
 /// A manifest lists at most 65,536 chunks at about 160 bytes each.
 export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_PATH_BYTES = 1024;
-const MAX_LISTING = { name: 120, description: 4000, genre: 40 };
+const MAX_LISTING = { name: 120, description: 4000 };
+
+/// How many players a session of a listing holds, as its Space authors it (Players.MaxPlayers). Everyone counts, the host's own
+/// character included while it plays. The one bound is the gallery's own: the live heartbeat refuses more than
+/// MAX_PLAYERS in live.mjs, which a test keeps equal to this. Unset means 10. docs/networking/MAX_PLAYERS.md.
+export const DEFAULT_MAX_PLAYERS = 10;
+export const MAX_PLAYERS_LIMIT = 10_000;
+export const MAX_PLAYERS_MESSAGE = `max_players must be a whole number from 1 to ${MAX_PLAYERS_LIMIT.toLocaleString('en-US')}`;
+
+/// `{ ok: true, value }` for a whole number from 1 to 10,000, otherwise `{ ok: false, error }` naming the range. A string, a
+/// boolean, a fraction, zero and a negative number are all refused: nothing is rounded or clamped to fit.
+export function checkMaxPlayers(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= MAX_PLAYERS_LIMIT) return { ok: true, value };
+  return { ok: false, error: MAX_PLAYERS_MESSAGE };
+}
 
 export const chunkKey = (simId, hash) => `universes/${simId}/chunks/${hash}.echk`;
 export const manifestKey = (simId, sha256) => `universes/${simId}/manifests/${sha256}.json`;
@@ -231,6 +254,11 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+import { contentLockedFor, inReview, simForServing, sourceApproved, REVIEW_SCHEMA } from './moderation.mjs';
+import { checkTags, listingTags, genreTag, setAuthorTags, withTagsWrittenBack, listingTagFields } from './tags.mjs';
+import { refuseAdult } from './adult_content.mjs';
+import { refuseBlockedUpload } from './takedown.mjs';
+
 /// A listing its author may publish into.
 async function ownedListing(request, simId, env, cors, deps) {
   const userId = await deps.verifyAuth(request, env);
@@ -240,23 +268,28 @@ async function ownedListing(request, simId, env, cors, deps) {
   const sim = JSON.parse(raw);
   if (sim.author_id !== userId) return { error: deps.json({ error: 'Not your simulation' }, 403, cors) };
   // A legal hold covers storage, so its author cannot swap the content under
-  // it. The refusal reads as ordinary review: naming the hold would tell a
-  // suspected uploader that one exists (see authorView in moderation.mjs).
-  if (sim.moderation?.status === 'quarantined')
-    return { error: deps.json({ error: 'This listing is being reviewed and cannot be changed right now', code: 'in_review' }, 409, cors) };
-  // Same freeze the create route honours: re-uploading into an existing
-  // listing would otherwise walk around it.
-  if (await env.USERS.get(`publish-frozen:${userId}`))
-    return { error: deps.json({ error: 'Publishing is paused on this account pending review', code: 'publish_frozen' }, 403, cors) };
+  // it, and the freeze covers every listing the author owns: re-uploading into
+  // an existing listing would otherwise walk around it. The CASE decides, not
+  // the listing's marker. The refusal reads as ordinary review: naming the
+  // hold would tell a suspected uploader that one exists (see authorView in
+  // moderation.mjs).
+  if (await contentLockedFor(env, sim, userId)) return { error: inReview(deps.json, cors) };
   return { sim, userId };
 }
 
 /// A listing this viewer may download: the same gate as the `.pak` download.
-async function servableListing(request, simId, env, cors, deps) {
+async function servableListing(request, simId, env, cors, deps, kind = 'content') {
   const raw = await env.SOCIAL.get(`sim:${simId}`);
   if (!raw) return { error: deps.json({ error: 'Simulation not found' }, 404, cors) };
-  const sim = JSON.parse(raw);
-  if (deps.isListable(sim)) return { sim, listable: true };
+  // Through the legal lock and the approval binding (see simForServing).
+  const sim = await simForServing(env, JSON.parse(raw), kind);
+  if (deps.isListable(sim)) {
+    // Adult content goes to a viewer who turned it on, and to its author (src/adult_content.mjs). The manifest, every
+    // chunk and the source world all pass here; the Player sends its session with each (crates/client space_fetch.rs).
+    const refused = await refuseAdult(request, env, sim, { authenticate: deps.verifyAuth, json: deps.json, cors });
+    if (refused) return { error: refused };
+    return { sim, listable: true };
+  }
   const auth = await deps.verifyAuth(request, env);
   const admin = auth ? await deps.requireAdmin(request, env) : null;
   if (!deps.canServe(sim, auth, !!admin))
@@ -264,8 +297,9 @@ async function servableListing(request, simId, env, cors, deps) {
   return { sim, listable: false };
 }
 
-/// Listing text sent with a commit. Returns whether anything changed.
-function applyListing(sim, listing) {
+/// Listing text sent with a commit. Returns whether anything changed. `tags` is the commit's already-checked tag list, or
+/// null when the commit sent none.
+function applyListing(sim, listing, tags = null) {
   if (!listing || typeof listing !== 'object') return false;
   let changed = false;
   const set = (key, value) => {
@@ -276,11 +310,29 @@ function applyListing(sim, listing) {
   };
   if (typeof listing.name === 'string' && listing.name.trim()) set('name', listing.name.trim().slice(0, MAX_LISTING.name));
   if (typeof listing.description === 'string') set('description', listing.description.trim().slice(0, MAX_LISTING.description));
-  if (typeof listing.genre === 'string' && listing.genre.trim()) set('genre', listing.genre.trim().slice(0, MAX_LISTING.genre));
-  if (typeof listing.is_public === 'boolean') set('is_public', listing.is_public);
+  // Tags are the only category. A `genre` (an older Studio still sends one; an empty one is absent) is ignored, except when
+  // the commit sends no tags and the listing has none: then a genre that is a valid tag, and not "all", becomes its one tag,
+  // the author's, as a genre from before tags does (src/tags.mjs genreTag). It is a change the review reads.
+  if (tags === null && listingTags(sim).length === 0) {
+    const genre = genreTag({ genre: listing.genre });
+    if (genre !== null) {
+      setAuthorTags(sim, [genre]);
+      sim.genre = genre;
+      changed = true;
+    }
+  }
+  // An archived listing stays private whatever a publish says; the publish's choice is what Unarchive restores.
+  if (typeof listing.is_public === 'boolean') {
+    if (sim.archived === true) sim.archived_was_public = listing.is_public;
+    else set('is_public', listing.is_public);
+  }
   // The author's "Share Source": the gallery offers Edit (open in Studio)
   // only on a listing that carries it.
   if (typeof listing.open_source === 'boolean') set('open_source', listing.open_source);
+  // Tags are text a reviewer reads: a different set is the author's and sends the listing back to review, as a new name
+  // does; `[]` asks the review to choose them. The same tags in another order are stored in that order and are no change,
+  // and a judge's tags sent back as they are stay the judge's. docs/networking/LISTING_TAGS.md.
+  if (tags !== null && setAuthorTags(sim, tags)) changed = true;
   return changed;
 }
 
@@ -353,6 +405,26 @@ async function handleCommit(request, simId, env, cors, deps) {
   if (read.error) return read.error;
   const { sizes, bytes, spaces, start_space } = read.checked;
 
+  // The authored player count travels with the listing text. Checked before anything is written, so a number outside the
+  // range leaves the listing as it was.
+  let maxPlayers = null;
+  const sent = read.body.listing && typeof read.body.listing === 'object' ? read.body.listing.max_players : undefined;
+  if (sent !== undefined && sent !== null) {
+    const checked = checkMaxPlayers(sent);
+    if (!checked.ok) return deps.json({ error: checked.error, code: 'bad_max_players' }, 400, cors);
+    maxPlayers = checked.value;
+  }
+
+  // The listing's tags are checked the same way: a bad one refuses the whole commit before anything is written. Absent or
+  // null is "not sent" (the tags stay as they were); an empty list clears them.
+  let tags = null;
+  const sentTags = read.body.listing && typeof read.body.listing === 'object' ? read.body.listing.tags : undefined;
+  if (sentTags !== undefined && sentTags !== null) {
+    const checked = checkTags(sentTags);
+    if (!checked.ok) return deps.json({ error: checked.error, code: 'bad_tags' }, 400, cors);
+    tags = checked.tags;
+  }
+
   const stored = await storedChunks(env, simId);
   const missing = [...sizes].filter(([hash, size]) => stored.get(hash) !== size).map(([hash]) => hash);
   if (missing.length)
@@ -360,16 +432,26 @@ async function handleCommit(request, simId, env, cors, deps) {
 
   const sim = owned.sim;
   const source = read.body.kind === 'source';
-  if (source && !sim.world?.manifest_key)
+  if (source && !worldIsCurrent(sim))
     return deps.json({ error: 'Commit the world before its source', code: 'no_world' }, 409, cors);
   if (source && sim.open_source !== true)
     return deps.json({ error: 'Share Source is off for this listing', code: 'not_open_source' }, 409, cors);
 
   const sha = await sha256Hex(read.bytes);
+  // A world (or source world) manifest on the takedown blocklist is refused before anything is stored (src/takedown.mjs).
+  const blocked = await refuseBlockedUpload(env, [sha], { json: deps.json, cors, accountId: owned.userId, simId, route: source ? 'world_source' : 'world_commit' });
+  if (blocked) return blocked;
   const key = manifestKey(simId, sha);
+  // Create-if-absent. The key is the bytes' own SHA-256, so bytes already stored under it are the same world, and a second
+  // put would only move the object to a new R2 version. An approval is bound to the version it reviewed (identOfObject),
+  // so an identical re-commit would send the listing back to pending for everyone but its author. Same rule for the
+  // source world, which shares this key space. `sha256` makes R2 verify the bytes and keep the hash, so a new manifest's
+  // identity is its SHA-256 and no later re-put, copy or migration can move it.
   await env.SCENES.put(key, read.bytes, {
     httpMetadata: { contentType: 'application/json' },
     customMetadata: { simId, authorId: owned.userId },
+    onlyIf: { etagDoesNotMatch: '*' },
+    sha256: sha,
   });
   const now = new Date().toISOString();
 
@@ -378,13 +460,16 @@ async function handleCommit(request, simId, env, cors, deps) {
   if (source) {
     sim.world = { ...sim.world, source_manifest_key: key, source_manifest_sha256: sha, source_committed_at: now };
     sim.updated_at = now;
-    await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+    await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
     return deps.json({ ok: true, kind: 'source', manifest_sha256: sha, chunks: sizes.size, bytes }, 200, cors);
   }
 
   const prior = sim.world;
   const sameWorld = prior?.manifest_sha256 === sha;
-  const listingChanged = applyListing(sim, read.body.listing);
+  const listingChanged = applyListing(sim, read.body.listing, tags);
+  // A player count is a number about hosting, not content or text a reviewer reads: changing it does not send an approved
+  // listing back to review (listingChanged stays as the text left it).
+  if (maxPlayers !== null) sim.max_players = maxPlayers;
   const publishHash = isContentHash(read.body.publish_hash) ? read.body.publish_hash : null;
   if (prior && !sameWorld) sim.version = (sim.version || 1) + 1;
 
@@ -414,6 +499,7 @@ async function handleCommit(request, simId, env, cors, deps) {
   // Moderation dedups on (author, etag, size) of an uploaded .pak. A manifest
   // is not one, so an .echk listing is always reviewed afresh.
   sim.pak_etag = null;
+  sim.pak_sha256 = null;
   sim.scene_size_bytes = bytes;
   if (publishHash) sim.content_root = `blake3:${publishHash}`;
   const names = deps.readSpaceNames(spaces);
@@ -426,10 +512,12 @@ async function handleCommit(request, simId, env, cors, deps) {
       status: 'pending',
       version: deps.MODERATION_VERSION,
       policy_version: deps.POLICY_VERSION,
+      // Guardian Code Part VIII: the review schema the listing is published under.
+      review_schema: REVIEW_SCHEMA,
     };
   }
   sim.updated_at = now;
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return deps.json({
     ok: true,
@@ -438,6 +526,8 @@ async function handleCommit(request, simId, env, cors, deps) {
     chunks: sizes.size,
     bytes,
     version: sim.version || 1,
+    // The listing's tags as stored, and who chose them, so Studio shows (and sends back) what the listing carries.
+    ...listingTagFields(sim),
     // Author-facing status only; held and quarantined both read as in_review.
     moderation: ({ approved: sim.is_public === false ? 'approved_private' : 'listed', rejected: 'not_listed', changes_requested: 'changes_requested', appealed: 'appeal_in_review' })[sim.moderation?.status] || 'in_review',
   }, 200, cors);
@@ -451,13 +541,15 @@ async function handleGetManifest(request, simId, env, cors, deps) {
   const gate = await servableListing(request, simId, env, cors, deps);
   if (gate.error) return gate.error;
   const sim = gate.sim;
-  if (sim.format !== WORLD_FORMAT || !sim.world?.manifest_key) {
+  if (!worldIsCurrent(sim)) {
     if (!sim.r2_key) return deps.json({ error: 'Nothing has been published to this listing yet' }, 404, cors);
     // Published before .echk. The Player falls back to the .pak on this answer.
     return deps.json({ error: 'This simulation was published as a .pak', format: 'pak', download: `/api/simulations/${simId}/download` }, 409, cors);
   }
   const obj = await env.SCENES.get(sim.world.manifest_key);
   if (!obj) return deps.json({ error: 'The manifest is missing from storage' }, 404, cors);
+  // A Player fetching the world to play it is a visit (once a day per person: src/visits.mjs). Never fails the read.
+  if (deps.onLaunch) await deps.onLaunch(request, sim).catch((e) => console.error('onLaunch failed:', e?.message || e));
   const headers = {
     ...cors,
     'Content-Type': 'application/json',
@@ -480,11 +572,11 @@ async function mayReadSource(request, sim, env, deps) {
 }
 
 async function handleGetSource(request, simId, env, cors, deps) {
-  const gate = await servableListing(request, simId, env, cors, deps);
+  const gate = await servableListing(request, simId, env, cors, deps, 'source');
   if (gate.error) return gate.error;
   const sim = gate.sim;
   // Not found either way, so a private source is indistinguishable from none.
-  if (!sim.world?.source_manifest_key || !(await mayReadSource(request, sim, env, deps)))
+  if (!worldIsCurrent(sim) || !sim.world?.source_manifest_key || !(await mayReadSource(request, sim, env, deps)))
     return deps.json({ error: 'This listing shares no source' }, 404, cors);
   const obj = await env.SCENES.get(sim.world.source_manifest_key);
   if (!obj) return deps.json({ error: 'The source manifest is missing from storage' }, 404, cors);
@@ -503,11 +595,11 @@ async function handleGetChunk(request, simId, hash, env, cors, deps) {
   const gate = await servableListing(request, simId, env, cors, deps);
   if (gate.error) return gate.error;
   const sim = gate.sim;
-  if (sim.format !== WORLD_FORMAT || !sim.world?.manifest_key) return deps.json({ error: 'Chunk not found' }, 404, cors);
+  if (!worldIsCurrent(sim)) return deps.json({ error: 'Chunk not found' }, 404, cors);
   // A chunk the world names, or one only the source world names (a
   // server-only service) for a viewer who may read the source.
   let named = (await committedHashes(env, sim.world.manifest_key))?.has(hash);
-  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, env, deps)))
+  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, env, deps)) && (!gate.listable || (await sourceApproved(env, sim))))
     named = (await committedHashes(env, sim.world.source_manifest_key))?.has(hash);
   if (!named) return deps.json({ error: 'Chunk not found' }, 404, cors);
   const obj = await env.SCENES.get(chunkKey(simId, hash));

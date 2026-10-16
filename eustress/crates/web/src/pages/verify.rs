@@ -38,6 +38,10 @@ enum Stage {
     Uploading,
     /// Documents in; waiting on the verification result.
     Submitting,
+    /// Verification could not run (the Worker's 503 `kyc_unavailable`: xAI out of
+    /// credits or down). Not a verdict: the uploads are kept, and "Try again"
+    /// submits the same session again without photographing anything.
+    Unavailable,
     /// Terminal, success or failure.
     Done,
 }
@@ -74,6 +78,9 @@ pub fn VerifyPage() -> impl IntoView {
     let advice = RwSignal::new(String::new());
 
     let session = RwSignal::new(String::new());
+    // The session's upload-only token, from the link's fragment. Memory only:
+    // never storage, never a log. It cannot register or link an account.
+    let upload_token = RwSignal::new(String::new());
     let id_type = RwSignal::new(String::new());
     let needs_back = RwSignal::new(true);
     let minimum_age = RwSignal::new(18u32);
@@ -107,9 +114,16 @@ pub fn VerifyPage() -> impl IntoView {
             return;
         };
         session.set(s.clone());
+        // The link carries the upload token in its fragment (#t=), which no server
+        // saw. Read it into memory, then take it out of the address bar.
+        upload_token.set(upload_token_from_url().unwrap_or_default());
+        strip_fragment_from_address_bar();
+        // The link's context needs the token (in a header, never the URL).
+        let tok = upload_token.get_untracked();
 
         spawn_local(async move {
             match gloo_net::http::Request::get(&format!("{}/api/kyc/handoff/{}", crate::state::api_base(), s))
+                .header("X-KYC-Token", &tok)
                 .send()
                 .await
             {
@@ -237,6 +251,7 @@ pub fn VerifyPage() -> impl IntoView {
     let accept_photo = move |_| {
         let data_url = preview.get_untracked();
         let sess = session.get_untracked();
+        let token = upload_token.get_untracked();
         let this_side = side.get_untracked();
         let idt = id_type.get_untracked();
         let wants_back = needs_back.get_untracked();
@@ -244,7 +259,7 @@ pub fn VerifyPage() -> impl IntoView {
         stage.set(Stage::Uploading);
 
         spawn_local(async move {
-            match upload_capture(&data_url, &sess, &this_side, &idt).await {
+            match upload_capture(&data_url, &sess, &token, &this_side, &idt).await {
                 Err(e) => {
                     error.set(e);
                     stage.set(Stage::Review);
@@ -259,27 +274,19 @@ pub fn VerifyPage() -> impl IntoView {
                         return;
                     }
 
-                    stage.set(Stage::Submitting);
-                    match submit_for_verification(&sess, wants_back).await {
-                        Ok(res) => {
-                            verified.set(res.status == "verified");
-                            result_msg.set(if res.status == "verified" {
-                                "Your identity has been verified. You can close this page and continue on your computer.".to_string()
-                            } else if res.reason.is_empty() {
-                                "We could not verify your documents. Please start again.".to_string()
-                            } else {
-                                res.reason
-                            });
-                        }
-                        Err(e) => {
-                            verified.set(false);
-                            result_msg.set(e);
-                        }
-                    }
-                    stage.set(Stage::Done);
+                    run_submit(sess, token, wants_back, stage, verified, result_msg).await;
                 }
             }
         });
+    };
+
+    // "Try again" after verification could not run: the same session, whose
+    // uploads the Worker kept, so nothing is photographed or uploaded again.
+    let retry_submit = move |_| {
+        let sess = session.get_untracked();
+        let token = upload_token.get_untracked();
+        let wants_back = needs_back.get_untracked();
+        spawn_local(run_submit(sess, token, wants_back, stage, verified, result_msg));
     };
 
     let retake = move |_| {
@@ -289,7 +296,7 @@ pub fn VerifyPage() -> impl IntoView {
 
     // Stop the camera as soon as the flow leaves the capture stages.
     Effect::new(move |_| {
-        if matches!(stage.get(), Stage::Done | Stage::Invalid) {
+        if matches!(stage.get(), Stage::Done | Stage::Invalid | Stage::Unavailable) {
             shutdown_camera();
         }
     });
@@ -428,6 +435,17 @@ pub fn VerifyPage() -> impl IntoView {
                         </div>
                     }.into_any(),
 
+                    Stage::Unavailable => view! {
+                        <div class="verify-card verify-center">
+                            <div class="verify-icon verify-icon-warn">"!"</div>
+                            <h1>"Verification is temporarily unavailable"</h1>
+                            <p class="verify-muted">{move || result_msg.get()}</p>
+                            <div class="verify-actions">
+                                <button class="verify-btn verify-btn-primary" on:click=retry_submit>"Try again"</button>
+                            </div>
+                        </div>
+                    }.into_any(),
+
                     Stage::Done => view! {
                         <div class="verify-card verify-center">
                             <div class=move || if verified.get() {
@@ -466,6 +484,7 @@ fn pretty_id_type(raw: &str) -> String {
 async fn upload_capture(
     data_url: &str,
     session_id: &str,
+    upload_token: &str,
     side: &str,
     id_type: &str,
 ) -> Result<(), String> {
@@ -478,6 +497,7 @@ async fn upload_capture(
     form.append_with_str("side", side).ok();
     form.append_with_str("id_type", id_type).ok();
     form.append_with_str("session_id", session_id).ok();
+    form.append_with_str("upload_token", upload_token).ok();
 
     let resp = gloo_net::http::Request::post(&format!("{}/api/kyc/upload", crate::state::api_base()))
         .body(form)
@@ -496,9 +516,10 @@ async fn upload_capture(
 }
 
 /// Run verification for the session and return the outcome.
-async fn submit_for_verification(session_id: &str, needs_back: bool) -> Result<SubmitResult, String> {
+async fn submit_for_verification(session_id: &str, upload_token: &str, needs_back: bool) -> Result<SubmitResult, String> {
     let payload = serde_json::json!({
         "session_id": session_id,
+        "upload_token": upload_token,
         "needs_back": needs_back,
     });
 
@@ -511,6 +532,11 @@ async fn submit_for_verification(session_id: &str, needs_back: bool) -> Result<S
         .map_err(|_| "Could not reach the verification service.".to_string())?;
 
     let body = resp.text().await.unwrap_or_default();
+    // Verification could not run: the uploads are kept, so this is an outcome the
+    // page offers to retry, not an error and not a rejection.
+    if let Some(message) = kyc_unavailable_message(resp.status(), &body) {
+        return Ok(SubmitResult { status: "unavailable".to_string(), reason: message });
+    }
     if resp.status() != 200 {
         return Err(extract_error(&body)
             .unwrap_or_else(|| "Verification could not be completed.".to_string()));
@@ -520,6 +546,89 @@ async fn submit_for_verification(session_id: &str, needs_back: bool) -> Result<S
         .map_err(|_| "Unexpected response from the verification service.".to_string())
 }
 
+/// The upload token in a link's fragment (`#t=<64 lower-case hex>`), or None.
+pub(crate) fn token_from_fragment(hash: &str) -> Option<String> {
+    hash.trim_start_matches('#')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("t="))
+        .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .map(str::to_string)
+}
+
+/// The upload token of the link this page was opened from.
+fn upload_token_from_url() -> Option<String> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    token_from_fragment(&hash)
+}
+
+/// Takes the fragment (the upload token) out of the address bar, so it is not
+/// left in a screenshot, a shared link or the history.
+fn strip_fragment_from_address_bar() {
+    let Some(window) = web_sys::window() else { return };
+    let location = window.location();
+    let (Ok(path), Ok(search)) = (location.pathname(), location.search()) else { return };
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&format!("{path}{search}")));
+    }
+}
+
+/// What the page says when the Worker sent no sentence of its own.
+pub(crate) const KYC_UNAVAILABLE_FALLBACK: &str =
+    "ID verification is temporarily unavailable. Your upload is saved; try again in a few minutes.";
+
+/// The Worker's sentence when verification could not run, or None for any other
+/// answer. Only a 503 with code `kyc_unavailable` is this: the uploads are kept
+/// and the try was not counted, so the page offers "Try again" with the same
+/// session. A rejection, a rate limit or any other error is not.
+pub(crate) fn kyc_unavailable_message(status: u16, body: &str) -> Option<String> {
+    if status != 503 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v.get("code").and_then(|c| c.as_str()) != Some("kyc_unavailable") {
+        return None;
+    }
+    let said = v.get("error").and_then(|e| e.as_str()).map(str::trim).unwrap_or("");
+    Some(if said.is_empty() { KYC_UNAVAILABLE_FALLBACK } else { said }.to_string())
+}
+
+/// Submits the session and moves the page to the outcome: Done (verified or not),
+/// or Unavailable when verification could not run. "Try again" calls this again
+/// with the same session; it never uploads.
+async fn run_submit(
+    sess: String,
+    token: String,
+    wants_back: bool,
+    stage: RwSignal<Stage>,
+    verified: RwSignal<bool>,
+    result_msg: RwSignal<String>,
+) {
+    stage.set(Stage::Submitting);
+    match submit_for_verification(&sess, &token, wants_back).await {
+        Ok(res) if res.status == "unavailable" => {
+            verified.set(false);
+            result_msg.set(res.reason);
+            stage.set(Stage::Unavailable);
+            return;
+        }
+        Ok(res) => {
+            verified.set(res.status == "verified");
+            result_msg.set(if res.status == "verified" {
+                "Your identity has been verified. You can close this page and continue on your computer.".to_string()
+            } else if res.reason.is_empty() {
+                "We could not verify your documents. Please start again.".to_string()
+            } else {
+                res.reason
+            });
+        }
+        Err(e) => {
+            verified.set(false);
+            result_msg.set(e);
+        }
+    }
+    stage.set(Stage::Done);
+}
+
 /// Pull a human-readable message out of an API error body.
 fn extract_error(body: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -527,4 +636,82 @@ fn extract_error(body: &str) -> Option<String> {
         .or_else(|| v.get("error"))
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod kyc_unavailable_tests {
+    use super::*;
+
+    const WORKER_503: &str = r#"{"status":"unavailable","code":"kyc_unavailable","error":"ID verification is temporarily unavailable. Your upload is saved; try again in a few minutes."}"#;
+
+    #[test]
+    fn the_workers_503_is_an_outage_and_its_own_sentence_is_shown() {
+        assert_eq!(
+            kyc_unavailable_message(503, WORKER_503).as_deref(),
+            Some("ID verification is temporarily unavailable. Your upload is saved; try again in a few minutes."),
+        );
+        assert_eq!(
+            kyc_unavailable_message(503, r#"{"code":"kyc_unavailable","error":"Back in a minute."}"#).as_deref(),
+            Some("Back in a minute."),
+            "the Worker's words, not the page's",
+        );
+    }
+
+    #[test]
+    fn a_503_with_no_sentence_still_offers_a_retry() {
+        assert_eq!(kyc_unavailable_message(503, r#"{"code":"kyc_unavailable","error":"  "}"#).as_deref(), Some(KYC_UNAVAILABLE_FALLBACK));
+        assert_eq!(kyc_unavailable_message(503, r#"{"code":"kyc_unavailable"}"#).as_deref(), Some(KYC_UNAVAILABLE_FALLBACK));
+    }
+
+    #[test]
+    fn a_verdict_or_any_other_error_is_not_an_outage() {
+        for (status, body) in [
+            (200, r#"{"status":"rejected","reason":"This is a photo of a screen"}"#),
+            (200, r#"{"status":"verified"}"#),
+            (429, r#"{"error":"Too many verification attempts.","code":"rate_limited"}"#),
+            (429, r#"{"code":"kyc_unavailable","error":"x"}"#),
+            (503, r#"{"error":"Sign-in is temporarily unavailable.","code":"account_unavailable"}"#),
+            (500, r#"{"error":"Submit failed: boom"}"#),
+            (503, "Service Unavailable"),
+        ] {
+            assert_eq!(kyc_unavailable_message(status, body), None, "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn try_again_submits_the_same_session_and_uploads_nothing() {
+        let src = include_str!("verify.rs").replace("\r\n", "\n");
+        let run = src.split("async fn run_submit(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(run.contains("submit_for_verification(&sess, &token, wants_back)"));
+        assert!(run.contains("Stage::Unavailable"));
+        assert!(!run.contains("upload_capture"));
+        let retry = src.split("let retry_submit = move |_| {").nth(1).unwrap().split("\n    };\n").next().unwrap();
+        assert!(retry.contains("session.get_untracked()") && retry.contains("run_submit("));
+        assert!(!retry.contains("upload_capture") && !retry.contains("ensure_camera"));
+    }
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn the_upload_token_is_read_from_the_fragment_only_in_its_own_shape() {
+        assert_eq!(token_from_fragment(&format!("#t={TOKEN}")).as_deref(), Some(TOKEN));
+        assert_eq!(token_from_fragment(&format!("t={TOKEN}")).as_deref(), Some(TOKEN));
+        assert_eq!(token_from_fragment(&format!("#x=1&t={TOKEN}")).as_deref(), Some(TOKEN));
+        for bad in ["", "#", "#t=", "#t=abc", &format!("#t={}", TOKEN.to_uppercase()), &format!("#t={TOKEN}0"), &format!("#s={TOKEN}"), "#t=zz23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"] {
+            assert_eq!(token_from_fragment(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_phone_page_never_holds_the_claim_secret_and_keeps_its_token_in_memory() {
+        let src = include_str!("verify.rs").replace("\r\n", "\n");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!code.contains("claim_secret") && !code.contains("kyc_claim"), "the phone page has no claim secret");
+        assert!(!code.contains("Storage"), "nothing goes to storage");
+        let handoff = code.split("/api/kyc/handoff/").nth(1).unwrap().split(".send()").next().unwrap();
+        assert!(handoff.contains(".header(\"X-KYC-Token\", &tok)"), "the hand-off context is read with the token in a header");
+        for line in code.lines().filter(|l| l.contains("token")) {
+            assert!(!line.contains("log::") && !line.contains("console"), "a token is logged: {line}");
+        }
+    }
 }

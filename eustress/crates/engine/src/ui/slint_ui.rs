@@ -266,6 +266,8 @@ pub enum SlintAction {
     /// `FileEvent::ImportRobloxPlace` for `do_import_roblox_place`.
     ImportRobloxPlace,
     PublishUniverse,
+    /// File > Publish As...: the Publish dialog with its picker first.
+    PublishAs,
     PublishSpace,
     Publish(PublishRequest),
 
@@ -466,6 +468,8 @@ pub enum SlintAction {
     CopyOutputVisible,
     /// Output: show or hide a line's stack (by entry id).
     ToggleOutputStack(i32),
+    /// Output: show a page of an open line's message (entry id, page).
+    TurnOutputPage(i32, i32),
     
     // Bottom panel mode (Output / Timeline tab switch)
     SetBottomPanel(String),
@@ -531,6 +535,12 @@ pub enum SlintAction {
     FindReplaceOne,
     FindReplaceAll,
     FindClosed,
+    /// Settings > AI keys > Remove for a provider ("anthropic", "xai",
+    /// "openai"): opens the confirmation. Confirm runs it; Cancel changes
+    /// nothing.
+    SoulKeyRemove(String),
+    SoulKeyRemoveConfirm,
+    SoulKeyRemoveCancel,
     /// Settings > Soul > Test Connection, and its background result.
     SoulTestConnection,
     SoulTestConnectionDone(Vec<crate::soul::KeyProbe>),
@@ -566,6 +576,8 @@ pub enum SlintAction {
     // Auth
     Login,
     Logout,
+    /// Sign out of every device (the account menu).
+    LogoutEverywhere,
     BrowseIdentity,
     LoginWithIdentity,
     SwitchIdentity(String),
@@ -624,7 +636,7 @@ pub enum SlintAction {
     LoadLayoutFromFile,
     ToggleThemeEditor,
     ApplyThemeSettings(bool, bool, f32), // dark-mode, high-contrast, ui-scale
-    SetThemeModern(bool), // Classic/Modern live theme switch (legacy bool path)
+    SetThemeModern(bool), // Classic/Voltec live theme switch (legacy bool path)
     SelectTheme(String), // TOML theme by id (Settings > Theme) — live swap + persist
     RescanThemes,        // reload built-ins + user Themes folder
     ResetToDefaults,     // Settings > Reset Defaults — theme resets to Classic
@@ -711,7 +723,8 @@ pub enum SlintAction {
     WorkshopModelChanged(String),
     /// User flipped the Gauntlet (AAA verify-loop) toggle.
     WorkshopGauntletToggled(bool),
-    /// Auto mode: run approval-gated Workshop tools without prompting.
+    /// Auto mode: run Workshop's read and write tools without prompting.
+    /// Tools that run commands, delete, or go online still ask.
     WorkshopAutoToggled(bool),
     /// Stop button or Escape while an agent turn is running.
     WorkshopStopAgent,
@@ -764,6 +777,22 @@ pub enum SlintAction {
     ScriptCompletionDismiss,
     /// Ctrl+Space — open even with an empty prefix.
     ScriptCompletionRequest,
+
+    // Find in Scripts (Ctrl+Shift+F). The search itself runs in
+    // `script_search_ui::sync_script_search`; these carry the modal's input.
+    /// The query text changed.
+    ScriptSearchQuery(String),
+    /// The Match case box was set.
+    ScriptSearchMatchCase(bool),
+    /// Enter or a click on this row of the results.
+    ScriptSearchOpen(i32),
+    /// Up, Down, Page Up or Page Down: move the highlighted row by this much.
+    ScriptSearchMove(i32),
+    /// Escape, the close button or a click outside.
+    ScriptSearchClose,
+    /// Ctrl+Shift+F while a script holds the keyboard, where the engine's own
+    /// shortcuts do not run.
+    ScriptSearchRequest,
 
     // API Reference panel
     ApiSearchChanged(String),
@@ -1524,10 +1553,8 @@ impl Plugin for StudioUiPlugin {
                 super::file_event_handler::drain_file_events,
                 super::file_event_handler::execute_file_actions,
             ).chain())
-            .add_systems(Update, crate::auth::auth_poll_system)
-            .init_resource::<PendingAuthRestore>()
-            .add_systems(Startup, try_restore_auth_session)
-            .add_systems(Update, apply_restored_auth_session);
+            .add_systems(Update, (crate::auth::auth_poll_system, show_sign_in_outcome).chain())
+            .add_systems(Startup, try_restore_auth_session);
     }
 }
 
@@ -1693,7 +1720,25 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, forward_input_to_slint.before(SlintSystems::Drain))
             .add_systems(Update, forward_keyboard_to_slint.before(SlintSystems::Drain))
             .add_systems(Update, update_slint_ui_focus)
+            .init_resource::<super::layout_tables::ActiveLayoutKey>()
+            .add_systems(Update, follow_mode_layout)
+            .add_systems(Update, super::publish_targets::sync_publish_targets)
+            .add_systems(
+                Update,
+                super::publish_changelog::sync_publish_changelogs.after(super::publish_targets::sync_publish_targets),
+            )
+            .add_systems(
+                Update,
+                super::publish_cover::sync_publish_cover_now.after(super::publish_targets::sync_publish_targets),
+            )
+            .add_systems(
+                Update,
+                super::publish_targets::sync_publish_tags.after(super::publish_targets::sync_publish_targets),
+            )
             .add_systems(crate::play_mode::session_start(), release_keyboard_on_play)
+            // Every frame, never on a stagger slot or behind a run condition: it
+            // is the input pump, and a skipped run would also hide Bevy's one-time
+            // "failed validation" warning for its parameters until the first click.
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             // Ctrl+P / Ctrl+Shift+P → re-queue as the SlintActions the File
             // menu pushes, so the keyboard and the menu share one dialog path.
@@ -1733,6 +1778,8 @@ impl Plugin for SlintUiPlugin {
             // adapter scale factor. On a resize frame it must read the
             // POST-resize layout, or the camera sub-rect + click hit-testing
             // run one frame on stale bounds (and a maximize could glitch).
+            // Every frame, never on a stagger slot: `ViewportBounds` and the
+            // right-click menu are read on the frame they change.
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain).after(handle_window_resize))
             .add_systems(Update, sync_tool_options_bar_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_numeric_input_to_slint.after(SlintSystems::Drain))
@@ -1776,6 +1823,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_procurement_to_slint.after(SlintSystems::Drain))
             // Dialog visibility mirror (camera blocking) + Forge dialog status
             .add_systems(Update, sync_dialog_state.after(SlintSystems::Drain))
+            // Credential results from the worker (capture::key_tasks).
+            .add_systems(Update, apply_key_results.after(SlintSystems::Drain))
             .add_systems(Update, announce_unbuilt_actions)
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState
             // Must run AFTER part_selection_system and SlintSystems::Drain
@@ -1836,6 +1885,10 @@ impl Plugin for SlintUiPlugin {
             // Script analyzer → squiggle spans on the script editor
             .add_systems(Update, sync_analyzer_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_completion_to_slint.after(SlintSystems::Drain))
+            // Find in Scripts (Ctrl+Shift+F): opens the modal, runs its search,
+            // opens a result in a tab and selects the match. Before the tab sync,
+            // so a tab it opens shows this frame.
+            .add_systems(Update, super::script_search_ui::sync_script_search.after(SlintSystems::Drain).before(sync_tab_manager_to_studio_state))
             // API Reference Panel sync: ApiCatalog + ApiFilterState → Slint
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Services Browser: one-shot push of static catalog to Slint
@@ -1892,10 +1945,8 @@ impl Plugin for SlintUiPlugin {
             // Radial media-import chooser: when a media file is staged
             // (Import pick or Assets double-click), push its wedges to Slint.
             .add_systems(Update, sync_radial_media_menu_to_slint.after(SlintSystems::Drain))
-            .add_systems(Update, crate::auth::auth_poll_system)
-            .init_resource::<PendingAuthRestore>()
-            .add_systems(Startup, try_restore_auth_session)
-            .add_systems(Update, apply_restored_auth_session);
+            .add_systems(Update, (crate::auth::auth_poll_system, show_sign_in_outcome).chain())
+            .add_systems(Startup, try_restore_auth_session);
 
         // Ribbon keyboard-shortcut subtitles — pushes formatted binding
         // strings to Slint on startup and whenever user remaps.
@@ -1993,7 +2044,16 @@ fn setup_slint_overlay(world: &mut World) {
     // About dialog identity — version comes from the engine crate's Cargo.toml
     // (so bumping the crate version automatically updates the About screen).
     ui.set_about_version(env!("CARGO_PKG_VERSION").into());
-    
+    // The commit and day it was built (`build.rs`); empty without git.
+    ui.set_about_commit(option_env!("EUSTRESS_GIT_COMMIT").unwrap_or("").into());
+    ui.set_about_build_date(option_env!("EUSTRESS_BUILD_DATE").unwrap_or("").into());
+
+    // The sign-in dialog says which server it signs in to when that is not
+    // production, and where an identity file for it comes from.
+    let (login_server, login_identity_hint) = crate::auth::sign_in_texts();
+    ui.set_login_server(login_server.into());
+    ui.set_login_identity_hint(login_identity_hint.into());
+
     // ========================================================================
     // Wire Slint callbacks → SlintActionQueue
     // Each callback captures a clone of the Arc<Mutex<Vec<SlintAction>>> queue.
@@ -2033,9 +2093,72 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_publish_universe(move || q.push(SlintAction::PublishUniverse));
     let q = queue.clone();
+    ui.on_publish_as(move || q.push(SlintAction::PublishAs));
+    // The Publish dialog's change logs (`publish_changelog`).
+    ui.on_publish_changelog_save(|| {
+        super::publish_changelog::request(super::publish_changelog::ChangeLogRequest::SaveLatest)
+    });
+    ui.on_publish_changelog_download(|id| {
+        super::publish_changelog::request(super::publish_changelog::ChangeLogRequest::Download(id.to_string()))
+    });
+    // The Publish dialog's cover (`publish_cover`): the picker and the
+    // checks run here, on the window's thread.
+    let window = ui.as_weak();
+    ui.on_publish_cover_choose(move || {
+        if let Some(ui) = window.upgrade() {
+            super::publish_cover::choose(&ui);
+        }
+    });
+    let window = ui.as_weak();
+    ui.on_publish_cover_remove(move || {
+        if let Some(ui) = window.upgrade() {
+            super::publish_cover::remove(&ui);
+        }
+    });
+    let window = ui.as_weak();
+    ui.on_publish_cover_keep(move || {
+        if let Some(ui) = window.upgrade() {
+            super::publish_cover::keep(&ui);
+        }
+    });
+    // The Publish dialog's tag field (`publish_targets`).
+    ui.on_publish_tag_add(|tag| {
+        super::publish_targets::request_tag(super::publish_targets::TagRequest::Add(tag.to_string()))
+    });
+    ui.on_publish_tag_typed(|text| {
+        super::publish_targets::request_tag(super::publish_targets::TagRequest::Typed(text.to_string()))
+    });
+    ui.on_publish_tag_remove(|i| {
+        super::publish_targets::request_tag(super::publish_targets::TagRequest::Remove(i.max(0) as usize))
+    });
+    let q = queue.clone();
     ui.on_publish_space(move || q.push(SlintAction::PublishSpace));
     let q = queue.clone();
+    let window = ui.as_weak();
     ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, space_only| {
+        // The Max players field, a whole number from 1 to 10,000 (the
+        // dialog will not publish anything else).
+        let max_players = window
+            .upgrade()
+            .and_then(|ui| ui.get_publish_max_players().trim().parse::<u16>().ok())
+            .filter(|n| (1..=10_000).contains(n));
+        // Where it goes (`publish_targets`): this Universe's listing, a new
+        // one, or another of the author's.
+        let target = window
+            .upgrade()
+            .map(|ui| {
+                let id = ui.get_publish_target_id();
+                let own = ui.get_publish_own_listing_id();
+                super::publish_targets::target_for(id.as_str(), own.as_str(), space_only)
+            })
+            .unwrap_or_default();
+        // The listing's hashtags, when they are known (loaded or edited); a
+        // Space-only publish never sends them.
+        let tags = window.upgrade().and_then(|ui| {
+            use slint::Model;
+            (!space_only && ui.get_publish_tags_known())
+                .then(|| ui.get_publish_tags().iter().map(|t| t.to_string()).collect::<Vec<_>>())
+        });
         q.push(SlintAction::Publish(PublishRequest {
             experience_name: experience_name.to_string(),
             description: description.to_string(),
@@ -2044,6 +2167,15 @@ fn setup_slint_overlay(world: &mut World) {
             open_source,
             studio_editable,
             space_only,
+            // The cover the author picked or removed; a Space-only publish keeps it.
+            cover: if space_only {
+                eustress_common::project_manifest::CoverChoice::Keep
+            } else {
+                super::publish_cover::current()
+            },
+            max_players,
+            target,
+            tags,
         }))
     });
     
@@ -2367,6 +2499,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_copy_output_visible(move || q.push(SlintAction::CopyOutputVisible));
     let q = queue.clone();
     ui.on_toggle_output_stack(move |id| q.push(SlintAction::ToggleOutputStack(id)));
+    let q = queue.clone();
+    ui.on_turn_output_page(move |id, page| q.push(SlintAction::TurnOutputPage(id, page)));
     
     // Bottom panel mode (Output ↔ Timeline tab switch)
     let q = queue.clone();
@@ -2523,6 +2657,8 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_logout(move || q.push(SlintAction::Logout));
     let q = queue.clone();
+    ui.on_logout_everywhere(move || q.push(SlintAction::LogoutEverywhere));
+    let q = queue.clone();
     ui.on_switch_identity(move |username| q.push(SlintAction::SwitchIdentity(username.to_string())));
     let q = queue.clone();
     ui.on_remove_identity(move |username| q.push(SlintAction::RemoveIdentity(username.to_string())));
@@ -2604,6 +2740,12 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_soul_api_key_saved(move || q.push(SlintAction::SoulApiKeySaved));
     let q = queue.clone();
+    ui.on_soul_key_remove(move |provider| q.push(SlintAction::SoulKeyRemove(provider.to_string())));
+    let q = queue.clone();
+    ui.on_soul_key_remove_confirm(move || q.push(SlintAction::SoulKeyRemoveConfirm));
+    let q = queue.clone();
+    ui.on_soul_key_remove_cancel(move || q.push(SlintAction::SoulKeyRemoveCancel));
+    let q = queue.clone();
     ui.on_soul_build_all(move || q.push(SlintAction::PluginAction("soul:build_all".to_string())));
     let q = queue.clone();
     ui.on_select_center_tab(move |idx| q.push(SlintAction::SelectCenterTab(idx)));
@@ -2643,6 +2785,18 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_script_completion_dismiss(move || q.push(SlintAction::ScriptCompletionDismiss));
     let q = queue.clone();
     ui.on_script_completion_request(move || q.push(SlintAction::ScriptCompletionRequest));
+    let q = queue.clone();
+    ui.on_script_search_query_changed(move |text| q.push(SlintAction::ScriptSearchQuery(text.to_string())));
+    let q = queue.clone();
+    ui.on_script_search_match_case_changed(move |on| q.push(SlintAction::ScriptSearchMatchCase(on)));
+    let q = queue.clone();
+    ui.on_script_search_open(move |row| q.push(SlintAction::ScriptSearchOpen(row)));
+    let q = queue.clone();
+    ui.on_script_search_move(move |delta| q.push(SlintAction::ScriptSearchMove(delta)));
+    let q = queue.clone();
+    ui.on_script_search_close(move || q.push(SlintAction::ScriptSearchClose));
+    let q = queue.clone();
+    ui.on_script_search_request(move || q.push(SlintAction::ScriptSearchRequest));
     let q = queue.clone();
     ui.on_reorder_center_tab(move |from, to| q.push(SlintAction::ReorderCenterTab(from, to)));
     let q = queue.clone();
@@ -2758,6 +2912,11 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_save_layout_to_file(move || q.push(SlintAction::SaveLayoutToFile));
     let q = queue.clone();
     ui.on_load_layout_from_file(move || q.push(SlintAction::LoadLayoutFromFile));
+    // A dock's pin button and the Layout menu's reset (`layout_tables`).
+    ui.on_toggle_pin_panel(|panel| {
+        super::layout_tables::request(super::layout_tables::LayoutRequest::TogglePin(panel.to_string()))
+    });
+    ui.on_reset_mode_layout(|| super::layout_tables::request(super::layout_tables::LayoutRequest::ResetToModeLayout));
     let q = queue.clone();
     ui.on_toggle_theme_editor(move || q.push(SlintAction::ToggleThemeEditor));
     let q = queue.clone();
@@ -2770,7 +2929,7 @@ fn setup_slint_overlay(world: &mut World) {
         q.push(SlintAction::SelectTheme(id.to_string()));
         // Direct-apply for the two built-ins: instant visual feedback on the
         // same frame as the click, no queue-drain latency. Only covers
-        // Classic/Modern (compile-time presets); user TOML themes and the
+        // Classic/Voltec (compile-time presets); user TOML themes and the
         // mode-accent overlay still go through the queued path only. The
         // queued action re-applies + persists regardless — idempotent.
         if let Some(w) = ui_weak_theme.upgrade() {
@@ -2778,11 +2937,11 @@ fn setup_slint_overlay(world: &mut World) {
             if id == "classic" {
                 let p = th.get_preset_classic();
                 th.set_data(p);
-                th.set_modern(false);
-            } else if id == "modern" {
-                let p = th.get_preset_modern();
+                th.set_voltec(false);
+            } else if id == "voltec" {
+                let p = th.get_preset_voltec();
                 th.set_data(p);
-                th.set_modern(true);
+                th.set_voltec(true);
             }
         }
     });
@@ -3240,12 +3399,15 @@ fn resolve_gui_rect<'a>(
         d.position_udim2[2] * ph + d.position_udim2[3]
     };
 
-    let r = (
-        px + local_x - d.anchor_point[0] * w,
-        py + local_y - d.anchor_point[1] * h,
-        w,
-        h,
-    );
+    // BOXHEAD #75: Slint's software renderer panics on an edge past its 16-bit
+    // limit, so every edge is bounded (common gui::edge_bounds). An edge clamped
+    // that way lies off the screen, so what is visible does not change.
+    let bound = eustress_common::gui::edge_bounds::edge_bound(viewport);
+    let left = px + local_x - d.anchor_point[0] * w;
+    let top = py + local_y - d.anchor_point[1] * h;
+    let (left, right) = eustress_common::gui::edge_bounds::bounded_edges(left, left + w, bound);
+    let (top, bottom) = eustress_common::gui::edge_bounds::bounded_edges(top, top + h, bound);
+    let r = (left, top, right - left, bottom - top);
     cache.insert(entity, r);
     r
 }
@@ -3493,12 +3655,12 @@ fn sync_gui_elements_to_slint(
             border_b: e.border_color[2],
             border_a: e.border_color[3],
             corner_radius: e.corner_radius,
-            text: e.text.as_str().into(),
+            text: super::display_text::shown_block(&e.text),
             text_r: e.text_color[0],
             text_g: e.text_color[1],
             text_b: e.text_color[2],
             text_a: e.text_color[3],
-            font_size: e.font_size,
+            font_size: eustress_common::gui::edge_bounds::bounded_font_size(e.font_size),
             font_weight: e.font_weight,
             // main.slint compares lowercase names; the display carries the
             // enum's ("Left", "Top").
@@ -3823,6 +3985,51 @@ pub fn release_keyboard_on_play(
     OVERLAY_INPUT_FOCUSED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The full-window modals, by name, and whether each is open: every `show-*`
+/// dialog whose component draws the modal backdrop. The input gate
+/// (`update_slint_ui_focus`) holds keys and the pointer while one is up, and
+/// `action.invoke` reports the ones an action opened.
+pub(crate) fn modal_dialogs(w: &StudioWindow) -> [(&'static str, bool); 25] {
+    [
+        ("the unsaved-changes dialog", w.get_show_unsaved_changes_dialog()),
+        ("Settings", w.get_show_settings_dialog()),
+        ("the exit confirmation", w.get_show_exit_confirmation()),
+        ("Publish", w.get_show_publish_dialog()),
+        ("Login", w.get_show_login_dialog()),
+        ("Keyboard shortcuts", w.get_show_keybindings_dialog()),
+        ("About", w.get_show_about_dialog()),
+        ("Forge connect", w.get_show_forge_connect_dialog()),
+        ("the stress test", w.get_show_stress_test_dialog()),
+        ("Sync domain", w.get_show_sync_domain_dialog()),
+        ("Simulation settings", w.get_show_simulation_settings_dialog()),
+        // Add-Attribute modal: without it, scrolling its type list
+        // leaked to the camera and zoomed the 3D viewport.
+        ("Add Attribute", w.get_show_attribute_dialog()),
+        ("Rename tag", w.get_show_rename_tag_dialog()),
+        ("Edit label", w.get_show_edit_label_dialog()),
+        // Typing a new universe's or space's name leaked WASD and
+        // shortcut keys to the 3D camera ("it moves me around").
+        ("New Universe", w.get_show_new_universe_dialog()),
+        ("New Space", w.get_show_new_space_dialog()),
+        // Insert Object's class search, the feedback and API-key forms,
+        // and the Data menu's three dialogs (typing a source name or
+        // endpoint used to fly the camera and hit Delete).
+        ("Insert Object", w.get_show_insert_object_dialog()),
+        ("Feedback", w.get_show_feedback_dialog()),
+        ("the API key dialog", w.get_show_api_key_dialog()),
+        ("Data sources", w.get_show_global_sources_window()),
+        ("Domains", w.get_show_domains_window()),
+        ("Global variables", w.get_show_global_variables_window()),
+        // History's revert confirm.
+        ("the revert confirm", w.get_show_revert_confirm()),
+        // Properties > Parameters "+": its Name field has the keyboard, and
+        // without this `t`, `f`, `-`, `=` and Backspace went to the world.
+        ("Add Parameter", w.get_show_parameter_dialog()),
+        // Find in Scripts: its query field and result keys.
+        ("Find in Scripts", w.get_show_script_search()),
+    ]
+}
+
 /// Updates `SlintUIFocus.has_focus` every frame based on cursor position vs viewport bounds.
 /// When the cursor is outside the 3D viewport area (i.e. over Explorer, Properties, Ribbon,
 /// Output, or Toolbox panels), `has_focus` is set to `true` to block 3D tool input.
@@ -3894,39 +4101,7 @@ pub fn update_slint_ui_focus(
     let mut modal_open = false;
     if let Some(ctx) = slint_context.as_ref() {
         let w = &ctx.window;
-        let modals: [(&'static str, bool); 23] = [
-            ("the unsaved-changes dialog", w.get_show_unsaved_changes_dialog()),
-            ("Settings", w.get_show_settings_dialog()),
-            ("the exit confirmation", w.get_show_exit_confirmation()),
-            ("Publish", w.get_show_publish_dialog()),
-            ("Login", w.get_show_login_dialog()),
-            ("Keyboard shortcuts", w.get_show_keybindings_dialog()),
-            ("About", w.get_show_about_dialog()),
-            ("Forge connect", w.get_show_forge_connect_dialog()),
-            ("the stress test", w.get_show_stress_test_dialog()),
-            ("Sync domain", w.get_show_sync_domain_dialog()),
-            ("Simulation settings", w.get_show_simulation_settings_dialog()),
-            // Add-Attribute modal: without it, scrolling its type list
-            // leaked to the camera and zoomed the 3D viewport.
-            ("Add Attribute", w.get_show_attribute_dialog()),
-            ("Rename tag", w.get_show_rename_tag_dialog()),
-            ("Edit label", w.get_show_edit_label_dialog()),
-            // Typing a new universe's or space's name leaked WASD and
-            // shortcut keys to the 3D camera ("it moves me around").
-            ("New Universe", w.get_show_new_universe_dialog()),
-            ("New Space", w.get_show_new_space_dialog()),
-            // Insert Object's class search, the feedback and API-key forms,
-            // and the Data menu's three dialogs (typing a source name or
-            // endpoint used to fly the camera and hit Delete).
-            ("Insert Object", w.get_show_insert_object_dialog()),
-            ("Feedback", w.get_show_feedback_dialog()),
-            ("the API key dialog", w.get_show_api_key_dialog()),
-            ("Data sources", w.get_show_global_sources_window()),
-            ("Domains", w.get_show_domains_window()),
-            ("Global variables", w.get_show_global_variables_window()),
-            // History's revert confirm.
-            ("the revert confirm", w.get_show_revert_confirm()),
-        ];
+        let modals = modal_dialogs(w);
         for (name, open) in modals {
             if open {
                 holders.push(name);
@@ -3937,7 +4112,7 @@ pub fn update_slint_ui_focus(
             let tab = w.get_active_tab_type();
             tab == "script" || tab == "code"
         };
-        let inputs: [(&'static str, bool); 7] = [
+        let inputs: [(&'static str, bool); 8] = [
             // Properties fields and the Workshop chat report here.
             ("a Properties or Workshop field (any-input-has-focus)", w.get_any_input_has_focus()),
             ("the command bar", w.get_command_bar_has_focus()),
@@ -3951,6 +4126,16 @@ pub fn update_slint_ui_focus(
             // flag a destroyed editor left true must never hold the
             // engine's keyboard shut.
             ("the script editor", w.get_script_editor_has_focus() && script_tab),
+            // Explorer search box. Honoured only while the Explorer tab is
+            // showing: the panel is destroyed when the tab or the dock goes,
+            // and a flag a destroyed panel left true must never hold the
+            // engine's keyboard shut.
+            (
+                "the Explorer search box",
+                w.get_explorer_search_has_focus()
+                    && w.get_left_tab_index() == 0
+                    && (w.get_show_explorer() || w.get_show_assets()),
+            ),
             // Explorer inline rename (F2): a TreeItem TextInput has keyboard
             // focus while the node id is >= 0.
             ("an Explorer rename", w.get_explorer_renaming_node_id() >= 0),
@@ -4296,149 +4481,85 @@ pub fn update_slint_ui_focus(
     }
 }
 
-/// Try to restore auth session on startup
-/// What the saved-identity restore thread produces.
-struct RestoredIdentity {
-    public_key: String,
-    display_name: String,
-    /// The witness JWT when the challenge auth succeeded.
-    token: Option<String>,
-    /// The witness's account id when authenticated (the ledger keys
-    /// everything by it, not by the pubkey), else the public key.
-    account_id: String,
-}
-
-/// Receiver for the restore thread's result, polled by
-/// `apply_restored_auth_session`. `Receiver` is not `Sync`, hence the mutex.
-#[derive(Resource, Default)]
-struct PendingAuthRestore(Option<std::sync::Mutex<std::sync::mpsc::Receiver<Option<RestoredIdentity>>>>);
-
-/// Startup: restore a JWT session, and if there is none, start the saved-
-/// identity auto-login on its own thread. That login is two HTTPS round
-/// trips to the API (challenge + verify, 4 s connect / 8 s read timeouts);
-/// done inline it held the first frame for 1.3 to 1.6 s on every launch,
-/// and up to 12 s with the API unreachable. The result lands through
-/// `apply_restored_auth_session`; until then the editor is simply not
-/// signed in, exactly as it is when the API is slow.
+/// Startup: sign in again, with the saved sign-in or else the saved identity
+/// file, on a thread of its own (`AuthState::restore`). Until it lands the
+/// editor is simply signed out, as it is while the API is slow.
 fn try_restore_auth_session(
     mut auth_state: ResMut<crate::auth::AuthState>,
     settings: Option<Res<crate::editor_settings::EditorSettings>>,
-    mut pending: ResMut<PendingAuthRestore>,
 ) {
-    // First try JWT token restore
-    auth_state.try_restore_session();
-    if auth_state.is_logged_in() {
-        return;
-    }
-
-    // If no JWT session, try auto-login from saved identity file
-    let Some(identity_path) = settings
+    let identity = settings
         .as_ref()
         .and_then(|s| s.saved_identities.first())
-        .map(|i| i.path.clone())
-    else {
-        return;
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel::<Option<RestoredIdentity>>();
-    let spawned = std::thread::Builder::new()
-        .name("eustress-auth-restore".into())
-        .spawn(move || {
-            let restored = (|| {
-                let content = std::fs::read_to_string(&identity_path).ok()?;
-                let mut public_key = String::new();
-                let mut username = String::new();
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("public_key") {
-                        if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                            public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                        }
-                    }
-                    if trimmed.starts_with("username") {
-                        if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                            username = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                        }
-                    }
-                }
-                if public_key.is_empty() {
-                    return None;
-                }
-                let display_name = if username.is_empty() {
-                    public_key[..std::cmp::min(8, public_key.len())].to_string()
-                } else {
-                    username.clone()
-                };
-
-                // Read private key for challenge-response auth
-                let (_, private_key, _) = parse_identity_toml(&content);
-
-                // Try challenge-response auth with the API
-                let authed = if !private_key.is_empty() {
-                    match do_challenge_auth(&public_key, &private_key) {
-                        Ok(pair) => {
-                            tracing::info!("Challenge auth succeeded for {}", display_name);
-                            Some(pair)
-                        }
-                        Err(e) => {
-                            tracing::warn!("Challenge auth failed: {} — using local identity", e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let (token, account_id) = match authed {
-                    Some((jwt, uid)) => (Some(jwt), uid),
-                    None => (None, public_key.clone()),
-                };
-                Some(RestoredIdentity { public_key, display_name, token, account_id })
-            })();
-            let _ = tx.send(restored);
-        });
-    match spawned {
-        Ok(_) => pending.0 = Some(std::sync::Mutex::new(rx)),
-        Err(e) => tracing::warn!("auth restore thread failed to spawn: {} — not signed in", e),
-    }
+        .map(|i| std::path::PathBuf::from(&i.path));
+    auth_state.restore(identity);
 }
 
-/// Update: apply the restore thread's result once it lands.
-fn apply_restored_auth_session(
+/// Show a finished sign-in once (`AuthState::take_notice`): the sign-in
+/// dialog closes, or says why it could not sign in; the identity it used goes
+/// first in the quick-switch list, under the account's name; and the Output
+/// says who is signed in.
+fn show_sign_in_outcome(
+    slint_context: Option<NonSend<SlintUiState>>,
     mut auth_state: ResMut<crate::auth::AuthState>,
-    mut pending: ResMut<PendingAuthRestore>,
+    mut settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
+    mut output: Option<ResMut<OutputConsole>>,
 ) {
-    let outcome: Option<Option<RestoredIdentity>> = match pending.0.as_ref() {
-        None => return,
-        Some(rx) => match rx.lock() {
-            Ok(r) => match r.try_recv() {
-                Ok(restored) => Some(restored),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
-            },
-            Err(_) => Some(None),
-        },
-    };
-    let Some(restored) = outcome else { return };
-    pending.0 = None;
-    let Some(id) = restored else { return };
-    if auth_state.is_logged_in() {
-        return; // a session landed some other way meanwhile
+    if let Some(warning) = auth_state.take_warning() {
+        if let Some(out) = output.as_mut() {
+            out.warn(warning);
+        }
     }
-    auth_state.jwt_valid = id.token.is_some();
-    auth_state.user = Some(crate::auth::AuthUser {
-        id: id.account_id,
-        username: id.display_name.clone(),
-        email: None,
-        avatar_url: None,
-        steam_id: None,
-        discord_id: None,
-        bliss_balance: 0.0,
-        total_hours: 0.0,
-    });
-    auth_state.token = id.token.or(Some(id.public_key));
-    auth_state.status = crate::auth::AuthStatus::LoggedIn;
-    tracing::info!("Auto-login from saved identity: {}", id.display_name);
+    // The sign-in dialog's spinner and "Signing in..." line follow a
+    // sign-in under way; both clear when it lands.
+    if let Some(ui) = slint_context.as_ref().map(|context| &context.window) {
+        let busy = auth_state.status == crate::auth::AuthStatus::LoggingIn;
+        if ui.get_login_loading() != busy {
+            ui.set_login_loading(busy);
+        }
+        let status = if busy { "Signing in..." } else { "" };
+        if ui.get_login_status().as_str() != status {
+            ui.set_login_status(status.into());
+        }
+    }
+    if !auth_state.has_notice() {
+        return;
+    }
+    let Some(notice) = auth_state.take_notice() else { return };
+    let ui = slint_context.as_ref().map(|context| &context.window);
+    let from_dialog = notice.source == crate::auth::SignInSource::Dialog;
+    match notice.outcome {
+        Ok(name) => {
+            if let (true, Some(ui)) = (from_dialog, ui) {
+                ui.set_show_login_dialog(false);
+                ui.set_login_error("".into());
+                ui.set_login_identity_path("".into());
+            }
+            if let (Some((path, public_key)), Some(settings)) = (notice.identity, settings.as_mut()) {
+                let path = path.to_string_lossy().to_string();
+                settings.saved_identities.retain(|i| i.path != path && i.username != name);
+                settings.saved_identities.insert(
+                    0,
+                    crate::editor_settings::SavedIdentity {
+                        username: name.clone(),
+                        path,
+                        public_key_short: public_key.chars().take(8).collect(),
+                    },
+                );
+            }
+            if let Some(out) = output.as_mut() {
+                out.info(format!("Signed in as {name}"));
+            }
+        }
+        Err(why) => {
+            if let (true, Some(ui)) = (from_dialog, ui) {
+                ui.set_login_error(super::display_text::shown_block(&why));
+            }
+            if let Some(out) = output.as_mut() {
+                out.warn(format!("Not signed in: {why}"));
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -4585,6 +4706,10 @@ fn copy_output_text(text: Option<String>, output: Option<&mut OutputConsole>) {
 #[derive(bevy::ecs::system::SystemParam)]
 struct DrainResources<'w> {
     state: Option<ResMut<'w, StudioState>>,
+    /// The Play state: during Play a request that writes the Space waits for
+    /// Stop (`space_write_of`), so does a Properties edit and a rename, and
+    /// Close Space takes no snapshot.
+    play_state: Option<Res<'w, State<crate::play_mode::PlayModeState>>>,
     output: Option<ResMut<'w, OutputConsole>>,
     /// The 2D working plane, `None` in 3D: Insert drops new parts onto it.
     active_view_plane: Option<Res<'w, crate::camera_controller::ActiveViewPlane>>,
@@ -4602,6 +4727,8 @@ struct DrainResources<'w> {
     data_overlay: Option<ResMut<'w, DataOverlay>>,
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     space_root: Option<Res<'w, crate::space::SpaceRoot>>,
+    /// The open Space's Players.MaxPlayers, for the Publish dialog.
+    open_max_players: Option<Res<'w, crate::multiplayer::OpenSpaceMaxPlayers>>,
     /// WorldDb/Fjall handle — needed by `do_reparent_node`. A drag-drop move
     /// renames the folder on disk, but for a migrated Space the loader spawns
     /// from the DB `tree` and the disk reconcile is ADD-ONLY, so a move that
@@ -4677,6 +4804,8 @@ struct DrainResources<'w> {
     /// Soul service settings for API key access
     soul_settings: Option<ResMut<'w, crate::soul::SoulServiceSettings>>,
     global_soul_settings: Option<ResMut<'w, crate::soul::GlobalSoulSettings>>,
+    /// Soul's keys in flight: a Save goes through it to the credential store.
+    soul_key_store: Option<ResMut<'w, crate::soul::key_store::SoulKeyStore>>,
     /// Stress test state
     stress_test: Option<ResMut<'w, crate::network_benchmark::StressTestState>>,
     /// Action queue ref for background thread callbacks
@@ -4737,103 +4866,13 @@ struct DrainResources<'w> {
     /// panel's own 300-frame throttle doesn't sit on a stale row model while
     /// the user types.
     panel_dirty: Option<ResMut<'w, eustress_common::change_queue::PanelDirtyFlags>>,
-}
-
-/// Perform Ed25519 challenge-response auth against the API.
-/// Returns a JWT token on success.
-/// Challenge-response login against the witness. Returns `(jwt, user_id)`.
-///
-/// `user_id` is the witness's CANONICAL account id (the JWT `sub`), which is
-/// NOT the Ed25519 public key. Callers must store this as `AuthUser.id` —
-/// every ledger key (balance, presence, node-mode, daily score) is written
-/// under it, so using the public key instead silently breaks Bliss earning.
-fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<(String, String), String> {
-    use ed25519_dalek::{SigningKey, Signer};
-
-    let api_url = eustress_common::api_base::api_base();
-
-    // Bounded timeouts: this runs on the Bevy main thread, so an unreachable
-    // or blackholed witness (captive portal, offline) would otherwise stall
-    // startup for ureq's default (effectively forever on a hung read).
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(4))
-        .timeout(std::time::Duration::from_secs(8))
-        .build();
-
-    // Step 1: Request challenge
-    let challenge_body = serde_json::json!({ "public_key": public_key_hex });
-    let challenge_resp = agent.post(&format!("{}/api/auth/challenge", api_url))
-        .set("Content-Type", "application/json")
-        .send_string(&challenge_body.to_string())
-        .map_err(|e| format!("Challenge request failed: {}", e))?;
-
-    let challenge_json: serde_json::Value = challenge_resp.into_json()
-        .map_err(|e| format!("Parse challenge: {}", e))?;
-    let challenge = challenge_json["challenge"].as_str()
-        .ok_or("No challenge in response")?
-        .to_string();
-
-    // Step 2: Sign challenge with Ed25519 private key
-    let secret_bytes = hex::decode(private_key_hex)
-        .map_err(|e| format!("Invalid private key hex: {}", e))?;
-    if secret_bytes.len() != 32 {
-        return Err(format!("Private key must be 32 bytes, got {}", secret_bytes.len()));
-    }
-    let signing_key = SigningKey::from_bytes(
-        secret_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?
-    );
-    let signature = signing_key.sign(challenge.as_bytes());
-    let sig_hex = hex::encode(signature.to_bytes());
-
-    // Step 3: Verify signature and get JWT
-    let verify_body = serde_json::json!({
-        "public_key": public_key_hex,
-        "challenge": challenge,
-        "signature": sig_hex,
-    });
-    let verify_resp = agent.post(&format!("{}/api/auth/verify-challenge", api_url))
-        .set("Content-Type", "application/json")
-        .send_string(&verify_body.to_string())
-        .map_err(|e| format!("Verify failed: {}", e))?;
-
-    let verify_json: serde_json::Value = verify_resp.into_json()
-        .map_err(|e| format!("Parse verify response: {}", e))?;
-    let token = verify_json["token"].as_str()
-        .ok_or("No token in verify response")?
-        .to_string();
-    // The witness echoes the account record; its `id` is the JWT subject.
-    // Fall back to the public key only so a schema change can't hard-fail
-    // login — the worker also maps pubkey→uuid defensively.
-    let user_id = verify_json["user"]["id"].as_str()
-        .unwrap_or(public_key_hex)
-        .to_string();
-
-    Ok((token, user_id))
-}
-
-/// Parse `public_key` / `private_key` / `username` out of an identity.toml.
-/// Shared by every identity login path so they authenticate identically —
-/// previously only auto-login read `private_key`, so the manual paths could
-/// never obtain a JWT.
-fn parse_identity_toml(content: &str) -> (String, String, String) {
-    let (mut public_key, mut private_key, mut username) =
-        (String::new(), String::new(), String::new());
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let mut take = |target: &mut String| {
-            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                *target = val.trim().trim_matches('"').trim_matches('\'').to_string();
-            }
-        };
-        if trimmed.starts_with("public_key") {
-            take(&mut public_key);
-        } else if trimmed.starts_with("private_key") {
-            take(&mut private_key);
-        } else if trimmed.starts_with("username") {
-            take(&mut username);
-        }
-    }
-    (public_key, private_key, username)
+    /// Credential work off the frame thread (Forge Connect, the API key
+    /// dialog): see `capture::key_tasks`.
+    #[cfg(feature = "data")]
+    key_tasks: Option<Res<'w, crate::capture::key_tasks::KeyTasks>>,
+    /// The remembered Forge key, kept here while the dialog shows a mask.
+    #[cfg(feature = "data")]
+    forge_remembered_key: Option<ResMut<'w, crate::capture::key_tasks::ForgeRememberedKey>>,
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -4866,7 +4905,11 @@ fn publish_target_from_sync_manifest(sync_manifest: &eustress_common::SyncManife
     }
 }
 
-fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_only: bool) {
+fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_only: bool, max_players: u16) {
+    // Publish starts on this Universe's own listing; Publish As... turns
+    // this on after (`publish_targets`).
+    ui.set_publish_focus_targets(false);
+    super::publish_cover::reset(ui);
     let mut request = PublishRequest {
         experience_name: default_publish_name(space_root),
         ..PublishRequest::default()
@@ -4906,7 +4949,7 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_
             if let Ok(sync_manifest) = eustress_common::load_toml_file::<eustress_common::SyncManifest>(&sync_path) {
                 publish_target = publish_target_from_sync_manifest(&sync_manifest);
                 is_update = is_update
-                    || sync_manifest.remote.experience_id.is_some()
+                    || sync_manifest.remote.listing_id().is_some()
                     || sync_manifest.remote.project_id.is_some();
             }
         }
@@ -4919,7 +4962,7 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_
     ui.set_publish_open_source(request.open_source);
     ui.set_publish_studio_editable(request.studio_editable);
     ui.set_publish_is_update(is_update);
-    ui.set_publish_target(publish_target.into());
+    ui.set_publish_target(super::display_text::shown_line(&publish_target));
 
     // Populate Spaces list from Universe
     let mut space_names: Vec<slint::SharedString> = Vec::new();
@@ -4955,6 +4998,10 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_
     let tree_model = slint::ModelRc::new(slint::VecModel::from(tree_nodes));
     ui.set_publish_tree_nodes(tree_model);
     ui.set_publish_pak_size("".into()); // Calculated during packaging
+
+    // Max players: the open Space's, and the size sessions are load-tested to.
+    ui.set_publish_max_players(max_players.to_string().into());
+    ui.set_publish_load_tested_players(eustress_common::play_session::LOAD_TESTED_PLAYERS as i32);
 
     ui.set_show_publish_dialog(true);
 }
@@ -4995,7 +5042,7 @@ fn build_publish_tree(
     // Skip excluded directories entirely
     if icon_hint == "excluded" {
         nodes.push(PublishTreeNode {
-            name: format!("{}/", name).into(),
+            name: super::display_text::shown_line(&format!("{}/", name)),
             depth,
             is_folder: true,
             is_primary: false,
@@ -5006,7 +5053,7 @@ fn build_publish_tree(
     }
 
     nodes.push(PublishTreeNode {
-        name: format!("{}/", name).into(),
+        name: super::display_text::shown_line(&format!("{}/", name)),
         depth,
         is_folder: true,
         is_primary,
@@ -5042,7 +5089,7 @@ fn build_publish_tree(
             // Show individual files at depth <= 2
             if depth <= 2 {
                 nodes.push(PublishTreeNode {
-                    name: entry_name.into(),
+                    name: super::display_text::shown_line(&entry_name),
                     depth: depth + 1,
                     is_folder: false,
                     is_primary: false,
@@ -5068,20 +5115,19 @@ fn sync_dialog_state(
     forge: Option<Res<crate::forge::ForgeState>>,
     mut last_forge_status: Local<Option<crate::forge::ForgeConnectionStatus>>,
     mut forge_prefilled: Local<bool>,
+    #[cfg(feature = "data")] key_tasks: Option<Res<crate::capture::key_tasks::KeyTasks>>,
 ) {
     let Some(ref context) = slint_context else { return };
     let ui = &context.window;
-    // Remembered Forge credentials fill the dialog once, at startup.
+    // Remembered Forge credentials fill the dialog once, at startup. Reading
+    // them waits on the system credential store, so the credential worker
+    // does it and `apply_key_results` fills the dialog in.
     if !*forge_prefilled {
         *forge_prefilled = true;
         #[cfg(feature = "data")]
         {
-            use crate::capture::credentials;
-            if let Some(url) = credentials::get(FORGE_URL_CREDENTIAL) {
-                ui.set_forge_server_url(url.into());
-            }
-            if let Some(key) = credentials::get(FORGE_KEY_CREDENTIAL) {
-                ui.set_forge_api_key(key.into());
+            if let Some(tasks) = key_tasks.as_ref() {
+                tasks.submit_forge_prefill();
             }
         }
     }
@@ -5103,11 +5149,11 @@ fn sync_dialog_state(
     ui.set_forge_connecting(forge.status == Status::Connecting);
     let status = match forge.status {
         Status::Connecting => format!("Connecting to {}...", forge.url),
-        Status::Connected => format!("Connected to {}", forge.url),
+        Status::Connected => eustress_forge_sdk::connect_policy::connected_line(&forge.url, forge.authenticated),
         Status::Disconnected | Status::Failed => String::new(),
     };
-    ui.set_forge_status_message(status.into());
-    ui.set_forge_error_message(forge.error.clone().unwrap_or_default().into());
+    ui.set_forge_status_message(super::display_text::shown_block(&status));
+    ui.set_forge_error_message(super::display_text::shown_block(forge.error.as_deref().unwrap_or_default()));
     // A connect that just succeeded closes the dialog it was started from.
     if forge.status == Status::Connected && last_forge_status.as_ref() != Some(&Status::Connected) {
         ui.set_show_forge_connect_dialog(false);
@@ -5115,12 +5161,145 @@ fn sync_dialog_state(
     *last_forge_status = Some(forge.status.clone());
 }
 
-/// Names of the remembered Forge connection in the local credential store
-/// (an environment variable of the same name also works).
+/// Show what the credential worker (`capture::key_tasks`) finished: the
+/// Forge dialog's remembered URL and key (the key as a mask; the key itself
+/// stays in `ForgeRememberedKey`), the capture key dialog's status, and the
+/// outcome of a Save, Remove or Remember. Nothing here waits on the store.
 #[cfg(feature = "data")]
-const FORGE_URL_CREDENTIAL: &str = "EUSTRESS_FORGE_URL";
-#[cfg(feature = "data")]
-const FORGE_KEY_CREDENTIAL: &str = "EUSTRESS_FORGE_API_KEY";
+fn apply_key_results(
+    slint_context: Option<NonSend<SlintUiState>>,
+    tasks: Option<Res<crate::capture::key_tasks::KeyTasks>>,
+    mut remembered: Option<ResMut<crate::capture::key_tasks::ForgeRememberedKey>>,
+    mut output: Option<ResMut<OutputConsole>>,
+    mut notifications: MessageWriter<super::notifications::NotificationEvent>,
+) {
+    use crate::capture::key_tasks::KeyResult;
+    use super::notifications::{NotificationCategory, NotificationEvent};
+    let Some(tasks) = tasks else { return };
+    let ui = slint_context.as_ref().map(|c| &c.window);
+    for result in tasks.take_results() {
+        match result {
+            KeyResult::ForgePrefill { url, key, generation } => {
+                // Only a prefill nobody has Connected past, and only into
+                // fields still empty: see `KeyTasks::apply_forge_prefill`.
+                // Always applied, window or not, so Connect never waits on a
+                // read that has already come back.
+                let (url_field, key_field) = ui
+                    .map(|ui| (ui.get_forge_server_url().to_string(), ui.get_forge_api_key().to_string()))
+                    .unwrap_or_default();
+                // The mask goes into the field only when the real resource
+                // took the key: a mask over a spare would make Connect read
+                // it as a saved key and connect with an empty one.
+                // With no window there is no field to mask, so the key is
+                // not kept either: the spare takes it.
+                let kept_for_real = remembered.is_some() && ui.is_some();
+                let mut spare = crate::capture::key_tasks::ForgeRememberedKey::default();
+                let kept = match remembered.as_mut() {
+                    Some(kept) if kept_for_real => &mut **kept,
+                    _ => &mut spare,
+                };
+                let fill = tasks.apply_forge_prefill(kept, generation, url, key, &url_field, &key_field);
+                if let Some(ui) = ui {
+                    if let Some(url) = fill.url {
+                        ui.set_forge_server_url(url.into());
+                    }
+                    if let Some(shown) = fill.key_field.filter(|_| kept_for_real) {
+                        ui.set_forge_api_key(shown.into());
+                    }
+                }
+                // A saved key the field does not hold (it could not be read,
+                // or has no usable URL): said, with what Connect does with
+                // it. No line holds a key.
+                if let Some(problem) = fill.problem {
+                    if let Some(out) = output.as_mut() {
+                        out.warn(format!("Forge · {problem}"));
+                    }
+                    notifications.write(NotificationEvent::warning(NotificationCategory::General, "Forge key", problem));
+                }
+                // The store could not be asked, so a key may be saved or
+                // none: the Output only, since most often none is.
+                if let Some(note) = fill.note {
+                    if let Some(out) = output.as_mut() {
+                        out.warn(format!("Forge · {note}"));
+                    }
+                }
+            }
+            KeyResult::ForgeRemembered { problems } => {
+                // The store may not hold the key: the next Connect writes it.
+                if !problems.is_empty() {
+                    if let Some(kept) = remembered.as_mut() {
+                        kept.not_stored();
+                    }
+                }
+                // Shown, not only logged: a key kept outside the store (in a
+                // private file, or only until Studio closes) or not kept at
+                // all is something the person must see. No line holds a key.
+                for problem in problems {
+                    if let Some(out) = output.as_mut() {
+                        out.warn(format!("Forge · {problem}"));
+                    }
+                    notifications.write(NotificationEvent::warning(NotificationCategory::General, "Forge key", problem));
+                }
+            }
+            KeyResult::Status { name, status } => {
+                if let Some(ui) = ui {
+                    // Only the dialog that asked: another may have opened since.
+                    if ui.get_api_key_name().as_str() == name {
+                        ui.set_api_key_status(super::display_text::shown_line(&status.summary()));
+                        ui.set_api_key_present(status.present);
+                        ui.set_api_key_from_environment(status.from_environment);
+                    }
+                } else if let Some(out) = output.as_mut() {
+                    // Headless: no dialog, so the status is said here.
+                    out.info(format!("Capture · {}", status.summary()));
+                }
+            }
+            KeyResult::Saved { name, result: Ok(status) } => {
+                // Report that it landed and when, never any part of the key:
+                // echoing it into a log or a toast would undo the whole reason
+                // it is not stored in the Space.
+                if let Some(out) = output.as_mut() {
+                    out.info(format!("Capture · {}", status.summary()));
+                }
+                let message = format!("{}. Takes effect on the next sync.", status.summary());
+                // Kept in a file or only until Studio closes: said as a
+                // warning, not a success.
+                notifications.write(if status.outside_store {
+                    NotificationEvent::warning(NotificationCategory::General, "API key saved outside the store", message)
+                } else {
+                    NotificationEvent::success(NotificationCategory::General, "API key saved", message)
+                });
+                if let Some(ui) = ui {
+                    if ui.get_api_key_name().as_str() == name {
+                        ui.set_api_key_status(super::display_text::shown_line(&status.summary()));
+                        ui.set_api_key_present(status.present);
+                    }
+                }
+            }
+            KeyResult::Saved { name, result: Err(e) } => {
+                if let Some(out) = output.as_mut() {
+                    out.warn(format!("Capture · could not save {name}: {e}"));
+                }
+                notifications.write(NotificationEvent::error(NotificationCategory::General, "API key not saved", e));
+            }
+            KeyResult::Removed { name, result } => {
+                let msg = match result {
+                    Ok(true) => format!("{name} removed"),
+                    Ok(false) => format!("{name} was not saved"),
+                    Err(e) => format!("could not remove {name}: {e}"),
+                };
+                if let Some(out) = output.as_mut() {
+                    out.info(format!("Capture · {msg}"));
+                }
+                notifications.write(NotificationEvent::info(NotificationCategory::General, "API key", msg));
+            }
+        }
+    }
+}
+
+/// Without the `data` feature there is no credential worker to drain.
+#[cfg(not(feature = "data"))]
+fn apply_key_results() {}
 
 /// What to tell someone who reaches a control whose backend is not built.
 fn unbuilt_feature_notice(id: &str) -> Option<super::notifications::NotificationEvent> {
@@ -5400,11 +5579,11 @@ fn snapshot_panel_property(
             let c = bp.color.to_srgba();
             S::Color([c.red, c.green, c.blue, c.alpha])
         }),
-        "Material" => queries
-            .base_parts
-            .get(entity)
-            .ok()
-            .map(|bp| S::Material(format!("{:?}", bp.material))),
+        // The panel sets `material_name` with the enum, so the "before" a
+        // material edit undoes to is the name when there is one.
+        "Material" => queries.base_parts.get(entity).ok().map(|bp| {
+            S::Material(if bp.material_name.is_empty() { format!("{:?}", bp.material) } else { bp.material_name.clone() })
+        }),
         "Transparency" => queries
             .base_parts
             .get(entity)
@@ -6008,35 +6187,9 @@ fn do_reparent_node(
                         let src_rel = crate::space::space_source::rel_from_root(&root.0, &src_entry);
                         let dst_rel = crate::space::space_source::rel_from_root(&root.0, &dest);
                         if let (Some(src_rel), Some(dst_rel)) = (src_rel, dst_rel) {
-                            // Collect BEFORE mutating — re-keying while the
-                            // tree iterator is live would mutate what we read.
-                            let child_prefix = format!("{}/", src_rel);
-                            let old_keys: Vec<String> = db
-                                .iter_tree_keys()
-                                .map(|it| {
-                                    it.filter_map(|k| k.ok())
-                                        .filter(|k| *k == src_rel || k.starts_with(&child_prefix))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-
-                            let mut rekeyed = 0usize;
-                            for old_key in &old_keys {
-                                // Suffix-preserving so the whole subtree moves
-                                // with the folder, not just its root entry.
-                                let new_key = format!("{}{}", dst_rel, &old_key[src_rel.len()..]);
-                                if let Ok(Some(bytes)) = db.get_file(old_key) {
-                                    if db.put_file(&new_key, &bytes).is_ok() {
-                                        let _ = db.delete_file(old_key);
-                                        rekeyed += 1;
-                                    } else {
-                                        warn!("📂 WorldDb: failed writing '{}' — leaving '{}' in place", new_key, old_key);
-                                    }
-                                }
-                            }
-                            let _ = db.flush();
+                            let (rekeyed, found) = rekey_world_db_tree(&**db, &src_rel, &dst_rel);
                             info!("📂 WorldDb: rekeyed {}/{} tree entries '{}' → '{}'",
-                                rekeyed, old_keys.len(), src_rel, dst_rel);
+                                rekeyed, found, src_rel, dst_rel);
                         } else {
                             warn!("📂 WorldDb: '{}' or '{}' is outside the Space root — tree NOT updated, so this move will NOT survive a reload",
                                 src_entry.display(), dest.display());
@@ -6252,9 +6405,9 @@ fn run_find(ui: &StudioWindow, queries: &DrainActionQueries, find: &mut FindStat
         .enumerate()
         .map(|(row, (path, _, name, class))| SearchResultData {
             entity_id: row as i32,
-            name: name.as_str().into(),
+            name: super::display_text::shown_line(name),
             class_name: class.as_str().into(),
-            path: path.as_str().into(),
+            path: super::display_text::shown_line(path),
         })
         .collect();
     ui.set_find_results(slint::ModelRc::new(slint::VecModel::from(rows)));
@@ -6279,6 +6432,19 @@ fn select_and_reveal(entity: Entity, res: &mut DrainResources) {
 /// `LoadedFromFile` and the file registry moved along so later saves land in
 /// the right place. The Properties panel's Name row and Find & Replace both
 /// rename through here. Err carries a message for the Output panel.
+/// Rewrite the Fjall tree's keys from `src_rel` to `dst_rel`: the folder (or
+/// flat file) itself and everything under it, keeping each key's suffix.
+///
+/// The tree is path-keyed, so a rename or a move on disk is a key-prefix
+/// rewrite. The disk change alone does not stick on a migrated Space: the
+/// loader spawns from the tree, and the open-time reconcile only adds and
+/// overwrites keys, never deletes them, so the old keys survive beside the
+/// new ones (the object loads twice, or returns to where it started).
+/// Returns (keys moved, keys found).
+fn rekey_world_db_tree(db: &dyn eustress_worlddb::WorldDb, src_rel: &str, dst_rel: &str) -> (usize, usize) {
+    crate::space::active_db::rekey_tree_keys(db, src_rel, dst_rel)
+}
+
 fn rename_instance(
     entity: Entity,
     new_name: &str,
@@ -6286,6 +6452,14 @@ fn rename_instance(
     queries: &mut DrainActionQueries,
     commands: &mut Commands,
 ) -> Result<(), String> {
+    // During Play a rename waits for Stop, whoever asks (Find and Replace,
+    // the Properties Name row): it renames the folder on disk and rekeys the
+    // world database, which Stop does not put back. Refused before anything
+    // changes, so no undo entry follows either.
+    let play_state = res.play_state.as_ref().map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
+    if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "rename") {
+        return Err(notice);
+    }
     if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
         inst.name = new_name.to_string();
     }
@@ -6365,6 +6539,20 @@ fn rename_instance(
                 let _ = registry.rename_file(&old_path, new_toml_path.clone());
             }
             info!("📝 Renamed {:?} → {:?}", old_fs_path, new_fs_path);
+            // 6. The WorldDb tree follows, as it does for a reparent.
+            if let (Some(db_handle), Some(root)) = (res.world_db.as_ref(), res.space_root.as_ref()) {
+                if let Some(db) = db_handle.0.as_ref() {
+                    let src_rel = crate::space::space_source::rel_from_root(&root.0, &old_fs_path);
+                    let dst_rel = crate::space::space_source::rel_from_root(&root.0, &new_fs_path);
+                    if let (Some(src_rel), Some(dst_rel)) = (src_rel, dst_rel) {
+                        let (moved, found) = rekey_world_db_tree(&**db, &src_rel, &dst_rel);
+                        info!("📂 WorldDb: rekeyed {}/{} tree entries '{}' → '{}'", moved, found, src_rel, dst_rel);
+                    } else {
+                        warn!("📂 WorldDb: '{}' is outside the Space root — tree NOT updated, so this rename will NOT survive a reload",
+                            new_fs_path.display());
+                    }
+                }
+            }
             Ok(())
         }
         Err(e) => {
@@ -6826,6 +7014,410 @@ mod commit_order_tests {
     }
 }
 
+/// What a request writes to the Space by itself, from the drain rather than
+/// through a handler that refuses during Play, as the words its Play notice
+/// names ("Stop Play to insert."): an insert, a rename (the Explorer's, and
+/// Find and Replace's), an Explorer move, an attribute, Parameter, tag or
+/// label edit, an import or a media placement, a terrain material, Sync
+/// Domain, History Clear, a command bar script, Clear Terrain, Lock, Anchor
+/// and Unlock All, and the Deal Room rebuild. `None` for every other request:
+/// it only reads, or its own handler answers for it. A Properties edit is
+/// judged in its arm, where the selection is known. During Play these wait
+/// for Stop ([`crate::keybindings::play_refusal_to`]).
+fn space_write_of(action: &SlintAction) -> Option<&'static str> {
+    match action {
+        SlintAction::MenuAction(id) => match id.as_str() {
+            id if id.starts_with("insert:") => Some("insert"),
+            "terrain:clear" => Some("clear the terrain"),
+            "edit:lock" | "edit:anchor" => Some("lock or anchor parts"),
+            "edit:unlock" => Some("unlock every part"),
+            "pcap:build_deal_room" => Some("rebuild the Deal Room"),
+            _ => None,
+        },
+        SlintAction::InsertPart(_) | SlintAction::OpenInsertObject => Some("insert"),
+        SlintAction::ContextAction(id) => match id.as_str() {
+            "insert-here" | "insert-part" | "insert-object" => Some("insert"),
+            "rename" => Some("rename"),
+            _ => None,
+        },
+        SlintAction::RenameNode(..) | SlintAction::FindReplaceOne | SlintAction::FindReplaceAll => Some("rename"),
+        SlintAction::ReparentNode(..) => Some("move objects in the Explorer"),
+        SlintAction::AttributeConfirmed(..) | SlintAction::AttributeDeleted(_) => Some("edit attributes"),
+        SlintAction::ParameterConfirmed | SlintAction::ParameterDeleted(_) => Some("edit parameters"),
+        SlintAction::TagAdded(_) | SlintAction::TagRemoved(_) | SlintAction::TagRenamed(..) => Some("edit tags"),
+        SlintAction::EditLabelConfirmed(_) => Some("edit a label"),
+        SlintAction::ImportAsset | SlintAction::AssetImport(_) => Some("import"),
+        SlintAction::AssetOpenMedia(..) | SlintAction::RadialMenuChosen(_) => Some("place media"),
+        SlintAction::ImportHeightmap => Some("import a heightmap"),
+        SlintAction::AddTerrainMaterial(_) => Some("add a terrain material"),
+        SlintAction::SyncDomainRun(..) => Some("sync objects from a domain"),
+        SlintAction::HistoryClear => Some("clear the history"),
+        SlintAction::ExecuteScript(..) => Some("run a command bar script"),
+        _ => None,
+    }
+}
+
+/// What Close Space does about its snapshot: `Ok` with its Output line when it
+/// takes one, `Err` with the line that says why not. During Play the scene is
+/// the running game, so no snapshot is taken.
+fn close_space_snapshot(play_state: crate::play_mode::PlayModeState) -> Result<&'static str, String> {
+    match crate::keybindings::play_refusal(play_state, crate::keybindings::Action::SaveScene) {
+        None => Ok("Snapshot taken. Pick a Space in the Universe browser to continue."),
+        Some(notice) => Err(format!("No snapshot taken. {notice}")),
+    }
+}
+
+/// What F2 says instead of opening the label editor: during Play, the notice
+/// its confirm would be refused with ([`space_write_of`]), so the editor never
+/// opens on an edit that cannot be kept. `None` while editing.
+fn label_editor_refusal(play_state: crate::play_mode::PlayModeState) -> Option<String> {
+    space_write_of(&SlintAction::EditLabelConfirmed(String::new())).and_then(|what| crate::keybindings::play_refusal_to(play_state, what))
+}
+
+#[cfg(test)]
+mod play_gate_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// Every request the drain refuses during Play, with the words its notice
+    /// names.
+    fn space_writes() -> Vec<(SlintAction, &'static str)> {
+        vec![
+            (SlintAction::MenuAction("insert:part".into()), "insert"),
+            (SlintAction::MenuAction("insert:Model".into()), "insert"),
+            (SlintAction::InsertPart("Part".into()), "insert"),
+            (SlintAction::OpenInsertObject, "insert"),
+            (SlintAction::ContextAction("insert-here".into()), "insert"),
+            (SlintAction::ContextAction("insert-part".into()), "insert"),
+            (SlintAction::ContextAction("insert-object".into()), "insert"),
+            (SlintAction::ContextAction("rename".into()), "rename"),
+            (SlintAction::RenameNode(4, "Door".into(), "entity".into()), "rename"),
+            (SlintAction::FindReplaceOne, "rename"),
+            (SlintAction::FindReplaceAll, "rename"),
+            (SlintAction::ReparentNode(4, 5), "move objects in the Explorer"),
+            (SlintAction::AttributeConfirmed("Speed".into(), "number".into(), "4".into(), false), "edit attributes"),
+            (SlintAction::AttributeDeleted("Speed".into()), "edit attributes"),
+            (SlintAction::ParameterConfirmed, "edit parameters"),
+            (SlintAction::ParameterDeleted("Data.Speed".into()), "edit parameters"),
+            (SlintAction::TagAdded("Enemy".into()), "edit tags"),
+            (SlintAction::TagRemoved("Enemy".into()), "edit tags"),
+            (SlintAction::TagRenamed("Enemy".into(), "Foe".into()), "edit tags"),
+            (SlintAction::EditLabelConfirmed("Hello".into()), "edit a label"),
+            (SlintAction::ImportAsset, "import"),
+            (SlintAction::AssetImport("mesh".into()), "import"),
+            (SlintAction::AssetOpenMedia(1, "image".into(), "assets/sign.png".into()), "place media"),
+            (SlintAction::RadialMenuChosen("Decal".into()), "place media"),
+            (SlintAction::ImportHeightmap, "import a heightmap"),
+            (SlintAction::AddTerrainMaterial("Red Rock".into()), "add a terrain material"),
+            (SlintAction::SyncDomainRun(4.0, 0.0, 4.0), "sync objects from a domain"),
+            (SlintAction::HistoryClear, "clear the history"),
+            (SlintAction::ExecuteScript("luau".into(), "print(1)".into()), "run a command bar script"),
+            (SlintAction::MenuAction("terrain:clear".into()), "clear the terrain"),
+            (SlintAction::MenuAction("edit:lock".into()), "lock or anchor parts"),
+            (SlintAction::MenuAction("edit:anchor".into()), "lock or anchor parts"),
+            (SlintAction::MenuAction("edit:unlock".into()), "unlock every part"),
+            (SlintAction::MenuAction("pcap:build_deal_room".into()), "rebuild the Deal Room"),
+        ]
+    }
+
+    #[test]
+    fn the_space_writes_wait_for_stop() {
+        for (action, what) in space_writes() {
+            assert_eq!(space_write_of(&action), Some(what), "{action:?}");
+        }
+        for action in [
+            SlintAction::MenuAction("csg:union".into()),
+            SlintAction::MenuAction("terrain:toggle-visibility".into()),
+            SlintAction::MenuAction("pcap:score_pipeline".into()),
+            SlintAction::ContextAction("copy".into()),
+            SlintAction::ContextAction("paste-here".into()),
+            SlintAction::CloseSpace,
+            SlintAction::Undo,
+            SlintAction::RadialMenuCancelled,
+            SlintAction::PropertyChanged("Name".into(), "Door".into()),
+            SlintAction::ExecuteCommand("help".into()),
+            SlintAction::GenerateTerrain("small".into()),
+        ] {
+            assert_eq!(space_write_of(&action), None, "{action:?}");
+        }
+        assert_eq!(crate::keybindings::play_refusal_to(PlayModeState::Playing, "insert").as_deref(), Some("Stop Play to insert."));
+        assert_eq!(crate::keybindings::play_refusal_to(PlayModeState::Editing, "rename"), None);
+        // The label editor opens only when its confirm would run.
+        assert_eq!(label_editor_refusal(PlayModeState::Editing), None);
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            assert_eq!(label_editor_refusal(state).as_deref(), Some("Stop Play to edit a label."), "{state:?}");
+        }
+    }
+
+    /// The drain itself in `state`, with every message it writes registered
+    /// and every resource it requires, so a test runs its gate and its arms.
+    fn drain_app(state: PlayModeState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<StandardMaterial>();
+        app.add_message::<crate::ui::FileEvent>()
+            .add_message::<crate::ui::MenuActionEvent>()
+            .add_message::<crate::commands::UndoCommandEvent>()
+            .add_message::<crate::commands::RedoCommandEvent>()
+            .add_message::<crate::scale_tool::ResizePartEvent>()
+            .add_message::<crate::undo::UndoEvent>()
+            .add_message::<crate::undo::RedoEvent>()
+            .add_message::<crate::undo::UndoSingleEvent>()
+            .add_message::<crate::undo::RevertToEvent>()
+            .add_message::<crate::undo::HistoryJumpEvent>()
+            .add_message::<crate::commands::HistoryActionEvent>()
+            .add_message::<bevy::app::AppExit>()
+            .add_message::<crate::ui::SpawnPartEvent>()
+            .add_message::<crate::ui::spawn_events::SpawnTerrainEvent>()
+            .add_message::<crate::ui::spawn_events::ToggleTerrainEditEvent>()
+            .add_message::<crate::ui::spawn_events::SetTerrainBrushEvent>()
+            .add_message::<crate::ui::spawn_events::ImportTerrainEvent>()
+            .add_message::<crate::ui::spawn_events::GenerateWorldEvent>()
+            .add_message::<crate::ui::spawn_events::GenerateFlatTerrainEvent>()
+            .add_message::<crate::workshop::WorkshopSendMessageEvent>()
+            .add_message::<crate::workshop::WorkshopApproveMcpEvent>()
+            .add_message::<crate::workshop::WorkshopSkipMcpEvent>()
+            .add_message::<crate::workshop::WorkshopEditMcpEvent>()
+            .add_message::<crate::workshop::WorkshopOpenArtifactEvent>()
+            .add_message::<crate::workshop::OptimizeAndBuildEvent>()
+            .add_message::<crate::workshop::WorkshopSetModeEvent>()
+            .add_message::<crate::workshop::gauntlet::WorkshopSetGauntletEvent>()
+            .add_message::<crate::studio_plugins::PluginActionEvent>()
+            .add_message::<crate::modal_tool::ToolOptionChangedEvent>()
+            .add_message::<crate::modal_tool::CancelModalToolEvent>()
+            .add_message::<crate::modal_tool::ActivateModalToolEvent>()
+            .add_message::<crate::align_distribute::AlignEntitiesEvent>()
+            .add_message::<crate::align_distribute::DistributeEntitiesEvent>()
+            .add_message::<crate::ui::floating_windows::DetachPanelEvent>()
+            .add_message::<crate::ui::notifications::NotificationEvent>()
+            .add_message::<crate::cad_plugin::CadInsertTemplateEvent>()
+            .add_message::<crate::cad_plugin::CadSetVariableEvent>()
+            .add_message::<crate::cad_plugin::CadExportGlbEvent>()
+            .add_message::<crate::cad_plugin::CadTreeOpEvent>()
+            .add_message::<crate::cad_plugin::CadSolveSketchEvent>()
+            .add_message::<crate::cad_plugin::CadAddConstraintEvent>()
+            .add_message::<crate::cad_plugin::CadSketchCanvasSetVisibleEvent>()
+            .add_message::<crate::cad_assembly::CadCreateMateEvent>()
+            .add_message::<crate::toast_undo::ToastUndoClickedEvent>()
+            .add_message::<crate::toast_undo::ToastUndoDismissedEvent>()
+            .add_message::<crate::camera_controller::FrameSelectionEvent>()
+            .add_message::<crate::clipboard::PasteEvent>();
+        app.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<OutputConsole>();
+        app.init_resource::<SlintActionQueue>();
+        app.init_resource::<TerrainVisibility>();
+        app.init_resource::<LabelEditState>();
+        app.init_resource::<PendingInsertSelection>();
+        app.add_systems(Update, drain_slint_actions);
+        app
+    }
+
+    /// Select `entity` in the Explorer, as a click on its row does.
+    fn select(app: &mut App, entity: Entity) {
+        let mut explorer = UnifiedExplorerState::default();
+        explorer.selected = SelectedItem::Entity(entity);
+        app.insert_resource(explorer);
+    }
+
+    /// Queue `action`, run the drain once, and return the toasts and every
+    /// Output line it left.
+    fn drain(app: &mut App, action: SlintAction) -> (Vec<String>, Vec<String>) {
+        app.world().resource::<SlintActionQueue>().push(action);
+        app.update();
+        let world = app.world();
+        let toasts = world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+        let output = world.resource::<OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        (toasts, output)
+    }
+
+    /// During Play the drain refuses each write before its arm runs, says why
+    /// as a toast and in the Output panel, and does nothing else.
+    #[test]
+    fn the_drain_refuses_every_space_write_during_play() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for (action, what) in space_writes() {
+                let mut app = drain_app(state);
+                let notice = format!("Stop Play to {what}.");
+                let (toasts, output) = drain(&mut app, action.clone());
+                assert_eq!(toasts, [notice.clone()], "{state:?} {action:?}");
+                assert_eq!(output, [notice], "{state:?} {action:?}");
+            }
+        }
+        // While editing the same request runs its arm: Clear Terrain with no
+        // open Space says so, and the gate said nothing.
+        let mut app = drain_app(PlayModeState::Editing);
+        let (toasts, output) = drain(&mut app, SlintAction::MenuAction("terrain:clear".into()));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        assert_eq!(output, ["Clear Terrain: no open Space, nothing was deleted"]);
+    }
+
+    /// A tag added during Play is not added; while editing it is.
+    #[test]
+    fn a_tag_waits_for_stop() {
+        for (state, added) in [(PlayModeState::Playing, false), (PlayModeState::Editing, true)] {
+            let mut app = drain_app(state);
+            let door = app.world_mut().spawn(eustress_common::classes::Instance::default()).id();
+            select(&mut app, door);
+            drain(&mut app, SlintAction::TagAdded("Enemy".into()));
+            let tags = app.world().get::<eustress_common::attributes::Tags>(door).map(|t| t.0.clone());
+            assert_eq!(tags.as_ref().is_some_and(|t| *t == ["Enemy"]), added, "{state:?}: {tags:?}");
+        }
+    }
+
+    /// History Clear empties the edit history while editing and leaves it
+    /// alone during Play.
+    #[test]
+    fn history_clear_waits_for_stop() {
+        for (state, kept) in [(PlayModeState::Playing, true), (PlayModeState::Editing, false)] {
+            let mut app = drain_app(state);
+            let mut stack = crate::undo::UndoStack::default();
+            stack.push(crate::undo::Action::ChangeProperty {
+                id: 1,
+                property: "Name".to_string(),
+                old_value: crate::undo::PropertyValueSnapshot::String("Door".to_string()),
+                new_value: crate::undo::PropertyValueSnapshot::String("Gate".to_string()),
+            });
+            app.insert_resource(stack);
+            drain(&mut app, SlintAction::HistoryClear);
+            assert_eq!(app.world().resource::<crate::undo::UndoStack>().can_undo(), kept, "{state:?}");
+        }
+    }
+
+    /// A label edit refused during Play leaves no editor target behind.
+    #[test]
+    fn a_refused_label_edit_drops_its_target() {
+        let mut app = drain_app(PlayModeState::Playing);
+        let label = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<LabelEditState>().target = Some(label);
+        let (toasts, _) = drain(&mut app, SlintAction::EditLabelConfirmed("Hello".into()));
+        assert_eq!(toasts, ["Stop Play to edit a label."]);
+        assert_eq!(app.world().resource::<LabelEditState>().target, None);
+    }
+
+    /// During Play a Properties edit changes nothing and says why, a terrain
+    /// layer's included; a particle simulation's own field stays live, applied
+    /// to the running sim and put back at Stop. While editing the layer edit
+    /// applies, so the refusal is the gate's.
+    #[test]
+    fn play_refuses_property_edits_but_keeps_simulations_live() {
+        use eustress_common::realism::particle_sim::ParticleSimulation;
+        use eustress_common::terrain::layer_instances::TerrainStamp;
+        let refused = vec!["Stop Play to edit properties.".to_string()];
+        let radius = TerrainStamp::default().radius;
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut app = drain_app(state);
+            let door = app
+                .world_mut()
+                .spawn(eustress_common::classes::Instance {
+                    name: "Door".to_string(),
+                    ..Default::default()
+                })
+                .id();
+            select(&mut app, door);
+            let said = drain(&mut app, SlintAction::PropertyChanged("Name".into(), "Gate".into()));
+            assert_eq!(said, (refused.clone(), refused.clone()), "{state:?}");
+            assert_eq!(app.world().get::<eustress_common::classes::Instance>(door).unwrap().name, "Door", "{state:?}");
+
+            let mut app = drain_app(state);
+            let stamp = app.world_mut().spawn(TerrainStamp::default()).id();
+            select(&mut app, stamp);
+            let said = drain(&mut app, SlintAction::PropertyChanged("Radius".into(), "35".into()));
+            assert_eq!(said, (refused.clone(), refused.clone()), "{state:?}");
+            assert_eq!(app.world().get::<TerrainStamp>(stamp).unwrap().radius, radius, "{state:?}: the layer changed");
+
+            let mut app = drain_app(state);
+            let sim = app.world_mut().spawn(ParticleSimulation::default()).id();
+            select(&mut app, sim);
+            let (toasts, _) = drain(&mut app, SlintAction::PropertyChanged("TimeScale".into(), "2".into()));
+            assert!(toasts.is_empty(), "{state:?}: {toasts:?}");
+            assert_eq!(app.world().get::<ParticleSimulation>(sim).unwrap().time_scale, 2.0, "{state:?}");
+        }
+        let mut app = drain_app(PlayModeState::Editing);
+        let stamp = app.world_mut().spawn(TerrainStamp::default()).id();
+        select(&mut app, stamp);
+        let (toasts, _) = drain(&mut app, SlintAction::PropertyChanged("Radius".into(), "35".into()));
+        assert!(toasts.is_empty(), "{toasts:?}");
+        assert_eq!(app.world().get::<TerrainStamp>(stamp).unwrap().radius, 35.0);
+    }
+
+    #[test]
+    fn close_space_takes_no_snapshot_during_play() {
+        assert_eq!(close_space_snapshot(PlayModeState::Editing), Ok("Snapshot taken. Pick a Space in the Universe browser to continue."));
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let line = close_space_snapshot(state).unwrap_err();
+            assert_eq!(line, "No snapshot taken. Stop Play to save the Space. Saving during Play would write the running scene to disk.");
+        }
+        // The drain's Close Space arm: a snapshot request while editing, none
+        // during Play, where the Output panel says so.
+        for (state, snapshots) in [(PlayModeState::Playing, 0), (PlayModeState::Editing, 1)] {
+            let mut app = drain_app(state);
+            let (toasts, output) = drain(&mut app, SlintAction::CloseSpace);
+            let requested = app
+                .world_mut()
+                .resource_mut::<Messages<crate::ui::FileEvent>>()
+                .drain()
+                .filter(|event| matches!(event, crate::ui::FileEvent::SaveScene))
+                .count();
+            assert_eq!(requested, snapshots, "{state:?}");
+            assert!(toasts.is_empty(), "{state:?}: {toasts:?}");
+            let line = close_space_snapshot(state).map(str::to_string).unwrap_or_else(|line| line);
+            assert_eq!(output, [line], "{state:?}");
+        }
+    }
+
+    #[derive(Resource)]
+    struct RenameProbe(Entity, Option<Result<(), String>>);
+
+    fn rename_probe(mut res: DrainResources, mut queries: DrainActionQueries, mut commands: Commands, mut probe: ResMut<RenameProbe>) {
+        let entity = probe.0;
+        probe.1 = Some(rename_instance(entity, "Gate", &mut res, &mut queries, &mut commands));
+    }
+
+    /// A rename asked for during Play renames nothing, whoever asks: not the
+    /// folder on disk and not the instance. While editing the same call
+    /// renames both.
+    #[test]
+    fn rename_instance_refuses_during_play() {
+        let space = std::env::temp_dir().join(format!("eustress_play_gate_rename_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        let folder = space.join("Workspace").join("Door");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("_instance.toml"), "[metadata]\nclass_name = \"Part\"\n").unwrap();
+        let run = |state: PlayModeState| {
+            let mut app = drain_app(state);
+            let door = app
+                .world_mut()
+                .spawn((
+                    eustress_common::classes::Instance {
+                        name: "Door".to_string(),
+                        ..Default::default()
+                    },
+                    crate::space::instance_loader::InstanceFile {
+                        toml_path: folder.join("_instance.toml"),
+                        mesh_path: std::path::PathBuf::new(),
+                        name: "Door".to_string(),
+                    },
+                ))
+                .id();
+            app.insert_resource(RenameProbe(door, None));
+            app.add_systems(Update, rename_probe);
+            app.update();
+            let answer = app.world().resource::<RenameProbe>().1.clone();
+            let name = app.world().get::<eustress_common::classes::Instance>(door).unwrap().name.clone();
+            (answer, name)
+        };
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            assert_eq!(run(state), (Some(Err("Stop Play to rename.".to_string())), "Door".to_string()), "{state:?}");
+            assert!(folder.join("_instance.toml").is_file(), "{state:?}: the folder was renamed");
+        }
+        assert_eq!(run(PlayModeState::Editing), (Some(Ok(())), "Gate".to_string()));
+        assert!(space.join("Workspace").join("Gate").join("_instance.toml").is_file(), "the editing rename did not reach the disk");
+        let _ = std::fs::remove_dir_all(&space);
+    }
+}
+
 fn drain_slint_actions(
     queue: Option<Res<SlintActionQueue>>,
     slint_context: Option<NonSend<SlintUiState>>,
@@ -6855,7 +7447,28 @@ fn drain_slint_actions(
         warn!("⚠ drain_slint_actions: StudioState is None — {} actions will be partially dropped!", actions.len());
     }
 
+    let play_state = res.play_state.as_ref().map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for action in actions {
+        // During Play a request that writes the Space from here waits for
+        // Stop, like the edits the menu handler refuses (`space_write_of`).
+        // It is refused before its arm runs, so none of it happens: no file,
+        // no database write, no undo entry and no change in memory.
+        if let Some(notice) = space_write_of(&action).and_then(|what| crate::keybindings::play_refusal_to(play_state, what)) {
+            // What the refused request leaves open goes with it: the label
+            // editor's target, and the Parameter dialog, which stays open,
+            // says why.
+            match &action {
+                SlintAction::EditLabelConfirmed(_) => label_edit_state.target = None,
+                SlintAction::ParameterConfirmed => {
+                    if let Some(ui) = ui {
+                        ui.set_parameter_dialog_error(super::display_text::shown_block(&notice));
+                    }
+                }
+                _ => {}
+            }
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         match action {
             // File operations → FileEvent
             SlintAction::NewUniverse => { events.file_events.write(FileEvent::NewUniverse); }
@@ -6982,11 +7595,23 @@ fn drain_slint_actions(
                     None => info!("📥 Import Roblox place cancelled by user"),
                 }
             }
+            SlintAction::PublishAs => {
+                // The whole Universe, with the picker taking the keyboard and
+                // starting on a new listing (`publish_targets`).
+                if let Some(ui) = ui {
+                    let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
+                    ui.set_publish_mode("universe".into());
+                    let max_players = res.open_max_players.as_ref().map_or(10, |m| m.0.players);
+                    populate_publish_dialog(ui, current_space_root, false, max_players);
+                    ui.set_publish_focus_targets(true);
+                }
+            }
             SlintAction::PublishUniverse => {
                 if let Some(ui) = ui {
                     let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
                     ui.set_publish_mode("universe".into());
-                    populate_publish_dialog(ui, current_space_root, false);
+                    let max_players = res.open_max_players.as_ref().map_or(10, |m| m.0.players);
+                    populate_publish_dialog(ui, current_space_root, false, max_players);
                 }
             }
             SlintAction::PublishSpace => {
@@ -6995,7 +7620,7 @@ fn drain_slint_actions(
                     .and_then(|sr| crate::space::universe_root_for_path(&sr.0))
                     .map(|ur| ur.join(".eustress").join("sync.toml"))
                     .and_then(|p| eustress_common::load_toml_file::<eustress_common::SyncManifest>(&p).ok())
-                    .and_then(|s| s.remote.experience_id)
+                    .and_then(|s| s.remote.listing_id().map(str::to_string))
                     .is_some();
 
                 if !has_experience_id {
@@ -7005,7 +7630,8 @@ fn drain_slint_actions(
                 } else if let Some(ui) = ui {
                     let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
                     ui.set_publish_mode("space".into());
-                    populate_publish_dialog(ui, current_space_root, false);
+                    let max_players = res.open_max_players.as_ref().map_or(10, |m| m.0.players);
+                    populate_publish_dialog(ui, current_space_root, false, max_players);
                 }
             }
             SlintAction::Publish(request) => { events.file_events.write(FileEvent::Publish(request)); }
@@ -7378,16 +8004,10 @@ fn drain_slint_actions(
                 // simulation or cause a divide-by-zero below.
                 let custom_str: String = ui.get_sim_custom_time_scale().into();
                 let custom: f32 = custom_str.trim().parse::<f32>().unwrap_or(1.0);
-                let scale: f64 = match preset.as_str() {
-                    "Realtime (1×)"               => 1.0,
-                    "1 min / sec (60×)"            => 60.0,
-                    "1 hr / sec (3,600×)"          => 3_600.0,
-                    "1 day / sec (86,400×)"        => 86_400.0,
-                    "1 week / sec (604,800×)"      => 604_800.0,
-                    "1 month / sec (2.63M×)"       => 2_630_000.0,
-                    "1 year / sec (31.5M×)"        => 31_536_000.0,
-                    "Custom" | _                   => custom as f64,
-                };
+                let scale: f64 = SIM_TIME_SCALE_PRESETS
+                    .iter()
+                    .find(|(label, _)| *label == preset.as_str())
+                    .map_or(custom as f64, |(_, scale)| *scale);
 
                 let tick_rate_str: String = ui.get_sim_tick_rate().into();
                 let tick_rate_hz: f32 = tick_rate_str.trim().parse::<f32>().unwrap_or(60.0);
@@ -7552,9 +8172,19 @@ fn drain_slint_actions(
                 // A Space is never "closed" the Roblox way: edits are already
                 // in the world database. Take a snapshot and hand over to the
                 // Universe browser, which the Slint side has just opened.
-                events.file_events.write(FileEvent::SaveScene);
-                if let Some(ref mut out) = res.output {
-                    out.info("Snapshot taken. Pick a Space in the Universe browser to continue.".to_string());
+                // During Play no snapshot is taken, and the line says so.
+                match close_space_snapshot(play_state) {
+                    Ok(line) => {
+                        events.file_events.write(FileEvent::SaveScene);
+                        if let Some(ref mut out) = res.output {
+                            out.info(line.to_string());
+                        }
+                    }
+                    Err(line) => {
+                        if let Some(ref mut out) = res.output {
+                            out.warn(line);
+                        }
+                    }
                 }
             }
             
@@ -7610,7 +8240,7 @@ fn drain_slint_actions(
                         None => (Vec::new(), "This Dataset has no readable data file.".to_string()),
                     };
                     ui.set_sync_domain_fields(slint::ModelRc::new(slint::VecModel::from(fields)));
-                    ui.set_sync_domain_status(status.into());
+                    ui.set_sync_domain_status(super::display_text::shown_block(&status));
                 }
                 #[cfg(not(feature = "data"))]
                 {
@@ -7626,7 +8256,7 @@ fn drain_slint_actions(
                         Ok(plan) => plan.summary(),
                         Err(e) => e,
                     };
-                    ui.set_sync_domain_status(status.into());
+                    ui.set_sync_domain_status(super::display_text::shown_block(&status));
                 }
                 #[cfg(not(feature = "data"))]
                 {
@@ -7644,7 +8274,7 @@ fn drain_slint_actions(
                     match sync_domain_plan(ui, &res, &queries, Vec3::new(sx, sy, sz)) {
                         Ok(plan) => {
                             ui.set_sync_domain_busy(true);
-                            ui.set_sync_domain_status(format!("Creating {}", plan.summary()).into());
+                            ui.set_sync_domain_status(super::display_text::shown_block(&format!("Creating {}", plan.summary())));
                             let queue = res.action_queue.as_deref().cloned();
                             // Thousands of folders are written off the main
                             // thread; the file watcher spawns them as they land.
@@ -7655,7 +8285,7 @@ fn drain_slint_actions(
                                 }
                             });
                         }
-                        Err(e) => ui.set_sync_domain_status(e.into()),
+                        Err(e) => ui.set_sync_domain_status(super::display_text::shown_block(&e)),
                     }
                 }
                 #[cfg(not(feature = "data"))]
@@ -7913,6 +8543,37 @@ fn drain_slint_actions(
                     **find = FindState::default();
                 }
             }
+            SlintAction::SoulKeyRemove(provider) => {
+                let prompt = match (
+                    res.soul_key_store.as_mut(),
+                    res.global_soul_settings.as_ref(),
+                    crate::soul::Provider::from_id(&provider),
+                ) {
+                    (Some(store), Some(gs), Some(p)) => store.request_remove(gs, p).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                if let Some(ui) = ui {
+                    ui.set_soul_key_remove_prompt(prompt.into());
+                }
+            }
+            SlintAction::SoulKeyRemoveConfirm => {
+                if let (Some(store), Some(gs)) =
+                    (res.soul_key_store.as_mut(), res.global_soul_settings.as_mut())
+                {
+                    store.confirm_remove(gs);
+                }
+                if let Some(ui) = ui {
+                    ui.set_soul_key_remove_prompt(slint::SharedString::default());
+                }
+            }
+            SlintAction::SoulKeyRemoveCancel => {
+                if let Some(store) = res.soul_key_store.as_mut() {
+                    store.cancel_remove();
+                }
+                if let Some(ui) = ui {
+                    ui.set_soul_key_remove_prompt(slint::SharedString::default());
+                }
+            }
             SlintAction::SoulTestConnection => {
                 // Tests what is typed in the dialog, saved or not, so a key
                 // can be checked before Save. Each provider is checked on its
@@ -7921,10 +8582,22 @@ fn drain_slint_actions(
                 if ui.get_soul_test_running() {
                     continue;
                 }
+                // A field left empty tests the saved key, read here in Rust:
+                // the saved key is never in a Slint property.
+                let typed_or_saved = |typed: String, provider: crate::soul::Provider| {
+                    if typed.trim().is_empty() {
+                        res.global_soul_settings
+                            .as_deref()
+                            .map(|g| g.session_key(provider).to_string())
+                            .unwrap_or_default()
+                    } else {
+                        typed
+                    }
+                };
                 let keys = [
-                    ("Anthropic", ui.get_soul_api_key().to_string()),
-                    ("xAI", ui.get_soul_xai_api_key().to_string()),
-                    ("OpenAI", ui.get_soul_openai_api_key().to_string()),
+                    ("Anthropic", typed_or_saved(ui.get_soul_api_key().to_string(), crate::soul::Provider::Anthropic)),
+                    ("xAI", typed_or_saved(ui.get_soul_xai_api_key().to_string(), crate::soul::Provider::Xai)),
+                    ("OpenAI", typed_or_saved(ui.get_soul_openai_api_key().to_string(), crate::soul::Provider::OpenAi)),
                 ];
                 ui.set_soul_test_running(true);
                 ui.set_soul_test_status("Testing...".into());
@@ -7952,13 +8625,14 @@ fn drain_slint_actions(
                 let anthropic_accepted = results.iter().find(|r| r.provider == "Anthropic").map(|r| r.accepted());
                 if let Some(ui) = ui {
                     ui.set_soul_test_running(false);
-                    ui.set_soul_test_status(summary.as_str().into());
-                    ui.set_soul_error_message(first_failure.clone().unwrap_or_default().into());
-                    // Record the verdict against the stored key when that is
-                    // the key that was tested.
+                    ui.set_soul_test_status(super::display_text::shown_block(&summary));
+                    ui.set_soul_error_message(super::display_text::shown_block(first_failure.as_deref().unwrap_or_default()));
+                    // Record the verdict against the saved key when that is
+                    // the key that was tested: an empty field tests it.
                     let typed = ui.get_soul_api_key().trim().to_string();
                     if let Some(ref mut gs) = res.global_soul_settings {
-                        if !typed.is_empty() && typed == gs.global_api_key.trim() {
+                        let saved = gs.global_api_key.trim().to_string();
+                        if !saved.is_empty() && (typed.is_empty() || typed == saved) {
                             gs.api_key_valid = anthropic_accepted;
                         }
                     }
@@ -8002,25 +8676,51 @@ fn drain_slint_actions(
                 // `ForgeState` and `sync_dialog_state` shows it in the dialog.
                 if let (Some(ui), Some(ref mut forge)) = (ui.as_ref(), res.forge_state.as_mut()) {
                     let url = ui.get_forge_server_url().to_string();
-                    let api_key = ui.get_forge_api_key().to_string();
-                    // "Remember credentials": kept in the local credential
-                    // store (outside every Space), or forgotten when unticked.
+                    let field = ui.get_forge_api_key().to_string();
+                    // The field shows a mask while a remembered key is in use;
+                    // the key itself is kept on the Rust side, never in Slint.
+                    // `None`: Connect is refused (the URL fails the
+                    // connection policy, the saved key is for another server,
+                    // or the field holds part of the mask), so nothing is sent
+                    // and nothing is remembered.
                     #[cfg(feature = "data")]
-                    {
-                        use crate::capture::credentials;
-                        if ui.get_forge_remember_credentials() {
-                            let _ = credentials::set(FORGE_URL_CREDENTIAL, &url);
-                            if !api_key.trim().is_empty() {
-                                let _ = credentials::set(FORGE_KEY_CREDENTIAL, &api_key);
-                            }
-                        } else {
-                            let _ = credentials::remove(FORGE_URL_CREDENTIAL);
-                            let _ = credentials::remove(FORGE_KEY_CREDENTIAL);
+                    let api_key: Option<String> = {
+                        use crate::capture::key_tasks::{plan_connect, ForgeRememberedKey};
+                        let pending = res.key_tasks.as_ref().is_some_and(|tasks| tasks.prefill_pending());
+                        let policy = eustress_forge_sdk::connect_policy::check_url(&url).map(drop);
+                        let remember = ui.get_forge_remember_credentials();
+                        // Without the resource there is nowhere to keep a
+                        // typed key, so the field is not masked over it.
+                        let kept_for_real = res.forge_remembered_key.is_some();
+                        let mut spare = ForgeRememberedKey::default();
+                        let kept = match res.forge_remembered_key.as_deref_mut() {
+                            Some(kept) => kept,
+                            None => &mut spare,
+                        };
+                        let plan = plan_connect(kept, &url, &field, remember, pending, policy);
+                        if let Some(why) = &plan.refusal {
+                            ui.set_forge_error_message(super::display_text::shown_block(why));
                         }
-                    }
-                    crate::forge::connect_to_forge(forge, &url, &api_key);
-                    if let Some(ref mut out) = res.output {
-                        out.info(format!("Connecting to Forge at {}...", url.trim()));
+                        // "Remember credentials": the worker keeps the key in
+                        // the system credential store (outside every Space),
+                        // or forgets it. Nothing here waits.
+                        if let (Some(tasks), Some(request)) = (res.key_tasks.as_ref(), plan.request) {
+                            tasks.submit(request);
+                        }
+                        // A typed key is now kept on the Rust side: the field
+                        // shows the mask, so the key never stays in Slint.
+                        if let Some(shown) = plan.key_field.filter(|_| kept_for_real) {
+                            ui.set_forge_api_key(shown.into());
+                        }
+                        plan.key
+                    };
+                    #[cfg(not(feature = "data"))]
+                    let api_key: Option<String> = Some(field);
+                    if let Some(api_key) = api_key {
+                        crate::forge::connect_to_forge(forge, &url, &api_key);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Connecting to Forge at {}...", url.trim()));
+                        }
                     }
                 }
             }
@@ -8045,7 +8745,7 @@ fn drain_slint_actions(
                                 .join(".eustress").join("sync.toml");
                             eustress_common::load_toml_file::<eustress_common::SyncManifest>(&publish_path).ok()
                         })
-                        .and_then(|sync| sync.remote.experience_id)
+                        .and_then(|sync| sync.remote.listing_id().map(str::to_string))
                         .unwrap_or_else(|| "local".to_string());
 
                     crate::forge::allocate_server(
@@ -8132,72 +8832,41 @@ fn drain_slint_actions(
             }
             SlintAction::Logout => {
                 if let Some(ref mut auth) = res.auth_state {
-                    auth.logout();
+                    // This machine only; `AuthState::sign_out_everywhere`
+                    // ends the account's tokens on every device as well.
+                    auth.sign_out_here();
                     if let Some(ref mut out) = res.output {
                         out.info("Logged out".to_string());
                     }
                 }
             }
+            SlintAction::LogoutEverywhere => {
+                if let Some(ref mut auth) = res.auth_state {
+                    // Every device: the API ends every token the account
+                    // holds, and Studio signs out here. If the API cannot
+                    // be reached, that is shown once (`take_warning`).
+                    auth.sign_out_everywhere();
+                    if let Some(ref mut out) = res.output {
+                        out.info("Signed out on every device".to_string());
+                    }
+                }
+            }
             SlintAction::SwitchIdentity(username) => {
-                // Find the saved identity by username and login with it
-                if let Some(ref settings) = res.editor_settings {
-                    if let Some(identity) = settings.saved_identities.iter().find(|i| i.username == username) {
-                        let path = identity.path.clone();
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            let (public_key, private_key, uname) = parse_identity_toml(&content);
-                            if !public_key.is_empty() {
-                                let display = if uname.is_empty() { public_key[..std::cmp::min(8, public_key.len())].to_string() } else { uname };
-                                // Re-authenticate on switch — the JWT is
-                                // per-account, so carrying the previous
-                                // identity's token (or the bare public key)
-                                // would earn Bliss for the wrong user, or
-                                // nothing at all.
-                                let authed = if private_key.is_empty() {
-                                    // NOTE: bound to a differently-named local on purpose.
-                                    // Inside tracing macros the identifier `display` resolves
-                                    // to `tracing::field::display` (in scope via the bevy
-                                    // prelude) rather than this local — for inline `{display}`,
-                                    // for a positional arg, and even for `display.as_str()`,
-                                    // since the path resolves before the method call. Renaming
-                                    // is the only reliable fix.
-                                    let ident_label: &str = &display;
-                                    warn!("Identity '{}' has no private_key — Bliss earning disabled", ident_label);
-                                    None
-                                } else {
-                                    match do_challenge_auth(&public_key, &private_key) {
-                                        Ok(pair) => Some(pair),
-                                        Err(e) => {
-                                            warn!("Challenge auth failed on switch: {e} — Bliss earning disabled");
-                                            None
-                                        }
-                                    }
-                                };
-                                let (token, account_id) = match authed {
-                                    Some((jwt, uid)) => (Some(jwt), uid),
-                                    None => (None, public_key.clone()),
-                                };
-                                if let Some(ref mut auth) = res.auth_state {
-                                    auth.jwt_valid = token.is_some();
-                                    auth.user = Some(crate::auth::AuthUser {
-                                        id: account_id, username: display.clone(),
-                                        email: None, avatar_url: None, steam_id: None, discord_id: None,
-                                        bliss_balance: 0.0, total_hours: 0.0,
-                                    });
-                                    auth.token = token.or(Some(public_key));
-                                    auth.status = crate::auth::AuthStatus::LoggedIn;
-                                }
-                                // Move this identity to front (active)
-                                if let Some(ref mut settings) = res.editor_settings {
-                                    if let Some(pos) = settings.saved_identities.iter().position(|i| i.username == username) {
-                                        let identity = settings.saved_identities.remove(pos);
-                                        settings.saved_identities.insert(0, identity);
-                                    }
-                                }
-                                if let Some(ref mut out) = res.output {
-                                    out.info(format!("Switched to {}", display));
-                                }
-                            }
-                        }
+                // Sign out here (the account stays signed in elsewhere), then
+                // in with the chosen identity on a thread
+                // (`AuthState::sign_in_with_identity`): a token belongs to one
+                // account, so the previous one's never carries over. The
+                // result lands through `show_sign_in_outcome`.
+                let path = res
+                    .editor_settings
+                    .as_ref()
+                    .and_then(|s| s.saved_identities.iter().find(|i| i.username == username))
+                    .map(|i| std::path::PathBuf::from(&i.path));
+                if let (Some(path), Some(auth)) = (path, res.auth_state.as_mut()) {
+                    auth.sign_out_here();
+                    auth.sign_in_with_identity(path, crate::auth::SignInSource::Switch);
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Signing in as {username}..."));
                     }
                 }
             }
@@ -8224,102 +8893,22 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::LoginWithIdentity => {
-                // Read identity.toml and authenticate
+                // Sign in with the chosen identity file on a thread
+                // (`AuthState::sign_in_with_identity`). The result lands
+                // through `show_sign_in_outcome`, which closes the dialog or
+                // says why it could not sign in.
                 let identity_path: String = ui.as_ref()
                     .map(|u| { let p: String = u.get_login_identity_path().into(); p })
                     .unwrap_or_default();
-
-                info!("🔐 LoginWithIdentity: path='{}'", identity_path);
-
                 if identity_path.is_empty() {
                     if let Some(ref ui) = ui {
                         ui.set_login_error("No identity file selected".into());
                     }
-                } else {
-                    match std::fs::read_to_string(&identity_path) {
-                        Ok(content) => {
-                            let (public_key, private_key, username) = parse_identity_toml(&content);
-                            info!("🔐 Parsed: username='{}', public_key='{}'",
-                                username, if public_key.is_empty() { "EMPTY" } else { &public_key[..8.min(public_key.len())] });
-
-                            if public_key.is_empty() {
-                                if let Some(ref ui) = ui {
-                                    ui.set_login_error("No public_key found in identity file".into());
-                                }
-                            } else {
-                                let display_name = if username.is_empty() {
-                                    public_key[..std::cmp::min(8, public_key.len())].to_string()
-                                } else {
-                                    username.clone()
-                                };
-                                // Authenticate to the witness. Without this the
-                                // token was just the public key, so every Bliss
-                                // co-sign 401'd and the user earned nothing —
-                                // silently.
-                                let authed = if private_key.is_empty() {
-                                    warn!("Identity has no private_key — Bliss earning disabled for this session");
-                                    None
-                                } else {
-                                    match do_challenge_auth(&public_key, &private_key) {
-                                        Ok(pair) => Some(pair),
-                                        Err(e) => {
-                                            warn!("Challenge auth failed: {e} — local identity only, Bliss earning disabled");
-                                            None
-                                        }
-                                    }
-                                };
-                                let (token, account_id) = match authed {
-                                    Some((jwt, uid)) => (Some(jwt), uid),
-                                    None => (None, public_key.clone()),
-                                };
-
-                                // Update AuthState resource so the sync system reflects the login
-                                if let Some(ref mut auth) = res.auth_state {
-                                    auth.jwt_valid = token.is_some();
-                                    auth.user = Some(crate::auth::AuthUser {
-                                        id: account_id,
-                                        username: display_name.clone(),
-                                        email: None,
-                                        avatar_url: None,
-                                        steam_id: None,
-                                        discord_id: None,
-                                        bliss_balance: 0.0,
-                                        total_hours: 0.0,
-                                    });
-                                    auth.token = token.or(Some(public_key.clone()));
-                                    auth.status = crate::auth::AuthStatus::LoggedIn;
-                                    auth.offline_mode = false;
-                                }
-                                if let Some(ref ui) = ui {
-                                    ui.set_show_login_dialog(false);
-                                    ui.set_login_error("".into());
-                                    ui.set_login_identity_path("".into());
-                                }
-                                if let Some(ref mut s) = res.state {
-                                    s.trigger_login = true;
-                                }
-                                // Save identity to settings for auto-login + quick switch
-                                if let Some(ref mut settings) = res.editor_settings {
-                                    let new_identity = crate::editor_settings::SavedIdentity {
-                                        username: display_name.clone(),
-                                        path: identity_path.clone(),
-                                        public_key_short: public_key[..std::cmp::min(8, public_key.len())].to_string(),
-                                    };
-                                    // Remove existing entry for same username, then insert at front (active)
-                                    settings.saved_identities.retain(|i| i.username != display_name);
-                                    settings.saved_identities.insert(0, new_identity);
-                                }
-                                if let Some(ref mut out) = res.output {
-                                    out.info(format!("Signed in as {}", display_name));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(ref ui) = ui {
-                                ui.set_login_error(format!("Failed to read: {}", e).into());
-                            }
-                        }
+                } else if let Some(ref mut auth) = res.auth_state {
+                    if let Some(ref ui) = ui {
+                        ui.set_login_error("".into());
                     }
+                    auth.sign_in_with_identity(identity_path.into(), crate::auth::SignInSource::Dialog);
                 }
             }
 
@@ -8470,12 +9059,16 @@ fn drain_slint_actions(
                     mgr.dirty = true;
                 }
                 if let Some(path) = save_path {
-                    let _ = std::fs::write(&path, &summary);
-                    info!("📝 Saved summary to {:?}", path);
+                    match super::center_tabs::write_file_atomic(&path, summary.as_bytes(), true) {
+                        Ok(()) => info!("📝 Saved summary to {:?}", path),
+                        Err(e) => warn!("Could not save the summary {:?}: {e}", path),
+                    }
                 }
                 if let Some(ref mut state) = res.state {
                     state.script_editor_content = summary;
                     state.script_content_dirty = true;
+                    // The Soul Panel's summary indicator reads the file just written.
+                    state.soul_panel_revision = state.soul_panel_revision.wrapping_add(1);
                 }
                 if let Some(ref mut out) = res.output {
                     out.info(format!("📝 Summary generated for {}", name));
@@ -8573,56 +9166,31 @@ fn drain_slint_actions(
             }
             #[cfg(feature = "data")]
             SlintAction::ApiKeySave(name, value) => {
-                use crate::capture::credentials;
-                match credentials::set(&name, &value) {
-                    Ok(()) => {
-                        // Report the MASKED value back. A user who pastes a key
-                        // with a trailing newline, which copying from a web page
-                        // routinely adds, needs to see that something landed;
-                        // echoing the key itself into a log would undo the whole
-                        // reason this is not stored in the Space.
-                        let status = credentials::status(&name);
-                        if let Some(ref mut out) = res.output {
-                            out.info(format!("Capture · {}", status.summary()));
-                        }
-                        events.notification.write(
-                            super::notifications::NotificationEvent::success(
-                                super::notifications::NotificationCategory::General,
-                                "API key saved",
-                                format!("{}. Takes effect on the next sync.", status.summary()),
-                            ),
-                        );
+                // The worker saves it; `apply_key_results` reports the
+                // outcome, never any part of the key.
+                match res.key_tasks.as_ref() {
+                    Some(tasks) => {
+                        tasks.submit(crate::capture::key_tasks::KeyRequest::Save { name, value });
                     }
-                    Err(e) => {
+                    None => {
                         if let Some(ref mut out) = res.output {
-                            out.warn(format!("Capture · could not save {name}: {e}"));
+                            out.warn(format!("Capture · could not save {name}: the credential worker is not running"));
                         }
-                        events.notification.write(
-                            super::notifications::NotificationEvent::error(
-                                super::notifications::NotificationCategory::General,
-                                "API key not saved",
-                                e.to_string(),
-                            ),
-                        );
                     }
                 }
             }
             #[cfg(feature = "data")]
             SlintAction::ApiKeyRemove(name) => {
-                use crate::capture::credentials;
-                let msg = match credentials::remove(&name) {
-                    Ok(true) => format!("{name} removed"),
-                    Ok(false) => format!("{name} was not saved"),
-                    Err(e) => format!("could not remove {name}: {e}"),
-                };
-                if let Some(ref mut out) = res.output {
-                    out.info(format!("Capture · {msg}"));
+                match res.key_tasks.as_ref() {
+                    Some(tasks) => {
+                        tasks.submit(crate::capture::key_tasks::KeyRequest::Remove { name });
+                    }
+                    None => {
+                        if let Some(ref mut out) = res.output {
+                            out.warn(format!("Capture · could not remove {name}: the credential worker is not running"));
+                        }
+                    }
                 }
-                events.notification.write(super::notifications::NotificationEvent::info(
-                    super::notifications::NotificationCategory::General,
-                    "API key",
-                    msg,
-                ));
             }
             SlintAction::FeedbackSend(about, text) => {
                 let text = text.trim().to_string();
@@ -8752,7 +9320,7 @@ fn drain_slint_actions(
                 if let Some(ref mut out) = res.output {
                     out.info(
                         if enabled {
-                            "Workshop Auto mode ON. Approval-gated tools run without asking.                              Capability limits still apply."
+                            "Workshop Auto mode ON. Still asks before running commands, deleting, or going online."
                                 .to_string()
                         } else {
                             "Workshop Auto mode off. Tools that need approval will ask again."
@@ -8762,45 +9330,30 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::SoulApiKeySaved => {
-                // Pull every typed key out of Slint and commit them. The
-                // Anthropic key goes to both the space-level and global Soul
-                // Settings resources so Workshop + Soul panels observe it
-                // immediately; the xAI and OpenAI keys are global-only (no
-                // per-space override — see
-                // GlobalSoulSettings::global_xai_api_key). All persist in the
-                // same save, so the dialog's single Save button covers every
-                // provider.
-                //
-                // Every field read here MUST also be populated when the dialog
-                // opens (see the loader's note): this handler writes all of
-                // them unconditionally, so a field that was never loaded is
-                // written back as "" and silently wipes a stored key.
+                // Each field holds only a newly typed key; the saved keys are
+                // never in Slint. A typed key goes to the system credential
+                // store, off the UI thread; an empty field, or one showing
+                // the mask, changes nothing (it never clears a saved key: that
+                // is Remove). The fields are cleared at once, so the typed key
+                // leaves Slint.
                 if let Some(ui) = ui {
-                    let key: String = ui.get_soul_api_key().to_string().trim().to_string();
-                    let xai_key: String = ui.get_soul_xai_api_key().to_string().trim().to_string();
-                    let openai_key: String = ui.get_soul_openai_api_key().to_string().trim().to_string();
-                    if let Some(ref mut ss) = res.soul_settings {
-                        ss.claude_api_key = key.clone();
-                    }
-                    if let Some(ref mut gs) = res.global_soul_settings {
-                        if gs.global_api_key.trim() != key {
-                            gs.api_key_valid = None;
-                        }
-                        gs.global_api_key = key.clone();
-                        gs.global_xai_api_key = xai_key.clone();
-                        gs.global_openai_api_key = openai_key.clone();
-                        if let Err(e) = gs.save() {
-                            if let Some(ref mut out) = res.output {
-                                out.warn(format!("Soul: failed to persist API key: {}", e));
-                            }
-                        }
-                    }
-                    if let Some(ref mut out) = res.output {
-                        if key.is_empty() {
-                            out.info("Soul API key cleared".to_string());
-                        } else {
-                            out.info("Soul API key saved".to_string());
-                        }
+                    let key = ui.get_soul_api_key().to_string();
+                    let xai_key = ui.get_soul_xai_api_key().to_string();
+                    let openai_key = ui.get_soul_openai_api_key().to_string();
+                    ui.set_soul_api_key(slint::SharedString::default());
+                    ui.set_soul_xai_api_key(slint::SharedString::default());
+                    ui.set_soul_openai_api_key(slint::SharedString::default());
+                    if let (Some(store), Some(gs)) =
+                        (res.soul_key_store.as_mut(), res.global_soul_settings.as_mut())
+                    {
+                        store.save_typed(
+                            gs,
+                            &[
+                                (crate::soul::Provider::Anthropic, key.as_str()),
+                                (crate::soul::Provider::Xai, xai_key.as_str()),
+                                (crate::soul::Provider::OpenAi, openai_key.as_str()),
+                            ],
+                        );
                     }
                 }
             }
@@ -8850,7 +9403,9 @@ fn drain_slint_actions(
                             if let Some(ref path) = active.file_path {
                                 if path.is_dir() {
                                     let target = super::center_tabs::script_summary_path_canonical(path);
-                                    let _ = std::fs::write(&target, &normalized);
+                                    if let Err(e) = super::center_tabs::write_file_atomic(&target, normalized.as_bytes(), false) {
+                                        warn!("Could not save the summary {}: {e}", target.display());
+                                    }
                                 }
                             }
                         } else if is_markdown {
@@ -8858,7 +9413,9 @@ fn drain_slint_actions(
                             active.content = normalized.clone();
                             if let Some(ref path) = active.file_path {
                                 if path.is_file() {
-                                    let _ = std::fs::write(path, &normalized);
+                                    if let Err(e) = super::center_tabs::write_file_atomic(path, normalized.as_bytes(), false) {
+                                        warn!("Could not save {}: {e}", path.display());
+                                    }
                                 }
                             }
                         } else {
@@ -8909,8 +9466,14 @@ fn drain_slint_actions(
                 let entity_source = tab.entity
                     .and_then(|e| queries.loaded_from_file.get(e).ok())
                     .map(|(_, loaded)| loaded.path.clone());
+                let tab_entity = tab.entity;
                 match super::center_tabs::save_code_tab(tab, entity_source.as_deref()) {
                     Ok(Some(path)) => {
+                        // The running copy takes the saved text itself; the file
+                        // watcher is not relied on for it.
+                        if let Ok(text) = std::fs::read_to_string(&path) {
+                            refresh_saved_script(&mut commands, tab_entity, text);
+                        }
                         if mgr.mark_clean(idx) {
                             if let (Some(ui), Some(s)) = (ui, res.state.as_mut()) {
                                 patch_center_tab_dirty(ui, s, idx, false);
@@ -8936,6 +9499,11 @@ fn drain_slint_actions(
                     mgr,
                     |e| queries.loaded_from_file.get(e).ok().map(|(_, l)| l.path.clone()),
                     |i, _| covered[i],
+                    |entity, path| {
+                        if let Ok(text) = std::fs::read_to_string(path) {
+                            refresh_saved_script(&mut commands, entity, text);
+                        }
+                    },
                 );
                 // A failed save cancels the close, so no unsaved edit is lost.
                 if report_close_saves(&saved, res.output.as_deref_mut()) {
@@ -8974,7 +9542,7 @@ fn drain_slint_actions(
                         let (line0, col0) = line_col0(&text, sel.cursor);
                         ui.set_script_hover_line(line0 + 1);
                         ui.set_script_hover_col(col0 + 1);
-                        ui.set_script_hover_text(hover.into());
+                        ui.set_script_hover_text(super::display_text::shown_block(&hover));
                     }
                     continue;
                 }
@@ -9103,6 +9671,39 @@ fn drain_slint_actions(
                 state.pending_external_edit = Some((at as u32, at as u32));
                 if let Some(ui) = ui {
                     ui.set_script_scroll_to_line(line);
+                }
+            }
+            // Find in Scripts (Ctrl+Shift+F): the modal's typing, toggles and
+            // keys. They are recorded here; `script_search_ui::sync_script_search`
+            // runs the search, opens the row and selects the match.
+            SlintAction::ScriptSearchQuery(query) => {
+                if let Some(ref mut state) = res.state {
+                    state.script_search.type_query(query);
+                }
+            }
+            SlintAction::ScriptSearchMatchCase(on) => {
+                if let Some(ref mut state) = res.state {
+                    state.script_search.set_match_case(on);
+                }
+            }
+            SlintAction::ScriptSearchMove(delta) => {
+                if let Some(ref mut state) = res.state {
+                    state.script_search.move_selection(delta);
+                }
+            }
+            SlintAction::ScriptSearchOpen(row) => {
+                if let Some(ref mut state) = res.state {
+                    state.script_search.request_open(row);
+                }
+            }
+            SlintAction::ScriptSearchClose => {
+                if let Some(ref mut state) = res.state {
+                    state.script_search.close();
+                }
+            }
+            SlintAction::ScriptSearchRequest => {
+                if let Some(ref mut state) = res.state {
+                    state.open_script_search_pulse = state.open_script_search_pulse.wrapping_add(1);
                 }
             }
             SlintAction::ReorderCenterTab(from, slot) => {
@@ -9647,15 +10248,15 @@ fn drain_slint_actions(
                     // presets live in theme.slint as compile-time constants
                     // (Phase B replaces them with TOML-sourced palettes).
                     let palette = if modern {
-                        theme.get_preset_modern()
+                        theme.get_preset_voltec()
                     } else {
                         theme.get_preset_classic()
                     };
                     theme.set_data(palette);
-                    theme.set_modern(modern); // UI-state mirror for the settings swatch
+                    theme.set_voltec(modern); // UI-state mirror for the settings swatch
                 }
                 if let Some(ref mut out) = res.output {
-                    out.info(format!("Theme: modern={}", modern));
+                    out.info(format!("Theme: voltec={}", modern));
                 }
             }
             SlintAction::SelectTheme(id) => {
@@ -9664,7 +10265,7 @@ fn drain_slint_actions(
                 }
                 if let Some(ref mut settings) = res.editor_settings {
                     settings.active_theme_id = Some(id.clone());
-                    settings.theme_modern = id == "modern"; // legacy back-compat mirror
+                    settings.theme_modern = id == "voltec"; // legacy back-compat mirror
                 }
                 if let (Some(ctx), Some(theme_reg)) = (&slint_context, &res.theme_registry) {
                     apply_effective_theme(ctx, theme_reg, res.mode_registry.as_deref());
@@ -10586,11 +11187,10 @@ fn drain_slint_actions(
             }
 
             SlintAction::AddService => {
-                // (+) button — log intent; actual service creation requires user to pick
-                // a name/type via command bar or future dialog. For now, print available services.
-                if let Some(ref mut out) = res.output {
-                    out.info("Add Service: use the command bar to create a new service (e.g. 'add service MyService')".to_string());
-                }
+                // The Explorer header's "+" opens the Insert Object dialog, the
+                // quick way to add an object. Its target is the selected row, or
+                // Workspace when nothing is selected (see OpenInsertObject).
+                queue.push(SlintAction::OpenInsertObject);
             }
             
             SlintAction::ExpandAll => {
@@ -10803,7 +11403,7 @@ fn drain_slint_actions(
                 ensure_parameters_synced(entity, &mut queries, &mut commands);
                 if let Some(ui) = ui {
                     fill_parameter_lists(ui, entity, &res, &queries);
-                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
+                    ui.set_parameter_dialog_target(super::display_text::shown_line(&parameter_target_label(entity, &queries)));
                     ui.set_parameter_dialog_is_edit(false);
                     ui.set_parameter_dialog_original("".into());
                     ui.set_parameter_dialog_domain(eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN.into());
@@ -10837,7 +11437,7 @@ fn drain_slint_actions(
                 };
                 if let Some(ui) = ui {
                     fill_parameter_lists(ui, entity, &res, &queries);
-                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
+                    ui.set_parameter_dialog_target(super::display_text::shown_line(&parameter_target_label(entity, &queries)));
                     ui.set_parameter_dialog_is_edit(true);
                     ui.set_parameter_dialog_original(label.as_str().into());
                     ui.set_parameter_dialog_domain(domain.as_str().into());
@@ -10880,7 +11480,7 @@ fn drain_slint_actions(
                         }
                         refresh_parameter_rows(&mut res);
                     }
-                    Err(why) => ui.set_parameter_dialog_error(why.into()),
+                    Err(why) => ui.set_parameter_dialog_error(super::display_text::shown_block(&why)),
                 }
             }
 
@@ -11092,6 +11692,22 @@ fn drain_slint_actions(
 
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
+                // During Play a Properties edit waits for Stop: nothing puts
+                // it back at Stop, and the next save would write the Play-time
+                // value. A particle simulation's or species' own field stays
+                // live, applied to the running sim and put back at Stop
+                // (`particle_sim_panel::live_during_play`). Refused here,
+                // before any file, database, undo or in-memory change.
+                if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "edit properties") {
+                    let selected = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                        SelectedItem::Entity(e) => Some(*e),
+                        _ => None,
+                    });
+                    if !selected.is_some_and(|e| super::particle_sim_panel::live_during_play(e, &key, &queries.particle_sim_edit)) {
+                        commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+                        continue;
+                    }
+                }
                 // A Parameter row edits as `Parameter:<label>` (see
                 // properties.slint), so it never collides with an Attribute or
                 // a built-in property of the same name.
@@ -12586,7 +13202,9 @@ fn drain_slint_actions(
                             if !handled {
                                 // Unhandled property
                                 if let Some(ref mut out) = res.output {
-                                    out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                                    // An API key typed into an instance row is never echoed.
+                                    let shown = if key == "ApiKey" { "<hidden>" } else { val.as_str() };
+                                    out.info(format!("Property '{}' = '{}' (unhandled)", key, shown));
                                 }
                             }
                         }
@@ -12868,21 +13486,21 @@ fn drain_slint_actions(
                                 }
                             }
                             "ApiKey" => {
-                                // Sync API key to service properties + Soul Settings resource
-                                service.properties.insert("api_key".to_string(),
-                                    crate::space::service_loader::PropertyValue::String(val.clone()));
-                                changed = true;
-
-                                // Also update the Soul Settings resource so Workshop/Soul panels see it immediately
-                                if let Some(ref mut ss) = res.soul_settings {
-                                    ss.claude_api_key = val.clone();
-                                }
-                                if let Some(ref mut gs) = res.global_soul_settings {
-                                    gs.global_api_key = val.clone();
-                                }
-
-                                if let Some(ref mut out) = res.output {
-                                    out.info("API key updated".to_string());
+                                // The key never goes into the Space: SoulService ships in
+                                // every published package. A new key goes to the system
+                                // credential store as the global Anthropic key, by the
+                                // same path as Settings > AI keys. An empty value, or the
+                                // mask the row shows, changes nothing. Nothing in the
+                                // Space changes, so `changed` stays false.
+                                if let (Some(store), Some(gs)) =
+                                    (res.soul_key_store.as_mut(), res.global_soul_settings.as_mut())
+                                {
+                                    let started = store.save_typed(gs, &[(crate::soul::Provider::Anthropic, val.as_str())]);
+                                    if started > 0 {
+                                        if let Some(ref mut out) = res.output {
+                                            out.info("API key updated".to_string());
+                                        }
+                                    }
                                 }
                             }
                             _ => {
@@ -13176,6 +13794,8 @@ fn drain_slint_actions(
                 let (result, created_instances) = if language == "luau" {
                     match eustress_common::luau::runtime::LuauRuntime::new() {
                         Ok(mut runtime) => {
+                            // The user's own code: its HTTP stays on, as before.
+                            runtime.set_network_access(eustress_common::luau::runtime::NetworkAccess::Allowed);
                             // Best-effort seed; failures shouldn't block execution.
                             if let Err(e) = runtime.seed_existing_tags(&tag_snapshot) {
                                 warn!("Failed to seed CollectionService snapshot for Luau: {}", e);
@@ -13547,6 +14167,7 @@ fn drain_slint_actions(
                             asset: light_class.is_none().then(|| crate::space::instance_loader::AssetReference {
                                 mesh: mesh_path.to_string(),
                                 scene: "Scene0".to_string(),
+                                scale_kind: None,
                             }),
                             transform: crate::space::instance_loader::TransformData {
                                 position: inst.position,
@@ -13920,6 +14541,9 @@ fn drain_slint_actions(
             }
             SlintAction::ToggleOutputStack(id) => {
                 super::output_rows::toggle_expanded(id as u32 as u64);
+            }
+            SlintAction::TurnOutputPage(id, page) => {
+                super::output_rows::set_page(id as u32 as u64, page.max(0) as usize);
             }
             SlintAction::CopyOutputLine(id) => {
                 let text = res.output.as_deref().and_then(|out| {
@@ -15733,6 +16357,7 @@ fn drain_slint_actions(
                             mode: crate::clipboard::PasteMode::Normal,
                             target_position: hit,
                             target_parent: None,
+                            target_folder: None,
                         });
                     }
                     // Focus and Zoom both frame the selection's bounds; the
@@ -15973,15 +16598,24 @@ fn drain_slint_actions(
                                 from_environment,
                             })) => {
                                 if let Some(w) = ui {
+                                    // Whole: the dialog sends the name back on save.
                                     w.set_api_key_name(name.as_str().into());
-                                    w.set_api_key_status(status.as_str().into());
+                                    w.set_api_key_status(super::display_text::shown_line(&status));
                                     w.set_api_key_present(present);
                                     w.set_api_key_from_environment(from_environment);
                                     w.set_api_key_text("".into());
                                     w.set_show_api_key_dialog(true);
+                                    // The status ("Checking..." until then)
+                                    // comes from the credential worker.
+                                    if let Some(tasks) = res.key_tasks.as_ref() {
+                                        tasks.submit(crate::capture::key_tasks::KeyRequest::Status { name: name.clone() });
+                                    }
+                                } else if let Some(tasks) = res.key_tasks.as_ref() {
+                                    // Headless: no dialog to open. The status
+                                    // goes to the Output when the credential
+                                    // worker answers (`apply_key_results`).
+                                    tasks.submit(crate::capture::key_tasks::KeyRequest::Status { name: name.clone() });
                                 } else if let Some(ref mut out) = res.output {
-                                    // Headless: no dialog to open, so say where
-                                    // the key would go rather than doing nothing.
                                     out.info(format!("Capture · {status}"));
                                 }
                             }
@@ -17610,10 +18244,9 @@ fn drain_slint_actions(
                             // GUI/* → StarterGui, …); a selected Folder/Model
                             // overrides it so the new instance lands inside
                             // the user's chosen container.
-                            let category = eustress_common::classes::ClassName::from_str(class_name)
-                                .map(super::insert_classes::category_for)
-                                .unwrap_or("Other");
-                            let service_name = super::insert_classes::default_service_for(category);
+                            let service_name = eustress_common::classes::ClassName::from_str(class_name)
+                                .map(super::insert_classes::default_service_for_class)
+                                .unwrap_or("Workspace");
 
                             // The OPEN Space, as in the template branch above.
                             let space_root = res.space_root.as_ref().map(|sr| sr.0.clone())
@@ -17968,6 +18601,7 @@ fn drain_slint_actions(
 fn sync_tool_options_bar_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     bar_state: Option<Res<crate::modal_tool::ToolOptionsBarState>>,
+    mut last_controls: Local<Option<String>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(bar_state) = bar_state else { return };
@@ -17994,6 +18628,7 @@ fn sync_tool_options_bar_to_slint(
         if !current_id.is_empty() {
             ui.set_tool_options_tool_id("".into());
         }
+        *last_controls = None;
         return;
     }
 
@@ -18007,14 +18642,22 @@ fn sync_tool_options_bar_to_slint(
     if current_id != bar_state.tool_id {
         ui.set_tool_options_tool_id(bar_state.tool_id.as_str().into());
     }
-    let current_step: String = ui.get_tool_options_step_label().into();
-    if current_step != bar_state.step_label {
-        ui.set_tool_options_step_label(bar_state.step_label.as_str().into());
+    let step_label = super::display_text::shown_line(&bar_state.step_label);
+    if ui.get_tool_options_step_label() != step_label {
+        ui.set_tool_options_step_label(step_label);
     }
 
-    // Controls list → Slint VecModel. Rebuild every frame the bar is
-    // visible; tools typically mutate the list only on state transitions
-    // so this is usually a no-op copy.
+    // Controls list → Slint VecModel, rebuilt only when it changed. Replacing
+    // a model rebuilds every row, which resets hover and swallows a click that
+    // is in flight (a toggle or combo press landing between two frames went to
+    // a row that no longer existed), and a number field being typed into lost
+    // focus on the next frame. The Debug text holds every control's whole
+    // value, so it is the change key.
+    let controls_key = format!("{}|{:?}", bar_state.tool_id, bar_state.controls);
+    if last_controls.as_deref() == Some(controls_key.as_str()) {
+        return;
+    }
+    *last_controls = Some(controls_key);
     let slint_controls: Vec<ToolOptionControlData> = bar_state.controls.iter().map(|c| {
         use crate::modal_tool::ToolOptionKind;
         match &c.kind {
@@ -18160,13 +18803,13 @@ fn sync_sketch_canvas_to_slint(
         return;
     }
 
-    let cur_part: String = ui.get_sketch_canvas_part_name().into();
-    if cur_part != state.part_name {
-        ui.set_sketch_canvas_part_name(state.part_name.as_str().into());
+    let part_name = super::display_text::shown_line(&state.part_name);
+    if ui.get_sketch_canvas_part_name() != part_name {
+        ui.set_sketch_canvas_part_name(part_name);
     }
-    let cur_sk: String = ui.get_sketch_canvas_sketch_name().into();
-    if cur_sk != state.sketch_name {
-        ui.set_sketch_canvas_sketch_name(state.sketch_name.as_str().into());
+    let sketch_name = super::display_text::shown_line(&state.sketch_name);
+    if ui.get_sketch_canvas_sketch_name() != sketch_name {
+        ui.set_sketch_canvas_sketch_name(sketch_name);
     }
     let cur_solve: String = ui.get_sketch_canvas_solve_state().into();
     if cur_solve != state.solve_state {
@@ -18175,9 +18818,9 @@ fn sync_sketch_canvas_to_slint(
     if ui.get_sketch_canvas_free_dof() != state.free_dof {
         ui.set_sketch_canvas_free_dof(state.free_dof);
     }
-    let cur_detail: String = ui.get_sketch_canvas_status_detail().into();
-    if cur_detail != state.status_detail {
-        ui.set_sketch_canvas_status_detail(state.status_detail.as_str().into());
+    let status_detail = super::display_text::shown_block(&state.status_detail);
+    if ui.get_sketch_canvas_status_detail() != status_detail {
+        ui.set_sketch_canvas_status_detail(status_detail);
     }
 
     // The row models only when their content changed. Replacing a model
@@ -18282,9 +18925,9 @@ fn sync_toast_undo_to_slint(
     }
     if !state.visible { return; }
 
-    let cur_msg: String = ui.get_toast_undo_message().into();
-    if cur_msg != state.message {
-        ui.set_toast_undo_message(state.message.as_str().into());
+    let message = super::display_text::shown_line(&state.message);
+    if ui.get_toast_undo_message() != message {
+        ui.set_toast_undo_message(message);
     }
     let cur_short: String = ui.get_toast_undo_shortcut().into();
     if cur_short != state.undo_shortcut {
@@ -18392,10 +19035,13 @@ struct UiSyncMemo {
     explorer_pulse: u32,
     properties_pulse: u32,
     command_bar_pulse: u32,
+    assets_pulse: u32,
     find_pulse: u32,
     /// Explorer / Properties / Output visibility as last reconciled.
     panels: Option<[bool; 3]>,
     settings_pushed: bool,
+    /// The saved identities as last pushed (name, short key, active).
+    identities: Option<Vec<(String, String, bool)>>,
 }
 
 /// "Universe > Space" for a Space path, the way the File menu lists it.
@@ -18505,9 +19151,9 @@ fn insert_row(row: &super::insert_classes::InsertClassDescriptor) -> InsertClass
     InsertClassData {
         class_name: row.class_name.as_str().into(),
         category: row.category.as_str().into(),
-        display: row.display.as_str().into(),
+        display: super::display_text::shown_line(&row.display),
         show_header: row.show_header,
-        section: row.section.as_str().into(),
+        section: super::display_text::shown_line(&row.section),
     }
 }
 
@@ -18647,8 +19293,9 @@ fn sync_bevy_to_slint(
         if perf.should_throttle(10) { return; }
     }
 
-    // Entity count
-    let entity_count = instance_query.iter().count();
+    // Entity count, summed over tables: `Entity` and `With` are decided per
+    // archetype, so the size hint is exact.
+    let entity_count = instance_query.iter().size_hint().0;
     
     // Get mutable reference to state
     let Some(mut state) = state else { return };
@@ -18671,7 +19318,7 @@ fn sync_bevy_to_slint(
     // dialog's results.
     if state.show_insert_object_dialog {
         state.show_insert_object_dialog = false;
-        ui.set_insert_target_name(state.insert_target_name.as_str().into());
+        ui.set_insert_target_name(super::display_text::shown_line(&state.insert_target_name));
         ui.set_insert_search_query(slint::SharedString::default());
         ui.set_insert_results(insert_results_model(ui, ""));
         ui.set_show_insert_object_dialog(true);
@@ -18686,6 +19333,18 @@ fn sync_bevy_to_slint(
     if state.focus_properties_filter_pulse != ui_memo.properties_pulse {
         ui_memo.properties_pulse = state.focus_properties_filter_pulse;
         ui.invoke_focus_properties_filter();
+    }
+
+    // ── Terrain panel request ──
+    // `show_terrain_editor` asks for the Terrain tab (Generate, or `t` with no
+    // terrain); it is not a state. Mirrored into Slint's `show-terrain-editor`,
+    // which only Rust ever cleared, it held the left dock open
+    // (`show-explorer || show-assets || show-terrain-editor`), so View >
+    // Explorer and Ctrl+1 could no longer hide it.
+    if state.show_terrain_editor {
+        state.show_terrain_editor = false;
+        state.show_explorer = true;
+        ui.set_left_tab_index(4);
     }
 
     // ── Explorer / Properties / Output visibility ──
@@ -18717,6 +19376,12 @@ fn sync_bevy_to_slint(
         ui.set_show_command_bar(!ui.get_show_command_bar());
     }
 
+    // ── Assets panel (Ctrl+4) ──
+    if state.toggle_assets_pulse != ui_memo.assets_pulse {
+        ui_memo.assets_pulse = state.toggle_assets_pulse;
+        ui.set_show_assets(!ui.get_show_assets());
+    }
+
     // ── Find & Replace (Ctrl+F) ──
     if state.open_find_pulse != ui_memo.find_pulse {
         ui_memo.find_pulse = state.open_find_pulse;
@@ -18736,7 +19401,7 @@ fn sync_bevy_to_slint(
                 .recent_spaces
                 .iter()
                 .map(|path| RecentSpaceEntry {
-                    label: recent_space_label(path).into(),
+                    label: super::display_text::shown_line(&recent_space_label(path)),
                     path: path.as_str().into(),
                 })
                 .collect();
@@ -18745,17 +19410,18 @@ fn sync_bevy_to_slint(
     }
 
     // Boolean flags - only set when changed
-    if ui.get_show_exit_confirmation() != state.show_exit_confirmation {
-        ui.set_show_exit_confirmation(state.show_exit_confirmation);
+    // The exit confirmation is a request, like Insert Object's above: Rust
+    // asks, Slint owns the answer. Mirroring the flag made Cancel (which
+    // clears only Slint's copy) bring the dialog back on the next tick.
+    if state.show_exit_confirmation {
+        state.show_exit_confirmation = false;
+        ui.set_show_exit_confirmation(true);
     }
     if ui.get_has_unsaved_changes() != state.has_unsaved_changes {
         ui.set_has_unsaved_changes(state.has_unsaved_changes);
     }
     if ui.get_show_network_panel() != state.show_network_panel {
         ui.set_show_network_panel(state.show_network_panel);
-    }
-    if ui.get_show_terrain_editor() != state.show_terrain_editor {
-        ui.set_show_terrain_editor(state.show_terrain_editor);
     }
     let has_terrain = !terrain.roots.is_empty();
     if ui.get_has_terrain() != has_terrain {
@@ -18858,9 +19524,14 @@ fn sync_bevy_to_slint(
     } else {
         ("Guest".to_string(), "Logged out", "Local-first")
     };
+    // All three: a failed or offline sign-in changes the status under the
+    // same name ("Guest").
+    let account_name = super::display_text::bound_line(&account_name);
     let current_account: String = ui.get_account_name().into();
-    if current_account != account_name {
-        ui.set_account_name(account_name.into());
+    let current_status: String = ui.get_account_status().into();
+    let current_sync: String = ui.get_sync_status().into();
+    if current_account != account_name || current_status != account_status || current_sync != sync_status {
+        ui.set_account_name(super::display_text::shown_line(&account_name));
         ui.set_account_status(account_status.into());
         ui.set_sync_status(sync_status.into());
     }
@@ -18872,15 +19543,24 @@ fn sync_bevy_to_slint(
                 .and_then(|a| a.user.as_ref())
                 .map(|u| u.username.clone())
                 .unwrap_or_default();
-            let identities: Vec<crate::ui::slint_ui::SavedIdentityData> = settings.saved_identities.iter().map(|i| {
-                crate::ui::slint_ui::SavedIdentityData {
-                    username: i.username.clone().into(),
-                    public_key_short: i.public_key_short.clone().into(),
-                    active: i.username == active_username,
-                }
-            }).collect();
-            let model = slint::ModelRc::new(slint::VecModel::from(identities));
-            ui.set_saved_identities(model);
+            // Pushed when the list changes, not every tick: a new model
+            // rebuilds every row, so a click on "Switch Account" that landed
+            // between press and release went to a row that no longer existed.
+            let key: Vec<(String, String, bool)> = settings.saved_identities.iter()
+                .map(|i| (i.username.clone(), i.public_key_short.clone(), i.username == active_username))
+                .collect();
+            if ui_memo.identities.as_ref() != Some(&key) {
+                ui_memo.identities = Some(key);
+                let identities: Vec<crate::ui::slint_ui::SavedIdentityData> = settings.saved_identities.iter().map(|i| {
+                    crate::ui::slint_ui::SavedIdentityData {
+                        username: i.username.clone().into(),
+                        public_key_short: i.public_key_short.clone().into(),
+                        active: i.username == active_username,
+                    }
+                }).collect();
+                let model = slint::ModelRc::new(slint::VecModel::from(identities));
+                ui.set_saved_identities(model);
+            }
         }
     }
 
@@ -18972,7 +19652,12 @@ fn sync_bevy_to_slint(
             state.last_output_revision = output.revision;
             state.last_output_filter = filter_hash;
             let filters = super::output_rows::Filters { source: &source_filter, search: &search, levels };
-            let built = super::output_rows::build(&output.entries, &filters, &super::output_rows::expanded_ids());
+            let built = super::output_rows::build_paged(
+                &output.entries,
+                &filters,
+                &super::output_rows::expanded_ids(),
+                &super::output_rows::row_pages(),
+            );
             let rows: Vec<OutputRow> = built.rows.into_iter().map(|r| OutputRow {
                 id: r.id as i32,
                 kind: r.kind.into(),
@@ -18988,6 +19673,10 @@ fn sync_bevy_to_slint(
                 line: r.line,
                 stack: r.stack.into(),
                 expanded: r.expanded,
+                more: r.more,
+                body: r.body.into(),
+                page: r.page,
+                pages: r.pages,
             }).collect();
             ui.set_output_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
             ui.set_output_count_info(built.counts[0]);
@@ -19044,8 +19733,20 @@ pub fn reset_explorer_for_space_reload(world: &mut World) {
     // The undo history's steps name the unloaded Space's entities; undoing
     // one after the reload would act on objects that no longer exist. The
     // History panel empties with it.
+    let mut undo_sequence = None;
     if let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() {
         undo.clear();
+        undo_sequence = Some(undo.sequence());
+    }
+    // The title asterisk and the exit prompt compare the stack's push counter
+    // with the value recorded at the last snapshot, and `clear` leaves the
+    // counter alone: edits made in the outgoing Space would still read as
+    // unsaved in the Space that just opened, whose history and git state start
+    // clean. (Anything not yet on disk went out in `persist_pending_edits`.)
+    if let (Some(sequence), Some(mut studio)) = (undo_sequence, world.get_resource_mut::<StudioState>()) {
+        studio.saved_undo_sequence = sequence;
+        studio.has_unsaved_changes = false;
+        studio.terrain_unsaved_warned = false;
     }
     if let Some(sm) = world.get_resource::<BevySelectionManager>() {
         sm.0.write().clear();
@@ -19054,8 +19755,35 @@ pub fn reset_explorer_for_space_reload(world: &mut World) {
         es.selected = SelectedItem::None;
         es.entity_id_cache.clear();
         es.expanded_entities.clear();
+        // Row ids are reassigned on every sync, so the shift-click anchor and
+        // the pending scroll target name nothing in the new Space, and a
+        // Workspace paging window grown in the old one would apply to it.
+        es.last_selected_node_id = None;
+        es.pending_scroll_target_entity = None;
+        es.page_windows.clear();
         es.dirty = true;
         es.needs_immediate_sync = true;
+    }
+    // Find's hits are the outgoing Space's entities.
+    if let Some(mut find) = world.get_resource_mut::<FindState>() {
+        find.hits.clear();
+        find.current = -1;
+    }
+    // The Asset Manager rescans only on a watcher event or when a list is
+    // empty, so the new Space would list the old one's files until something
+    // in it changed on disk.
+    if let Some(mut assets) = world.get_resource_mut::<AssetManagerState>() {
+        assets.cache_stale = true;
+        assets.dirty = true;
+    }
+    // Data > Overlay tints parts by name from a Dataset of the outgoing Space.
+    // Left active it would tint whichever parts of the new Space share a name.
+    if let Some(mut overlay) = world.get_resource_mut::<DataOverlay>() {
+        if overlay.active || !overlay.values.is_empty() {
+            overlay.active = false;
+            overlay.values.clear();
+            overlay.rev += 1;
+        }
     }
 }
 
@@ -19149,9 +19877,9 @@ fn push_model_picker_rows(
         };
 
         rows.push(WorkshopModelEntry {
-            name: model.display_name().into(),
+            name: super::display_text::shown_line(&model.display_name()),
             provider: provider.label().into(),
-            tagline: model.tagline().into(),
+            tagline: super::display_text::shown_line(&model.tagline()),
             price: price.into(),
             section_start,
             key_missing: global_settings
@@ -19230,9 +19958,9 @@ impl WorkshopAgentStatus {
 
     fn push(&self, ui: &StudioWindow) {
         ui.set_workshop_agent_busy(self.busy);
-        ui.set_workshop_agent_activity(self.activity.as_str().into());
+        ui.set_workshop_agent_activity(super::display_text::shown_line(&self.activity));
         ui.set_workshop_pending_approvals(self.pending_approvals);
-        let queued: Vec<slint::SharedString> = self.queued.iter().map(|q| q.as_str().into()).collect();
+        let queued: Vec<slint::SharedString> = self.queued.iter().map(|q| super::display_text::shown_line(q)).collect();
         ui.set_workshop_queued_messages(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(queued))));
     }
 }
@@ -19303,8 +20031,11 @@ fn sync_workshop_to_slint(
             .is_some(),
     };
     ui.set_workshop_chat_key_valid(chat_key_valid);
+    let key_wait = global_settings.as_ref().and_then(|g| g.key_wait_text(model.provider()));
     ui.set_workshop_chat_key_hint(if chat_key_valid {
         slint::SharedString::default()
+    } else if let Some(wait) = key_wait {
+        wait.into()
     } else {
         format!(
             "{} needs your {} API key.",
@@ -19324,7 +20055,7 @@ fn sync_workshop_to_slint(
         global_settings.as_ref().map(|g| g.workshop_auto_approve).unwrap_or(false),
     );
     ui.set_workshop_pipeline_state(pipeline.state_string().into());
-    ui.set_workshop_product_name(pipeline.product_name.as_str().into());
+    ui.set_workshop_product_name(super::display_text::shown_line(&pipeline.product_name));
     ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
     ui.set_workshop_estimated_cost(pipeline.format_cost().into());
 
@@ -19433,6 +20164,7 @@ fn workshop_row_signature(msg: &crate::workshop::ChatMessage) -> u64 {
     msg.mcp_status.as_ref().map(|s| s.to_slint_string()).hash(&mut h);
     msg.tool_result.as_ref().map(|r| r.len()).hash(&mut h);
     msg.tool_input.is_some().hash(&mut h);
+    msg.input_digest.hash(&mut h);
     msg.image_path.hash(&mut h);
     msg.model_used.hash(&mut h);
     h.finish()
@@ -19460,11 +20192,44 @@ fn workshop_row(msg: &crate::workshop::ChatMessage) -> ChatMessage {
     // What a tool row opens to. Agentic calls carry structured input; the
     // ideation pipeline's step cards carry only their content, which is still
     // what their approval card should show.
-    let tool_input = match &msg.tool_input {
-        Some(serde_json::Value::Object(fields)) if fields.is_empty() => String::new(),
-        Some(input) => clip_for_display(&serde_json::to_string_pretty(input).unwrap_or_default(), 4_000),
-        None if is_tool => clip_for_display(&msg.content, 4_000),
-        None => String::new(),
+    //
+    // `card_review` decides what a card shows and whether Run works: a call that
+    // runs code, deletes or goes online is shown whole (or refused when too long
+    // to review), dangerous characters are shown as text, and the same rule is
+    // applied again when the click arrives. A row that is not waiting for a click
+    // is clipped to keep layout light; it was shown whole when it was approved.
+    let (tool_input, review_note, run_blocked) = match &msg.tool_input {
+        Some(serde_json::Value::Object(fields)) if fields.is_empty() => {
+            (String::new(), String::new(), false)
+        }
+        Some(input) => {
+            use crate::workshop::card_review;
+            let class = msg
+                .mcp_endpoint
+                .as_deref()
+                .and_then(|name| eustress_tools::capability::capability_of_call(name, input));
+            let review = card_review::review(input, class);
+            if msg.mcp_status == Some(crate::workshop::McpCommandStatus::Pending) {
+                let mut note = review.note;
+                let blocked = match card_review::approval_check(input, class, msg.input_digest.as_deref()) {
+                    Ok(()) => false,
+                    Err(refusal) => {
+                        if refusal != card_review::Refusal::TooLong {
+                            if !note.is_empty() {
+                                note.push('\n');
+                            }
+                            note.push_str(refusal.message());
+                        }
+                        true
+                    }
+                };
+                (review.text, note, blocked)
+            } else {
+                (clip_for_display(&review.text, 4_000), String::new(), false)
+            }
+        }
+        None if is_tool => (clip_for_display(&msg.content, 4_000), String::new(), false),
+        None => (String::new(), String::new(), false),
     };
 
     ChatMessage {
@@ -19472,15 +20237,21 @@ fn workshop_row(msg: &crate::workshop::ChatMessage) -> ChatMessage {
         // handlers look messages up by id.
         id: msg.id as i32,
         role: msg.role.to_slint_string().into(),
-        content: styled_content.into(),
+        // Notices and errors draw `content` as wrapped text; other rows draw
+        // `blocks` and copy `content` whole.
+        content: if matches!(msg.role.to_slint_string(), "notice" | "error") {
+            super::display_text::shown_block(&styled_content)
+        } else {
+            styled_content.into()
+        },
         // "7:59 PM", not the RFC 3339 string in UTC the message stores.
         timestamp: workshop_display_time(&msg.timestamp).into(),
-        mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
+        mcp_endpoint: super::display_text::shown_line(msg.mcp_endpoint.as_deref().unwrap_or_default()),
         mcp_method: msg.mcp_method.as_deref().unwrap_or("").into(),
         mcp_status: msg.mcp_status.as_ref().map(|s| s.to_slint_string()).unwrap_or("").into(),
         artifact_path: msg.artifact_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default().into(),
         artifact_type: msg.artifact_type.as_ref().map(|t| t.to_slint_string()).unwrap_or("").into(),
-        entity_class: entity_class.into(),
+        entity_class: super::display_text::shown_line(&entity_class),
         entity_name: entity_name.into(),
         entity_icon,
         // Slint resolves `@image-url` at compile time only, so a runtime
@@ -19500,8 +20271,10 @@ fn workshop_row(msg: &crate::workshop::ChatMessage) -> ChatMessage {
         // Split the reply into prose and tables so the row can draw a grid.
         // Tool rows never show a body, so they skip the parse.
         blocks: if is_tool { Default::default() } else { chat_blocks_for(&msg.content) },
-        tool_summary: msg.tool_input.as_ref().map(workshop_tool_summary).unwrap_or_default().into(),
+        tool_summary: super::display_text::shown_line(&msg.tool_input.as_ref().map(workshop_tool_summary).unwrap_or_default()),
         tool_input: tool_input.into(),
+        review_note: review_note.into(),
+        run_blocked,
         tool_result: msg
             .tool_result
             .as_deref()
@@ -19572,13 +20345,17 @@ fn clip_line(s: &str, max: usize) -> String {
 /// text stays in the conversation and still reaches the model; this only keeps
 /// one enormous result from stalling the panel's layout.
 fn clip_for_display(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
+    // At most `max` characters, and at most what one Text can draw: a
+    // count of characters alone lets 4,000 line breaks through
+    // (`display_text`).
+    let clipped = match s.char_indices().nth(max) {
         Some((cut, _)) => {
             let hidden = s[cut..].chars().count();
             format!("{}\n\n… {hidden} more characters not shown", &s[..cut])
         }
         None => s.to_string(),
-    }
+    };
+    super::display_text::bound_block(&clipped)
 }
 
 /// PNG bytes for the image currently sitting in the Workshop attach strip,
@@ -19784,13 +20561,13 @@ fn sync_workshop_sessions_to_slint(
             .unwrap_or_default();
         ConversationSummary {
             session_id: s.session_id.as_str().into(),
-            title: s.title.as_str().into(),
-            product_name: s.product_name.as_str().into(),
+            title: super::display_text::shown_line(&s.title),
+            product_name: super::display_text::shown_line(&s.product_name),
             state: s.pipeline_state.as_str().into(),
             message_count: s.entry_count as i32,
             cost: format!("${:.2}", s.total_cost).into(),
             last_active: last_active.into(),
-            preview: s.first_message.as_str().into(),
+            preview: super::display_text::shown_line(&s.first_message),
         }
     }).collect();
 
@@ -20533,7 +21310,7 @@ fn refresh_insert_menu(
     let context = super::insert_classes::context_rows(suggest_for, &title, &menu.catalog, recent);
     let rows: Vec<InsertClassData> = context.iter().map(insert_row).collect();
     ui.set_insert_context(slint::ModelRc::new(slint::VecModel::from(rows)));
-    ui.set_insert_target_name(label.into());
+    ui.set_insert_target_name(super::display_text::shown_line(&label));
     if ui.get_show_insert_object_dialog() && ui.get_insert_search_query().trim().is_empty() {
         ui.set_insert_results(insert_results_model(ui, ""));
     }
@@ -20547,7 +21324,7 @@ fn refresh_insert_menu(
 struct ThemeInitialized(bool);
 
 /// Read one color token from a parsed palette, falling back to the given base
-/// color (the Modern palette) when the theme omits it or the value is bad.
+/// color (the Voltec palette) when the theme omits it or the value is bad.
 fn color_tok(
     p: &crate::studio_theme::ThemePalette,
     key: &str,
@@ -20568,7 +21345,7 @@ fn len_tok(p: &crate::studio_theme::ThemePalette, key: &str, base: f32) -> f32 {
         .unwrap_or(base)
 }
 
-/// Compose a `ThemeData` from a parsed palette on top of `base` (the Modern
+/// Compose a `ThemeData` from a parsed palette on top of `base` (the Voltec
 /// preset), filling any token the palette omits. This literal is EXHAUSTIVE by
 /// design — a token added to `theme.slint`'s `ThemeData` struct without a line
 /// here is a compile error, which keeps the palette and the loader in lockstep.
@@ -20673,9 +21450,9 @@ fn palette_to_theme_data(
 }
 
 /// Resolve the active theme in `theme_registry`, compose its palette over the
-/// Modern base, overlay the active Mode's accent (if any — architecture
+/// Voltec base, overlay the active Mode's accent (if any — architecture
 /// decision 7: a pure recomposition, never mutating the stored theme), and
-/// push the result live. Falls back to the Modern preset if the active theme
+/// push the result live. Falls back to the Voltec preset if the active theme
 /// id is unknown.
 fn apply_effective_theme(
     ctx: &SlintUiState,
@@ -20683,7 +21460,7 @@ fn apply_effective_theme(
     mode_registry: Option<&crate::studio_modes::ModeRegistry>,
 ) {
     let theme = ctx.window.global::<Theme>();
-    let base = theme.get_preset_modern();
+    let base = theme.get_preset_voltec();
     let mut td = match theme_registry.find(&theme_registry.active_id) {
         Some(p) => palette_to_theme_data(p, &base),
         None => base.clone(),
@@ -20696,7 +21473,7 @@ fn apply_effective_theme(
         }
     }
     theme.set_data(td.clone());
-    theme.set_modern(theme_registry.active_id == "modern"); // legacy UI mirror
+    theme.set_voltec(theme_registry.active_id == "voltec"); // legacy UI mirror
 
     // Refresh ribbon-tab colors against the NEW palette immediately — without
     // this, switching Theme (not Mode) would leave tab-pill colors stale
@@ -20765,7 +21542,7 @@ fn push_ribbon_tabs(
         for tab in m.effective_custom_tabs(submode_id) {
             rows.push(RibbonTabData {
                 id: tab.id.clone().into(),
-                name: tab.name.clone().into(),
+                name: super::display_text::shown_line(&tab.name),
                 color: resolve_custom_tab_color(&tab.color, td),
             });
         }
@@ -20832,7 +21609,7 @@ fn sync_theme_list_to_slint(
     }
     pushed.0 = registry.signature;
 
-    let base = ctx.window.global::<Theme>().get_preset_modern();
+    let base = ctx.window.global::<Theme>().get_preset_voltec();
     let rows: Vec<ThemeEntry> = registry
         .themes
         .iter()
@@ -20840,8 +21617,8 @@ fn sync_theme_list_to_slint(
             let td = palette_to_theme_data(p, &base);
             ThemeEntry {
                 id: p.id.clone().into(),
-                name: p.name.clone().into(),
-                description: p.description.clone().into(),
+                name: super::display_text::shown_line(&p.name),
+                description: super::display_text::shown_line(&p.description),
                 swatch_bg: td.background_primary,
                 swatch_accent: td.accent_eustress,
                 builtin: p.builtin,
@@ -20894,27 +21671,8 @@ fn ribbon_tab_color(id: &str, td: &ThemeData) -> slint::Color {
 /// `floating_windows::PanelType::from_panel_id`'s id set; falls back to a
 /// title-cased echo of the id for any panel not in that registry (keeps
 /// detach from silently no-op'ing on an unrecognized id).
-/// The Studio window's panel layout, as the Layout menu saves and imports it:
-/// which panels show, how wide the side docks are, the Output height, the
-/// selected dock tabs, and the preset it started from.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PanelLayout {
-    show_explorer: bool,
-    show_properties: bool,
-    show_output: bool,
-    show_toolbox: bool,
-    show_assets: bool,
-    show_history: bool,
-    show_soul_panel: bool,
-    left_panel_width: f32,
-    right_panel_width: f32,
-    output_height: f32,
-    left_tab_index: i32,
-    right_tab_index: i32,
-    #[serde(default)]
-    preset: i32,
-}
-
+/// The docks' state (`layout_tables::PanelLayout`), read from and applied
+/// to the window.
 impl PanelLayout {
     fn read(ui: &StudioWindow) -> Self {
         Self {
@@ -20942,12 +21700,112 @@ impl PanelLayout {
         ui.set_show_assets(self.show_assets);
         ui.set_show_history(self.show_history);
         ui.set_show_soul_panel(self.show_soul_panel);
-        ui.set_left_panel_width(self.left_panel_width.max(120.0));
-        ui.set_right_panel_width(self.right_panel_width.max(120.0));
-        ui.set_output_height(self.output_height.max(60.0));
+        ui.set_left_panel_width(self.left_panel_width.max(super::layout_tables::MIN_LEFT_WIDTH));
+        ui.set_right_panel_width(self.right_panel_width.max(super::layout_tables::MIN_RIGHT_WIDTH));
+        ui.set_output_height(self.output_height.max(super::layout_tables::MIN_OUTPUT_HEIGHT));
         ui.set_left_tab_index(self.left_tab_index.max(0));
         ui.set_right_tab_index(self.right_tab_index.max(0));
         ui.set_current_layout_preset(self.preset);
+    }
+}
+
+use super::layout_tables::PanelLayout;
+
+/// The docks follow the mode and discipline (`layout_tables`). On a switch
+/// the layout the user left the old pair in is remembered, and the new
+/// pair's is applied: the user's own, else the discipline's or mode's table,
+/// then the pins. A layout the user changes and leaves for a moment is
+/// remembered too, so it survives a restart. The dock pin buttons and the
+/// Layout menu's reset arrive as requests.
+fn follow_mode_layout(
+    mut changes: MessageReader<crate::studio_modes::ModeChanged>,
+    registry: Option<Res<crate::studio_modes::ModeRegistry>>,
+    settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut active: ResMut<super::layout_tables::ActiveLayoutKey>,
+    mut pending: Local<Option<(String, String)>>,
+    mut watch: Local<(Option<PanelLayout>, u32)>,
+) {
+    use super::layout_tables as lt;
+    if let Some(change) = changes.read().last() {
+        *pending = Some((change.mode.clone(), change.discipline.clone()));
+    }
+    let (Some(ctx), Some(registry), Some(mut settings)) = (slint_context.as_ref(), registry, settings) else {
+        return;
+    };
+    let ui = &ctx.window;
+    let apply = |mode: &str, discipline: &str, remembered: Option<&PanelLayout>, pinned: &[String]| {
+        let now = PanelLayout::read(ui);
+        let table = registry.find(mode).and_then(|m| m.effective_layout(discipline)).map(lt::view);
+        let (state, notes) = lt::resolve(remembered, table.as_ref(), &now, pinned);
+        for note in notes {
+            warn!("Layout {}: {note}", lt::layout_key(mode, discipline));
+        }
+        state.apply(ui);
+        state
+    };
+
+    // A mode or discipline switch.
+    if let Some((mode, discipline)) = pending.take() {
+        let key = lt::layout_key(&mode, &discipline);
+        if active.key.as_deref() != Some(key.as_str()) {
+            if let Some(old) = active.key.take() {
+                let now = PanelLayout::read(ui);
+                if active.applied.as_ref() != Some(&now) && settings.layout_state_by_key.get(&old) != Some(&now) {
+                    settings.layout_state_by_key.insert(old, now);
+                }
+            }
+            let remembered = settings.layout_state_by_key.get(&key).cloned();
+            let state = apply(&mode, &discipline, remembered.as_ref(), &settings.pinned_panels);
+            *active = lt::ActiveLayoutKey { key: Some(key), mode, discipline, applied: Some(state) };
+            *watch = (None, 0);
+        }
+    }
+
+    // The dock pin buttons and the Layout menu's reset.
+    for request in lt::take_requests() {
+        match request {
+            lt::LayoutRequest::TogglePin(panel) => {
+                if !lt::toggle_pin(&mut settings.pinned_panels, &panel) {
+                    warn!("Layout: '{panel}' has no dock to pin it in");
+                }
+            }
+            lt::LayoutRequest::ResetToModeLayout => {
+                let Some(key) = active.key.clone() else { continue };
+                settings.layout_state_by_key.remove(&key);
+                let (mode, discipline) = (active.mode.clone(), active.discipline.clone());
+                let state = apply(&mode, &discipline, None, &settings.pinned_panels);
+                active.applied = Some(state);
+                *watch = (None, 0);
+            }
+        }
+    }
+
+    // Remember a layout the user changed once it has settled (half a
+    // second), not on every frame of a resize drag.
+    if let Some(key) = active.key.clone() {
+        let now = PanelLayout::read(ui);
+        if watch.0.as_ref() != Some(&now) {
+            *watch = (Some(now), 0);
+        } else if watch.1 < 30 {
+            watch.1 += 1;
+            if watch.1 == 30
+                && active.applied.as_ref() != Some(&now)
+                && settings.layout_state_by_key.get(&key) != Some(&now)
+            {
+                settings.layout_state_by_key.insert(key, now);
+            }
+        }
+    }
+
+    // The pin buttons show whether the dock's active panel is pinned.
+    let left = lt::tab_pinned(&lt::LEFT_TABS, ui.get_left_tab_index(), &settings.pinned_panels);
+    if ui.get_left_active_pinned() != left {
+        ui.set_left_active_pinned(left);
+    }
+    let right = lt::tab_pinned(&lt::RIGHT_TABS, ui.get_right_tab_index(), &settings.pinned_panels);
+    if ui.get_right_active_pinned() != right {
+        ui.set_right_active_pinned(right);
     }
 }
 
@@ -21061,8 +21919,8 @@ fn sync_active_mode_to_slint(
     // compile-time presets by the active-theme mirror so it's the un-overlaid
     // brand accent, not the currently-active mode's overlaid one.
     let theme_global = ctx.window.global::<Theme>();
-    let base_accent = if theme_global.get_modern() {
-        theme_global.get_preset_modern().accent_eustress
+    let base_accent = if theme_global.get_voltec() {
+        theme_global.get_preset_voltec().accent_eustress
     } else {
         theme_global.get_preset_classic().accent_eustress
     };
@@ -21082,7 +21940,7 @@ fn sync_active_mode_to_slint(
         .iter()
         .map(|m| ModeData {
             id: m.id.clone().into(),
-            name: m.name.clone().into(),
+            name: super::display_text::shown_line(&m.name),
             icon_id: m.icon.clone().into(),
             // Only show the expand affordance if at least one submode is
             // visible for the current roles (a mode whose submodes are all
@@ -21120,7 +21978,7 @@ fn sync_active_mode_to_slint(
                     SubmodeData {
                         mode_id: m.id.clone().into(),
                         id: sm.id.clone().into(),
-                        name: sm.name.clone().into(),
+                        name: super::display_text::shown_line(&sm.name),
                         has_submode_color: submode_color.is_some(),
                         submode_color: submode_color.unwrap_or(base_accent),
                         icon_id: sm.icon.clone().unwrap_or_default().into(),
@@ -21137,7 +21995,7 @@ fn sync_active_mode_to_slint(
     // The Mode menu-bar button shows the active mode's name (falls back to
     // "Mode" only if no mode resolves).
     let mode_name = active.map(|m| m.name.clone()).unwrap_or_else(|| "Mode".to_string());
-    ctx.window.set_active_mode_name(mode_name.into());
+    ctx.window.set_active_mode_name(super::display_text::shown_line(&mode_name));
 
     let td = ctx.window.global::<Theme>().get_data();
     push_ribbon_tabs(ctx, active, &registry.active_submode_id, &td);
@@ -21176,7 +22034,7 @@ fn sync_active_mode_to_slint(
                 section_rows.push(CustomTabSectionData {
                     tab_id: tab.id.clone().into(),
                     section_id: section_id.clone().into(),
-                    label: section.name.clone().into(),
+                    label: super::display_text::shown_line(&section.name),
                     tool_count: section.tools.len() as i32,
                 });
                 let section_tint = section_palette[palette_idx % section_palette.len()];
@@ -21351,14 +22209,14 @@ fn sync_plugin_tabs_to_slint(
         sections.push(PluginSectionData {
             tab_id: plugins_tab.id.clone().into(),
             section_id: section.id.clone().into(),
-            label: section.label.clone().into(),
+            label: super::display_text::shown_line(&section.label),
         });
         for button in btns {
             buttons.push(PluginButtonData {
                 tab_id: plugins_tab.id.clone().into(),
                 section_id: section.id.clone().into(),
-                label: button.label.clone().into(),
-                tooltip: button.tooltip.clone().unwrap_or_default().into(),
+                label: super::display_text::shown_line(&button.label),
+                tooltip: super::display_text::shown_line(button.tooltip.as_deref().unwrap_or_default()),
                 action_id: button.action_id.clone().into(),
             });
         }
@@ -22687,7 +23545,8 @@ fn sync_terrain_materials_to_slint(
                 let [r, g, b] = def.swatch_srgb();
                 TerrainMaterialSlotData {
                     slot_id: i32::from(slot),
-                    name: def.name.clone().into(),
+                    // Shown only; picking sends the slot.
+                    name: crate::ui::display_text::shown_line(&def.name),
                     swatch: slint::Color::from_rgb_u8(byte(r), byte(g), byte(b)),
                     custom: slot >= eustress_common::terrain::FIRST_CUSTOM_MATERIAL_SLOT,
                 }
@@ -22712,6 +23571,8 @@ fn sync_terrain_materials_to_slint(
     let name = slots
         .get(brush.paint_material)
         .map_or_else(|| format!("Material {}", brush.paint_material), |def| def.name.clone());
+    // Bounded before the comparison, so an unchanged name is not set again.
+    let name = crate::ui::display_text::bound_line(&name);
     let current: String = ui.get_terrain_paint_material_name().into();
     if current != name {
         ui.set_terrain_paint_material_name(name.into());
@@ -22982,13 +23843,35 @@ fn update_ui_performance(
 /// pads and truncates ragged rows to the header width, which is what lets the
 /// Slint side index `r * columns + c` without a bounds check.
 fn chat_blocks_for(content: &str) -> slint::ModelRc<ChatBlock> {
+    use super::display_text::{bound_block, bound_line, drawn_lines};
     use crate::workshop::markdown::{parse_blocks, Block};
 
-    let blocks: Vec<ChatBlock> = parse_blocks(content)
-        .into_iter()
-        .map(|b| match b {
-            Block::Text(t) => ChatBlock {
-                kind: "text".into(),
+    // What one reply draws at most (`display_text`): each block bounded on
+    // its own, a table to its first rows and columns with each cell one line
+    // (a markdown cell is one line), and the reply to a total. A note says
+    // what is left out; the copy button still copies the whole reply.
+    const REPLY_LINES: usize = 1_200;
+    const TABLE_ROWS: usize = 200;
+    const TABLE_COLUMNS: usize = 16;
+
+    let note = |text: String| ChatBlock {
+        kind: "text".into(),
+        text: text.into(),
+        table: ChatTable::default(),
+    };
+    let plural = |n: usize, one: &str| format!("{n} more {one}{}", if n == 1 { "" } else { "s" });
+
+    let parsed = parse_blocks(content);
+    let total = parsed.len();
+    let mut drawn = 0;
+    let mut blocks: Vec<ChatBlock> = Vec::new();
+    for (i, b) in parsed.into_iter().enumerate() {
+        if drawn >= REPLY_LINES {
+            blocks.push(note(format!("… {} of this reply not shown", plural(total - i, "part"))));
+            break;
+        }
+        match b {
+            Block::Text(t) => {
                 // Flatten AFTER splitting, never before: the split keys on
                 // pipes and dashes, and flattening first would be one more pass
                 // that could disturb them. Flattening at all is required because
@@ -22996,51 +23879,61 @@ fn chat_blocks_for(content: &str) -> slint::ModelRc<ChatBlock> {
                 // `content` was already flattened, so skipping it here would
                 // bring the `**bold**` markers back on Windows where Segoe UI
                 // has no math-alphanumeric glyphs.
-                text: flatten_markdown_for_display(&t).into(),
-                table: ChatTable::default(),
-            },
+                let text = bound_block(&flatten_markdown_for_display(&t));
+                drawn += drawn_lines(&text);
+                blocks.push(ChatBlock {
+                    kind: "text".into(),
+                    text: text.into(),
+                    table: ChatTable::default(),
+                });
+            }
             Block::Table(t) => {
-                let columns = t.headers.len();
                 // Cells and headers get the same flattening as prose: a model
                 // reply routinely bolds a header or a total, and an unflattened
                 // `**` inside a grid cell is more obviously wrong than in a
                 // paragraph.
+                let columns = t.headers.len().min(TABLE_COLUMNS);
+                let rows = t.rows.len().min(TABLE_ROWS);
+                let cell = |c: &str| slint::SharedString::from(bound_line(&flatten_markdown_for_display(c)));
                 let cells: Vec<slint::SharedString> = t
                     .rows
                     .iter()
-                    .flat_map(|r| {
-                        r.iter().map(|c| flatten_markdown_for_display(c).into())
-                    })
+                    .take(rows)
+                    .flat_map(|r| r.iter().take(columns).map(|c| cell(c)))
                     .collect();
-                ChatBlock {
+                blocks.push(ChatBlock {
                     kind: "table".into(),
                     text: Default::default(),
                     table: ChatTable {
                         headers: slint::ModelRc::new(slint::VecModel::from(
-                            t.headers
-                                .iter()
-                                .map(|h| {
-                                    slint::SharedString::from(
-                                        flatten_markdown_for_display(h),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
+                            t.headers.iter().take(columns).map(|h| cell(h)).collect::<Vec<_>>(),
                         )),
                         columns: columns as i32,
                         cells: slint::ModelRc::new(slint::VecModel::from(cells)),
                         // 0..n-1 for each axis, so the Slint side iterates real
                         // models rather than relying on an integer being one.
                         row_indices: slint::ModelRc::new(slint::VecModel::from(
-                            (0..t.rows.len() as i32).collect::<Vec<i32>>(),
+                            (0..rows as i32).collect::<Vec<i32>>(),
                         )),
                         col_indices: slint::ModelRc::new(slint::VecModel::from(
                             (0..columns as i32).collect::<Vec<i32>>(),
                         )),
                     },
+                });
+                drawn += rows + 1;
+                let mut left = Vec::new();
+                if t.rows.len() > rows {
+                    left.push(plural(t.rows.len() - rows, "row"));
+                }
+                if t.headers.len() > columns {
+                    left.push(plural(t.headers.len() - columns, "column"));
+                }
+                if !left.is_empty() {
+                    blocks.push(note(format!("… {} not shown", left.join(" and "))));
                 }
             }
-        })
-        .collect();
+        }
+    }
     slint::ModelRc::new(slint::VecModel::from(blocks))
 }
 
@@ -23134,7 +24027,12 @@ fn sync_procurement_to_slint(
             .and_then(|v| options.iter().position(|o| o.id == v.as_str()));
 
         let rfq_refs: Vec<String> = rfqs.iter().map(|row| row.reference.to_string()).collect();
-        let names: Vec<slint::SharedString> = options.iter().map(|o| o.name.clone()).collect();
+        // Display only: the vendor ComboBox selects by INDEX and the id comes
+        // from `manufacturers[i]`, so a shortened name is never what is saved.
+        let names: Vec<slint::SharedString> = options
+            .iter()
+            .map(|o| crate::ui::display_text::shown_line(o.name.as_str()))
+            .collect();
         ui.set_procurement_rfqs(slint::ModelRc::new(slint::VecModel::from(rfqs)));
         ui.set_procurement_manufacturers(slint::ModelRc::new(slint::VecModel::from(options)));
         ui.set_procurement_manufacturer_names(slint::ModelRc::new(slint::VecModel::from(names)));
@@ -23216,7 +24114,7 @@ fn sync_procurement_to_slint(
     ui.set_procurement_rfq_count(orders.rfq_count() as i32);
     ui.set_procurement_order_count(orders.order_count() as i32);
     ui.set_procurement_total_committed(format!("{committed:.2}").into());
-    ui.set_procurement_currency(currency.into());
+    ui.set_procurement_currency(crate::ui::display_text::shown_line(&currency));
 }
 
 fn sync_history_to_slint(
@@ -23256,7 +24154,7 @@ fn sync_history_to_slint(
         HistoryEntry {
             id: i as i32,
             action: structural.into(),
-            description: shown.into(),
+            description: super::display_text::shown_line(&shown),
             timestamp: slint::SharedString::default(),
             // Nothing is current once every step is undone (index 0).
             is_current: current_index > 0 && i == current_index - 1,
@@ -23274,13 +24172,53 @@ fn sync_history_to_slint(
     ui.set_history_current_index(current_index as i32 - 1);
 }
 
+/// The Simulation Settings dialog's time-scale presets: the label it shows and
+/// the multiplier it means. "Custom" is not here; it takes the custom field.
+const SIM_TIME_SCALE_PRESETS: [(&str, f64); 8] = [
+    ("Realtime (1×)", 1.0),
+    ("Realtime", 1.0),
+    ("1 min / sec (60×)", 60.0),
+    ("1 hr / sec (3,600×)", 3_600.0),
+    ("1 day / sec (86,400×)", 86_400.0),
+    ("1 week / sec (604,800×)", 604_800.0),
+    ("1 month / sec (2.63M×)", 2_630_000.0),
+    ("1 year / sec (31.5M×)", 31_536_000.0),
+];
+
+/// The preset whose multiplier is `scale`, else "Custom".
+fn sim_preset_label(scale: f64) -> &'static str {
+    SIM_TIME_SCALE_PRESETS
+        .iter()
+        .find(|(_, s)| (*s - scale).abs() <= scale.abs() * 1e-9)
+        .map_or("Custom", |(label, _)| *label)
+}
+
 /// Sync simulation clock display to the Slint ribbon.
 fn sync_sim_clock_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     sim_clock: Option<Res<eustress_common::simulation::SimulationClock>>,
+    mut dialog_memo: Local<(Option<(u64, u64, u32)>, bool)>,
 ) {
     let Some(ref context) = slint_context else { return };
     let ui = &context.window;
+
+    // The Simulation Settings dialog's fields are Slint properties with their
+    // own defaults, and nothing set them from the clock: reopening it showed
+    // "Realtime / 60 / 10" whatever the clock ran at, and Save wrote those back
+    // over it. While the dialog is closed the fields follow the clock; the
+    // closing edge restores them too, so a cancelled edit does not linger.
+    let dialog_open = ui.get_show_simulation_settings_dialog();
+    if let Some(ref clock) = sim_clock {
+        let key = (clock.time_scale.to_bits(), clock.tick_rate_hz.to_bits(), clock.max_ticks_per_frame);
+        if !dialog_open && (dialog_memo.0 != Some(key) || dialog_memo.1) {
+            dialog_memo.0 = Some(key);
+            ui.set_sim_time_scale_preset(sim_preset_label(clock.time_scale).into());
+            ui.set_sim_custom_time_scale(format!("{}", clock.time_scale).into());
+            ui.set_sim_tick_rate(format!("{}", clock.tick_rate_hz).into());
+            ui.set_sim_max_ticks_per_frame(clock.max_ticks_per_frame.to_string().into());
+        }
+    }
+    dialog_memo.1 = dialog_open;
     if let Some(ref clock) = sim_clock {
         let display = if clock.tick_count == 0 {
             "0.0s | Tick 0".to_string()
@@ -24593,7 +25531,10 @@ fn sync_unified_explorer_to_slint(
                     if !path.is_dir() { continue; }
                     let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
                     if hardcoded_services.contains(name) { continue; }
-                    if !path.join("_service.toml").exists() { continue; }
+                    // DataService shows as soon as its folder exists: its
+                    // Connectors and Datasets live there whether or not the
+                    // service marker has been written.
+                    if !path.join("_service.toml").exists() && name != "DataService" { continue; }
                     let svc_toml = path.join("_service.toml");
                     let icon_name = std::fs::read_to_string(&svc_toml)
                         .ok()
@@ -25228,8 +26169,8 @@ fn mention_entry_to_slint_item(
         // only matter for the current popup — `canonical` is the source of
         // truth for commit.
         id: entry.id.0 as i32,
-        name: entry.name.as_str().into(),
-        qualifier: entry.qualifier.as_str().into(),
+        name: super::display_text::shown_line(&entry.name),
+        qualifier: super::display_text::shown_line(&entry.qualifier),
         canonical: entry.canonical_path.as_str().into(),
         icon: load_service_icon(icon_name),
         kind: entry.kind.as_str().into(),
@@ -25476,6 +26417,8 @@ struct LabelEditState {
 ///   - no Slint text input or modal may be focused (so F2 inside the
 ///     Tag-add field or the EditLabelDialog itself doesn't re-trigger
 ///     this handler — this is the user-asked-about gate)
+///   - during Play, once a label is found, it does not open and says why:
+///     its confirm would be refused (`label_editor_refusal`)
 fn open_label_editor_on_enter(
     keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
     mut raw_keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
@@ -25486,6 +26429,8 @@ fn open_label_editor_on_enter(
     children_q: Query<&bevy::prelude::Children>,
     instances: Query<&eustress_common::classes::Instance>,
     mut label_state: ResMut<LabelEditState>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     use eustress_common::classes::ClassName;
 
@@ -25600,6 +26545,15 @@ fn open_label_editor_on_enter(
     }
 
     if let Some((label_entity, _, text)) = found {
+        // During Play the editor does not open: its confirm writes the Space,
+        // which waits for Stop (`label_editor_refusal`), so the notice the
+        // confirm would give is given now and no dialog is left waiting.
+        let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
+        if let Some(notice) = label_editor_refusal(play_state) {
+            info!("⏎ [label-edit] skip: Play is running");
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            return;
+        }
         label_state.target = Some(label_entity);
         let ui = &ctx.window;
         ui.set_edit_label_text(text.as_str().into());
@@ -25761,6 +26715,8 @@ fn sync_tags_to_slint(
 /// the live Tags/Attributes query joined the signature.
 #[derive(bevy::ecs::system::SystemParam)]
 struct PropertyExtraQueries<'w, 's> {
+    /// The Soul key settings, for the SoulService ApiKey row's mask.
+    soul_keys: Option<Res<'w, crate::soul::GlobalSoulSettings>>,
     /// GUI display component — used to read live GUI element layout when a
     /// GuiElementDisplay-backed entity is selected.
     gui_display: Query<'w, 's, &'static eustress_common::gui::billboard_renderer::GuiElementDisplay>,
@@ -26098,6 +27054,17 @@ fn push_property_rows(ui: &StudioWindow, rows: Vec<PropertyData>) {
     }
     LAST_ROWS_HASH.with(|h| h.set(new_hash));
 
+    // What a row shows and never saves back (`display_text`): its note and
+    // its shown name. The value and the name are edited and keyed on, so
+    // they stay whole.
+    let rows: Vec<PropertyData> = rows
+        .into_iter()
+        .map(|mut r| {
+            r.description = super::display_text::shown_block(&r.description);
+            r.display_name = super::display_text::shown_line(&r.display_name);
+            r
+        })
+        .collect();
     ui.set_entity_properties(slint::ModelRc::from(std::rc::Rc::new(
         slint::VecModel::from(rows),
     )));
@@ -26954,22 +27921,16 @@ fn sync_properties_to_slint(
         }
         add_prop("Service", "TomlPath", service.toml_path.display().to_string(), "string", false);
 
-        // SoulService: show API key — read from settings file on disk
+        // SoulService: the global Anthropic key's mask, never the key, and
+        // never read from a file. The row stays editable: a new key typed
+        // there goes to the credential store.
         if service.class_name == "SoulService" {
-            // Try service TOML properties first, then fall back to soul_settings.json
-            let api_key = service.properties.get("api_key")
-                .map(|v| v.to_display_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    // Read from ~/.eustress_engine/soul_settings.json
-                    let path = dirs::home_dir()
-                        .map(|h| h.join(".eustress_engine").join("soul_settings.json"));
-                    path.and_then(|p| std::fs::read_to_string(p).ok())
-                        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-                        .and_then(|v| v.get("claude_api_key").and_then(|k| k.as_str().map(String::from)))
-                        .unwrap_or_default()
-                });
-            add_prop("API", "ApiKey", api_key, "string", true);
+            let shown = extra_q
+                .soul_keys
+                .as_deref()
+                .map(|g| g.key_placeholder(crate::soul::Provider::Anthropic))
+                .unwrap_or_default();
+            add_prop("API", "ApiKey", shown, "secret", true);
         }
         
         // Display ALL dynamic properties from the TOML file
@@ -26978,6 +27939,14 @@ fn sync_properties_to_slint(
         prop_names.sort();
         
         for prop_name in prop_names {
+            // A SoulService never shows a legacy key property.
+            if service.class_name == "SoulService"
+                && crate::space::service_loader::LEGACY_SOUL_PROPERTIES
+                    .iter()
+                    .any(|legacy| legacy.eq_ignore_ascii_case(prop_name))
+            {
+                continue;
+            }
             if let Some(prop_value) = service.properties.get(prop_name) {
                 add_prop(
                     "Properties",
@@ -27521,51 +28490,9 @@ fn sync_properties_to_slint(
         }
     }
 
-    // Choice lists for the editor camera's Perspective rows
-    // (`camera_property_rows`).
-    {
-        let view_modes: Vec<slint::SharedString> = vec!["3D".into(), "2D".into()];
-        let projections: Vec<slint::SharedString> =
-            vec!["Perspective".into(), "Orthographic".into()];
-        let view_modes = slint::ModelRc::new(slint::VecModel::from(view_modes));
-        let projections = slint::ModelRc::new(slint::VecModel::from(projections));
-        // A SpotLight's or SurfaceLight's Face (`light_panel`).
-        let faces = slint::ModelRc::new(slint::VecModel::from(super::light_panel::face_options()));
-        // An Atmosphere's RenderingMode, a Clouds object's LayerType and
-        // CoverageMode, and the Moon's Phase (`celestial_panel`).
-        let rendering_modes =
-            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::rendering_mode_options()));
-        let layer_types =
-            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_layer_type_options()));
-        let coverage_modes =
-            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_coverage_options()));
-        let moon_phases = slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::moon_phase_options()));
-        let moon_placements =
-            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::moon_placement_options()));
-        let tonemappers = slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::tonemapper_options()));
-        // A Sound's RollOffMode and SoundGroup (`sound_panel`).
-        let rolloff_modes = slint::ModelRc::new(slint::VecModel::from(super::sound_panel::rolloff_mode_options()));
-        let sound_groups = slint::ModelRc::new(slint::VecModel::from(super::sound_panel::sound_group_options()));
-        for prop in &mut flat_props {
-            if prop.property_type.as_str() != "choice" {
-                continue;
-            }
-            match prop.name.as_str() {
-                "ViewMode" => prop.options = view_modes.clone(),
-                "Projection" => prop.options = projections.clone(),
-                "Face" => prop.options = faces.clone(),
-                "RenderingMode" => prop.options = rendering_modes.clone(),
-                "LayerType" => prop.options = layer_types.clone(),
-                "CoverageMode" => prop.options = coverage_modes.clone(),
-                "Phase" => prop.options = moon_phases.clone(),
-                "MoonPlacement" => prop.options = moon_placements.clone(),
-                "Tonemapper" => prop.options = tonemappers.clone(),
-                "RollOffMode" => prop.options = rolloff_modes.clone(),
-                "SoundGroup" => prop.options = sound_groups.clone(),
-                _ => {}
-            }
-        }
-    }
+    // Every enum row's choices (`property_enums`): a row with a fixed set
+    // of values is a dropdown holding them.
+    super::property_enums::apply(instance.class_name.as_str(), &mut flat_props);
 
     // Hash-based change detection: only push to Slint when the model data actually
     // changes. Re-pushing an identical model destroys and recreates all `for` loop
@@ -28479,7 +29406,7 @@ fn fmt_udim_n(v: f32) -> String {
 /// Returns `None` for shapes `route_property` has no routing table entry
 /// for (`Transform`) — same as an unroutable panel key, the live ECS
 /// write already happened; only the disk mirror is skipped.
-fn property_value_to_toml_string(value: &eustress_common::classes::PropertyValue) -> Option<String> {
+pub(crate) fn property_value_to_toml_string(value: &eustress_common::classes::PropertyValue) -> Option<String> {
     use eustress_common::classes::PropertyValue as PV;
     match value {
         PV::Bool(b) => Some(b.to_string()),
@@ -28510,7 +29437,7 @@ fn property_value_to_toml_string(value: &eustress_common::classes::PropertyValue
 /// properties aren't undo-wired via the Properties panel either
 /// (`canonical_undo_property` maps them to `None` too — see its doc
 /// comment), so skipping the push here matches existing behavior.
-fn property_value_to_undo_snapshot(
+pub(crate) fn property_value_to_undo_snapshot(
     property_name: &str,
     value: &eustress_common::classes::PropertyValue,
 ) -> Option<crate::undo::PropertyValueSnapshot> {
@@ -28536,7 +29463,7 @@ fn property_value_to_undo_snapshot(
 /// (see `undo.rs`). Rune-driven writes only push onto `UndoStack` for
 /// names in this set; anything else (BillboardGui's UDim2 `Size`, etc.)
 /// is left un-undo-wired, same as the Properties panel today.
-fn is_undo_wired_property(name: &str) -> bool {
+pub(crate) fn is_undo_wired_property(name: &str) -> bool {
     matches!(
         name,
         "Name" | "Position" | "Orientation" | "Size" | "Scale" | "Color"
@@ -29303,6 +30230,8 @@ fn build_service_properties(
     }
     } // Close fallback block
     
+    // Enum rows are dropdowns holding the schema's `options`.
+    super::property_enums::apply(service_name, &mut props);
     push_property_rows(ui, props);
 }
 
@@ -29337,13 +30266,33 @@ fn patch_center_tab_dirty(ui: &StudioWindow, state: &mut StudioState, mgr_idx: u
     }
 }
 
+/// Give a saved script's running copy the text that was just written. Save
+/// does not rely on the file watcher for this: an atomic replace can be
+/// reported against the temp file's name, and a script saved but not reloaded
+/// would run its old code in the next Play. Rune hot-recompiles a script
+/// marked dirty.
+fn refresh_saved_script(commands: &mut Commands, entity: Option<Entity>, text: String) {
+    let Some(entity) = entity else { return };
+    commands.queue(move |world: &mut World| {
+        if let Some(mut data) = world.get_mut::<crate::soul::SoulScriptData>(entity) {
+            if data.source != text {
+                data.source = text;
+                data.dirty = true;
+                data.build_status = crate::soul::SoulBuildStatus::Stale;
+            }
+        }
+    });
+}
+
 /// Save every dirty code tab that `closing` selects, before a close removes
 /// it from the strip. `entity_source` maps a tab's entity to the source file
-/// the loader read for it.
+/// the loader read for it; `on_saved` hears of each file written, with the
+/// tab's entity.
 fn save_dirty_tabs_before_close(
     mgr: &mut super::center_tabs::CenterTabManager,
     entity_source: impl Fn(Entity) -> Option<std::path::PathBuf>,
     closing: impl Fn(usize, &super::center_tabs::CenterTabEntry) -> bool,
+    mut on_saved: impl FnMut(Option<Entity>, &std::path::Path),
 ) -> Vec<Result<std::path::PathBuf, String>> {
     let mut results = Vec::new();
     for i in 0..mgr.tabs.len() {
@@ -29352,9 +30301,11 @@ fn save_dirty_tabs_before_close(
             continue;
         }
         let src = tab.entity.and_then(&entity_source);
+        let entity = tab.entity;
         match super::center_tabs::save_code_tab(tab, src.as_deref()) {
             Ok(Some(path)) => {
                 mgr.tabs[i].dirty = false;
+                on_saved(entity, &path);
                 results.push(Ok(path));
             }
             Ok(None) => {}
@@ -29414,7 +30365,7 @@ fn sync_unsaved_changes_dialog(
         let dirty = mgr.dirty_tabs_closed_by(req);
         let names: Vec<&str> = dirty.iter().map(|&i| mgr.tabs[i].name.as_str()).collect();
         ui.set_unsaved_changes_count(names.len() as i32);
-        ui.set_unsaved_changes_names(unsaved_tab_names(&names).into());
+        ui.set_unsaved_changes_names(super::display_text::shown_block(&unsaved_tab_names(&names)));
     }
     ui.set_show_unsaved_changes_dialog(want);
 }
@@ -29982,7 +30933,7 @@ pub fn sync_analyzer_to_slint(
                     crate::script_editor::Severity::Info => "info".into(),
                     crate::script_editor::Severity::Hint => "hint".into(),
                 },
-                message: d.message.as_str().into(),
+                message: super::display_text::shown_block(&d.message),
             }
         })
         .collect();
@@ -30017,7 +30968,7 @@ pub fn sync_analyzer_to_slint(
                 file_path: file_full.into(),
                 line: d.range.start_line as i32,
                 column: d.range.start_column as i32,
-                message: d.message.as_str().into(),
+                message: super::display_text::shown_block(&d.message),
                 source: d.source.into(),
             });
         }
@@ -30068,6 +31019,7 @@ fn sync_center_tabs_to_slint(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     languages: Option<Res<crate::script_editor::plugin::ScriptLanguages>>,
     mut last_palette: Local<Option<crate::script_editor::theme::EditorPalette>>,
+    mut last_web_url: Local<(i32, String)>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut state) = state else { return };
@@ -30079,6 +31031,8 @@ fn sync_center_tabs_to_slint(
         .unwrap_or_else(|| "Space".to_string());
     let current_scene_name: String = ui.get_scene_tab_name().into();
     if current_scene_name != scene_tab_name {
+        // The exit dialog names the Space it is leaving; it said "Untitled".
+        ui.set_scene_name(super::display_text::shown_line(&scene_tab_name));
         ui.set_scene_tab_name(scene_tab_name.into());
     }
     
@@ -30189,7 +31143,7 @@ fn sync_center_tabs_to_slint(
         let slint_tabs: Vec<CenterTab> = state.center_tabs.iter().map(|t| {
             CenterTab {
                 entity_id: t.entity_id,
-                name: t.name.as_str().into(),
+                name: super::display_text::shown_line(&t.name),
                 tab_type: t.tab_type.as_str().into(),
                 mode: t.mode.as_str().into(),
                 dirty: t.dirty,
@@ -30392,8 +31346,20 @@ fn sync_center_tabs_to_slint(
     if tab_type == "web" {
         let idx = (state.active_center_tab - 1) as usize;
         if let Some(tab) = state.center_tabs.get(idx) {
-            ui.set_web_url_bar(tab.url.as_str().into());
+            // The address bar is a two-way field: pushing the tab's URL every
+            // frame put back whatever the user had typed before Enter. Push it
+            // when the tab or its URL changes.
+            if last_web_url.0 != state.active_center_tab || last_web_url.1 != tab.url {
+                last_web_url.0 = state.active_center_tab;
+                last_web_url.1 = tab.url.clone();
+                ui.set_web_url_bar(tab.url.as_str().into());
+            }
             ui.set_web_loading(tab.loading);
+            // Nothing reports the page's history, and the buttons ignore a
+            // click while these are false. Enabled, a press asks the webview,
+            // which does nothing when there is no history to walk.
+            ui.set_web_can_go_back(true);
+            ui.set_web_can_go_forward(true);
             ui.set_web_has_url(tab.url != "about:blank" && !tab.url.is_empty());
             ui.set_web_secure(tab.url.starts_with("https://"));
         }
@@ -30490,6 +31456,8 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Laws => "laws",
         ClassName::Runs => "runs",
         ClassName::Connector => "connector",
+        ClassName::Domain => "domain",
+        ClassName::ExportTarget => "exporttarget",
         // Workshop folder uses wrench icon (not a ClassName but handled via name match below)
         _ => "instance",
     }
@@ -30602,23 +31570,117 @@ fn asset_icon(asset_type: &str) -> slint::Image {
 /// Scan a directory recursively and collect asset files as (relative_path, full_path, size)
 fn scan_asset_dir(dir: &std::path::Path, base: &std::path::Path) -> Vec<(String, std::path::PathBuf, u64)> {
     let mut results = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return results };
+    walk_asset_dir(dir, base, false, 0, &mut results);
+    results
+}
+
+/// `scan_asset_dir` over a whole Space, leaving out the folders
+/// `space_dir_skipped` names. The Space Assets list drops every file in
+/// them, and on a big Space they hold most of its files (Workspace/ and
+/// .git/ alone can run to tens of thousands), so walking them was most of
+/// what a rescan cost.
+fn scan_space_asset_dir(space_root: &std::path::Path) -> Vec<(String, std::path::PathBuf, u64)> {
+    let mut results = Vec::new();
+    walk_asset_dir(space_root, space_root, true, 0, &mut results);
+    results
+}
+
+/// The walk behind `scan_asset_dir` and `scan_space_asset_dir`: depth
+/// first, each folder's entries in name order, so files come out in the
+/// order they always have. With `skip_space_dirs` it leaves out the folders
+/// `space_dir_skipped` names. Returns how many directory entries it read,
+/// which the tests use to show a skipped folder is never opened.
+///
+/// Each entry's type and size come from the directory listing, which on
+/// Windows already holds both. `Path::is_dir` and `Path::metadata` open the
+/// entry by path instead: two opens per file over the whole tree, which made
+/// a rescan of a big Space stall the frame for up to 3 s. A symlink or
+/// junction still goes through the path, which follows the link as this
+/// walk always has. The listing can show a file that another program still
+/// holds open for writing at its size from before the write (NTFS updates
+/// it when the handle closes); rescans wait for the watcher's burst to
+/// settle, so such a write has usually finished.
+fn walk_asset_dir(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    skip_space_dirs: bool,
+    depth: usize,
+    results: &mut Vec<(String, std::path::PathBuf, u64)>,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
+    let mut read = entries.len();
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
+        // The listing's type, unless the entry is a link or has none.
+        let listed = entry.file_type().ok().filter(|t| !t.is_symlink());
+        let is_dir = match listed {
+            Some(file_type) => file_type.is_dir(),
+            None => path.is_dir(),
+        };
+        if is_dir {
+            if skip_space_dirs && space_dir_skipped(&entry.file_name().to_string_lossy(), depth == 0) {
+                continue;
+            }
             // Recurse into subdirectories
-            results.extend(scan_asset_dir(&path, base));
+            read += walk_asset_dir(&path, base, skip_space_dirs, depth + 1, results);
         } else {
-            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            let metadata = if listed.is_some() { entry.metadata() } else { path.metadata() };
+            let size = metadata.map(|m| m.len()).unwrap_or(0);
             let relative = path.strip_prefix(base)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_else(|_| path.file_name().unwrap_or_default().to_string_lossy().to_string());
             results.push((relative, path, size));
         }
     }
-    results
+    read
+}
+
+/// Whether the Space walk leaves a folder out. Each rule names a folder
+/// whose every file `space_asset_kept` drops by its path alone: at the top
+/// level, Workspace and any folder whose name starts with .eustress, src or
+/// StarterGui; at any depth, a folder whose name ends in Service, since
+/// every path below it contains "Service/".
+///
+/// .git and world.fjalldb at the top level are left out on other grounds:
+/// `space_asset_kept` shows only files of a recognised asset type, and
+/// nothing git or the world database writes there has one. That is the one
+/// way the list can differ from a full walk: an asset file put inside
+/// either by hand no longer shows.
+fn space_dir_skipped(name: &str, top_level: bool) -> bool {
+    name.ends_with("Service")
+        || (top_level
+            && (name == "Workspace"
+                || name.starts_with(".eustress")
+                || name.starts_with("src")
+                || name.starts_with("StarterGui")
+                || name == ".git"
+                || name == "world.fjalldb"))
+}
+
+/// Whether the Space Assets list shows a file the Space walk found. `rel` is
+/// its path from the Space root ('/' separated), `category` the active tab,
+/// `search` the lowercased search text. `space_dir_skipped` leans on the
+/// path rules here: a change to one belongs in the other too.
+fn space_asset_kept(rel: &str, path: &std::path::Path, category: &str, search: &str) -> bool {
+    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // Skip marker files, config, and service directories
+    if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml"
+        || fname == ".gitignore" || rel.starts_with(".eustress")
+        || rel.starts_with("src")
+        || rel.contains("Service/") || rel.contains("Service\\")
+        || rel.starts_with("StarterGui") || rel.starts_with("Workspace/")
+        || rel.starts_with("Workspace\\")
+        { return false; }
+    let ext = compound_ext(path);
+    let cat = asset_category_for_extension(&ext);
+    // Category filter
+    if category != "All" && cat != category { return false; }
+    // Search filter
+    if !search.is_empty() && !fname.to_lowercase().contains(search) { return false; }
+    // Only show recognized asset types (Materials belong to MaterialService, not Assets)
+    cat != "Other" && cat != "Materials"
 }
 
 /// Sync the Asset Manager tree to Slint.
@@ -30806,30 +31868,14 @@ fn sync_asset_manager_to_slint(
     // Use cached space files — only rescanned on file watcher events
     {
         if needs_rescan || state.cached_space_files.is_empty() {
-            state.cached_space_files = scan_asset_dir(&space_root, &space_root);
+            state.cached_space_files = scan_space_asset_dir(&space_root);
             state.cache_stale = false;
         }
         let space_files = &state.cached_space_files;
         // Filter to actual asset files (not _service.toml, _instance.toml, space.toml, etc.)
-        let space_assets: Vec<_> = space_files.iter().filter(|(rel, path, _)| {
-            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Skip marker files, config, and service directories
-            if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml"
-                || fname == ".gitignore" || rel.starts_with(".eustress")
-                || rel.starts_with("src")
-                || rel.contains("Service/") || rel.contains("Service\\")
-                || rel.starts_with("StarterGui") || rel.starts_with("Workspace/")
-                || rel.starts_with("Workspace\\")
-                { return false; }
-            let ext = compound_ext(path);
-            let cat = asset_category_for_extension(&ext);
-            // Category filter
-            if category != "All" && cat != category.as_str() { return false; }
-            // Search filter
-            if !search.is_empty() && !fname.to_lowercase().contains(&search) { return false; }
-            // Only show recognized asset types (Materials belong to MaterialService, not Assets)
-            cat != "Other" && cat != "Materials"
-        }).collect();
+        let space_assets: Vec<_> = space_files.iter()
+            .filter(|(rel, path, _)| space_asset_kept(rel, path, &category, &search))
+            .collect();
 
         space_count = space_assets.len() as i32;
         push_node(space_section_id, &format!("Space Assets ({})", space_assets.len()),
@@ -30858,7 +31904,7 @@ fn sync_asset_manager_to_slint(
     let slint_nodes: Vec<AssetNode> = asset_nodes.into_iter().map(|(id, name, icon, asset_type, depth, expandable, expanded, selected, size, path)| {
         AssetNode {
             id,
-            name: name.into(),
+            name: super::display_text::shown_line(&name),
             icon,
             asset_type: asset_type.into(),
             depth,
@@ -30892,6 +31938,265 @@ fn sync_asset_manager_to_slint(
         ui.set_asset_nodes(slint::ModelRc::from(model));
         ui.set_universe_asset_count(universe_count);
         ui.set_space_asset_count(space_count);
+    }
+}
+
+#[cfg(test)]
+mod asset_scan_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    type Listing = Vec<(String, PathBuf, u64)>;
+
+    /// A scratch folder that removes itself when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("eustress-asset-scan-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Scratch(root)
+        }
+
+        /// A file of `len` bytes at `rel`, its folders made as needed.
+        fn file(&self, rel: &str, len: usize) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![b'x'; len]).unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `scan_asset_dir` as it was: each entry's type and size read by path,
+    /// every folder entered. `read` counts the entries it read.
+    fn old_scan_asset_dir(dir: &Path, base: &Path, read: &mut usize) -> Listing {
+        let mut results = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else { return results };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        *read += entries.len();
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                // Recurse into subdirectories
+                results.extend(old_scan_asset_dir(&path, base, read));
+            } else {
+                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                let relative = path.strip_prefix(base)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                results.push((relative, path, size));
+            }
+        }
+        results
+    }
+
+    /// The Space Assets filter as it was, inline in `sync_asset_manager_to_slint`.
+    fn old_space_assets(space_files: &Listing, category: String, search: String) -> Listing {
+        space_files.iter().filter(|(rel, path, _)| {
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Skip marker files, config, and service directories
+            if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml"
+                || fname == ".gitignore" || rel.starts_with(".eustress")
+                || rel.starts_with("src")
+                || rel.contains("Service/") || rel.contains("Service\\")
+                || rel.starts_with("StarterGui") || rel.starts_with("Workspace/")
+                || rel.starts_with("Workspace\\")
+                { return false; }
+            let ext = compound_ext(path);
+            let cat = asset_category_for_extension(&ext);
+            // Category filter
+            if category != "All" && cat != category.as_str() { return false; }
+            // Search filter
+            if !search.is_empty() && !fname.to_lowercase().contains(&search) { return false; }
+            // Only show recognized asset types (Materials belong to MaterialService, not Assets)
+            cat != "Other" && cat != "Materials"
+        }).cloned().collect()
+    }
+
+    /// The Space Assets filter as `sync_asset_manager_to_slint` runs it now.
+    fn new_space_assets(space_files: &Listing, category: &str, search: &str) -> Listing {
+        space_files.iter()
+            .filter(|(rel, path, _)| space_asset_kept(rel, path, category, search))
+            .cloned()
+            .collect()
+    }
+
+    fn rels(listing: &Listing) -> Vec<&str> {
+        listing.iter().map(|(rel, _, _)| rel.as_str()).collect()
+    }
+
+    const TABS: [&str; 10] = ["All", "Meshes", "Textures", "Images", "Videos", "Audio", "Materials", "Scripts", "Fonts", "Other"];
+    const SEARCHES: [&str; 5] = ["", "png", "inner", "car", "zzz"];
+
+    /// A Space with a file for every rule: assets that show, files each
+    /// filter rule drops, assets inside every folder the walk leaves out,
+    /// and folders named like those that it keeps. Each file has its own
+    /// size. Returns how many files it made.
+    fn space_tree(s: &Scratch) -> usize {
+        let files = [
+            // The root: assets, config and a marker the filter drops, and
+            // files named like left-out folders (Workspace.png shows).
+            "space.toml", "simulation.toml", ".gitignore", "_marker.png",
+            "logo.png", "theme.ogg", "notes.txt", "src.png", "Workspace.png",
+            // A kept folder: assets of each type, and files the filter drops.
+            "assets/images/hero.png", "assets/models/car.glb", "assets/clip.mp4",
+            "assets/fonts/Inter.ttf", "assets/scripts/boot.luau", "assets/_instance.toml",
+            "assets/materials/Steel.mat.toml", "assets/readme.md",
+            // The top-level names below the top level: kept.
+            "assets/Workspace/inner.png", "assets/src/inner.png", "assets/.eustress/inner.png",
+            "assets/StarterGui/inner.png", "assets/.git/inner.png", "assets/world.fjalldb/inner.png",
+            // Near misses at the top level: kept.
+            "WorkspaceX/tree.png", "Lighting/_service.toml", "Lighting/ServiceDesk/desk.png",
+            // Every folder the walk leaves out, with assets inside.
+            "Workspace/Car/body.glb", "Workspace/Car/_instance.toml", "Workspace/decal.png",
+            ".eustress/assets/meshes/x.glb", ".eustress/output.log", ".eustress_cache/thumb.png",
+            "src/main.luau", "srcery/potion.png",
+            "StarterGui/Menu/button.png", "StarterGuiExtras/icon.png",
+            "SoundService/music.ogg", "SoundService/_service.toml",
+            "Lighting/SkyService/sky.hdr", "ReplicatedStorage/Deep/AudioService/x.mp3",
+            // git's and the world database's own files: no asset among them.
+            ".git/HEAD", ".git/config", ".git/objects/ab/cdef0123", ".git/hooks/pre-commit.sample",
+            ".git/objects/pack/pack-1.pack", "world.fjalldb/version", "world.fjalldb/journals/0",
+            "world.fjalldb/partitions/instances/segments/7",
+        ];
+        for (i, rel) in files.iter().enumerate() {
+            s.file(rel, 10 + i);
+        }
+        files.len()
+    }
+
+    /// The Space Assets list is unchanged, file for file and byte for byte,
+    /// on every tab and search, while the walk reads fewer entries.
+    #[test]
+    fn the_space_list_is_unchanged_and_the_walk_reads_less() {
+        let s = Scratch::new("space");
+        space_tree(&s);
+        let mut old_read = 0;
+        let old = old_scan_asset_dir(&s.0, &s.0, &mut old_read);
+        let mut new = Vec::new();
+        let new_read = walk_asset_dir(&s.0, &s.0, true, 0, &mut new);
+        assert_eq!(new, scan_space_asset_dir(&s.0));
+
+        for tab in TABS {
+            for search in SEARCHES {
+                assert_eq!(
+                    new_space_assets(&new, tab, search),
+                    old_space_assets(&old, tab.to_string(), search.to_string()),
+                    "tab {tab:?}, search {search:?}",
+                );
+            }
+        }
+        // What the All tab shows, so the comparison is not of empty lists.
+        assert_eq!(rels(&new_space_assets(&new, "All", "")), [
+            "Lighting/ServiceDesk/desk.png", "Workspace.png", "WorkspaceX/tree.png",
+            "assets/.eustress/inner.png", "assets/.git/inner.png", "assets/StarterGui/inner.png",
+            "assets/Workspace/inner.png", "assets/clip.mp4", "assets/fonts/Inter.ttf",
+            "assets/images/hero.png", "assets/models/car.glb", "assets/scripts/boot.luau",
+            "assets/src/inner.png", "assets/world.fjalldb/inner.png", "logo.png", "theme.ogg",
+        ]);
+        assert!(new_read < old_read, "read {new_read} entries, the full walk {old_read}");
+    }
+
+    /// `space_asset_kept` is the inline filter moved into a function: on the
+    /// full listing it keeps exactly what the inline one kept.
+    #[test]
+    fn the_extracted_filter_keeps_what_the_inline_one_kept() {
+        let s = Scratch::new("filter");
+        space_tree(&s);
+        let full = old_scan_asset_dir(&s.0, &s.0, &mut 0);
+        for tab in TABS {
+            for search in SEARCHES {
+                assert_eq!(
+                    new_space_assets(&full, tab, search),
+                    old_space_assets(&full, tab.to_string(), search.to_string()),
+                    "tab {tab:?}, search {search:?}",
+                );
+            }
+        }
+    }
+
+    /// The Universe folders are walked whole, as before: the same entries
+    /// in the same order with the same sizes, now read from the listing.
+    #[test]
+    fn a_universe_folder_lists_exactly_as_before() {
+        let s = Scratch::new("universe");
+        let made = space_tree(&s);
+        let mut old_read = 0;
+        let old = old_scan_asset_dir(&s.0, &s.0, &mut old_read);
+        let mut new = Vec::new();
+        let new_read = walk_asset_dir(&s.0, &s.0, false, 0, &mut new);
+        assert_eq!(new, old);
+        assert_eq!(scan_asset_dir(&s.0, &s.0), old);
+        assert_eq!(new_read, old_read);
+        assert_eq!(old.len(), made);
+    }
+
+    /// The one way the list can differ from a full walk: an asset put by
+    /// hand inside .git or world.fjalldb no longer shows, since those two
+    /// are left out on what git and the world database write there, not on
+    /// a path rule.
+    #[test]
+    fn an_asset_inside_git_or_the_world_database_is_the_one_difference() {
+        let s = Scratch::new("exception");
+        s.file(".git/stray.png", 3);
+        s.file("world.fjalldb/stray.ogg", 4);
+        s.file("logo.png", 5);
+        let old = old_space_assets(&old_scan_asset_dir(&s.0, &s.0, &mut 0), "All".to_string(), String::new());
+        let new = new_space_assets(&scan_space_asset_dir(&s.0), "All", "");
+        assert_eq!(rels(&old), [".git/stray.png", "logo.png", "world.fjalldb/stray.ogg"]);
+        assert_eq!(rels(&new), ["logo.png"]);
+    }
+
+    /// A symlink is followed as before: a linked folder is walked, a linked
+    /// file has its target's size, a broken link lists at size 0.
+    #[test]
+    fn links_are_followed_as_before() {
+        let s = Scratch::new("links");
+        s.file("real/a.png", 7);
+        s.file("real/b.ogg", 9);
+        let made = link_dir(&s.0.join("real"), &s.0.join("linked"))
+            && link_file(&s.0.join("real").join("a.png"), &s.0.join("alias.png"))
+            && link_file(&s.0.join("missing.png"), &s.0.join("broken.png"));
+        if !made {
+            // Windows makes symlinks only in Developer Mode or as admin.
+            eprintln!("links_are_followed_as_before: no symlinks here, nothing to check");
+            return;
+        }
+        let old = old_scan_asset_dir(&s.0, &s.0, &mut 0);
+        assert_eq!(scan_asset_dir(&s.0, &s.0), old);
+        assert_eq!(scan_space_asset_dir(&s.0), old);
+        let sizes: Vec<_> = old.iter().map(|(rel, _, size)| (rel.as_str(), *size)).collect();
+        assert_eq!(sizes, [
+            ("alias.png", 7), ("broken.png", 0), ("linked/a.png", 7),
+            ("linked/b.ogg", 9), ("real/a.png", 7), ("real/b.ogg", 9),
+        ]);
+    }
+
+    #[cfg(unix)]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(unix)]
+    fn link_file(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn link_file(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
     }
 }
 
@@ -31398,8 +32703,8 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
     })
 }
 
-/// Push the current Soul API key + its computed validity status to Slint so
-/// File > Settings shows the actual stored key, and the Soul/Workshop panels
+/// Push the Soul API key's validity and presence (never the key) to Slint,
+/// so the Soul/Workshop panels
 /// dismiss the "Configure API key" banner once a key is present (the status
 /// string is a presence check). The Settings dialog's "validated" mark is
 /// shown only after Test Connection accepted the stored key. Fires on
@@ -31422,25 +32727,24 @@ fn sync_soul_api_key_to_slint(
     }
 
     let effective_key = space.effective_api_key(&global);
-    let status = if effective_key.is_empty() { "not-set" } else { "valid" };
+    // A key still being looked up is not reported missing.
+    let present = !effective_key.is_empty() || global.key_pending(crate::soul::Provider::Anthropic);
+    let status = if present { "valid" } else { "not-set" };
 
     let ui = &slint_context.window;
-    // Only overwrite the Slint key field with the stored key when the dialog
-    // isn't currently showing — otherwise we'd wipe whatever the user is
-    // typing every sync. Slint's Settings dialog is `if show-settings-dialog`
-    // so we check the root flag.
-    if !ui.get_show_settings_dialog() {
-        ui.set_soul_api_key(effective_key.clone().into());
-        // The xAI key must be loaded on the same terms as the Anthropic one.
-        // Without this the field read empty every time Settings opened, and
-        // because the save handler commits both fields together, the next
-        // Save wrote "" over a perfectly good stored key. The symptom was a
-        // 400 "Incorrect API key provided" from api.x.ai on a key the user
-        // had definitely entered: it had been blanked by a later Save.
-        ui.set_soul_xai_api_key(global.global_xai_api_key.clone().into());
-        // Same contract for OpenAI, and for the same reason.
-        ui.set_soul_openai_api_key(global.global_openai_api_key.clone().into());
+    // The key fields hold only what the person types: a saved key is never
+    // written into a Slint property. The page gets the masks, whether a
+    // key can be removed, and the status lines.
+    {
+        use crate::soul::Provider;
+        ui.set_soul_api_key_mask(global.key_placeholder(Provider::Anthropic).into());
+        ui.set_soul_xai_api_key_mask(global.key_placeholder(Provider::Xai).into());
+        ui.set_soul_openai_api_key_mask(global.key_placeholder(Provider::OpenAi).into());
+        ui.set_soul_api_key_can_remove(global.can_remove_key(Provider::Anthropic));
+        ui.set_soul_xai_api_key_can_remove(global.can_remove_key(Provider::Xai));
+        ui.set_soul_openai_api_key_can_remove(global.can_remove_key(Provider::OpenAi));
     }
+    ui.set_soul_key_status(super::display_text::shown_block(&global.key_status_text()));
     ui.set_soul_api_key_valid(!effective_key.is_empty() && global.api_key_valid == Some(true));
     ui.set_soul_api_key_status(status.into());
 }
@@ -31520,6 +32824,7 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::PasteInto)),
         ("", Some(A::InsertObject)),
         ("", Some(A::FindReplace)),
+        ("", Some(A::FindInScripts)),
         ("", Some(A::Duplicate)),
         ("", Some(A::Delete)),
         ("", Some(A::SelectAll)),
@@ -31546,6 +32851,8 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::ToolGapFill)),
         ("", Some(A::ToolResizeAlign)),
         ("", Some(A::ToolMaterialFlip)),
+        ("", Some(A::ToolPaintBucket)),
+        ("", Some(A::SampleLook)),
         ("", Some(A::ToolLinearArray)),
         ("", Some(A::ToolRadialArray)),
         ("", Some(A::ToolGridArray)),
@@ -31931,6 +33238,7 @@ fn sync_soul_panel_to_slint(
     luau_locals: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauLocalScript)>,
     luau_modules: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauModuleScript)>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    state: Option<Res<StudioState>>,
     mut last_hash: Local<u64>,
 ) {
     // Helper: given an entity's LoadedFromFile path (which usually points at
@@ -31988,23 +33296,41 @@ fn sync_soul_panel_to_slint(
     luau_scripts.iter().count().hash(&mut hasher);
     luau_locals.iter().count().hash(&mut hasher);
     luau_modules.iter().count().hash(&mut hasher);
-    for (e, _, data) in soul_scripts.iter() {
+    // The summary indicator reads a file the hash cannot see (a disk stat per
+    // row is too much for every frame): the Summarize arm bumps this instead.
+    state.as_deref().map_or(0, |s| s.soul_panel_revision).hash(&mut hasher);
+    // A row shows its script's name and line count, so those are hashed too:
+    // the name, and the source's byte length (the cheap stand-in for the line
+    // count; an edit that changes the lines but not the length is not noticed
+    // until the next change).
+    for (e, inst, data) in soul_scripts.iter() {
         e.index().hash(&mut hasher);
+        inst.name.hash(&mut hasher);
+        data.source.len().hash(&mut hasher);
         std::mem::discriminant(&data.build_status).hash(&mut hasher);
         data.errors.len().hash(&mut hasher);
     }
-    for (e, _, s) in luau_scripts.iter() {
+    for (e, inst, s) in luau_scripts.iter() {
         e.index().hash(&mut hasher);
+        inst.name.hash(&mut hasher);
+        s.source.len().hash(&mut hasher);
+        s.source_path.hash(&mut hasher);
         s.error.is_some().hash(&mut hasher);
         s.loaded.hash(&mut hasher);
     }
-    for (e, _, s) in luau_locals.iter() {
+    for (e, inst, s) in luau_locals.iter() {
         e.index().hash(&mut hasher);
+        inst.name.hash(&mut hasher);
+        s.source.len().hash(&mut hasher);
+        s.source_path.hash(&mut hasher);
         s.error.is_some().hash(&mut hasher);
         s.loaded.hash(&mut hasher);
     }
-    for (e, _, s) in luau_modules.iter() {
+    for (e, inst, s) in luau_modules.iter() {
         e.index().hash(&mut hasher);
+        inst.name.hash(&mut hasher);
+        s.source.len().hash(&mut hasher);
+        s.source_path.hash(&mut hasher);
         s.error.is_some().hash(&mut hasher);
         s.loaded.hash(&mut hasher);
     }
@@ -32032,10 +33358,10 @@ fn sync_soul_panel_to_slint(
         );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
-            name: inst.name.clone().into(),
+            name: super::display_text::shown_line(&inst.name),
             status: status.into(),
             last_build: "".into(),
-            error_message: data.errors.join("\n").into(),
+            error_message: super::display_text::shown_block(&data.errors.join("\n")),
             line_count: data.source.lines().count() as i32,
             language: "rune".into(),
             file_path: "".into(),
@@ -32057,10 +33383,10 @@ fn sync_soul_panel_to_slint(
         );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
-            name: inst.name.clone().into(),
+            name: super::display_text::shown_line(&inst.name),
             status: status.into(),
             last_build: "".into(),
-            error_message: err.into(),
+            error_message: super::display_text::shown_block(&err),
             line_count: s.source.lines().count() as i32,
             language: "luau-server".into(),
             file_path: s.source_path.clone().into(),
@@ -32082,10 +33408,10 @@ fn sync_soul_panel_to_slint(
         );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
-            name: inst.name.clone().into(),
+            name: super::display_text::shown_line(&inst.name),
             status: status.into(),
             last_build: "".into(),
-            error_message: err.into(),
+            error_message: super::display_text::shown_block(&err),
             line_count: s.source.lines().count() as i32,
             language: "luau-client".into(),
             file_path: s.source_path.clone().into(),
@@ -32107,10 +33433,10 @@ fn sync_soul_panel_to_slint(
         );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
-            name: inst.name.clone().into(),
+            name: super::display_text::shown_line(&inst.name),
             status: status.into(),
             last_build: "".into(),
-            error_message: err.into(),
+            error_message: super::display_text::shown_block(&err),
             line_count: s.source.lines().count() as i32,
             language: "luau-module".into(),
             file_path: s.source_path.clone().into(),
@@ -32144,8 +33470,8 @@ fn sync_notifications_to_slint(
     let items: Vec<NotificationData> = queue.items.iter().map(|n| NotificationData {
         id: n.id as i32,
         level: n.level.as_str().into(),
-        title: n.title.clone().into(),
-        message: n.message.clone().into(),
+        title: super::display_text::shown_line(&n.title),
+        message: super::display_text::shown_block(&n.message),
         duration_ms: 0, // animation handled on Bevy side; toast displays until expires_at
         dismissible: n.dismissible,
     }).collect();
@@ -32348,5 +33674,82 @@ mod play_keyboard_tests {
         app.update();
         assert!(!app.world().resource::<crate::ui::SlintUIFocus>().text_input_focused);
         assert!(!OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod gui_rect_bound_tests {
+    use super::*;
+    use eustress_common::gui::billboard_renderer::GuiElementDisplay;
+    use eustress_common::gui::edge_bounds::EDGE_LIMIT;
+    use std::collections::HashMap;
+
+    /// A 10 x 10 element with the given UDim2 halves, `[scale_x, offset_x,
+    /// scale_y, offset_y]`, and no anchor.
+    fn element(position: [f32; 4], size: [f32; 4]) -> GuiElementDisplay {
+        GuiElementDisplay {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            position_udim2: position,
+            size_udim2: size,
+            anchor_point: [0.0, 0.0],
+            z_order: 0,
+            visible: true,
+            clip_children: false,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            bg_color: [0.0; 4],
+            border_size: 0.0,
+            border_color: [0.0; 4],
+            corner_radius: 0.0,
+            text: String::new(),
+            text_color: [0.0; 4],
+            font: String::new(),
+            font_size: 14.0,
+            font_weight: 400,
+            text_align: String::new(),
+            text_y_align: String::new(),
+            text_stroke_color: [0.0; 4],
+            text_scaled: false,
+            image_path: String::new(),
+            class_type: "Frame".into(),
+            mouse_filter: "stop".into(),
+        }
+    }
+
+    /// The rect an element resolves to, in a 1920 x 1080 viewport.
+    fn resolved(d: &GuiElementDisplay) -> (f32, f32, f32, f32) {
+        let mut cache = HashMap::new();
+        let lookup = |_: Entity| -> Option<(&GuiElementDisplay, Option<Entity>)> { Some((d, None)) };
+        resolve_gui_rect(Entity::PLACEHOLDER, &lookup, (1920.0, 1080.0), &mut cache)
+    }
+
+    /// BOXHEAD #75: a UDim2 a script can write must not reach Slint as an edge
+    /// it cannot draw. The code this replaces returned the raw scale-times-
+    /// viewport numbers (1.9e33 here), and Slint's software renderer panicked
+    /// inside euclid on them.
+    #[test]
+    fn a_huge_udim2_resolves_inside_what_slint_can_draw() {
+        let cases = [
+            element([1e30, 0.0, -3e38, 0.0], [1e30, 0.0, 1e30, 0.0]),
+            element([f32::INFINITY, 0.0, f32::NEG_INFINITY, 0.0], [f32::INFINITY, 0.0, 1.0, 0.0]),
+            element([f32::NAN, 0.0, 0.5, 0.0], [1e38, 1e38, 1e38, 1e38]),
+        ];
+        for d in &cases {
+            let (x, y, w, h) = resolved(d);
+            for edge in [x, y, x + w, y + h] {
+                assert!(edge.is_finite() && edge.abs() <= EDGE_LIMIT, "edge {edge} is outside ±{EDGE_LIMIT}: {:?}", (x, y, w, h));
+            }
+            assert!(w >= 0.0 && h >= 0.0, "a size is never negative: {:?}", (x, y, w, h));
+        }
+    }
+
+    /// A rect inside the bound is exactly what the element asked for.
+    #[test]
+    fn an_ordinary_rect_is_unchanged() {
+        let d = element([0.0, 100.0, 0.0, 50.0], [0.0, 300.0, 0.0, 40.0]);
+        assert_eq!(resolved(&d), (100.0, 50.0, 300.0, 40.0));
     }
 }

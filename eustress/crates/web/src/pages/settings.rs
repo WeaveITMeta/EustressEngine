@@ -10,6 +10,10 @@ use leptos_router::hooks::use_navigate;
 use web_sys::NotificationPermission;
 use crate::api::ApiClient;
 use crate::components::{CentralNav, Footer};
+use crate::components::adult_content::AdultContentSetting;
+use crate::pages::email_settings::EmailSection;
+use crate::pages::passkeys::PasskeysSection;
+use crate::pages::replace_key::ReplaceKeySection;
 use crate::services::notifications;
 use crate::state::{AppState, AuthState};
 
@@ -28,15 +32,11 @@ pub fn SettingsPage() -> impl IntoView {
     let auth = app_state.auth;
     
     // Active settings tab
-    let active_tab = RwSignal::new("account".to_string());
+    // `/settings?replace_key=1` (from the one-time prompt) opens on Security; `/settings?tab=privacy` (from an adult listing's notice)
+    // opens on Privacy, where Adult content is the first setting.
+    let query = crate::utils::current_query();
+    let active_tab = RwSignal::new(if query.contains("replace_key=1") { "security" } else if query.contains("tab=privacy") { "privacy" } else { "account" }.to_string());
     
-    // Form states
-    let email = RwSignal::new(String::new());
-    let password = RwSignal::new(String::new());
-    let confirm_password = RwSignal::new(String::new());
-    let loading = RwSignal::new(false);
-    let success_msg = RwSignal::new(Option::<String>::None);
-    let error_msg = RwSignal::new(Option::<String>::None);
     
     // Toggle states for privacy settings
     let inventory_visible = RwSignal::new(true);
@@ -118,8 +118,8 @@ pub fn SettingsPage() -> impl IntoView {
     let discord_link_url = RwSignal::new(format!("{}/api/auth/discord/link", api_url));
     
     // Clone for use in closures
-    let app_state_for_form = RwSignal::new(app_state.clone());
-    let app_state_for_logout = app_state.clone();
+    let navigate_home = StoredValue::new_local(navigate.clone());
+    let sign_out = crate::components::sign_out::use_sign_out(Callback::new(move |_| navigate_home.with_value(|go| go("/", Default::default()))));
     
     view! {
         <div class="page page-settings-roblox">
@@ -190,16 +190,15 @@ pub fn SettingsPage() -> impl IntoView {
                     </nav>
                     
                     <div class="sidebar-footer">
-                        <button 
-                            class="settings-nav-item logout"
-                            on:click=move |_| {
-                                app_state_for_logout.logout();
-                                navigate("/", Default::default());
-                            }
-                        >
-                            <img src="/assets/icons/logout.svg" alt="Logout" />
-                            "Sign Out"
+                        <button class="settings-nav-item logout" title=crate::components::sign_out::THIS_DEVICE_HELP on:click=move |_| sign_out.this_device.run(())>
+                            <img src="/assets/icons/logout.svg" alt="" />
+                            "Sign out of this device"
                         </button>
+                        <button class="settings-nav-item logout" title=crate::components::sign_out::EVERYWHERE_HELP disabled=move || sign_out.busy.get() on:click=move |_| sign_out.everywhere.run(())>
+                            <img src="/assets/icons/logout.svg" alt="" />
+                            "Sign out everywhere"
+                        </button>
+                        {move || sign_out.error.get().map(|e| view! { <p class="sign-out-error" role="alert">{e}</p> })}
                     </div>
                 </aside>
                 
@@ -274,128 +273,14 @@ pub fn SettingsPage() -> impl IntoView {
                     <Show when=move || active_tab.get() == "security">
                         <div class="settings-panel">
                             <h1 class="panel-title">"Security"</h1>
-                            <p class="panel-description">"Manage your password and account security"</p>
+                            <p class="panel-description">"Your identity file and how you sign in"</p>
                             
-                            <div class="settings-group">
-                                <h2 class="group-title">"Password"</h2>
-                                
-                                {move || {
-                                    let app_state_inner = app_state_for_form.get();
-                                    if has_email() {
-                                        view! {
-                                            <div class="setting-row">
-                                                <div class="setting-info">
-                                                    <span class="setting-label">"Password"</span>
-                                                    <span class="setting-value">"••••••••"</span>
-                                                </div>
-                                                <button class="btn-edit">"Change Password"</button>
-                                            </div>
-                                        }.into_any()
-                                    } else {
-                                        view! {
-                                            <div class="add-password-section">
-                                                <p class="info-text">"Add a password to enable email login as a backup to Discord."</p>
-                                                
-                                                {move || success_msg.get().map(|msg| view! {
-                                                    <div class="alert alert-success">
-                                                        <img src="/assets/icons/check.svg" alt="Success" />
-                                                        {msg}
-                                                    </div>
-                                                })}
-                                                
-                                                {move || error_msg.get().map(|msg| view! {
-                                                    <div class="alert alert-error">
-                                                        <img src="/assets/icons/x.svg" alt="Error" />
-                                                        {msg}
-                                                    </div>
-                                                })}
-                                                
-                                                <div class="form-grid">
-                                                    <div class="form-field">
-                                                        <label>"Email"</label>
-                                                        <input
-                                                            type="email"
-                                                            placeholder="you@example.com"
-                                                            prop:value=move || email.get()
-                                                            on:input=move |e| email.set(event_target_value(&e))
-                                                        />
-                                                    </div>
-                                                    <div class="form-field">
-                                                        <label>"Password"</label>
-                                                        <input
-                                                            type="password"
-                                                            placeholder="••••••••"
-                                                            prop:value=move || password.get()
-                                                            on:input=move |e| password.set(event_target_value(&e))
-                                                        />
-                                                    </div>
-                                                    <div class="form-field">
-                                                        <label>"Confirm Password"</label>
-                                                        <input
-                                                            type="password"
-                                                            placeholder="••••••••"
-                                                            prop:value=move || confirm_password.get()
-                                                            on:input=move |e| confirm_password.set(event_target_value(&e))
-                                                        />
-                                                    </div>
-                                                </div>
-                                                
-                                                <button
-                                                    class="btn-primary"
-                                                    disabled=loading.get()
-                                                    on:click=move |_| {
-                                                        let email_val = email.get();
-                                                        let password_val = password.get();
-                                                        let confirm_val = confirm_password.get();
-                                                        
-                                                        if email_val.is_empty() || password_val.is_empty() {
-                                                            error_msg.set(Some("Please fill in all fields".to_string()));
-                                                            return;
-                                                        }
-                                                        
-                                                        if password_val != confirm_val {
-                                                            error_msg.set(Some("Passwords do not match".to_string()));
-                                                            return;
-                                                        }
-                                                        
-                                                        if password_val.len() < 8 {
-                                                            error_msg.set(Some("Password must be at least 8 characters".to_string()));
-                                                            return;
-                                                        }
-                                                        
-                                                        loading.set(true);
-                                                        error_msg.set(None);
-                                                        success_msg.set(None);
-                                                        
-                                                        let app_state_clone = app_state_inner.clone();
-                                                        spawn_local(async move {
-                                                            let client = crate::api::ApiClient::new(&app_state_clone.api_url);
-                                                            
-                                                            match crate::api::add_email_password(&client, &email_val, &password_val).await {
-                                                                Ok(user) => {
-                                                                    success_msg.set(Some("Email and password added!".to_string()));
-                                                                    app_state_clone.login(user);
-                                                                    email.set(String::new());
-                                                                    password.set(String::new());
-                                                                    confirm_password.set(String::new());
-                                                                }
-                                                                Err(e) => {
-                                                                    error_msg.set(Some(e.to_string()));
-                                                                }
-                                                            }
-                                                            
-                                                            loading.set(false);
-                                                        });
-                                                    }
-                                                >
-                                                    {move || if loading.get() { "Adding..." } else { "Add Email & Password" }}
-                                                </button>
-                                            </div>
-                                        }.into_any()
-                                    }
-                                }}
-                            </div>
-                            
+                            <ReplaceKeySection />
+
+                            <PasskeysSection />
+
+                            <EmailSection />
+
                             <div class="settings-group">
                                 <h2 class="group-title">"Two-Factor Authentication"</h2>
                                 <div class="setting-row">
@@ -428,6 +313,8 @@ pub fn SettingsPage() -> impl IntoView {
                         <div class="settings-panel">
                             <h1 class="panel-title">"Privacy"</h1>
                             <p class="panel-description">"Control who can see your information and interact with you"</p>
+
+                            <AdultContentSetting />
                             
                             <div class="settings-group">
                                 <h2 class="group-title">"Profile Visibility"</h2>
@@ -537,7 +424,7 @@ pub fn SettingsPage() -> impl IntoView {
                                         <div class="permission-text">
                                             <span class="permission-title">"Browser Notifications"</span>
                                             <span class="permission-description">
-                                                "Get notified when your favorite experiences are updated"
+                                                "Get notified when your favorite simulations are updated"
                                             </span>
                                         </div>
                                     </div>
@@ -550,8 +437,8 @@ pub fn SettingsPage() -> impl IntoView {
                                 
                                 <div class="toggle-row">
                                     <div class="toggle-info">
-                                        <span class="toggle-label">"Experience Updates"</span>
-                                        <span class="toggle-description">"When a favorited experience gets a new version"</span>
+                                        <span class="toggle-label">"Simulation Updates"</span>
+                                        <span class="toggle-description">"When a favorited simulation gets a new version"</span>
                                     </div>
                                     <button class="toggle-switch active">
                                         <span class="toggle-knob"></span>

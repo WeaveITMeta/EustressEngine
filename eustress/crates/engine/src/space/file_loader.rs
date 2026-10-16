@@ -203,6 +203,12 @@ impl FileType {
             // AdornmentService: Adornment definition TOMLs spawn as adornment entities
             (Self::Toml, "AdornmentService") => true,
 
+            // DataService: Connectors, Datasets, Domains and ExportTargets are
+            // folder-form instances (`DataService/<name>/_instance.toml`). They
+            // spawn like any other instance, so the Explorer lists them as soon
+            // as they are written, not only on the next reopen.
+            (Self::Toml, "DataService") => true,
+
             // Storage services hold the templates scripts clone at run time
             // (zombie models, weapons, GUI prefabs), so their instance files
             // load like Workspace content. They stay hidden and out of
@@ -2654,15 +2660,11 @@ pub fn spawn_directory_entry(
             })
             .unwrap_or(Vec3::new(0.0, 2.0, 0.0));
 
-        // Resolve the asset on disk. Universe root = grandparent of
-        // SpaceRoot (`<Universe>/Spaces/<SpaceN>`); asset path is
-        // joined from there.
-        let universe_root = space_path
-            .ancestors()
-            .nth(2)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| space_path.to_path_buf());
-        let abs_asset_path = universe_root.join(&asset_rel);
+        // The asset's file in the Universe's shared asset folders, where
+        // media imports land (`media_asset_path`); `None` for one that may not
+        // be opened, which draws as the flat quad.
+        let universe_root = crate::space::universe_root_for_path(space_path);
+        let abs_asset_path = media_asset_path(universe_root.as_deref(), &asset_rel);
 
         // Build a unit quad mesh — same shape as `BillboardCard`'s
         // quad, scaled to size via Transform.scale.
@@ -2688,13 +2690,13 @@ pub fn spawn_directory_entry(
             // The simplest cross-platform approach: pass the absolute
             // path as a string. AssetServer accepts absolute filesystem
             // paths on the filesystem source.
-            if !asset_rel.is_empty() && abs_asset_path.exists() {
+            if let Some(abs_asset_path) = abs_asset_path.as_ref().filter(|path| path.exists()) {
                 let texture: Handle<bevy::image::Image> = asset_server.load(abs_asset_path.clone());
                 mat.base_color_texture = Some(texture);
             } else {
                 warn!(
                     "🖼️ Image entity '{}' has missing asset at {:?} — rendering as flat colour quad",
-                    dir_meta.name, abs_asset_path
+                    dir_meta.name, asset_rel
                 );
             }
         } else {
@@ -2757,11 +2759,15 @@ pub fn spawn_directory_entry(
             // metadata when the asset opens.
             let video_w: u32 = 1280;
             let video_h: u32 = 720;
-            commands.entity(entity).insert(crate::video::PendingVideoSetup {
-                width: video_w,
-                height: video_h,
-                asset_path: abs_asset_path.clone(),
-            });
+            if let Some(asset_path) = abs_asset_path.clone() {
+                commands.entity(entity).insert(crate::video::PendingVideoSetup {
+                    width: video_w,
+                    height: video_h,
+                    asset_path,
+                });
+            } else {
+                warn!("🎞️ Video entity '{}' names an asset that may not be opened: {:?}", dir_meta.name, asset_rel);
+            }
         }
 
         entity
@@ -3748,6 +3754,13 @@ pub const PRIORITY_SERVICES: &[&str] = &["Workspace", "Lighting"];
 /// DeferredServiceLoader stamps the generation it was built for; if the
 /// live counter moves on (rename, switch, or rapid re-open) the stale
 /// queue is discarded before it can load entries into the wrong Space.
+///
+/// Every once-per-open latch keys on this number with the Space's path,
+/// never on the path alone. Reopening the Space that is already open
+/// (Restore Points > Revert, File > Open Recent, the Universe browser) keeps
+/// the path and moves this number, so a path-only latch never ran again and
+/// the reopened Space came back without its database-held parts or its
+/// terrain.
 #[derive(Resource, Default)]
 pub struct SpaceLoadGeneration(pub u64);
 
@@ -3968,10 +3981,13 @@ pub fn load_space_files_system(
     // docstring for the failure mode this prevents).
     load_in_progress.begin();
 
-    // A Space written under the legacy pose rule moves to ParentPose before
-    // its rule is read (`rule_migration`). One read from its database moved
-    // in the open worker, before anything read the tree.
+    // A Space older than this build's format moves to it
+    // (`format_migration`), then one written under the legacy pose rule
+    // moves to ParentPose before its rule is read (`rule_migration`), which
+    // so reads every custom mesh's scale as what it is. One read from its
+    // database moved in the open worker, before anything read the tree.
     if !source.is_fjall() {
+        super::format_migration::migrate_logged(space_path, None);
         super::rule_migration::migrate_logged(space_path, None);
     }
 
@@ -4632,6 +4648,18 @@ impl Plugin for SpaceFileLoaderPlugin {
                 eustress_common::class_schema::dispatch_pending_extras,
             ));
 
+        // A custom mesh's collider is built at spawn from the file's scale;
+        // its size is known only when the mesh loads
+        // (`update_base_part_size_from_mesh`), so the collider is rebuilt at
+        // that size by the same system the scale tool and Play use. It builds
+        // through `shape_collider(.., collider_local_half(..))`, and skips a
+        // part whose collider already matches (`ColliderBuiltForSize`).
+        app.add_systems(
+            Update,
+            eustress_play_runtime::part_colliders::rebuild_collider_on_size_change
+                .after(super::instance_loader::update_base_part_size_from_mesh),
+        );
+
         // A save writes only the parts changed since the last one
         // (`space_ops::save_space`); this keeps the list.
         app.init_resource::<super::space_ops::SaveDirty>()
@@ -4827,5 +4855,42 @@ mod folder_load_tests {
             apply_flat_extension_class(Path::new(file), text, &mut def);
             assert_eq!(def.metadata.class_name, class, "{file}");
         }
+    }
+}
+
+/// An imported Image's or Video's file: `asset_rel` (its `[asset] path`)
+/// under the Universe's shared asset folders, where media imports land
+/// (`<Universe>/assets/images`, `assets/videos`). `None` with no Universe, or
+/// for a path that names a drive, share, root or device, climbs out, or lands
+/// outside those folders: the load would otherwise stat or read it, and a
+/// `//host/share` path opens SMB.
+fn media_asset_path(universe_root: Option<&Path>, asset_rel: &str) -> Option<PathBuf> {
+    let universe = universe_root?;
+    let rel = eustress_common::space_path::relative_in_space(Path::new(asset_rel))?;
+    let roots = eustress_common::space_path::shared_asset_roots(universe);
+    let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    eustress_common::space_path::resolve_in_roots(&roots, &universe.join(rel))
+}
+
+#[cfg(test)]
+mod media_path_tests {
+    use super::*;
+
+    /// Media resolves in the shared asset folders and nowhere else.
+    #[test]
+    fn imported_media_stays_in_the_shared_asset_folders() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let universe = std::env::temp_dir().join(format!("eustress_media_path_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(universe.join("assets").join("images")).unwrap();
+        std::fs::write(universe.join("assets").join("images").join("logo.png"), b"png").unwrap();
+        std::fs::create_dir_all(universe.join("Spaces").join("Other")).unwrap();
+        std::fs::write(universe.join("Spaces").join("Other").join("x.png"), b"png").unwrap();
+        let u = Some(universe.as_path());
+        assert_eq!(media_asset_path(u, "assets/images/logo.png"), Some(universe.join("assets").join("images").join("logo.png")));
+        for refused in ["", "Spaces/Other/x.png", "../x.png", "assets/../Spaces/Other/x.png", "//host/share/x.png", "C:/x.png", "/x.png", "assets/images/NUL", "assets/images/logo.png:s"] {
+            assert_eq!(media_asset_path(u, refused), None, "{refused:?}");
+        }
+        assert_eq!(media_asset_path(None, "assets/images/logo.png"), None, "no Universe");
+        let _ = std::fs::remove_dir_all(&universe);
     }
 }

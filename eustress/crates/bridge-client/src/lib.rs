@@ -175,18 +175,10 @@ fn round_trip(
 
     // ── Send one newline-terminated request frame ────────────────────
     //
-    // `id` is a constant 1: this is a single synchronous round-trip on a
-    // fresh connection, so there are no concurrent requests to
-    // disambiguate. The engine echoes it back; we don't bother checking.
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
-    let mut line = serde_json::to_string(&request)
-        .map_err(|e| format!("internal: failed to encode request: {e}"))?;
-    line.push('\n');
+    // It carries the engine's per-launch token, found by the port this
+    // stream reached; without it the engine answers "unauthorized".
+    let auth = stream.peer_addr().ok().and_then(|a| read_token(a.port()));
+    let line = request_frame(method, params, auth.as_deref())?;
 
     let mut writer = stream
         .try_clone()
@@ -246,6 +238,69 @@ fn round_trip(
             resp_line.trim()
         )),
     }
+}
+
+/// One request frame, newline-terminated. `id` is a constant 1: each frame
+/// is a single synchronous round-trip on a fresh connection, so there are
+/// no concurrent requests to disambiguate. `auth` is the engine's token.
+/// This program's name (`eustress-mcp`, `eustress-cli`, ...), sent with each
+/// request so the engine's write log can tell callers apart.
+fn client_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn request_frame(method: &str, params: Value, auth: Option<&str>) -> Result<String, String> {
+    let mut request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    if let Some(token) = auth {
+        request["auth"] = Value::String(token.to_string());
+    }
+    // Who is calling, as the engine's write log shows it (unverified there).
+    request["client"] = Value::String(client_name());
+    let mut line = serde_json::to_string(&request).map_err(|e| format!("internal: failed to encode request: {e}"))?;
+    line.push('\n');
+    Ok(line)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The bridge token: one per engine launch, required on every request
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Reaching the port is not enough to drive an engine: a web page can reach a
+// loopback port. Each engine writes a fresh token at
+// `~/.eustress_engine/bridge/<port>.token`, in the user's own profile and
+// outside every Universe, and refuses a request that does not carry it.
+// Clients find it by the port they connected to, however they found the
+// port.
+
+/// `~/.eustress_engine/bridge/`: where each running engine keeps its token.
+pub fn token_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".eustress_engine").join("bridge"))
+}
+
+/// `<dir>/<port>.token`.
+pub fn token_path_in(dir: &Path, port: u16) -> std::path::PathBuf {
+    dir.join(format!("{port}.token"))
+}
+
+/// The token of the engine listening on `port`, read from `dir`. `None`
+/// when missing or empty.
+pub fn read_token_in(dir: &Path, port: u16) -> Option<String> {
+    let token = std::fs::read_to_string(token_path_in(dir, port)).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// The token of the engine listening on `port`.
+pub fn read_token(port: u16) -> Option<String> {
+    read_token_in(&token_dir()?, port)
 }
 
 /// Discover the bridge's `engine.port` for `universe_dir` and return the
@@ -487,4 +542,33 @@ pub fn default_workspace_root() -> std::path::PathBuf {
     documents
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("Eustress")
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_carries_the_token_when_there_is_one() {
+        let with: Value = serde_json::from_str(request_frame("ping", Value::Null, Some("abc")).unwrap().trim()).unwrap();
+        assert_eq!(with["auth"], "abc");
+        assert_eq!(with["method"], "ping");
+        let without: Value = serde_json::from_str(request_frame("ping", Value::Null, None).unwrap().trim()).unwrap();
+        assert!(without.get("auth").is_none());
+        assert!(request_frame("ping", Value::Null, None).unwrap().ends_with('\n'));
+    }
+
+    #[test]
+    fn tokens_are_found_by_port() {
+        let dir = std::env::temp_dir().join(format!("eus_bridge_client_token_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(token_path_in(&dir, 50123), dir.join("50123.token"));
+        assert_eq!(read_token_in(&dir, 50123), None);
+        std::fs::write(dir.join("50123.token"), "abc\n").unwrap();
+        assert_eq!(read_token_in(&dir, 50123).as_deref(), Some("abc"));
+        std::fs::write(dir.join("50124.token"), "  \n").unwrap();
+        assert_eq!(read_token_in(&dir, 50124), None, "an empty token is no token");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

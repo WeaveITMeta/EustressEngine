@@ -21,11 +21,16 @@ pub mod api;
 pub mod app;
 pub mod capture;
 pub mod components;
+pub mod identity_file;
 pub mod pages;
+pub mod seo;
 pub mod services;
 pub mod state;
+pub mod tags;
+pub mod time_words;
 pub mod utils;
 pub mod wallet;
+pub mod webauthn;
 
 // -----------------------------------------------------------------------------
 // 2. Re-exports

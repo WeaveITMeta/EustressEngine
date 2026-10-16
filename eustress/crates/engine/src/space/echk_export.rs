@@ -63,6 +63,18 @@
 //! than one upload request carries and more than a Player accepts. Any chunk
 //! over [`MAX_EXPORT_CHUNK_BYTES`] is repacked into several at the same
 //! coordinate. Readers do not care how a Space's records are split.
+//!
+//! ## Keys
+//!
+//! Everyone who downloads a package can read every byte of it. [`export_world`]
+//! screens every Space and the assets before it writes anything
+//! ([`eustress_echk::screen_records`]): SoulService's `api_key` and
+//! `use_global_key` come out of its settings, then every byte of every file,
+//! and every file's name, is read for keys and judged for the package's
+//! [`Destination`]. A package that leaves this machine is refused by a key,
+//! naming the file, where in it, and the provider, never the key, and naming
+//! only the Space of a file whose name holds one; one that stays warns
+//! instead.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -72,8 +84,11 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use eustress_echk::{
-    content_hash, decode_chunk, encode_chunk, is_safe_record_path, ChunkEntry, Record, SpaceManifest, WorldManifest,
+    content_hash, decode_chunk, encode_chunk, is_safe_record_path, screen_outcome, screen_records, ChunkEntry, Findings,
+    Record, SpaceManifest, WorldManifest,
 };
+/// Where an export's package goes, which decides what a key in it does.
+pub use eustress_echk::Destination;
 use eustress_worlddb::{
     ChangeStream, Commit, ComponentTypeId, EntityId, Filter, Result as DbResult, Subscription, TreeEntry, TxId, WorldDb,
 };
@@ -91,6 +106,8 @@ pub const MAX_EXPORT_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// How long after a save the tree takes to hold what the save wrote: it lags
 /// disk by 350 ms to 1.2 s. An export that follows a save waits this long.
 pub const SAVE_SETTLE: Duration = Duration::from_millis(1500);
+/// How a key message names the Universe's shared assets.
+const ASSETS_SCOPE: &str = "the shared assets";
 
 /// What an export did, for the log and the publish summary.
 #[derive(Debug, Clone, Default)]
@@ -128,6 +145,16 @@ pub struct ExportStats {
     /// Terrain files published from the host's memory in place of the saved
     /// ones (see [`replace_terrain`]).
     pub live_terrain: usize,
+    /// Meshes from the Universe's shared asset folders carried into the
+    /// Space's records (see [`ship_shared_meshes`]).
+    pub shared_meshes: usize,
+    /// Each of those meshes, by key and size in bytes, for the Publish dialog
+    /// to list before the person confirms: nothing from outside the Space
+    /// leaves the machine unseen.
+    pub shared_mesh_names: Vec<(String, u64)>,
+    /// SoulService's own AI key was taken out of this Space's records, in a
+    /// package that leaves this machine ([`eustress_echk::SOUL_KEY_NOTICE`]).
+    pub soul_key_left_out: bool,
 }
 
 /// Services players never receive, as in Roblox, where neither replicates to
@@ -275,6 +302,16 @@ pub struct ExportedWorld {
     /// Chunk file for every content hash the manifest names.
     pub files: HashMap<String, PathBuf>,
     pub stats: Vec<(String, ExportStats)>,
+    /// Lines for the person to read as warnings: on a loopback host,
+    /// [`eustress_echk::SOUL_KEY_NOTICE`] first when SoulService's key came
+    /// out; one line for each Space whose SoulService settings could not be
+    /// read and ship empty; then one per key the destination let through, at
+    /// most 8 and then a count, each naming the file, where in it, and the
+    /// provider.
+    pub warnings: Vec<String>,
+    /// [`eustress_echk::SOUL_KEY_NOTICE`], when SoulService's key came out of a
+    /// package that leaves this machine.
+    pub notice: Option<&'static str>,
 }
 
 impl ExportedWorld {
@@ -298,10 +335,78 @@ impl ExportedWorld {
     }
 }
 
-/// Export Spaces (and optionally the Universe's `assets/`) into `out_root`.
+/// One Space's records as the bake receives them, and what collecting them
+/// found.
+struct SpaceRecords {
+    /// Every record the bake writes for the audience, sorted by path.
+    records: Vec<Record>,
+    stats: ExportStats,
+    /// Records the audience leaves to the other part.
+    left_out: usize,
+    /// Files only on disk that joined a database-backed Space.
+    disk_only: usize,
+}
+
+/// Collect `space` and shape it for `audience`: exactly the records
+/// [`export_world`] bakes for it, with `terrain` as its live terrain.
+fn space_records(
+    space: &SpaceInput,
+    terrain: Option<Vec<Record>>,
+    big_space_threshold: usize,
+    audience: Audience,
+) -> Result<SpaceRecords, String> {
+    let (mut records, mut stats) = match &space.source {
+        SpaceSource::Db(db) => collect_from_db(db.as_ref(), big_space_threshold)?,
+        SpaceSource::Disk(root) => collect_from_disk(root)?,
+    };
+    let disk_only = match (&space.source, &space.folder) {
+        (SpaceSource::Db(_), Some(folder)) => add_disk_only_files(&mut records, folder, &mut stats)?,
+        _ => 0,
+    };
+    if let Some(live) = terrain {
+        stats.live_terrain = replace_terrain(&mut records, live);
+    }
+    // The shared meshes its parts use travel with the Space, and a part
+    // naming a mesh it may not is left out (`ship_shared_meshes`).
+    let folder = match &space.source {
+        SpaceSource::Disk(root) => Some(root.clone()),
+        SpaceSource::Db(_) => space.folder.clone(),
+    };
+    let roots = folder.map(super::space_asset_source::AssetRoots::of);
+    ship_shared_meshes(&mut records, roots.as_ref(), CARRY_SHARED_MESHES, &mut stats);
+    let before = records.len();
+    // Players get everything but the server-only services, and of the
+    // rest, every server Script's instance but not its code.
+    let (server_side, rest): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|(path, _)| is_server_only(path));
+    let (for_players, withheld_code) = withhold_server_code(rest, &mut stats);
+    let mut records = match audience {
+        Audience::Players => for_players,
+        Audience::Server => server_side.into_iter().chain(withheld_code).collect(),
+    };
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    stats.files = records.len();
+    stats.webhook_paths = records.iter().filter(|(_, bytes)| contains_webhook(bytes)).map(|(p, _)| p.clone()).collect();
+    Ok(SpaceRecords { left_out: before.saturating_sub(records.len()), records, stats, disk_only })
+}
+
+/// Export Spaces (and optionally the Universe's `assets/`) into `out_root`,
+/// for `destination`.
 ///
 /// `out_root` persists between runs on purpose: the bake compares each chunk
 /// with the one it wrote last time and leaves unchanged chunks alone.
+///
+/// Nothing is written until every Space and the assets pass the screen
+/// ([`eustress_echk::screen_records`], judged by
+/// [`eustress_echk::screen_outcome`]): SoulService's own key comes out, every
+/// byte of every file and every file's name is read for keys, and a key that
+/// refuses this destination stops the export, naming each such file, where in
+/// it, and the provider, never the key; a file whose name holds one is named
+/// by its Space only. Each Space is collected once to be screened and again to
+/// be baked, so one Space is in memory at a time. The second screen runs on
+/// exactly the records the bake writes: a Space that gains a key between the
+/// two is refused before it is written, and the Spaces baked before it in that
+/// call hold no key. The warnings and the notice come back with the world.
+#[allow(clippy::too_many_arguments)]
 pub fn export_world(
     universe: &str,
     spaces: Vec<SpaceInput>,
@@ -310,6 +415,7 @@ pub fn export_world(
     out_root: &Path,
     big_space_threshold: usize,
     audience: Audience,
+    destination: Destination,
 ) -> Result<ExportedWorld, String> {
     let mut manifest = WorldManifest::new(universe, env!("CARGO_PKG_VERSION"), eustress_worlddb::bake::DEFAULT_CHUNK_SIZE);
     manifest.start_space = start_space.to_string();
@@ -319,36 +425,38 @@ pub fn export_world(
         Audience::Players => "spaces",
         Audience::Server => "server",
     };
+    // The shared assets are for players; a host has them locally.
+    let assets_root = assets_root.filter(|_| audience == Audience::Players);
+    let prefix = |space: &SpaceInput| format!("{}/", space.name);
 
-    for space in spaces {
-        let (mut records, mut stats) = match &space.source {
-            SpaceSource::Db(db) => collect_from_db(db.as_ref(), big_space_threshold)?,
-            SpaceSource::Disk(root) => collect_from_disk(root)?,
-        };
-        let disk_only = match (&space.source, &space.folder) {
-            (SpaceSource::Db(_), Some(folder)) => add_disk_only_files(&mut records, folder, &mut stats)?,
-            _ => 0,
-        };
-        if let Some(live) = space.terrain {
-            stats.live_terrain = replace_terrain(&mut records, live);
-        }
-        let before = records.len();
-        // Players get everything but the server-only services, and of the
-        // rest, every server Script's instance but not its code.
-        let (server_side, rest): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|(path, _)| is_server_only(path));
-        let (for_players, withheld_code) = withhold_server_code(rest, &mut stats);
-        let mut records = match audience {
-            Audience::Players => for_players,
-            Audience::Server => server_side.into_iter().chain(withheld_code).collect(),
-        };
-        records.sort_by(|a, b| a.0.cmp(&b.0));
-        stats.files = records.len();
-        stats.webhook_paths = records.iter().filter(|(_, bytes)| contains_webhook(bytes)).map(|(p, _)| p.clone()).collect();
+    // The screen, before anything is written. Asset records already start
+    // with `assets/`.
+    let mut first = Findings::default();
+    for space in &spaces {
+        let mut checked = space_records(space, space.terrain.clone(), big_space_threshold, audience)?;
+        first.extend(screen_records(&mut checked.records, &prefix(space), &space.name));
+    }
+    if let Some(root) = assets_root {
+        first.extend(screen_records(&mut collect_assets(root)?, "", ASSETS_SCOPE));
+    }
+    screen_outcome(&first, destination)?;
+
+    let mut passed = Findings::default();
+    for mut space in spaces {
+        let terrain = space.terrain.take();
+        let SpaceRecords { mut records, mut stats, left_out, disk_only } =
+            space_records(&space, terrain, big_space_threshold, audience)?;
+        // What is about to be written, screened again: the Space may have
+        // changed since the screen above.
+        let found = screen_records(&mut records, &prefix(&space), &space.name);
+        screen_outcome(&found, destination)?;
+        stats.soul_key_left_out = found.stripped && destination.leaves_machine();
+        passed.extend(found);
         info!(
             "echk export ({part}): {}: {} files ({} left to the other part, code of {} server Scripts kept from players), {} entities ({} #bin overlays, {} cores written back, {} standalone cores, {} baked copies dropped, {} files only on disk, {} live terrain files){}",
             space.name,
             stats.files,
-            before.saturating_sub(records.len()),
+            left_out,
             stats.server_code_withheld,
             stats.entities,
             stats.bin_overlays,
@@ -366,9 +474,11 @@ pub fn export_world(
         all_stats.push((space.name, stats));
     }
 
-    // The shared assets are for players; a host has them locally.
-    if let Some(root) = assets_root.filter(|_| audience == Audience::Players) {
-        let records = collect_assets(root)?;
+    if let Some(root) = assets_root {
+        let mut records = collect_assets(root)?;
+        let found = screen_records(&mut records, "", ASSETS_SCOPE);
+        screen_outcome(&found, destination)?;
+        passed.extend(found);
         if !records.is_empty() {
             let dir = out_root.join("assets");
             let chunks = pack_assets(records, &dir)?;
@@ -379,9 +489,12 @@ pub fn export_world(
         }
     }
 
+    // Every key left passed this destination; together they make the
+    // world's warnings, capped once for the whole world.
+    let screened = screen_outcome(&passed, destination)?;
     manifest.canonicalize();
     manifest.validate().map_err(|e| format!("the exported world failed its own check: {e}"))?;
-    Ok(ExportedWorld { manifest, files, stats: all_stats })
+    Ok(ExportedWorld { manifest, files, stats: all_stats, warnings: screened.warnings, notice: screened.notice })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -603,6 +716,11 @@ fn walk_paths(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Resu
         if skip_name(&name) {
             continue;
         }
+        // A link or junction is never followed: in a Space someone hands
+        // over, one could point anywhere on this machine.
+        if entry.file_type().map_or(true, |kind| kind.is_symlink()) {
+            continue;
+        }
         if path.is_dir() {
             walk_paths(base, &path, out)?;
             continue;
@@ -634,6 +752,12 @@ fn walk_files(base: &Path, dir: &Path, prefix: &str, out: &mut Vec<Record>, stat
         if skip_name(&name) {
             continue;
         }
+        // A link or junction is never followed: in a Space someone hands
+        // over, one could point anywhere on this machine.
+        if entry.file_type().map_or(true, |kind| kind.is_symlink()) {
+            stats.skipped.push(format!("{prefix}{name}: a link, not followed"));
+            continue;
+        }
         if path.is_dir() {
             walk_files(base, &path, prefix, out, stats)?;
             continue;
@@ -648,6 +772,318 @@ fn walk_files(base: &Path, dir: &Path, prefix: &str, out: &mut Vec<Record>, stat
         out.push((rel, bytes));
     }
     Ok(())
+}
+
+/// The prefixes a shared mesh travels under in a Space's records, for
+/// `<Universe>/assets` and `<Universe>/.eustress/assets`, in
+/// [`eustress_common::space_path::shared_asset_roots`]'s order.
+const SHARED_MESH_KEYS: [&str; 2] = ["assets/universe/", "assets/universe-eustress/"];
+
+/// Whether a publish carries the Universe's shared meshes into its Spaces.
+/// Off until the Publish dialog lists them by name and size before the
+/// person confirms: a Space someone hands over can name any `.glb` in the
+/// shared folders, so nothing from there leaves the machine unseen. With it
+/// off, such a part ships as it is named and its mesh is reported not
+/// carried.
+const CARRY_SHARED_MESHES: bool = false;
+
+/// The largest shared mesh one publish carries.
+const SHARED_MESH_MAX_BYTES: u64 = MAX_EXPORT_CHUNK_BYTES;
+
+/// All the shared meshes one publish carries, together.
+const SHARED_MESHES_MAX_BYTES: u64 = 4 * MAX_EXPORT_CHUNK_BYTES;
+
+/// Where a part's mesh is, for a publish.
+#[derive(Debug, PartialEq)]
+enum MeshPlace {
+    /// Ships as it is named: in the Space beside the part, a primitive, a
+    /// bundled asset, or missing everywhere (it draws the fallback, as in
+    /// Studio).
+    AsIs,
+    /// In the Space at this key, found by its `assets/...` path: named again
+    /// by a climb from the part's folder, which a Player's reader resolves.
+    InSpace(String),
+    /// In a shared asset folder: carried in at this key, from this file.
+    Shared { key: String, file: PathBuf },
+    /// In a shared asset folder but not a mesh a publish carries (not a
+    /// `.glb` under its `meshes/`): the part ships as it is named, and the
+    /// file is never read.
+    NotCarried,
+    /// Names a drive, share, root or `:`, or lands outside the Space and the
+    /// shared folders: the part is left out and the file never read.
+    Refused,
+}
+
+/// Every shared mesh the Space's parts use, carried into the Space's own
+/// records, and every part that names a mesh it may not, left out. Returns
+/// the meshes carried in.
+///
+/// A part's `[asset] mesh` is found as Studio's loader finds it
+/// (`instance_loader::resolve_custom_mesh`): beside its file, then, for an
+/// `assets/...` path, in the Space and in the Universe. One in the Space
+/// ships with the Space's records. One in the Universe's shared asset
+/// folders, a `.glb` under its `meshes/` within [`SHARED_MESH_MAX_BYTES`] (and
+/// [`SHARED_MESHES_MAX_BYTES`] for all of them), is copied in under
+/// [`SHARED_MESH_KEYS`] and listed in `stats.shared_mesh_names`, and the part's published
+/// record names it by a climb from its own folder, which a Player's reader
+/// (`record::mesh_id_of`, Space-relative) and Studio both resolve; a mesh
+/// Studio finds in the Space by its `assets/...` path is named the same way.
+/// A part whose mesh names a drive, share, root or `:`, or lands anywhere
+/// else (a sibling Space, the system), is left out with a warning, and that
+/// file is never read: a Space someone hands over to be published must not
+/// make export read an arbitrary file into the package. With `carry` false
+/// ([`CARRY_SHARED_MESHES`]) no shared mesh is carried: its part ships as
+/// named and the mesh is reported. `roots` is `None`
+/// when the Space's folder is unknown: its own meshes still ship, nothing
+/// outside it does.
+pub(crate) fn ship_shared_meshes(
+    records: &mut Vec<Record>,
+    roots: Option<&super::space_asset_source::AssetRoots>,
+    carry: bool,
+    stats: &mut ExportStats,
+) -> usize {
+    let keys: HashSet<String> = records.iter().map(|(key, _)| key.clone()).collect();
+    let universe = roots.and_then(|roots| roots.universe());
+    let shared: Vec<(&str, PathBuf)> = match (roots, universe) {
+        (Some(roots), Some(universe)) => {
+            let allowed = roots.allowed();
+            SHARED_MESH_KEYS
+                .iter()
+                .copied()
+                .zip(eustress_common::space_path::shared_asset_roots(universe))
+                .filter(|(_, root)| allowed.contains(root))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let space = roots.map(|roots| roots.space.as_path());
+    let mut carried: Vec<Record> = Vec::new();
+    let mut carried_keys: HashSet<String> = HashSet::new();
+    let mut carried_bytes: u64 = 0;
+    let mut refused: Vec<(String, String)> = Vec::new();
+    for (key, bytes) in records.iter_mut() {
+        if !key.ends_with(".toml") || !bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"mesh")) {
+            continue;
+        }
+        let Some(mut doc) = std::str::from_utf8(bytes).ok().and_then(|text| text.parse::<toml::Value>().ok()) else {
+            continue;
+        };
+        let Some(mesh) = asset_mesh(&doc) else { continue };
+        let target = match place_mesh(key, &mesh, &keys, space, universe, &shared) {
+            MeshPlace::AsIs => continue,
+            MeshPlace::Refused => {
+                refused.push((key.clone(), mesh));
+                continue;
+            }
+            MeshPlace::NotCarried => {
+                stats.skipped.push(format!("{key}: its mesh {mesh:?} is not a .glb under a shared folder's meshes/; not carried"));
+                continue;
+            }
+            MeshPlace::InSpace(target) => target,
+            MeshPlace::Shared { key: target, .. } if !carry => {
+                stats.skipped.push(format!("{key}: names the shared mesh {target}; not carried, since a publish carries shared meshes only once the Publish dialog lists them"));
+                continue;
+            }
+            MeshPlace::Shared { key: target, file } => {
+                if keys.contains(&target) {
+                    stats.skipped.push(format!("{target}: the Space already has a file there; {key}'s shared mesh is not carried"));
+                    continue;
+                }
+                if !carried_keys.contains(&target) {
+                    let left = SHARED_MESHES_MAX_BYTES.saturating_sub(carried_bytes).min(SHARED_MESH_MAX_BYTES);
+                    match read_capped(&file, left) {
+                        Ok(Some(mesh_bytes)) => {
+                            carried_bytes += mesh_bytes.len() as u64;
+                            stats.shared_mesh_names.push((target.clone(), mesh_bytes.len() as u64));
+                            carried_keys.insert(target.clone());
+                            carried.push((target.clone(), mesh_bytes));
+                        }
+                        Ok(None) => {
+                            stats.skipped.push(format!(
+                                "{target}: over the size a publish carries ({SHARED_MESH_MAX_BYTES} bytes a mesh, {SHARED_MESHES_MAX_BYTES} in all); not carried"
+                            ));
+                            continue;
+                        }
+                        Err(e) => {
+                            stats.skipped.push(format!("{target}: {e}"));
+                            continue;
+                        }
+                    }
+                }
+                target
+            }
+        };
+        set_asset_mesh(&mut doc, &climb_to(key, &target));
+        if let Ok(text) = toml::to_string_pretty(&doc) {
+            *bytes = text.into_bytes();
+        }
+    }
+    for (key, mesh) in &refused {
+        warn!("echk export: {key} names the mesh {mesh:?}, outside the Space and the Universe's shared assets; the part is left out");
+        stats.skipped.push(format!("{key}: its mesh is outside the Space and the Universe's shared assets; the part is left out"));
+    }
+    let refused: HashSet<&String> = refused.iter().map(|(key, _)| key).collect();
+    records.retain(|(key, _)| !refused.contains(key));
+    let shipped = carried.len();
+    stats.shared_meshes += shipped;
+    records.extend(carried);
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    stats.files = records.len();
+    stats.entities = records.iter().filter(|(path, _)| is_entity(path)).count();
+    shipped
+}
+
+/// Where the mesh `mesh` of the record at `key` is, for a publish (see
+/// [`MeshPlace`]). Nothing is read; a shared file is only stat'ed after it
+/// passes the canonical check.
+fn place_mesh(
+    key: &str,
+    mesh: &str,
+    keys: &HashSet<String>,
+    space: Option<&Path>,
+    universe: Option<&Path>,
+    shared: &[(&str, PathBuf)],
+) -> MeshPlace {
+    let mesh = mesh.trim();
+    if mesh.is_empty() {
+        return MeshPlace::AsIs;
+    }
+    let slashed = mesh.replace('\\', "/");
+    if slashed.to_ascii_lowercase().starts_with("parts/") {
+        return MeshPlace::AsIs;
+    }
+    if slashed.contains("://") {
+        // `space://`, `bundled://` and `embedded://` as a Player reads them;
+        // any other scheme names somewhere else.
+        return match eustress_common::space_path::contained_url(&slashed, Path::new("")) {
+            Some(_) => MeshPlace::AsIs,
+            None => MeshPlace::Refused,
+        };
+    }
+    let own_root = slashed.contains(':')
+        || Path::new(mesh).components().any(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir));
+    if own_root {
+        return MeshPlace::Refused;
+    }
+    let folder = key.rfind('/').map_or("", |i| &key[..i]);
+    let beside = if folder.is_empty() { slashed.clone() } else { format!("{folder}/{slashed}") };
+    match normalize_key(&beside) {
+        Some(found) if keys.contains(&found) => return MeshPlace::AsIs,
+        Some(_) => {}
+        // Beside the part climbs out of the Space: a shared folder, or nothing.
+        None => {
+            let Some(space) = space else { return MeshPlace::Refused };
+            return shared_place(&lexical(&space.join(folder).join(mesh)), shared);
+        }
+    }
+    if slashed.trim_start_matches("./").to_ascii_lowercase().starts_with("assets/") {
+        if let Some(found) = normalize_key(&slashed).filter(|found| keys.contains(found)) {
+            return MeshPlace::InSpace(found);
+        }
+        if let Some(universe) = universe {
+            match shared_place(&lexical(&universe.join(mesh)), shared) {
+                MeshPlace::Refused => {}
+                place => return place,
+            }
+        }
+    }
+    MeshPlace::AsIs
+}
+
+/// A path outside the Space, as a publish may carry it: inside a shared
+/// asset folder by its canonical form (`space_path::resolve_in_roots`), with
+/// a publishable key. Missing there: as it is. Anywhere else: refused.
+fn shared_place(path: &Path, shared: &[(&str, PathBuf)]) -> MeshPlace {
+    for (prefix, root) in shared {
+        let Ok(rel) = path.strip_prefix(root) else { continue };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        // Only a mesh: a Space someone hands over must not publish whatever
+        // else the shared folders hold (images, videos, notes, an unreleased
+        // product's other files).
+        if !is_shared_mesh(&rel) {
+            return MeshPlace::NotCarried;
+        }
+        let Some(file) = eustress_common::space_path::resolve_in_roots(&[root.as_path()], path) else {
+            return MeshPlace::Refused;
+        };
+        let key = format!("{prefix}{rel}");
+        if !publishable(&key) {
+            return MeshPlace::Refused;
+        }
+        return if file.is_file() { MeshPlace::Shared { key, file } } else { MeshPlace::AsIs };
+    }
+    MeshPlace::Refused
+}
+
+/// Whether a path in a shared asset folder is one a publish may carry: a
+/// `.glb` (its buffers inside it) under the folder's `meshes/`. A `.gltf` is
+/// not: its buffers and images are other files it names.
+fn is_shared_mesh(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    lower.starts_with("meshes/") && lower.ends_with(".glb") && !lower.contains(':')
+}
+
+/// A file's bytes when it holds at most `cap` of them, read no further than
+/// that; `None` when it is larger.
+fn read_capped(file: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)?.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= cap).then_some(bytes))
+}
+
+/// `path` with `.` dropped and `..` applied, by text.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// A `/` path with `.` dropped and `..` applied; `None` when it climbs out.
+fn normalize_key(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// The path from the folder of the record at `key` to `target`, both keys in
+/// the Space, by climbing: what `record::mesh_id_of` turns back into
+/// `target`.
+fn climb_to(key: &str, target: &str) -> String {
+    let depth = key.rfind('/').map_or(0, |i| key[..i].split('/').filter(|s| !s.is_empty()).count());
+    format!("{}{target}", "../".repeat(depth))
+}
+
+/// A record's `[asset] mesh`, table and key in any case.
+fn asset_mesh(doc: &toml::Value) -> Option<String> {
+    let asset = doc.as_table()?.iter().find(|(k, _)| k.eq_ignore_ascii_case("asset"))?.1;
+    let mesh = asset.as_table()?.iter().find(|(k, _)| k.eq_ignore_ascii_case("mesh"))?.1;
+    mesh.as_str().map(str::to_owned)
+}
+
+/// Set a record's `[asset] mesh`, under the spelling it already has.
+fn set_asset_mesh(doc: &mut toml::Value, mesh: &str) {
+    let Some(table) = doc.as_table_mut() else { return };
+    let Some(asset_key) = table.keys().find(|k| k.eq_ignore_ascii_case("asset")).cloned() else { return };
+    let Some(asset) = table.get_mut(&asset_key).and_then(|a| a.as_table_mut()) else { return };
+    let mesh_key = asset.keys().find(|k| k.eq_ignore_ascii_case("mesh")).cloned().unwrap_or_else(|| "mesh".to_string());
+    asset.insert(mesh_key, toml::Value::String(mesh.to_string()));
 }
 
 /// Names never published: hidden entries (`.eustress/`, `.git/`), the
@@ -1395,5 +1831,440 @@ mod tests {
         let (records, _) = collect_from_db(&view, usize::MAX).unwrap();
         let published = records.iter().find(|(path, _)| path == "space.toml").map(|(_, bytes)| bytes.clone());
         assert_eq!(published, Some(space_toml));
+    }
+}
+
+#[cfg(test)]
+mod shared_mesh_tests {
+    use super::*;
+    use crate::space::space_asset_source::AssetRoots;
+
+    fn part(mesh: &str) -> String {
+        format!("[metadata]\nclass_name = \"Part\"\n\n[asset]\nmesh = \"{mesh}\"\n")
+    }
+
+    /// A Universe with the Space `Garage`, a Workshop mesh in
+    /// `assets/meshes`, an Assets panel mesh in `.eustress/assets`, a sibling
+    /// Space, and the Space's parts naming each kind of mesh.
+    fn universe() -> (PathBuf, PathBuf) {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let universe = std::env::temp_dir().join(format!("eustress_echk_shared_{}_{nanos}", std::process::id()));
+        let space = universe.join("Spaces").join("Garage");
+        let put = |path: PathBuf, bytes: &[u8]| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        put(space.join("meshes").join("own.glb"), b"own");
+        put(universe.join("assets").join("meshes").join("Drone").join("body.glb"), b"workshop");
+        put(universe.join(".eustress").join("assets").join("meshes").join("crate.glb"), b"panel");
+        put(universe.join("Spaces").join("Other").join("secret.glb"), b"secret");
+        put(universe.join("assets").join("images").join("logo.png"), b"PRIVATE-LOGO");
+        put(universe.join("assets").join("videos").join("x.mp4"), b"PRIVATE-VIDEO");
+        put(universe.join("assets").join("notes.txt"), b"PRIVATE-NOTES");
+        put(universe.join("assets").join("meshes").join("x.glb.png"), b"PRIVATE-DOUBLE");
+        put(universe.join(".eustress").join("assets").join("meshes").join("scene.gltf"), b"PRIVATE-GLTF");
+        let huge = std::fs::File::create(universe.join("assets").join("meshes").join("huge.glb")).unwrap();
+        huge.set_len(SHARED_MESH_MAX_BYTES + 1).unwrap();
+        drop(huge);
+        let parts: [(&str, &str); 15] = [
+            ("Own", "../../meshes/own.glb"),
+            ("Drone", "assets/meshes/Drone/body.glb"),
+            ("Crate", "../../../../.eustress/assets/meshes/crate.glb"),
+            ("Block", "parts/block.glb"),
+            ("WinIni", "../../../Windows/win.ini"),
+            ("Deep", "../../../../../../../../../../Windows/win.ini"),
+            ("Absolute", "C:/Windows/win.ini"),
+            ("Share", "//attacker.example/share/x.glb"),
+            ("Sibling", "../../../Other/secret.glb"),
+            ("Logo", "assets/images/logo.png"),
+            ("Video", "assets/videos/x.mp4"),
+            ("Notes", "assets/notes.txt"),
+            ("Double", "assets/meshes/x.glb.png"),
+            ("Gltf", "../../../../.eustress/assets/meshes/scene.gltf"),
+            ("Huge", "assets/meshes/huge.glb"),
+        ];
+        for (name, mesh) in parts {
+            put(space.join("Workspace").join(name).join("_instance.toml"), part(mesh).as_bytes());
+        }
+        (universe, space)
+    }
+
+    fn mesh_of(records: &[Record], key: &str) -> Option<String> {
+        let (_, bytes) = records.iter().find(|(k, _)| k == key)?;
+        asset_mesh(&std::str::from_utf8(bytes).ok()?.parse().ok()?)
+    }
+
+    /// A Workshop mesh and an Assets panel mesh travel with the Space and
+    /// their parts name them where a Player reads them; the Space's own mesh
+    /// and a primitive are untouched.
+    #[test]
+    fn a_publish_carries_the_shared_meshes_its_parts_use() {
+        let (universe, space) = universe();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        assert_eq!(ship_shared_meshes(&mut records, Some(&roots), true, &mut stats), 2);
+        assert_eq!(stats.shared_meshes, 2);
+
+        let bytes = |key: &str| records.iter().find(|(k, _)| k == key).map(|(_, b)| b.clone());
+        assert_eq!(bytes("assets/universe/meshes/Drone/body.glb").as_deref(), Some(&b"workshop"[..]));
+        assert_eq!(bytes("assets/universe-eustress/meshes/crate.glb").as_deref(), Some(&b"panel"[..]));
+        for (part, shipped) in [("Drone", "assets/universe/meshes/Drone/body.glb"), ("Crate", "assets/universe-eustress/meshes/crate.glb")] {
+            let key = format!("Workspace/{part}/_instance.toml");
+            let mesh = mesh_of(&records, &key).unwrap();
+            assert_eq!(eustress_common::datamodel::record::mesh_id_of(&key, &mesh), shipped, "{part}: a Player reads it there");
+        }
+        assert_eq!(mesh_of(&records, "Workspace/Own/_instance.toml").as_deref(), Some("../../meshes/own.glb"));
+        assert_eq!(mesh_of(&records, "Workspace/Block/_instance.toml").as_deref(), Some("parts/block.glb"));
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// A part whose mesh names the system, a drive, a share or a sibling Space
+    /// is left out with a warning, and nothing of what it names is in the
+    /// package.
+    #[test]
+    fn a_part_naming_a_file_outside_is_left_out_and_the_file_never_read() {
+        let (universe, space) = universe();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        ship_shared_meshes(&mut records, Some(&roots), true, &mut stats);
+
+        for part in ["WinIni", "Deep", "Absolute", "Share", "Sibling"] {
+            let key = format!("Workspace/{part}/_instance.toml");
+            assert!(records.iter().all(|(k, _)| k != &key), "{part} was published");
+            assert!(stats.skipped.iter().any(|s| s.starts_with(&key)), "{part} was not reported");
+        }
+        assert!(records.iter().all(|(k, _)| !k.ends_with("win.ini") && !k.contains("secret")), "a refused file is in the package");
+        assert!(records.iter().all(|(_, bytes)| bytes.as_slice() != b"secret"), "the sibling Space's file was read in");
+        if let Ok(win_ini) = std::fs::read("C:/Windows/win.ini") {
+            if !win_ini.is_empty() {
+                assert!(records.iter().all(|(_, bytes)| bytes != &win_ini), "win.ini was read into the package");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// Only a `.glb` under a shared folder's `meshes/`, within the size caps,
+    /// is carried, and listed for the Publish dialog; any other file there is
+    /// never read into the package.
+    #[test]
+    fn only_shared_meshes_within_the_caps_are_carried() {
+        let (universe, space) = universe();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        ship_shared_meshes(&mut records, Some(&roots), true, &mut stats);
+
+        for part in ["Logo", "Video", "Notes", "Double", "Gltf"] {
+            let key = format!("Workspace/{part}/_instance.toml");
+            assert!(records.iter().any(|(k, _)| k == &key), "{part} ships as it is named");
+            assert!(stats.skipped.iter().any(|s| s.starts_with(&key) && s.contains("not carried")), "{part}: {:?}", stats.skipped);
+        }
+        for private in [&b"PRIVATE-LOGO"[..], b"PRIVATE-VIDEO", b"PRIVATE-NOTES", b"PRIVATE-DOUBLE", b"PRIVATE-GLTF"] {
+            assert!(records.iter().all(|(_, bytes)| bytes.as_slice() != private), "{:?} is in the package", String::from_utf8_lossy(private));
+        }
+        assert!(records.iter().all(|(k, _)| !k.ends_with("huge.glb")), "the oversize mesh was carried");
+        assert!(records.iter().any(|(k, _)| k == "Workspace/Huge/_instance.toml"), "a part with an oversize mesh still ships");
+        assert!(stats.skipped.iter().any(|s| s.contains("huge.glb") && s.contains("size")), "{:?}", stats.skipped);
+        let mut names = stats.shared_mesh_names.clone();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![("assets/universe-eustress/meshes/crate.glb".to_string(), 5), ("assets/universe/meshes/Drone/body.glb".to_string(), 8)]
+        );
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// A Space that already has a file at a carried key keeps it, and the
+    /// shared mesh is not added beside it.
+    #[test]
+    fn a_carried_key_the_space_already_has_is_not_doubled() {
+        let (universe, space) = universe();
+        let own = space.join("assets").join("universe").join("meshes").join("Drone");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("body.glb"), b"the Space's own").unwrap();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        ship_shared_meshes(&mut records, Some(&roots), true, &mut stats);
+        let at: Vec<&Record> = records.iter().filter(|(k, _)| k == "assets/universe/meshes/Drone/body.glb").collect();
+        assert_eq!(at.len(), 1, "two records at one key");
+        assert_eq!(at[0].1, b"the Space's own");
+        assert!(stats.skipped.iter().any(|s| s.contains("already has a file")), "{:?}", stats.skipped);
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// With the Space's folder unknown, its own meshes still ship and nothing
+    /// outside it does.
+    #[test]
+    fn without_a_folder_nothing_outside_ships() {
+        let (universe, space) = universe();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        assert_eq!(ship_shared_meshes(&mut records, None, true, &mut stats), 0);
+        assert!(records.iter().any(|(k, _)| k == "Workspace/Own/_instance.toml"));
+        assert!(records.iter().all(|(k, _)| k != "Workspace/Crate/_instance.toml"), "a climb out is refused");
+        assert!(records.iter().all(|(k, _)| !k.starts_with("assets/universe")));
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    /// With carrying off, nothing from the shared folders is read or
+    /// shipped, each such mesh is reported, and a part naming a file outside
+    /// is still left out.
+    #[test]
+    fn with_carrying_off_no_shared_mesh_leaves() {
+        let (universe, space) = universe();
+        let (mut records, mut stats) = collect_from_disk(&space).unwrap();
+        let roots = AssetRoots::with_universe(space.clone(), &universe);
+        assert_eq!(ship_shared_meshes(&mut records, Some(&roots), false, &mut stats), 0);
+        assert!(stats.shared_mesh_names.is_empty());
+        assert!(records.iter().all(|(k, _)| !k.starts_with("assets/universe")));
+        assert!(records.iter().all(|(_, bytes)| bytes.as_slice() != b"workshop" && bytes.as_slice() != b"panel"));
+        for part in ["Drone", "Crate"] {
+            let key = format!("Workspace/{part}/_instance.toml");
+            assert!(records.iter().any(|(k, _)| k == &key), "{part} ships as named");
+            assert!(stats.skipped.iter().any(|s| s.starts_with(&key) && s.contains("not carried")), "{part}: {:?}", stats.skipped);
+        }
+        assert!(records.iter().all(|(k, _)| k != "Workspace/WinIni/_instance.toml"), "a climb to win.ini is still left out");
+        let _ = std::fs::remove_dir_all(&universe);
+    }
+
+    #[test]
+    fn a_climb_names_the_target_from_the_parts_folder() {
+        assert_eq!(climb_to("Workspace/Drone/Body/_instance.toml", "assets/x.glb"), "../../../assets/x.glb");
+        assert_eq!(climb_to("Workspace/Car.part.toml", "assets/x.glb"), "../assets/x.glb");
+        assert_eq!(climb_to("top.toml", "assets/x.glb"), "assets/x.glb");
+        assert_eq!(normalize_key("Workspace/P/../../x"), Some("x".to_string()));
+        assert_eq!(normalize_key("Workspace/P/../../../x"), None);
+    }
+
+    /// A junction inside the Space is never walked into.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_in_the_space_is_not_followed() {
+        let (universe, space) = universe();
+        let outside = universe.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("private.txt"), b"private").unwrap();
+        let link = space.join("Workspace").join("Link");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output();
+        match made {
+            Ok(out) if out.status.success() => {
+                let (records, stats) = collect_from_disk(&space).unwrap();
+                assert!(records.iter().all(|(k, _)| !k.contains("private")), "walked through the junction");
+                assert!(stats.skipped.iter().any(|s| s.contains("Link")), "the link was not reported");
+                let mut found = Vec::new();
+                walk_paths(&space, &space, &mut found).unwrap();
+                assert!(found.iter().all(|(k, _)| !k.contains("private")));
+            }
+            Ok(out) => panic!("mklink /J refused: {}", String::from_utf8_lossy(&out.stderr)),
+            Err(e) => panic!("could not run mklink: {e}"),
+        }
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&universe);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+}
+
+#[cfg(test)]
+mod provider_key_tests {
+    //! The key here is built at run time, so the source holds none, and no
+    //! assertion prints it.
+    use super::*;
+    use eustress_echk::{screen_package, SOUL_KEY_NOTICE};
+
+    /// A key of Anthropic's shape: `sk-ant-` and 60 letters and digits.
+    fn planted_key() -> String {
+        let run: String = (b'a'..=b'z').chain(b'A'..=b'Z').chain(b'0'..=b'9').cycle().take(60).map(char::from).collect();
+        format!("sk-ant-{run}")
+    }
+
+    /// SoulService's settings holding `key`, with both credential fields.
+    fn soul_service(key: &str) -> Vec<u8> {
+        format!(
+            "[service]\nclass_name = \"SoulService\"\nuse_global_key = false\n\n\
+             [properties]\nenable_soul_scripts = true\napi_key = \"{key}\"\n"
+        )
+        .into_bytes()
+    }
+
+    /// Whether `records` hold SoulService's settings with their other values,
+    /// and with neither credential field nor `key`.
+    fn soul_service_is_clean(records: &[Record], key: &str) -> bool {
+        let Some((_, bytes)) = records.iter().find(|(path, _)| path == "SoulService/_service.toml") else { return false };
+        let text = String::from_utf8_lossy(bytes);
+        text.contains("enable_soul_scripts") && !text.contains(key) && !text.contains("api_key") && !text.contains("use_global_key")
+    }
+
+    /// Whether any 8 characters in a row of `key` appear in `text`.
+    fn holds_a_piece_of(text: &str, key: &str) -> bool {
+        let chars: Vec<char> = key.chars().collect();
+        chars.windows(8).any(|piece| text.contains(&piece.iter().collect::<String>()))
+    }
+
+    /// A database-backed Space named `name` with no folder: a part, and a
+    /// script whose first line is `KEY = "{setting}"`, beside `extra`.
+    fn view_space(name: &str, setting: &str, extra: Vec<Record>) -> SpaceInput {
+        let mut records = vec![
+            ("Workspace/Pad/_instance.toml".to_string(), b"[metadata]\nclass_name = \"Part\"\n".to_vec()),
+            ("ReplicatedStorage/Settings.luau".to_string(), format!("local KEY = \"{setting}\"\n").into_bytes()),
+        ];
+        records.extend(extra);
+        SpaceInput { name: name.into(), source: SpaceSource::Db(Arc::new(RecordView::new(records))), folder: None, terrain: None }
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress_keys_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// What `collect_from_disk` reads goes through the same screen as the
+    /// database's copy: SoulService's key comes out, never refusing.
+    #[test]
+    fn the_folder_copy_of_soul_service_loses_its_credentials() {
+        let space = temp("soul_folder");
+        std::fs::create_dir_all(space.join("SoulService")).unwrap();
+        let key = planted_key();
+        std::fs::write(space.join("SoulService").join("_service.toml"), soul_service(&key)).unwrap();
+        let (mut records, _) = collect_from_disk(&space).unwrap();
+        let Ok(screened) = screen_package(&mut records, Destination::Publish) else { panic!("SoulService's own key refused the package") };
+        assert!(screened.stripped && screened.notice == Some(SOUL_KEY_NOTICE), "the strip and its notice");
+        assert!(soul_service_is_clean(&records, &key), "SoulService's credentials reached the records");
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// A Space never opened again before it is published: the key is in its
+    /// database record only, with no SoulService file on disk. The screen
+    /// strips it, so it never refuses a package the strip cleaned. Needs a
+    /// process of its own.
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored --test-threads=1"]
+    fn a_fjall_space_loses_soul_service_credentials() {
+        let space = temp("soul_fjall");
+        std::fs::create_dir_all(space.join("world.fjalldb")).unwrap();
+        let db = eustress_worlddb::backend::open(&space.join("world.fjalldb")).unwrap();
+        let key = planted_key();
+        db.put_file("SoulService/_service.toml", &soul_service(&key)).unwrap();
+        db.put_file("Workspace/Pad/_instance.toml", b"[metadata]\nclass_name = \"Part\"\n").unwrap();
+        assert!(!space.join("SoulService").exists(), "the settings live in the database record only");
+        let (mut records, _) = collect_from_db(db.as_ref(), usize::MAX).unwrap();
+        let Ok(screened) = screen_package(&mut records, Destination::Publish) else {
+            panic!("the SoulService key refused a package the strip cleans")
+        };
+        assert!(screened.stripped, "the database's copy was not stripped");
+        assert_eq!(screened.notice, Some(SOUL_KEY_NOTICE));
+        assert!(soul_service_is_clean(&records, &key), "SoulService's credentials reached the records");
+        assert!(records.iter().any(|(path, _)| path == "Workspace/Pad/_instance.toml"), "the rest of the Space was lost");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// A refused export leaves `out_root` as it found it, the clean Space
+    /// listed before the one holding the key included, and its error names
+    /// the file, its line and the provider only. With the key gone, the same
+    /// export succeeds.
+    #[test]
+    fn a_refused_export_writes_nothing() {
+        let out = temp("refused_export");
+        let key = planted_key();
+        let refused = export_world(
+            "U",
+            vec![view_space("Arena", "", Vec::new()), view_space("Lobby", &key, Vec::new())],
+            "Arena",
+            None,
+            &out,
+            usize::MAX,
+            Audience::Players,
+            Destination::Publish,
+        );
+        let Err(message) = refused else { panic!("an export holding a key was not refused") };
+        assert!(!holds_a_piece_of(&message, &key), "a piece of the key reached the refusal");
+        assert_eq!(
+            message,
+            "Refused: Lobby/ReplicatedStorage/Settings.luau:1 contains what looks like a key for Anthropic. Remove the key from that file, then try again."
+        );
+        assert!(!out.exists(), "a refused export wrote under its out_root");
+
+        let spaces = vec![view_space("Arena", "", Vec::new()), view_space("Lobby", "", Vec::new())];
+        let world = export_world("U", spaces, "Arena", None, &out, usize::MAX, Audience::Players, Destination::Publish)
+            .expect("the same export without the key failed");
+        assert_eq!(world.manifest.spaces.len(), 2);
+        assert!(out.join("spaces").join("Arena").is_dir() && out.join("spaces").join("Lobby").is_dir());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A key used as a file name refuses the export by its Space and provider
+    /// only, never by the name.
+    #[test]
+    fn a_key_in_a_file_name_refuses_by_its_space_only() {
+        let out = temp("key_name");
+        let key = planted_key();
+        let named = vec![(format!("Workspace/Notes/{key}.md"), b"notes\n".to_vec())];
+        let spaces = vec![view_space("Lobby", "", named)];
+        let refused = export_world("U", spaces, "Lobby", None, &out, usize::MAX, Audience::Players, Destination::Publish);
+        let Err(message) = refused else { panic!("a key used as a file name went through") };
+        assert!(!holds_a_piece_of(&message, &key), "a piece of the key reached the refusal");
+        assert_eq!(
+            message,
+            "Refused: a file or folder name in Lobby contains what looks like a key for Anthropic. Rename it, then try again."
+        );
+        assert!(!out.exists(), "a refused export wrote under its out_root");
+    }
+
+    /// Publish and a LAN host refuse a key; a loopback host warns, one line
+    /// naming the file, its line and the provider, and goes ahead.
+    #[test]
+    fn publish_and_lan_refuse_and_loopback_warns() {
+        let key = planted_key();
+        for destination in [Destination::Publish, Destination::LanHost, Destination::LoopbackHost] {
+            let out = temp("destinations");
+            let spaces = vec![view_space("Lobby", &key, Vec::new())];
+            let result = export_world("U", spaces, "Lobby", None, &out, usize::MAX, Audience::Players, destination);
+            let line = "Lobby/ReplicatedStorage/Settings.luau:1";
+            match (destination, result) {
+                (Destination::LoopbackHost, Ok(world)) => {
+                    assert!(!holds_a_piece_of(&world.warnings.join("\n"), &key), "a piece of the key reached a warning");
+                    assert_eq!(world.warnings, vec![format!("{line} contains what looks like a key for Anthropic.")]);
+                    assert_eq!(world.notice, None);
+                    assert!(out.join("spaces").join("Lobby").is_dir(), "the loopback export did not go ahead");
+                }
+                (Destination::LoopbackHost, Err(_)) => panic!("the loopback host was refused"),
+                (_, Ok(_)) => panic!("{destination:?} let the key through"),
+                (_, Err(message)) => {
+                    assert!(!holds_a_piece_of(&message, &key), "a piece of the key reached the refusal");
+                    assert!(message.starts_with(&format!("Refused: {line} contains")), "{destination:?}: {message}");
+                    assert!(!out.exists(), "{destination:?}: a refused export wrote under its out_root");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&out);
+        }
+    }
+
+    /// SoulService's key comes out on every destination. A loopback export
+    /// warns with the notice, word for word, and is not refused; one that
+    /// leaves this machine carries it as the notice and records it in the
+    /// Space's stats.
+    #[test]
+    fn a_loopback_export_that_stripped_soul_service_warns_with_the_notice() {
+        let key = planted_key();
+        let soul = vec![("SoulService/_service.toml".to_string(), soul_service(&key))];
+        for destination in [Destination::LoopbackHost, Destination::Publish] {
+            let out = temp("soul_notice");
+            let spaces = vec![view_space("Lobby", "", soul.clone())];
+            let Ok(world) = export_world("U", spaces, "Lobby", None, &out, usize::MAX, Audience::Players, destination) else {
+                panic!("{destination:?}: SoulService's own key refused the export")
+            };
+            let left_out = world.stats.iter().any(|(_, stats)| stats.soul_key_left_out);
+            match destination {
+                Destination::LoopbackHost => {
+                    assert_eq!(world.warnings, vec![SOUL_KEY_NOTICE.to_string()]);
+                    assert_eq!(world.notice, None);
+                    assert!(!left_out, "a package that stays was recorded as leaving");
+                }
+                _ => {
+                    assert!(world.warnings.is_empty(), "{destination:?}: unexpected warnings");
+                    assert_eq!(world.notice, Some(SOUL_KEY_NOTICE));
+                    assert!(left_out, "{destination:?}: the stats do not record the stripped key");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&out);
+        }
     }
 }

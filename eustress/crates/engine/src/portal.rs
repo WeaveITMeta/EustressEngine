@@ -163,7 +163,11 @@ fn declares_portal(attrs: &Attributes) -> bool {
 /// (every `Attributes` is freshly inserted) and whenever someone edits an
 /// attribute in the Properties panel. The filter still checks a tick on every
 /// instance each frame (every instance carries `Attributes`), so a quiet frame
-/// is answered by `probe_any` first, spread over the compute pool.
+/// is answered by `probe_any` first, spread over the compute pool. It runs
+/// on a stagger slot, one frame in `STAGGER_PERIOD`: a portal declared or
+/// retired by an edit is marked up to three frames late, and
+/// [`portal_teleport_system`] re-checks each target, so a marker that
+/// trails an edit never fires.
 fn sync_portal_markers(
     mut commands: Commands,
     changed: Query<(Entity, &Attributes, Has<IsPortal>), Changed<Attributes>>,
@@ -227,8 +231,20 @@ fn resolve_space(reg: &UniverseRegistry, current: &PathBuf, name: &str) -> Optio
     None
 }
 
+/// Whether a jump to `target` may arm. `open_space` refuses a Space a newer
+/// build made, so nothing may be armed for it.
+fn jump_may_arm(target: &std::path::Path) -> bool {
+    crate::space::format_migration::newer_than_build(target).is_none()
+}
+
 /// Exclusive because [`crate::space::space_ops::open_space`] takes `&mut World`.
-fn portal_teleport_system(world: &mut World) {
+/// Both queries are kept between frames: building one fresh walks every
+/// archetype, and an imported Space has thousands.
+fn portal_teleport_system(
+    world: &mut World,
+    cameras: &mut QueryState<&GlobalTransform, With<EustressCamera>>,
+    portals: &mut QueryState<(&GlobalTransform, &Attributes), With<IsPortal>>,
+) {
     // ── Tick cooldown ───────────────────────────────────────────────────────
     let dt = world.resource::<Time>().delta_secs();
     {
@@ -244,12 +260,9 @@ fn portal_teleport_system(world: &mut World) {
     // ── Where is the free camera? ───────────────────────────────────────────
     // Filtered on `EustressCamera` so the separate AI camera (see
     // `ai_camera.rs`, also a Camera3d) can never trigger a portal.
-    let cam_pos = {
-        let mut q = world.query_filtered::<&GlobalTransform, With<EustressCamera>>();
-        match q.iter(world).next() {
-            Some(gt) => gt.translation(),
-            None => return,
-        }
+    let cam_pos = match cameras.iter(world).next() {
+        Some(gt) => gt.translation(),
+        None => return,
     };
 
     // ── Collect portals and their distance to the camera ────────────────────
@@ -258,9 +271,12 @@ fn portal_teleport_system(world: &mut World) {
     let mut nearest: Option<PortalHit> = None;
     let mut any_in_rearm_band = false;
     {
-        let mut q = world.query_filtered::<(&GlobalTransform, &Attributes), With<IsPortal>>();
-        for (gt, attrs) in q.iter(world) {
-            let Some(target) = attr_str(attrs, ATTR_TARGET) else { continue };
+        for (gt, attrs) in portals.iter(world) {
+            // The marker can trail an edit by a few frames (its sync runs on
+            // a stagger slot), so a target blanked since then is skipped here.
+            let Some(target) = attr_str(attrs, ATTR_TARGET).filter(|t| !t.trim().is_empty()) else {
+                continue;
+            };
             let radius = attr_f32(attrs, ATTR_RADIUS).unwrap_or(DEFAULT_RADIUS).max(0.5);
             let dist_sq = gt.translation().distance_squared(cam_pos);
 
@@ -328,6 +344,19 @@ fn portal_teleport_system(world: &mut World) {
         let mut st = world.resource_mut::<PortalState>();
         st.armed = false;
         st.cooldown = COOLDOWN_SECS;
+        return;
+    }
+
+    // A Space a newer build made is refused by `open_space`, so no jump happens.
+    // Arming first would leave an arrival pose waiting for the next load, applied
+    // in the Space the person is still in.
+    if !jump_may_arm(&target_path) {
+        {
+            let mut st = world.resource_mut::<PortalState>();
+            st.armed = false;
+            st.cooldown = COOLDOWN_SECS;
+        }
+        crate::space::space_ops::open_space(world, &target_path);
         return;
     }
 
@@ -425,7 +454,15 @@ impl Plugin for PortalPlugin {
             // so the freshly placed camera is not measured against a stale pose.
             .add_systems(
                 Update,
-                (sync_portal_markers, apply_portal_arrival, portal_teleport_system).chain(),
+                (
+                    sync_portal_markers.run_if(eustress_common::utils::stagger(
+                        eustress_common::utils::STAGGER_PERIOD,
+                        eustress_common::utils::stagger_slots::SYNC_PORTAL_MARKERS,
+                    )),
+                    apply_portal_arrival,
+                    portal_teleport_system,
+                )
+                    .chain(),
             );
     }
 }
@@ -553,6 +590,78 @@ mod tests {
         );
     }
 
+    /// On its slot the marker sync marks a portal late, never wrongly, and
+    /// misses none: declared, retired and re-declared within one cycle, and
+    /// retired by a non-string target.
+    #[test]
+    fn sync_portal_markers_on_its_slot_loses_nothing() {
+        use eustress_common::utils::{stagger, stagger_check, stagger_slots, STAGGER_PERIOD};
+
+        #[derive(Component)]
+        struct Nth(u8);
+
+        fn nth(world: &mut World, n: u8) -> Entity {
+            let mut q = world.query::<(Entity, &Nth)>();
+            q.iter(world).find(|(_, tag)| tag.0 == n).map(|(e, _)| e).unwrap()
+        }
+        fn set_target(world: &mut World, n: u8, value: AttributeValue) {
+            let e = nth(world, n);
+            world.get_mut::<Attributes>(e).unwrap().set(ATTR_TARGET, value);
+        }
+
+        stagger_check::assert_same_after_settle(
+            |app| {
+                app.add_systems(
+                    Update,
+                    sync_portal_markers
+                        .run_if(stagger(STAGGER_PERIOD, stagger_slots::SYNC_PORTAL_MARKERS)),
+                );
+            },
+            |world, frame| match frame {
+                0 => {
+                    let mut attrs = Attributes::new();
+                    attrs.set(ATTR_TARGET, AttributeValue::String("Temple".into()));
+                    world.spawn((attrs, Nth(0)));
+                    world.spawn((Attributes::new(), Nth(1)));
+                }
+                2 => set_target(world, 1, AttributeValue::String("Water".into())),
+                5 => set_target(world, 0, AttributeValue::String(String::new())),
+                6 => set_target(world, 0, AttributeValue::String("Temple".into())),
+                8 => set_target(world, 1, AttributeValue::Number(3.0)),
+                _ => {}
+            },
+            12,
+            |world| {
+                let mut q = world.query_filtered::<Entity, With<IsPortal>>();
+                let mut marked: Vec<Entity> = q.iter(world).collect();
+                marked.sort();
+                marked
+            },
+        );
+    }
+
+    /// A blanked target whose marker has not been retired yet (the marker
+    /// sync runs on a stagger slot) neither fires, warns nor disarms.
+    #[test]
+    fn a_blank_target_under_a_stale_marker_does_nothing() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(PortalState { armed: true, ..PortalState::default() })
+            .insert_resource(SpaceRoot(PathBuf::from("/w/Tucson/Spaces/Temple")))
+            .insert_resource(reg())
+            .add_systems(Update, portal_teleport_system);
+        app.world_mut().spawn((EustressCamera::default(), GlobalTransform::default()));
+        let mut attrs = Attributes::new();
+        attrs.set(ATTR_TARGET, AttributeValue::String("  ".into()));
+        app.world_mut().spawn((attrs, GlobalTransform::default(), IsPortal));
+
+        app.update();
+
+        let st = app.world().resource::<PortalState>();
+        assert!(st.armed, "a blank target must not disarm the portals");
+        assert_eq!(st.cooldown, 0.0, "a blank target must not start the cooldown");
+    }
+
     #[test]
     fn attribute_readers_ignore_wrong_types() {
         let mut a = Attributes::new();
@@ -565,5 +674,33 @@ mod tests {
         a.set(ATTR_RADIUS, AttributeValue::Int(9));
         assert_eq!(attr_str(&a, ATTR_TARGET).as_deref(), Some("Temple"));
         assert_eq!(attr_f32(&a, ATTR_RADIUS), Some(9.0), "Int coerces to radius");
+    }
+}
+
+#[cfg(test)]
+mod newer_jump_tests {
+    use super::*;
+
+    /// A jump into a Space a newer build made arms nothing; a Space with no
+    /// newer format arms.
+    #[test]
+    fn a_jump_into_a_newer_space_arms_nothing() {
+        let pid = std::process::id();
+        let newer = std::env::temp_dir().join(format!("eustress_jump_newer_{pid}"));
+        let older = std::env::temp_dir().join(format!("eustress_jump_older_{pid}"));
+        for root in [&newer, &older] {
+            let _ = std::fs::remove_dir_all(root);
+            std::fs::create_dir_all(root).unwrap();
+        }
+        std::fs::write(
+            newer.join("space.toml"),
+            format!("[space]\nname = \"Garage\"\nformat = {}\n", eustress_common::space_format::CURRENT + 1),
+        )
+        .unwrap();
+        assert!(!jump_may_arm(&newer), "a newer Space is refused, so nothing arms");
+        assert!(jump_may_arm(&older), "a Space with no newer format arms");
+        for root in [&newer, &older] {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

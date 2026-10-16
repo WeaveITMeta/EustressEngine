@@ -56,7 +56,9 @@ use eustress_common::soul::rune_runtime::{
 
 use crate::simulation::plugin::SimValuesResource;
 use crate::spatial_query_bridge::ScriptSpatialQuery;
-use crate::space::SpaceRoot;
+use crate::space::{SpaceFileRegistry, SpaceRoot};
+#[cfg(feature = "realism-scripting")]
+use crate::space::trash;
 
 #[cfg(feature = "realism-scripting")]
 use crate::soul::rune_ecs_module::{
@@ -99,17 +101,84 @@ pub struct RunePlayBridges {
 // Session lifecycle
 // ============================================================================
 
+/// Carries out the deletes scripts asked for (`instance_delete`), in the frame
+/// after the script ran. Outside Play, the instance moves to the Space trash
+/// through the shared helper, as the Delete key does, and its entities go. In
+/// Play only the live entities are despawned; no authored file moves.
+pub fn drain_script_deletes(
+    mut commands: Commands,
+    mut registry: Option<ResMut<SpaceFileRegistry>>,
+    _main_thread: bevy::ecs::system::NonSendMarker,
+) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        for request in rune_ecs_module::drain_script_deletes() {
+            match request {
+                rune_ecs_module::ScriptDelete::DespawnLive { record } => {
+                    // A folder's descendants go with it; a flat file is its own entry.
+                    let is_folder_record =
+                        record.file_name().and_then(|n| n.to_str()) == Some("_instance.toml");
+                    let ancestor = if is_folder_record {
+                        record.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| record.clone())
+                    } else {
+                        record.clone()
+                    };
+                    let victims: Vec<Entity> = registry
+                        .as_deref()
+                        .map(|r| r.descendants_of(&ancestor).into_iter().map(|(_, e)| e).collect::<Vec<Entity>>())
+                        .unwrap_or_default();
+                    for entity in victims {
+                        commands.entity(entity).try_despawn();
+                    }
+                }
+                rune_ecs_module::ScriptDelete::Trash { source, record } => {
+                    let entity = registry.as_deref().and_then(|r| r.get_entity(&record));
+                    let destination = trash::trash_destination(&source);
+                    let request = trash::TrashRequest {
+                        entity: entity.unwrap_or(Entity::PLACEHOLDER),
+                        source: &source,
+                        record: &record,
+                        destination: &destination,
+                    };
+                    match trash::trash_instance(&request, &mut commands, registry.as_deref_mut()) {
+                        Ok(_) => {
+                            if let Some(entity) = entity {
+                                commands.entity(entity).try_despawn();
+                            }
+                        }
+                        Err(e) => warn!(
+                            "Script delete: could not move {} to the trash, so it was left in place ({:?})",
+                            source.display(),
+                            e,
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "realism-scripting"))]
+    {
+        let _ = (&mut commands, &mut registry);
+    }
+}
+
 /// OnEnter(Playing): create this session's `Instance::new()` registry and drop
 /// any raycast state left over from a previous session.
 pub fn start_rune_session(
     mut bridges: ResMut<RunePlayBridges>,
     spatial: Option<Res<ScriptSpatialQuery>>,
+    // Clears the script state that lives on the main thread (see
+    // `drive_rune_frame`).
+    _main_thread: bevy::ecs::system::NonSendMarker,
 ) {
     #[cfg(feature = "realism-scripting")]
     {
         bridges.registry = Some(std::sync::Arc::new(std::sync::RwLock::new(
             eustress_common::scripting::InstanceRegistry::default(),
         )));
+        // A session never starts with a previous one's tags or attributes.
+        rune_ecs_module::clear_entity_tags();
+        rune_ecs_module::clear_instance_attributes();
     }
     bridges.snapshot_built = false;
     bridges.warned_classes.clear();
@@ -132,9 +201,16 @@ pub fn stop_rune_session(
     space_root: Option<Res<SpaceRoot>>,
     spatial: Option<Res<ScriptSpatialQuery>>,
     spawned: Query<Entity, With<RuneSpawned>>,
+    // `on_exit` runs the VM, so this shares the main thread with the frame
+    // driver (see `drive_rune_frame`).
+    _main_thread: bevy::ecs::system::NonSendMarker,
 ) {
     #[cfg(feature = "realism-scripting")]
     {
+        // `on_exit` is the session's last Rune work, timed for the script
+        // profile as driver time, like a frame of `drive_rune_frame`.
+        let profile_start = eustress_common::utils::script_profile::armed().then(std::time::Instant::now);
+        let _profile_scope = eustress_common::utils::script_profile::scope();
         install_bridges(&bridges, space_root.as_deref(), spatial.as_deref(), None, None);
         call_script_exit(&runtime);
         // A script's `on_exit` may still queue destroys; honour them before
@@ -149,9 +225,17 @@ pub fn stop_rune_session(
         let _ = rune_ecs_module::drain_script_sim_writes();
         // Left on this thread they would reach the next session's first frame.
         let _ = rune_ecs_module::drain_physics_commands();
+        rune_ecs_module::clear_entity_tags();
+        rune_ecs_module::clear_instance_attributes();
+        // Stop restores the authored world. A delete that on_exit queued must not
+        // reach the Edit world, and the next session starts with no Play deletes.
+        rune_ecs_module::discard_play_script_deletes();
         clear_bridges();
         bridges.registry = None;
         bridges.snapshot_built = false;
+        if let Some(start) = profile_start {
+            eustress_common::utils::script_profile::record_driver("rune", start.elapsed());
+        }
     }
     #[cfg(not(feature = "realism-scripting"))]
     {
@@ -334,7 +418,52 @@ fn clear_bridges() {
 // The per-frame driver
 // ============================================================================
 
+/// What the Rune frame driver's script calls cost over a window of frames,
+/// kept only while profiling is armed (`EUSTRESS_PROFILE`; the window is
+/// `EUSTRESS_PROFILE_FRAMES`). The driver runs on the main thread, so one
+/// thread-local is exact. The per-system profile needs a `profiling` build;
+/// this reports what the VM costs on any build.
+#[cfg(feature = "realism-scripting")]
+#[derive(Default)]
+struct RuneFrameClock {
+    total: std::time::Duration,
+    worst: std::time::Duration,
+    frames: u64,
+}
+
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static RUNE_FRAME_CLOCK: std::cell::RefCell<RuneFrameClock> =
+        std::cell::RefCell::new(RuneFrameClock::default());
+}
+
+/// Add one frame's script time to the window, and log it when the window is full.
+#[cfg(feature = "realism-scripting")]
+fn record_rune_frame(elapsed: std::time::Duration, scripts: usize) {
+    RUNE_FRAME_CLOCK.with(|cell| {
+        let mut clock = cell.borrow_mut();
+        clock.total += elapsed;
+        clock.worst = clock.worst.max(elapsed);
+        clock.frames += 1;
+        if clock.frames < crate::profiler::phase_window() {
+            return;
+        }
+        info!(
+            "Rune frame driver: {:.3} ms per frame (worst {:.3} ms) over {} frame(s), {} script(s)",
+            clock.total.as_secs_f64() * 1000.0 / clock.frames as f64,
+            clock.worst.as_secs_f64() * 1000.0,
+            clock.frames,
+            scripts,
+        );
+        *clock = RuneFrameClock::default();
+    });
+}
+
 /// Update (Playing): run one frame of Rune script execution end to end.
+///
+/// Pinned to the main thread (`_main_thread`): Rune's per-script state lives in
+/// thread-locals, and the executor would otherwise run this on a different
+/// worker from frame to frame, losing what the last frame stored.
 #[cfg(feature = "realism-scripting")]
 #[allow(clippy::too_many_arguments)]
 pub fn drive_rune_frame(
@@ -352,6 +481,7 @@ pub fn drive_rune_frame(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut physics: ResMut<crate::soul::physics_bridge::RunePhysicsBridge>,
     terrain: ScriptTerrain,
+    _main_thread: bevy::ecs::system::NonSendMarker,
 ) {
     if runtime.compiled.is_empty() {
         // No scripts — make sure last frame's assertions don't linger and keep
@@ -361,6 +491,13 @@ pub fn drive_rune_frame(
         }
         return;
     }
+
+    // The script profile (`eustress_common::utils::script_profile`), only
+    // while it is armed: the whole driver is Rune's time for the frame, so
+    // the part its callbacks did not take shows as Rune's own time, and the
+    // frame's DataModel traffic counts as script work.
+    let profile_start = eustress_common::utils::script_profile::armed().then(std::time::Instant::now);
+    let _profile_scope = eustress_common::utils::script_profile::scope();
 
     // ── 1. Install every bridge on THIS thread ───────────────────────────
     install_bridges(
@@ -386,6 +523,7 @@ pub fn drive_rune_frame(
     // The terrain view borrows the root's components, so rather than being
     // installed with the bridges above it is scoped to the callbacks.
     // `eustress::terrain` reads it and takes edits only while it is in place.
+    let clock_start = crate::profiler::phase_armed().then(std::time::Instant::now);
     let terrain_view = terrain.view();
     rune_terrain::with_terrain_view(terrain_view.as_ref(), || {
         call_script_init(&mut runtime);
@@ -395,6 +533,9 @@ pub fn drive_rune_frame(
     // Purchases to grant go to the script defining `process_receipt`, while
     // the bridges are still installed.
     rune_ecs_module::process_rune_receipts(&mut runtime);
+    if let Some(start) = clock_start {
+        record_rune_frame(start.elapsed(), runtime.compiled.len());
+    }
 
     // ── 3. Drain queued effects ──────────────────────────────────────────
     // Physics: impulses and velocity sets go to the systems that apply them,
@@ -512,6 +653,9 @@ pub fn drive_rune_frame(
 
     // ── 4. Tear down ─────────────────────────────────────────────────────
     clear_bridges();
+    if let Some(start) = profile_start {
+        eustress_common::utils::script_profile::record_driver("rune", start.elapsed());
+    }
 }
 
 /// No-op driver for builds without the scripting feature, so `play_mode.rs`

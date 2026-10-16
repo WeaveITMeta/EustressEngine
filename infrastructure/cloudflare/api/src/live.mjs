@@ -22,12 +22,15 @@
 
 import { inspectIdentityTicket } from './identity.mjs';
 import { leaseIsLive } from './guest.mjs';
+import { simForServing, simWithLegalLock } from './moderation.mjs';
+import { cleanRegion, publicRegion, regionOf, tellLiveIndex } from './live_index.mjs';
+import { adultRefusal, isAdultListing, mayView, refuseAdult, viewerFor } from './adult_content.mjs';
 
 /// A host with no heartbeat for this long is Offline. Three missed 30 s beats.
 export const HEARTBEAT_TTL_MS = 90_000;
 
 const MAX_LINK_LENGTH = 512;
-const MAX_PLAYERS = 10_000;
+export const MAX_PLAYERS = 10_000;
 
 /// Most ticket ids one hosting session remembers. Tickets last 10 minutes, so
 /// this is far above any real join rate; a full table refuses (`busy`) and
@@ -122,15 +125,24 @@ function count(value, min, max) {
 // The Durable Object
 // -----------------------------------------------------------------------------
 
-/// Forget every admitted ticket id: the hosting session they belong to is over.
+/// Forget every admitted ticket id, and how many were admitted: the hosting session they belong to is over.
 async function clearAdmitted(storage) {
   const keys = [...(await storage.list({ prefix: 'adm:' })).keys()];
   // delete() takes at most 128 keys at a time.
   for (let i = 0; i < keys.length; i += 128) await storage.delete(keys.slice(i, i + 128));
+  await storage.delete(ADMITTED_COUNT);
 }
 
+/// How many players the Worker has admitted to this hosting session, in all: every ticket it let through, never fewer as
+/// players leave. The host's own heartbeat can claim more players than that, but no more than these plus the host itself.
+const ADMITTED_COUNT = 'adm_n';
+
+/// The players a session shows: what the host claims, up to the players the Worker admitted plus the host's own character. The strip,
+/// the listing's own live read and the play route all show this, so no page shows a bigger number than another.
+export const cappedPlayers = (claimed, admitted) => Math.min(claimed, (admitted || 0) + 1);
+
 const LIVE_OPS = {
-  async beat({ host_id, link, players, max_players, protocol, connected, now }) {
+  async beat({ host_id, link, players, max_players, protocol, connected, country, now }) {
     const prev = await this.storage.get('host');
     // `since` is when the host started answering at this link. A restart
     // brings a new certificate, so a new pin and a new link, and a new since.
@@ -147,10 +159,13 @@ const LIVE_OPS = {
       connected: connected || [],
       since: continuing ? prev.since : now,
       last_seen: now,
+      // The country the host came in from, as the platform names it: never an address, and never the data centre, which
+      // names a city. A host that moves has the new country on its next beat.
+      region: cleanRegion(country),
     };
     await this.storage.put('host', host);
     await this.storage.setAlarm(now + HEARTBEAT_TTL_MS);
-    return { ok: true, expires_at: new Date(now + HEARTBEAT_TTL_MS).toISOString() };
+    return { ok: true, expires_at: new Date(now + HEARTBEAT_TTL_MS).toISOString(), since: host.since, region: host.region, admitted: (await this.storage.get(ADMITTED_COUNT)) || 0 };
   },
 
   async stop() {
@@ -197,7 +212,8 @@ const LIVE_OPS = {
     }
     if (count >= MAX_ADMITTED) return refuse(403, 'busy', 'The gallery could not confirm this join right now');
     await this.storage.put(`adm:${seen.id}`, seen.expires);
-    return { ok: true, account_id: seen.accountId, username: seen.username, guest: false, expires: seen.expires };
+    await this.storage.put(ADMITTED_COUNT, ((await this.storage.get(ADMITTED_COUNT)) || 0) + 1);
+    return { ok: true, id: seen.id, account_id: seen.accountId, username: seen.username, guest: false, expires: seen.expires };
   },
 
   async status({ now }) {
@@ -208,10 +224,13 @@ const LIVE_OPS = {
       live: true,
       link: host.link,
       players: host.players,
+      // How many the Worker admitted to this hosting session: what the players a reader shows are capped at (cappedPlayers).
+      admitted: (await this.storage.get(ADMITTED_COUNT)) || 0,
       max_players: host.max_players,
       protocol: host.protocol,
       since: host.since,
       last_seen: host.last_seen,
+      region: publicRegion(host.region),
     };
   },
 };
@@ -260,6 +279,19 @@ export class LiveHost {
   }
 }
 
+/// What Play on a listing needs to know about its host: whether it is live now, who is in it, and the join
+/// link, which only a visitor who may join receives (signed in, or holding a live guest lease; the same rule as
+/// GET /live). `null` when nobody hosts it, when this deployment has no live registry, and when what the host
+/// stored is not the exact join grammar: nothing is handed to the Player that checkJoinLink would refuse.
+/// The caller has already decided that the visitor may play this listing at all (approved, or its author).
+export async function livePlayInfo(env, simId, { signedIn, lease, now }) {
+  if (!env.LIVE_HOSTS) return null;
+  const s = await liveCall(env, simId, 'status', { now });
+  if (s.ok === false || !s.live) return null;
+  if (!checkJoinLink(s.link).ok) return null;
+  return { players: cappedPlayers(s.players, s.admitted), max_players: s.max_players, link: signedIn || lease ? s.link : null };
+}
+
 async function liveCall(env, simId, op, args) {
   const stub = env.LIVE_HOSTS.get(env.LIVE_HOSTS.idFromName(simId));
   const res = await stub.fetch(`https://live.internal/${op}`, {
@@ -287,7 +319,7 @@ export async function handleLive(request, env, cors, simId, deps) {
   }
   const raw = await env.SOCIAL.get(`sim:${simId}`);
   if (!raw) return json({ error: 'Simulation not found' }, 404, cors);
-  const sim = JSON.parse(raw);
+  const sim = await simWithLegalLock(env, JSON.parse(raw));
   const now = Date.now();
 
   // /live/admit takes POST only, from the author; it is not a second way to read /live.
@@ -304,16 +336,22 @@ export async function handleLive(request, env, cors, simId, deps) {
       const viewer = await verifyAuth(request, env);
       const admin = viewer ? await requireAdmin(request, env) : null;
       if (viewer !== sim.author_id && !admin) return json({ live: false }, 200, headers);
+    } else {
+      // Adult content: whether it is live, and where to join, go to a viewer who turned it on and to its author
+      // (src/adult_content.mjs). A guest lease never reaches it: a guest is signed out, so off.
+      const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+      if (refused) return refused;
     }
     const s = await liveCall(env, simId, 'status', { now });
     if (s.ok === false) return json({ error: s.error }, s.status || 500, cors);
     if (!s.live) return json({ live: false }, 200, headers);
     const body = {
       live: true,
-      players: s.players,
+      players: cappedPlayers(s.players, s.admitted),
       max_players: s.max_players,
       protocol: s.protocol,
       since: new Date(s.since).toISOString(),
+      region: s.region ?? null,
     };
     // The join link goes only to someone who may join: a signed-in account, or
     // a guest holding a live lease (the X-Eustress-Lease header). Anyone else
@@ -339,16 +377,44 @@ export async function handleLive(request, env, cors, simId, deps) {
     if (typeof body.audience !== 'string' || !/^[0-9a-f]{64}$/.test(body.audience)) {
       return json({ error: 'audience must be the host certificate pin (64 hex characters)', code: 'bad_audience' }, 400, cors);
     }
+    // A session whose listing does not serve (unapproved, held, quarantined, or bound to other bytes than were reviewed) admits its
+    // author only. "Serves" is the test the download uses (simForServing), so admission and download cannot disagree, and the
+    // author's privacy setting does not enter it: an approved private listing is joined by link, as its download is. Any
+    // signed-in account can mint a ticket for a pin it holds a link to, so the ticket's own account decides here, before the
+    // Durable Object spends the ticket. Every other joiner gets the same answer whichever reason applies (Security's rulings,
+    // 2026-10-07). An invite list the author sets is the later extension; no admin joins a session that does not serve.
+    const served = await simForServing(env, { id: simId, ...sim }, 'content');
+    if (served?.moderation?.status !== 'approved') {
+      const who = await inspectIdentityTicket(env, body.ticket, { audience: body.audience, now: Math.floor(now / 1000) });
+      if (!who.ok || who.accountId !== sim.author_id) {
+        return json({ error: 'This session is not available right now.', code: 'not_available' }, 403, { ...cors, 'Cache-Control': 'no-store' });
+      }
+    }
+    // Adult content admits a joiner the gate lets see it (turned it on; for adult_21, a verified age of 21 or over too), and
+    // its author (src/adult_content.mjs mayView). The ticket's own account decides, here, before the Durable Object spends
+    // the ticket: a joiner who turns the setting on, or turns 21, can use the same ticket. A ticket that is not genuine goes
+    // on to the object, which refuses it in its own words.
+    if (isAdultListing(sim)) {
+      const who = await inspectIdentityTicket(env, body.ticket, { audience: body.audience, now: Math.floor(now / 1000) });
+      if (who.ok) {
+        const joiner = await viewerFor(env, who.accountId, now);
+        if (!mayView(sim, joiner)) return adultRefusal(json, cors, joiner);
+      }
+    }
     const r = await liveCall(env, simId, 'admit', { ticket: body.ticket, audience: body.audience, now });
     if (r.ok === false) {
       return json({ error: r.error, code: r.code || 'admit_failed' }, r.status || 500, { ...cors, 'Cache-Control': 'no-store' });
     }
-    return json({ ok: true, account_id: r.account_id, username: r.username, guest: r.guest, expires: r.expires }, 200, { ...cors, 'Cache-Control': 'no-store' });
+    // The player was admitted: a visit by them, counted once a day (src/visits.mjs). Never fails the admission.
+    if (deps.onJoin) await Promise.resolve(deps.onJoin(sim, { id: r.id, accountId: r.account_id, guest: r.guest })).catch((e) => console.error('onJoin failed:', e?.message || e));
+    return json({ ok: true, id: r.id, account_id: r.account_id, username: r.username, guest: r.guest, expires: r.expires }, 200, { ...cors, 'Cache-Control': 'no-store' });
   }
 
   if (request.method === 'DELETE') {
     const r = await liveCall(env, simId, 'stop', { now });
     if (r.ok === false) return json({ error: r.error }, r.status || 500, cors);
+    // The live index drops the session at once. An index that fails never fails a stop.
+    await tellLiveIndex(env, 'stop', { sim_id: simId });
     return json({ ok: true }, 200, cors);
   }
 
@@ -372,9 +438,17 @@ export async function handleLive(request, env, cors, simId, deps) {
       connected = body.admitted;
     }
     const r = await liveCall(env, simId, 'beat', {
-      host_id: userId, link: body.link, players, max_players: maxPlayers, protocol, connected, now,
+      host_id: userId, link: body.link, players, max_players: maxPlayers, protocol, connected, now, ...regionOf(request),
     });
     if (r.ok === false) return json({ error: r.error }, r.status || 500, cors);
+    // The live index learns of this beat only while the listing is listed: an author's unlisted listings never fill it. It is told no
+    // link, key or pin, only what the Gallery shows, and the players are what the host claims up to the players the Worker admitted
+    // (plus the host itself). An index that fails never fails a heartbeat.
+    if (isListable(sim)) {
+      await tellLiveIndex(env, 'beat', {
+        sim_id: simId, author: sim.author_id, players: cappedPlayers(players, r.admitted), max_players: maxPlayers, region: r.region ?? null, since: r.since, now,
+      });
+    }
     return json({ ok: true, expires_at: r.expires_at }, 200, cors);
   }
 

@@ -22,12 +22,24 @@
 //! | `EUSTRESS_GTAO`            | off  | ground-contact ambient occlusion |
 //! | `EUSTRESS_AUTO_EXPOSURE`   | off  | histogram exposure adaptation |
 //! | `EUSTRESS_CONTACT_SHADOWS` | off  | screen-space contact shadows from the sun |
+//! | `EUSTRESS_PLAY_PREPASS`    | off  | the editor camera's depth prepass on Play's view cameras |
+//! | `EUSTRESS_PERF_OFF=play_far_plane` | on | Play's view cameras at bevy's 1,000 m instead of 10,000 m |
 //!
 //! The stack needs bevy's bloom, SMAA and tonemapping lookup tables, so it
 //! is behind common's optional `view-look` feature, which Studio and the
 //! Player turn on. A build without it (the web Player, a luau-only test
 //! build) gives view cameras Reinhard, which needs no lookup table (bevy's
 //! default, TonyMcMapface, renders magenta without one), and no post stack.
+//!
+//! ## The far plane
+//!
+//! A view camera sees at least [`VIEW_FAR_PLANE`] (10,000 m) out, the
+//! editor's own default. Play's cameras used to be built with bevy's 1,000 m,
+//! so terrain beyond a kilometre never drew there. The marker's insert hook
+//! sets the far plane once, at spawn; a rebuild of a view camera's projection
+//! (a script changing the field of view) goes through [`view_perspective`],
+//! which keeps the planes. A camera marked [`OwnsClipPlanes`] (Studio's
+//! editor camera, whose clip planes the user edits) is left alone.
 //!
 //! ## Objects in the Space
 //!
@@ -41,6 +53,7 @@
 //! tonemapper; "Default" is the engine's own.
 
 use bevy::asset::{embedded_asset, load_embedded_asset};
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::{tonemapping, Tonemapping};
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::ecs::lifecycle::HookContext;
@@ -69,16 +82,65 @@ use crate::classes::{ColorCorrectionEffect, ColorGradingEffect};
 /// camera and the scripted Play camera. They get the view look.
 #[derive(Component, Debug, Clone, Copy, Default, Reflect)]
 #[reflect(Component)]
-#[component(on_insert = set_view_tonemapper)]
+#[component(on_insert = on_view_camera_inserted)]
 pub struct ViewCamera;
 
-/// The view's tonemapper, written the moment the marker lands, so the
-/// camera's first frame already has it: TonyMcMapface with `view-look`,
-/// Reinhard without it. `Camera3d`'s own required default is TonyMcMapface,
-/// which renders magenta without the lookup tables `view-look` brings, so
-/// an Update system would leave at least the spawn frame magenta. A
-/// ColorGradingEffect's Tonemapper changes it afterwards.
-fn set_view_tonemapper(mut world: DeferredWorld, ctx: HookContext) {
+/// A view camera whose near and far planes are set elsewhere: Studio's editor
+/// camera, whose clip planes the user edits. The view look leaves them be.
+#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Component)]
+pub struct OwnsClipPlanes;
+
+/// How far a view camera sees at least, metres: the editor camera's default.
+pub const VIEW_FAR_PLANE: f32 = 10_000.0;
+
+/// Whether Play's view cameras see [`VIEW_FAR_PLANE`]. On unless
+/// `EUSTRESS_PERF_OFF` names `play_far_plane`, which restores bevy's 1,000 m
+/// so the cost of the longer view can be measured apart. Read once.
+pub fn play_far_plane_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| crate::utils::perf_on("play_far_plane"))
+}
+
+/// Whether Play's view cameras get the depth prepass the editor camera has
+/// (`EUSTRESS_PLAY_PREPASS=1`, off by default, read once). With it the cloud
+/// and sky shaders stop each ray at the scene exactly, as in Studio's edit
+/// view; it costs a depth-only pass over the opaque meshes.
+pub fn play_prepass_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| flag("EUSTRESS_PLAY_PREPASS", false))
+}
+
+/// A perspective projection at `fov` for a view camera, rebuilding `current`:
+/// it keeps `current`'s near and far planes when that is a perspective, and
+/// takes the view default (bevy's near, [`VIEW_FAR_PLANE`]) otherwise, since
+/// an orthographic projection's planes mean something else. Rebuild a view
+/// camera's projection with this, not with `..default()`, which puts the far
+/// plane back to bevy's 1,000 m.
+pub fn view_perspective(fov: f32, current: &Projection) -> Projection {
+    let (near, far) = match current {
+        Projection::Perspective(p) => (p.near, p.far),
+        _ => {
+            let default = PerspectiveProjection::default();
+            (default.near, if play_far_plane_on() { VIEW_FAR_PLANE } else { default.far })
+        }
+    };
+    Projection::Perspective(PerspectiveProjection { fov, near, far, ..default() })
+}
+
+/// What a view camera gets the moment the marker lands, so its first frame
+/// already has it.
+///
+/// The tonemapper: TonyMcMapface with `view-look`, Reinhard without it.
+/// `Camera3d`'s own required default is TonyMcMapface, which renders magenta
+/// without the lookup tables `view-look` brings, so an Update system would
+/// leave at least the spawn frame magenta. A ColorGradingEffect's Tonemapper
+/// changes it afterwards.
+///
+/// The far plane: at least [`VIEW_FAR_PLANE`] (see [`play_far_plane_on`]),
+/// unless the camera is marked [`OwnsClipPlanes`] or its projection is not a
+/// perspective. And with [`play_prepass_on`], the depth prepass.
+fn on_view_camera_inserted(mut world: DeferredWorld, ctx: HookContext) {
     #[cfg(feature = "view-look")]
     let wanted = Tonemapping::TonyMcMapface;
     #[cfg(not(feature = "view-look"))]
@@ -89,6 +151,22 @@ fn set_view_tonemapper(mut world: DeferredWorld, ctx: HookContext) {
         }
     } else {
         world.commands().entity(ctx.entity).insert(wanted);
+    }
+
+    if world.get::<OwnsClipPlanes>(ctx.entity).is_none() {
+        if play_far_plane_on() {
+            if let Some(mut projection) = world.get_mut::<Projection>(ctx.entity) {
+                let short = matches!(&*projection, Projection::Perspective(p) if p.far < VIEW_FAR_PLANE);
+                if short {
+                    if let Projection::Perspective(p) = &mut *projection {
+                        p.far = VIEW_FAR_PLANE;
+                    }
+                }
+            }
+        }
+        if play_prepass_on() {
+            world.commands().entity(ctx.entity).insert(DepthPrepass);
+        }
     }
 }
 
@@ -701,6 +779,47 @@ mod tests {
         #[cfg(not(feature = "view-look"))]
         let wanted = Tonemapping::Reinhard;
         assert_eq!(world.get::<Tonemapping>(camera), Some(&wanted), "set by the hook, no system run");
+    }
+
+    #[test]
+    fn a_view_camera_sees_as_far_as_the_editor_from_the_moment_it_spawns() {
+        let far = |world: &World, e: Entity| match world.get::<Projection>(e) {
+            Some(Projection::Perspective(p)) => p.far,
+            Some(Projection::Orthographic(o)) => o.far,
+            _ => f32::NAN,
+        };
+        let mut world = World::new();
+        // The marker first, the projection after: the hook must not depend on
+        // the order of the bundle.
+        let play = world.spawn((ViewCamera, Projection::Perspective(PerspectiveProjection::default()))).id();
+        assert_eq!(far(&world, play), VIEW_FAR_PLANE, "a Play camera sees as far as the editor's");
+        // The editor camera's planes are the user's.
+        let editor = world
+            .spawn((ViewCamera, OwnsClipPlanes, Projection::Perspective(PerspectiveProjection::default())))
+            .id();
+        assert_eq!(far(&world, editor), PerspectiveProjection::default().far);
+        // Orthographic is left alone, and a farther plane is kept.
+        let ortho = world.spawn((ViewCamera, Projection::Orthographic(OrthographicProjection::default_3d()))).id();
+        assert_eq!(far(&world, ortho), OrthographicProjection::default_3d().far);
+        let distant = world
+            .spawn((ViewCamera, Projection::Perspective(PerspectiveProjection { far: 50_000.0, ..default() })))
+            .id();
+        assert_eq!(far(&world, distant), 50_000.0);
+    }
+
+    #[test]
+    fn a_rebuilt_projection_keeps_the_cameras_planes() {
+        let current = Projection::Perspective(PerspectiveProjection { near: 0.3, far: 8_000.0, ..default() });
+        let Projection::Perspective(next) = view_perspective(1.2, &current) else { panic!("a perspective") };
+        assert_eq!((next.fov, next.near, next.far), (1.2, 0.3, 8_000.0), "only the field of view changes");
+        // From an orthographic projection (near -500, far 5000 there) it takes the view default.
+        let mut ortho = OrthographicProjection::default_3d();
+        ortho.near = -500.0;
+        ortho.far = 5_000.0;
+        let Projection::Perspective(next) = view_perspective(1.2, &Projection::Orthographic(ortho)) else {
+            panic!("a perspective")
+        };
+        assert_eq!((next.near, next.far), (PerspectiveProjection::default().near, VIEW_FAR_PLANE));
     }
 
     #[test]

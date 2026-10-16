@@ -57,7 +57,9 @@ const GRAPH_SWAP_FRAMES: u32 = 2;
 /// Every Animator's runtime entity.
 #[derive(Resource, Default)]
 pub struct AnimatorIndex {
-    tree: usize,
+    /// The session of the tree the index was built for: `datamodel::session_of`,
+    /// which a freed tree's successor never shares. 0 is none yet.
+    tree: u64,
     structure: u64,
     frames_since_scan: u32,
     pub by_animator: HashMap<InstanceId, Entity>,
@@ -95,7 +97,32 @@ pub struct AnimatorRuntime {
     probe: Probe,
 }
 
+/// A bound skeleton, for the motion matcher.
+pub(crate) struct SkeletonView<'a> {
+    pub joints: &'a RigJoints,
+    /// The avatar the skeleton belongs to.
+    pub avatar: Entity,
+    pub skeleton_root: Option<Entity>,
+}
+
 impl AnimatorRuntime {
+    /// The skeleton this Animator animates, once its rig is bound to an avatar.
+    pub(crate) fn skeleton(&self) -> Option<SkeletonView<'_>> {
+        let rig = self.rig.as_ref()?;
+        if rig.joints.kind != RigKind::Skeleton {
+            return None;
+        }
+        Some(SkeletonView { joints: &rig.joints, avatar: rig.avatar?, skeleton_root: rig.skeleton_root })
+    }
+
+    /// The loaded, retargeted clip for a content id, once it is ready.
+    pub(crate) fn ready_clip(&self, content: &str) -> Option<&Handle<AnimationClip>> {
+        match self.clips.get(content)? {
+            ClipState::Ready { handle, .. } => Some(handle),
+            _ => None,
+        }
+    }
+
     fn new(animator: InstanceId) -> Self {
         Self {
             animator,
@@ -203,7 +230,7 @@ pub fn track_animators(
         index.tree = 0;
         return;
     };
-    let id = std::sync::Arc::as_ptr(&tree.dm) as usize;
+    let id = crate::datamodel::session_of(&tree.dm);
     if index.tree != id {
         for (_, e) in index.by_animator.drain() {
             commands.entity(e).try_despawn();

@@ -473,8 +473,65 @@ mod imp {
         let Ok(g) = ACTIVE.read() else { return false };
         let Some(a) = g.as_ref() else { return false };
         let Some(rel) = rel_key(&a.root, abs) else { return false };
+        put_text_locked(a, &rel, text)
+    }
 
-        if a.db.put_file(&rel, text.as_bytes()).is_err() {
+    /// Held across every change that removes or moves a tree key, and across
+    /// [`update_instance_text`]'s read and write; always taken after the
+    /// `ACTIVE` read guard, never before. A save that read a record can then
+    /// never write it back after a trash, a Cut or a move took it away.
+    static TREE_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn tree_edit() -> std::sync::MutexGuard<'static, ()> {
+        TREE_EDIT.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Rewrite the tree record at `abs` where it stands: `edit` gets its text
+    /// and returns the new text, or `None` to leave it. `Ok(true)` when
+    /// written; `Ok(false)` when `edit` left it, or when the tree holds no
+    /// record there (it was trashed, cut or moved, so nothing is written and
+    /// nothing comes back). `edit` runs outside the lock, so the writer's
+    /// parallel saves stay parallel; the write happens under the lock every
+    /// tree removal and move takes, and only while the record still holds
+    /// the text `edit` was given. A record changed meanwhile is edited again.
+    /// `edit` must not call back into this module.
+    pub fn update_instance_text(
+        abs: &Path,
+        edit: impl Fn(&str) -> Result<Option<String>, String>,
+    ) -> Result<bool, String> {
+        let Ok(g) = ACTIVE.read() else { return Ok(false) };
+        let Some(a) = g.as_ref() else { return Ok(false) };
+        let Some(rel) = rel_key(&a.root, abs) else { return Ok(false) };
+        if rel.is_empty() || hidden(&rel) {
+            return Ok(false);
+        }
+        let read = || a.db.get_file(&rel).map_err(|e| format!("{rel}: {e}"));
+        let mut current = read()?;
+        for _ in 0..8 {
+            let Some(bytes) = current else {
+                return Ok(false);
+            };
+            let text = String::from_utf8(bytes).map_err(|_| format!("{rel}: the stored record is not UTF-8"))?;
+            let Some(new_text) = edit(&text)? else {
+                return Ok(false);
+            };
+            let _edit = tree_edit();
+            current = read()?;
+            if current.as_deref() == Some(text.as_bytes()) {
+                return if put_text_locked(a, &rel, &new_text) {
+                    Ok(true)
+                } else {
+                    Err(format!("Failed to store {rel} in the Space database"))
+                };
+            }
+        }
+        Err(format!("{rel} kept changing while it was being saved"))
+    }
+
+    /// [`put_instance_text`]'s body, for a caller already holding the
+    /// `ACTIVE` read guard.
+    fn put_text_locked(a: &Active, rel: &str, text: &str) -> bool {
+        if a.db.put_file(rel, text.as_bytes()).is_err() {
             return false;
         }
 
@@ -651,6 +708,7 @@ mod imp {
         let Some(rel) = rel_key(&a.root, abs) else {
             return false;
         };
+        let _edit = tree_edit();
         let removed_toml = a.db.delete_file(&rel).is_ok();
         let removed_bin = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}")).is_ok();
         removed_toml || removed_bin
@@ -674,6 +732,12 @@ mod imp {
         let Some(rel) = rel_key(&a.root, abs) else {
             return false;
         };
+        // A temp file a write leaves between its write and its rename is not a
+        // record (`write_text_atomic` names it `_instance.toml.tmp`), so it
+        // never reaches the tree.
+        if rel.ends_with(".tmp") {
+            return false;
+        }
         match a.db.put_file(&rel, bytes) {
             Ok(()) => true,
             Err(e) => {
@@ -702,7 +766,28 @@ mod imp {
         let Some(rel) = rel_key(&a.root, abs) else {
             return false;
         };
+        let _edit = tree_edit();
         a.db.delete_file(&rel).is_ok()
+    }
+
+    /// Drop the `#bin` twin of a disk file that was removed, under the same
+    /// same-Space rule as [`delete_tree_file`]. Called once the removal is
+    /// final (the path is still absent), so a save that replaced the file
+    /// keeps its twin.
+    pub fn delete_tree_twin(abs: &Path) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let Some(rel) = rel_key(&a.root, abs) else {
+            return false;
+        };
+        if hidden(&rel) {
+            return false;
+        }
+        a.db.delete_file(&format!("{rel}{BIN_SUFFIX}")).is_ok()
     }
 
     /// Purge a folder-form entity from EVERY Fjall store so a delete actually
@@ -731,7 +816,295 @@ mod imp {
         };
         let uuid = eustress_common::instance_create::uuid_hex_to_bytes(uuid_hex)
             .filter(|b| *b != [0u8; 16]);
+        let _edit = tree_edit();
         purge_rel_locked(a, &rel, uuid, class_name)
+    }
+
+    /// Whether a Space-relative path lies in a hidden folder (`.eustress/`,
+    /// the trash): never a tree record, so no subtree call touches one. A
+    /// Delete moves its folder into `.eustress/trash`; seeding or re-keying
+    /// that copy would undo the Delete.
+    fn hidden(rel: &str) -> bool {
+        rel.split('/').any(|part| part.starts_with('.'))
+    }
+
+    /// Every tree key at `rel` or under `rel/`, from one key scan.
+    fn subtree_keys(a: &Active, rel: &str) -> Vec<String> {
+        let prefix = format!("{rel}/");
+        a.db.iter_tree_keys()
+            .map(|keys| keys.filter_map(|k| k.ok()).filter(|k| k == rel || k.starts_with(&prefix)).collect())
+            .unwrap_or_default()
+    }
+
+    /// A record's `[metadata] uuid` (when it has a real one) and raw class.
+    fn identity_of(bytes: &[u8]) -> (Option<[u8; 16]>, String) {
+        let Some(doc) = std::str::from_utf8(bytes).ok().and_then(|t| t.parse::<toml::Value>().ok()) else {
+            return (None, String::new());
+        };
+        let meta = doc.get("metadata").or_else(|| doc.get("Metadata"));
+        let uuid = meta
+            .and_then(|m| m.get("uuid").or_else(|| m.get("Uuid")))
+            .and_then(|u| u.as_str())
+            .and_then(eustress_common::instance_create::uuid_hex_to_bytes)
+            .filter(|b| *b != [0u8; 16]);
+        let class = eustress_common::datamodel::record::raw_class_name(&doc).unwrap_or_default().to_string();
+        (uuid, class)
+    }
+
+    /// Move every tree record at or under `from` to the same place under
+    /// `to`: each file with its `#bin` twin, and each record's
+    /// `path_to_uuid` entry, with `uuid_to_path` rewritten where it named the
+    /// old place, so every entity keeps its identity. Cores are keyed by
+    /// identity, not path, and stay. A record already at the destination is
+    /// replaced. The records moved; 0 outside the active Space. A folder move
+    /// the watcher cannot see (`guard_rename`), or sees as one renamed pair
+    /// (`handle_file_renamed`), keeps the tree in step through this.
+    pub fn rekey_subtree(from: &Path, to: &Path) -> usize {
+        let Ok(g) = ACTIVE.read() else { return 0 };
+        let Some(a) = g.as_ref() else { return 0 };
+        let (Some(from_rel), Some(to_rel)) = (rel_key(&a.root, from), rel_key(&a.root, to)) else {
+            return 0;
+        };
+        if from_rel.is_empty() || to_rel.is_empty() || from_rel == to_rel || hidden(&from_rel) || hidden(&to_rel) {
+            return 0;
+        }
+        let _edit = tree_edit();
+        let mut moved = 0;
+        for key in subtree_keys(a, &from_rel) {
+            let new_key = format!("{to_rel}{}", &key[from_rel.len()..]);
+            let Ok(Some(bytes)) = a.db.get_file(&key) else { continue };
+            if a.db.put_file(&new_key, &bytes).is_err() {
+                continue;
+            }
+            let _ = a.db.delete_file(&key);
+            moved += 1;
+            if key.ends_with(BIN_SUFFIX) {
+                continue;
+            }
+            let uuid = a.db.path_to_uuid(&key).ok().flatten().or_else(|| identity_of(&bytes).0);
+            let _ = a.db.delete_path_to_uuid(&key);
+            if let Some(uuid) = uuid {
+                let _ = a.db.put_path_to_uuid(&new_key, &uuid);
+                if a.db.uuid_to_path(&uuid).ok().flatten().as_deref() == Some(key.as_str()) {
+                    let _ = a.db.put_uuid_to_path(&uuid, &new_key);
+                }
+            }
+        }
+        moved
+    }
+
+    /// Move the tree records at or under `src_rel` to the same place under
+    /// `dst_rel`, and move each record's identity with it: `path_to_uuid` moves
+    /// to the new key, and `uuid_to_path` is rewritten where it named the old
+    /// one. The reparent and rename paths call this on the database they hold,
+    /// so a moved record keeps the identity the bake and the loader look up. The
+    /// tree keys alone moved before, which left each record with no identity at
+    /// its new path. Returns (keys moved, keys found).
+    pub fn rekey_tree_keys(db: &dyn WorldDb, src_rel: &str, dst_rel: &str) -> (usize, usize) {
+        if src_rel.is_empty() || dst_rel.is_empty() || src_rel == dst_rel {
+            return (0, 0);
+        }
+        let _edit = tree_edit();
+        // Collect before mutating: re-keying while the tree iterator is live
+        // would mutate what is being read.
+        let child_prefix = format!("{src_rel}/");
+        let old_keys: Vec<String> = db
+            .iter_tree_keys()
+            .map(|keys| {
+                keys.filter_map(|k| k.ok())
+                    .filter(|k| k == src_rel || k.starts_with(&child_prefix))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut moved = 0usize;
+        for key in &old_keys {
+            let new_key = format!("{dst_rel}{}", &key[src_rel.len()..]);
+            let Ok(Some(bytes)) = db.get_file(key) else {
+                continue;
+            };
+            if let Err(e) = db.put_file(&new_key, &bytes) {
+                tracing::warn!(target: "eustress_engine::world_db", error = %e, rel = %new_key, "rekey: put_file failed; the record stays at its old key");
+                continue;
+            }
+            let _ = db.delete_file(key);
+            moved += 1;
+            if key.ends_with(BIN_SUFFIX) {
+                continue;
+            }
+            let uuid = db.path_to_uuid(key).ok().flatten().or_else(|| identity_of(&bytes).0);
+            let _ = db.delete_path_to_uuid(key);
+            if let Some(uuid) = uuid {
+                let _ = db.put_path_to_uuid(&new_key, &uuid);
+                if db.uuid_to_path(&uuid).ok().flatten().as_deref() == Some(key.as_str()) {
+                    let _ = db.put_uuid_to_path(&uuid, &new_key);
+                }
+            }
+        }
+        let _ = db.flush();
+        (moved, old_keys.len())
+    }
+
+    /// Bring a folder's files (or one file) from disk into the tree: every
+    /// kind `representation::tree_tracks` names, each instance file's
+    /// identity registered from its `[metadata] uuid` (`path_to_uuid`,
+    /// `uuid_to_path`, `class_index`), and a stale `#bin` twin dropped, since
+    /// disk is what is restored. For a folder restored from the trash or
+    /// moved in where the watcher could not see it, before a rescan reads the
+    /// tree. The files written; 0 outside the active Space.
+    pub fn seed_subtree(dir: &Path) -> usize {
+        let Ok(g) = ACTIVE.read() else { return 0 };
+        let Some(a) = g.as_ref() else { return 0 };
+        if rel_key(&a.root, dir).is_none_or(|rel| hidden(&rel)) {
+            return 0;
+        }
+        let mut files = Vec::new();
+        if dir.is_file() {
+            files.push(dir.to_path_buf());
+        } else {
+            collect_tracked_files(dir, &mut files);
+        }
+        let mut seeded = 0;
+        for path in files {
+            let Some(rel) = rel_key(&a.root, &path) else { continue };
+            if !crate::space::representation::tree_tracks(&rel) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if a.db.put_file(&rel, &bytes).is_err() {
+                continue;
+            }
+            let _ = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}"));
+            seeded += 1;
+            if rel.ends_with(".toml") {
+                if let (Some(uuid), class) = identity_of(&bytes) {
+                    let _ = a.db.put_path_to_uuid(&rel, &uuid);
+                    let _ = a.db.put_uuid_to_path(&uuid, &rel);
+                    if !class.is_empty() {
+                        let _ = a.db.put_class_index(&class, &uuid);
+                    }
+                }
+            }
+        }
+        seeded
+    }
+
+    /// Every tracked file under `dir`, leaving out hidden folders and the
+    /// database's folders.
+    fn collect_tracked_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !name.starts_with('.') && !name.starts_with("world.fjalldb") {
+                    collect_tracked_files(&path, out);
+                }
+            } else if crate::space::representation::tree_tracks(&name) {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Delete's full purge ([`purge_path_all_stores`]) for every instance file
+    /// at or under `dir`, and every other tree key there (scripts, binaries,
+    /// `#bin` twins) with its path index. For a folder genuinely removed, by a
+    /// Cut or a trash, where each descendant's uuid is not in hand. Refuses
+    /// the Space root. The records purged; 0 outside the active Space.
+    pub fn purge_subtree(dir: &Path) -> usize {
+        let Ok(g) = ACTIVE.read() else { return 0 };
+        let Some(a) = g.as_ref() else { return 0 };
+        let Some(rel) = rel_key(&a.root, dir) else { return 0 };
+        if rel.is_empty() || hidden(&rel) {
+            return 0;
+        }
+        let _edit = tree_edit();
+        let mut purged = 0;
+        for key in subtree_keys(a, &rel) {
+            if key.ends_with(BIN_SUFFIX) {
+                let _ = a.db.delete_file(&key);
+                continue;
+            }
+            if key.ends_with(".toml") {
+                let (uuid, class) = a
+                    .db
+                    .get_file(&key)
+                    .ok()
+                    .flatten()
+                    .map(|b| identity_of(&b))
+                    .unwrap_or((None, String::new()));
+                if purge_rel_locked(a, &key, uuid, &class) {
+                    purged += 1;
+                }
+            } else if a.db.delete_file(&key).is_ok() {
+                let _ = a.db.delete_path_to_uuid(&key);
+                purged += 1;
+            }
+        }
+        purged
+    }
+
+    /// Write every tree record at or under `dir` as files under `dest`,
+    /// keeping their layout (never a `#bin` twin); the tree is untouched. For
+    /// trashing an entity that has no folder on disk: export, then
+    /// [`purge_subtree`]; the undo moves it back and [`seed_subtree`]s it.
+    /// The files written; 0 outside the active Space.
+    pub fn export_subtree(dir: &Path, dest: &Path) -> usize {
+        let Ok(g) = ACTIVE.read() else { return 0 };
+        let Some(a) = g.as_ref() else { return 0 };
+        let Some(rel) = rel_key(&a.root, dir) else { return 0 };
+        if rel.is_empty() || hidden(&rel) {
+            return 0;
+        }
+        let mut written = 0;
+        for key in subtree_keys(a, &rel) {
+            if key.ends_with(BIN_SUFFIX) {
+                continue;
+            }
+            let Ok(Some(bytes)) = a.db.get_file(&key) else { continue };
+            let target = if key == rel { dest.to_path_buf() } else { dest.join(&key[rel.len() + 1..]) };
+            if let Some(parent) = target.parent() {
+                if std::fs::create_dir_all(parent).is_err() {
+                    continue;
+                }
+            }
+            if std::fs::write(&target, &bytes).is_ok() {
+                written += 1;
+            }
+        }
+        written
+    }
+
+    /// The watcher's half of a folder that left the Space: its tree records,
+    /// `#bin` twins and path index entries, NOTHING keyed by identity. The
+    /// watcher cannot tell a move from a delete, and a move keeps its cores;
+    /// a delete purges every store itself ([`purge_path_all_stores`],
+    /// [`purge_subtree`]). Never a whole service. The records dropped.
+    pub fn drop_subtree_paths(dir: &Path) -> usize {
+        let Ok(g) = ACTIVE.read() else { return 0 };
+        let Some(a) = g.as_ref() else { return 0 };
+        let Some(rel) = rel_key(&a.root, dir) else { return 0 };
+        if !rel.contains('/') || hidden(&rel) {
+            return 0;
+        }
+        let _edit = tree_edit();
+        let mut dropped = 0;
+        for key in subtree_keys(a, &rel) {
+            if a.db.delete_file(&key).is_ok() {
+                dropped += 1;
+            }
+            if !key.ends_with(BIN_SUFFIX) {
+                let _ = a.db.delete_path_to_uuid(&key);
+            }
+        }
+        dropped
+    }
+
+    /// Whether the tree holds exactly this path's key.
+    pub fn has_tree_key(abs: &Path) -> bool {
+        let Ok(g) = ACTIVE.read() else { return false };
+        let Some(a) = g.as_ref() else { return false };
+        let Some(rel) = rel_key(&a.root, abs) else { return false };
+        a.db.has_file(&rel).unwrap_or(false)
     }
 
     /// The body of [`purge_path_all_stores`], for a caller already holding the
@@ -980,6 +1353,17 @@ mod imp {
     /// that must complete against the Space it started on.
     pub fn db_arc() -> Option<Arc<dyn WorldDb>> {
         ACTIVE.read().ok().and_then(|g| g.as_ref().map(|a| a.db.clone()))
+    }
+
+    /// Flush the installed DB to disk on app exit (from `persist_edits_on_exit`).
+    /// The handle lives in a static, so `FjallWorldDb`'s Drop never runs on a
+    /// normal quit, and anything not yet persisted would otherwise be lost.
+    pub fn flush_on_exit() {
+        let Some(db) = db_arc() else { return };
+        match db.flush() {
+            Ok(()) => tracing::info!(target: "eustress_engine::active_db", "flushed the open Space database on exit"),
+            Err(e) => tracing::error!(target: "eustress_engine::active_db", error = %e, "flush on exit failed"),
+        }
     }
 
     /// The Space root the installed DB belongs to.
@@ -1244,6 +1628,7 @@ mod imp {
                 .unwrap_or([0u8; 16])
         };
         let known = uuid != [0u8; 16];
+        let _edit = tree_edit();
 
         // Where the uuid-primary copy says the core is keyed: a move re-keys
         // the core and the copy together, so this finds a core whose cell the
@@ -1466,6 +1851,8 @@ mod imp {
 
     pub fn clear() {}
 
+    pub fn flush_on_exit() {}
+
     // Causal-context parity with the `world-db` module, so a caller that opens
     // an actor scope (an MCP tool, the bridge) compiles in BOTH builds. There
     // is no op-log without the feature, so the scope is inert rather than
@@ -1505,6 +1892,14 @@ mod imp {
         false
     }
 
+    /// No DB in this build: the tree holds no record to rewrite.
+    pub fn update_instance_text(
+        _abs: &Path,
+        _edit: impl Fn(&str) -> Result<Option<String>, String>,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
     pub fn put_instance(_abs: &Path, _def: &InstanceDefinition) -> bool {
         false
     }
@@ -1527,7 +1922,33 @@ mod imp {
     pub fn delete_tree_file(_abs: &Path) -> bool {
         false
     }
+    pub fn delete_tree_twin(_abs: &Path) -> bool {
+        false
+    }
     pub fn purge_path_all_stores(_abs: &Path, _uuid_hex: &str, _class_name: &str) -> bool {
+        false
+    }
+    /// Without a database nothing is moved.
+    pub fn rekey_tree_keys<D: ?Sized>(_db: &D, _src_rel: &str, _dst_rel: &str) -> (usize, usize) {
+        (0, 0)
+    }
+
+    pub fn rekey_subtree(_from: &Path, _to: &Path) -> usize {
+        0
+    }
+    pub fn seed_subtree(_dir: &Path) -> usize {
+        0
+    }
+    pub fn purge_subtree(_dir: &Path) -> usize {
+        0
+    }
+    pub fn export_subtree(_dir: &Path, _dest: &Path) -> usize {
+        0
+    }
+    pub fn drop_subtree_paths(_dir: &Path) -> usize {
+        0
+    }
+    pub fn has_tree_key(_abs: &Path) -> bool {
         false
     }
     pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {
@@ -1640,4 +2061,84 @@ pub fn streaming_active() -> bool {
 /// teardown (reset to false). Non-gated so both callers compile.
 pub fn set_streaming_active(v: bool) {
     STREAMING_ACTIVE.store(v, Ordering::Relaxed);
+}
+
+#[cfg(all(test, feature = "world-db"))]
+mod twin_tests {
+    use super::*;
+
+    /// A file removed on disk takes its `#bin` twin with it, and the base
+    /// record stays with the twin's own removal. Needs a process of its own.
+    #[test]
+    #[ignore = "opens a Fjall keyspace and sets the process-wide active DB; run with --ignored --test-threads=1"]
+    fn a_removed_file_takes_its_twin() {
+        let space = std::env::temp_dir().join(format!("eustress_twin_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        std::fs::create_dir_all(space.join("world.fjalldb")).unwrap();
+        let db = eustress_worlddb::backend::open(&space.join("world.fjalldb")).unwrap();
+        let base = "Workspace/Gone/_instance.toml";
+        db.put_file(base, b"[metadata]\nclass_name = \"Part\"\n").unwrap();
+        db.put_file(&format!("{base}#bin"), b"twin").unwrap();
+        set(db.clone(), space.clone());
+        assert!(delete_tree_twin(&space.join(base)));
+        clear();
+        assert!(db.get_file(&format!("{base}#bin")).unwrap().is_none(), "the twin is gone");
+        assert!(db.get_file(base).unwrap().is_some(), "the base record is not the twin's to remove");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
+    }
+}
+
+#[cfg(all(test, feature = "world-db"))]
+mod reparent_identity_tests {
+    use super::*;
+    use eustress_worlddb::WorldDb;
+
+    /// A folder moved by the engine keeps each record's identity at its new
+    /// path. Before `rekey_tree_keys`, the reparent and rename paths moved the
+    /// tree keys alone, so `path_to_uuid` had no entry at the new key and the
+    /// bake skipped the record. Needs a process of its own.
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored --test-threads=1"]
+    fn a_folder_move_keeps_identity_at_the_new_path() {
+        let space = std::env::temp_dir().join(format!("eustress_reparent_identity_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        std::fs::create_dir_all(space.join("world.fjalldb")).unwrap();
+        let db = eustress_worlddb::backend::open(&space.join("world.fjalldb")).unwrap();
+        let uuid = [7u8; 16];
+        let old = "Workspace/Crate/_instance.toml";
+        let child = "Workspace/Crate/Part/_instance.toml";
+        db.put_file(old, b"[metadata]\nclass_name = \"Model\"\n").unwrap();
+        db.put_file(child, b"[metadata]\nclass_name = \"Part\"\n").unwrap();
+        db.put_file("Workspace/Crate/Part/_instance.toml#bin", b"twin").unwrap();
+        db.put_path_to_uuid(old, &uuid).unwrap();
+        db.put_uuid_to_path(&uuid, old).unwrap();
+        let (moved, found) = rekey_tree_keys(&*db, "Workspace/Crate", "Workspace/Moved/Crate");
+        assert_eq!((moved, found), (3, 3), "the record, its child and the child's twin move");
+        let new_old = "Workspace/Moved/Crate/_instance.toml";
+        assert_eq!(db.path_to_uuid(new_old).unwrap(), Some(uuid), "identity follows the record");
+        assert!(db.path_to_uuid(old).unwrap().is_none(), "no identity is left at the old path");
+        assert_eq!(db.uuid_to_path(&uuid).unwrap().as_deref(), Some(new_old), "the identity names the new path");
+        assert!(db.get_file(old).unwrap().is_none(), "the old record is gone");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// A temp file a write leaves between its write and its rename never
+    /// reaches the tree.
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored --test-threads=1"]
+    fn a_temp_file_is_never_a_tree_record() {
+        let space = std::env::temp_dir().join(format!("eustress_tmp_record_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        std::fs::create_dir_all(space.join("world.fjalldb")).unwrap();
+        let db = eustress_worlddb::backend::open(&space.join("world.fjalldb")).unwrap();
+        set(db.clone(), space.clone());
+        let tmp = space.join("Workspace").join("A").join("_instance.toml.tmp");
+        assert!(!put_tree_file(&tmp, b"[metadata]\n"), "the temp file is refused");
+        assert!(db.get_file("Workspace/A/_instance.toml.tmp").unwrap().is_none(), "nothing is stored");
+        clear();
+        drop(db);
+        let _ = std::fs::remove_dir_all(&space);
+    }
 }

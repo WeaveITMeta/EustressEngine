@@ -210,6 +210,42 @@ fn anthropic_image_to_openai(block: &Value) -> Option<Value> {
     }))
 }
 
+/// Split a `tool_result`'s `content` into its text and its images.
+///
+/// The content is a plain string, or an array of text and image blocks when a
+/// tool returned a picture (a camera capture). Reading it with `as_str()` alone
+/// turned the array into an empty tool message, so the model lost the tool's
+/// text whenever an image came with it.
+fn tool_result_parts(content: Option<&Value>) -> (String, Vec<Value>) {
+    match content {
+        Some(Value::String(text)) => (text.clone(), Vec::new()),
+        Some(Value::Array(blocks)) => {
+            let mut text = String::new();
+            let mut images = Vec::new();
+            for block in blocks {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(t);
+                        }
+                    }
+                    Some("image") => {
+                        if let Some(image) = anthropic_image_to_openai(block) {
+                            images.push(image);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (text, images)
+        }
+        _ => (String::new(), Vec::new()),
+    }
+}
+
 fn user_message_to_openai(content: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     let mut leftover_text = String::new();
@@ -222,10 +258,20 @@ fn user_message_to_openai(content: &[Value]) -> Vec<Value> {
                     .get("tool_use_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let result_content = block
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
+                let (mut result_content, result_images) = tool_result_parts(block.get("content"));
+                if !result_images.is_empty() {
+                    // OpenAI's tool messages carry text only, so the picture
+                    // rides in the user turn that follows all the tool
+                    // messages, labelled with the call it belongs to.
+                    result_content.push_str(
+                        "\n\n[An image came with this result. It follows in the next message.]",
+                    );
+                    if !leftover_text.is_empty() {
+                        leftover_text.push('\n');
+                    }
+                    leftover_text.push_str(&format!("Image returned by tool call {tool_call_id}."));
+                    images.extend(result_images);
+                }
                 out.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -533,5 +579,90 @@ mod tests {
         // trailing user message.
         assert_eq!(openai[5]["role"], "user");
         assert_eq!(openai[5]["content"], "Now also rename them.");
+    }
+
+    // ---- a tool result that carries an image (a camera capture) -------------
+
+    fn capture_turn(result_content: Value) -> Vec<Value> {
+        vec![
+            json!({ "role": "assistant", "content": [
+                { "type": "tool_use", "id": "call_1", "name": "ai_camera_capture", "input": {} },
+            ]}),
+            json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": result_content },
+            ]}),
+        ]
+    }
+
+    fn capture_content() -> Value {
+        json!([
+            { "type": "text", "text": "Screenshot captured." },
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "QUJD" } },
+        ])
+    }
+
+    #[test]
+    fn a_tool_result_with_an_image_keeps_its_text() {
+        // Reading the content with as_str() alone made this an EMPTY tool
+        // message, so Grok and OpenAI lost the tool's text whenever a picture
+        // came with it.
+        let out = anthropic_history_to_openai(&capture_turn(capture_content()), None);
+        let tool = out.iter().find(|m| m["role"] == "tool").expect("a tool message");
+        let text = tool["content"].as_str().expect("tool content is text");
+        assert!(text.starts_with("Screenshot captured."), "{text}");
+        assert!(text.contains("follows in the next message"), "{text}");
+    }
+
+    #[test]
+    fn the_picture_follows_the_tool_messages_as_a_user_turn() {
+        let out = anthropic_history_to_openai(&capture_turn(capture_content()), None);
+        // OpenAI requires the tool message to directly follow the assistant's
+        // tool call; the image goes after, in a user message.
+        let roles: Vec<&str> = out.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool", "user"]);
+
+        let parts = out[2]["content"].as_array().expect("image turns use the array form");
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "data:image/png;base64,QUJD");
+        assert!(
+            parts[1]["text"].as_str().is_some_and(|t| t.contains("call_1")),
+            "the picture must be labelled with the call it belongs to"
+        );
+    }
+
+    #[test]
+    fn a_plain_string_result_is_unchanged() {
+        let out = anthropic_history_to_openai(&capture_turn(json!("3 entities")), None);
+        let roles: Vec<&str> = out.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool"], "no image, so no extra user turn");
+        assert_eq!(out[1]["content"], "3 entities");
+    }
+
+    #[test]
+    fn two_results_with_a_picture_keep_every_tool_message_ahead_of_it() {
+        let history = vec![
+            json!({ "role": "assistant", "content": [
+                { "type": "tool_use", "id": "call_1", "name": "ai_camera_capture", "input": {} },
+                { "type": "tool_use", "id": "call_2", "name": "list_directory", "input": {} },
+            ]}),
+            json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": capture_content() },
+                { "type": "tool_result", "tool_use_id": "call_2", "content": "a.toml\nb.toml" },
+            ]}),
+        ];
+        let out = anthropic_history_to_openai(&history, None);
+        let roles: Vec<&str> = out.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool", "tool", "user"]);
+        assert_eq!(out[2]["content"], "a.toml\nb.toml");
+    }
+
+    #[test]
+    fn an_image_only_result_still_produces_a_tool_message() {
+        let content = json!([
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "QUJD" } },
+        ]);
+        let out = anthropic_history_to_openai(&capture_turn(content), None);
+        let tool = out.iter().find(|m| m["role"] == "tool").expect("a tool message");
+        assert!(tool["content"].as_str().is_some_and(|t| !t.is_empty()), "the tool message must not be empty");
     }
 }

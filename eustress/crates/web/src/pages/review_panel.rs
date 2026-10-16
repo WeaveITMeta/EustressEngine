@@ -28,12 +28,20 @@ pub struct ReviewView {
     pub status: String,
     #[serde(default)]
     pub headline: String,
+    /// A person has the case (held). Said so the page can word it; never a reason.
+    #[serde(default)]
+    pub person_review: bool,
     #[serde(default)]
     pub reasons: Vec<ReviewReason>,
     #[serde(default)]
     pub suggested_edit: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// The tags the review chose when the author gave none, and the sentence that says so ("Tags chosen for your Space: a, b").
+    #[serde(default)]
+    pub assigned_tags: Vec<String>,
+    #[serde(default)]
+    pub tags_chosen: Option<String>,
     #[serde(default)]
     pub rating: Option<String>,
     #[serde(default)]
@@ -93,7 +101,7 @@ fn valid_appeal(text: &str) -> bool {
 
 /// The label for an author status. Held and quarantined cases both arrive as
 /// `in_review` and read the same.
-fn status_label(status: &str) -> &'static str {
+pub fn status_label(status: &str) -> &'static str {
     match status {
         "listed" => "Listed",
         "in_review" => "In review",
@@ -106,12 +114,14 @@ fn status_label(status: &str) -> &'static str {
     }
 }
 
-fn rating_label(rating: &str) -> &'static str {
+pub fn rating_label(rating: &str) -> &'static str {
     match rating {
-        "all_ages" => "Everyone",
-        "teen_13" => "Teen (13+)",
-        "mature_17" => "Mature (17+)",
-        "adult_18" => "Adults (18+)",
+        "all_ages" => "All ages",
+        "ages_10" => "Ages 10+",
+        "teen_13" => "Ages 13+",
+        "mature_17" => "Ages 17+",
+        "adult_18" => "Adults only (18+)",
+        "adult_21" => "Adults only (21+)",
         _ => "Not rated",
     }
 }
@@ -216,7 +226,7 @@ pub fn ReviewPanel(
     let on_close_btn = on_close.clone();
 
     view! {
-        <div class="modal-overlay review-overlay" on:click=move |_| on_close_bg()>
+        <div class="modal-overlay review-overlay" on:click=move |_| { let close = on_close_bg.clone(); crate::utils::after_event(move || close()); }>
             <div
                 class="review-panel"
                 role="dialog"
@@ -224,7 +234,7 @@ pub fn ReviewPanel(
                 aria-label="Review details"
                 on:click=|e| e.stop_propagation()
             >
-                <button class="modal-close" aria-label="Close" on:click=move |_| on_close_btn()>
+                <button class="modal-close" aria-label="Close" on:click=move |_| { let close = on_close_btn.clone(); crate::utils::after_event(move || close()); }>
                     "×"
                 </button>
                 {move || match load.get() {
@@ -280,6 +290,12 @@ pub fn ReviewPanel(
                                 {v.note.clone().map(|text| view! {
                                     <div class="review-suggestion">
                                         <span class="review-label">"A note from the reviewer"</span>
+                                        <p>{text}</p>
+                                    </div>
+                                })}
+                                {crate::tags::tags_chosen_line(v.tags_chosen.as_deref()).map(|text| view! {
+                                    <div class="review-suggestion">
+                                        <span class="review-label">"Tags"</span>
                                         <p>{text}</p>
                                     </div>
                                 })}

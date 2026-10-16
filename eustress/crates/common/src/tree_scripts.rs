@@ -182,7 +182,7 @@ fn run_tree_scripts(
     mut commands: Commands,
     // The tree a VM failed to build for, so that tree is not retried every
     // frame while a newly opened world still gets its own attempt.
-    mut gave_up_on: Local<Option<usize>>,
+    mut gave_up_on: Local<Option<u64>>,
     tree: Option<Res<PlayDataModel>>,
     scripts: Option<ResMut<TreeScripts>>,
     role: Option<Res<PlayRole>>,
@@ -217,7 +217,7 @@ fn run_tree_scripts(
     }
 
     let Some(mut scripts) = scripts else {
-        let this_tree = std::sync::Arc::as_ptr(&tree.dm) as usize;
+        let this_tree = crate::datamodel::session_of(&tree.dm);
         if *gave_up_on == Some(this_tree) {
             return;
         }

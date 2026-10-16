@@ -7,9 +7,15 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use crate::api::{ApiClient};
+use crate::api::{commerce_error_text, get_commerce_account, CommerceMode, SellerSimulation};
+use crate::components::action_menu::{Action, ActionMenu, Item};
 use crate::components::{CentralNav, Footer};
-use crate::state::AppState;
+use crate::state::{AppState, AuthState};
+use crate::utils::after_event;
 use super::review_panel::ReviewPanel;
+use super::project_sell::{seller_for, SellButton, SellChip, SellNote};
+use super::project_tags::TagEditor;
+use crate::tags::{query_matches_tag, suggested_label};
 
 // -----------------------------------------------------------------------------
 // Data Types
@@ -31,7 +37,7 @@ pub enum SpaceStatus {
 }
 
 impl SpaceStatus {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Published => "published",
             Self::Draft => "draft",
@@ -43,7 +49,7 @@ impl SpaceStatus {
         }
     }
 
-    fn display_name(&self) -> &'static str {
+    pub(crate) fn display_name(&self) -> &'static str {
         match self {
             Self::Published => "Published",
             Self::Draft => "Draft",
@@ -57,7 +63,7 @@ impl SpaceStatus {
 
     /// The status the API reports for a project. Held and quarantined cases
     /// both arrive as `in_review` and are not told apart here.
-    fn from_api(status: &str) -> Self {
+    pub(crate) fn from_api(status: &str) -> Self {
         match status {
             "published" => Self::Published,
             "draft" | "rejected" => Self::Draft,
@@ -88,7 +94,9 @@ pub struct Place {
     pub visits: u64,
     pub favorites: u64,
     pub max_players: u32,
-    pub genre: String,
+    /// The tags that describe it, and who chose them (`"author"` or `"judge"`; absent means the author).
+    pub tags: Vec<String>,
+    pub tags_source: Option<String>,
     pub updated_at: String,
     pub created_at: String,
     pub is_public: bool,
@@ -110,7 +118,10 @@ pub struct ProjectData {
     pub description: Option<String>,
     pub thumbnail_url: Option<String>,
     pub status: String,
-    pub genre: String,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub tags_source: Option<String>,
     pub max_players: u32,
     pub is_public: bool,
     pub version: u32,
@@ -136,7 +147,10 @@ pub fn ProjectsPage() -> impl IntoView {
     let filter_status = RwSignal::new("all".to_string());
     let sort_by = RwSignal::new("updated".to_string());
     let view_mode = RwSignal::new("grid".to_string()); // "grid" or "list"
-    let active_menu = RwSignal::new(None::<String>); // Track which context menu is open
+    // The project whose settings dialog is open, the one an Archive is waiting on, and the line that says what just happened.
+    let settings_open = RwSignal::new(None::<Place>);
+    let archive_ask = RwSignal::new(None::<Place>);
+    let toast = RwSignal::new(None::<Toast>);
     // The project whose review panel is open. A review email links to
     // /projects?review=<id>, which opens it.
     let review_open = RwSignal::new(review_id_from_query(&current_query()));
@@ -146,9 +160,32 @@ pub fn ProjectsPage() -> impl IntoView {
     let spaces = RwSignal::new(Vec::<Place>::new());
     let is_loading = RwSignal::new(true);
     
-    // Fetch projects from API on mount
-    let api_url = app_state.api_url.clone();
-    Effect::new(move |_| {
+    // What each published project can sell, from the account's commerce record. A project with no entry here has
+    // nothing to show: no chip and no Sell button. The record is asked for once per sign-in.
+    let sellers = RwSignal::new(Vec::<SellerSimulation>::new());
+    let auth = app_state.auth;
+    let signed_in = Memo::new(move |_| matches!(auth.get(), AuthState::Authenticated(_)));
+    {
+        let api_url = app_state.api_url.clone();
+        Effect::new(move |_| {
+            if !signed_in.get() {
+                sellers.set(Vec::new());
+                return;
+            }
+            let api_url = api_url.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match get_commerce_account(&api_url, CommerceMode::Test).await {
+                    Ok(account) => sellers.set(account.simulations),
+                    Err(e) => log::warn!("Could not read what each project can sell: {}", commerce_error_text(&e)),
+                }
+            });
+        });
+    }
+
+    // Fetch projects from API on mount, and again after an archive or unarchive.
+    let reload = {
+        let api_url = app_state.api_url.clone();
+        move || {
         let api_url = api_url.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let client = ApiClient::new(&api_url);
@@ -169,7 +206,8 @@ pub fn ProjectsPage() -> impl IntoView {
                             visits: p.play_count,
                             favorites: p.favorite_count,
                             max_players: p.max_players,
-                            genre: p.genre,
+                            tags: p.tags.unwrap_or_default(),
+                            tags_source: p.tags_source,
                             updated_at: p.last_edited,
                             created_at: p.created_at,
                             is_public: p.is_public,
@@ -183,8 +221,71 @@ pub fn ProjectsPage() -> impl IntoView {
             }
             is_loading.set(false);
         });
+        }
+    };
+    let first_load = reload.clone();
+    Effect::new(move |_| first_load());
+
+    // Archive and unarchive go through the Worker; the list is read again afterwards, so it shows what the Worker kept.
+    let archive_api = app_state.api_url.clone();
+    let set_archived = {
+        let reload = reload.clone();
+        move |place: Place, archive: bool| {
+            let api_url = archive_api.clone();
+            let reload = reload.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let client = ApiClient::new(&api_url);
+                let route = if archive { "archive" } else { "unarchive" };
+                let sent = client.post::<serde_json::Value, _>(&format!("/api/simulations/{}/{route}", place.id), &serde_json::json!({})).await;
+                match sent {
+                    Ok(_) => {
+                        reload();
+                        toast.set(Some(if archive {
+                            Toast { message: format!("Archived {}. It is out of the Gallery, and only you can see it.", place.name), undo: Some(place.id.clone()), failed: false }
+                        } else {
+                            Toast { message: format!("{} is back in the Gallery, as it was.", place.name), undo: None, failed: false }
+                        }));
+                    }
+                    Err(e) => toast.set(Some(Toast { message: format!("Could not {} {}: {}", route, place.name, crate::api::failure_sentence(&e)), undo: None, failed: true })),
+                }
+            });
+        }
+    };
+    let archive_now = {
+        let set_archived = set_archived.clone();
+        Callback::new(move |place: Place| set_archived(place, true))
+    };
+    let unarchive_now = {
+        let set_archived = set_archived.clone();
+        Callback::new(move |place: Place| set_archived(place, false))
+    };
+    // A card's Archive asks first; Unarchive undoes it at once.
+    let on_archive = Callback::new(move |place: Place| {
+        if place.status == SpaceStatus::Archived {
+            unarchive_now.run(place);
+        } else {
+            archive_ask.set(Some(place));
+        }
     });
-    
+    let on_configure = Callback::new(move |place: Place| settings_open.set(Some(place)));
+    // The tag editor saved: close the dialog, read the list again, and say that the Space goes back to review.
+    let after_tags = {
+        let reload = reload.clone();
+        Callback::new(move |message: String| {
+            settings_open.set(None);
+            reload();
+            toast.set(Some(Toast { message, undo: None, failed: false }));
+        })
+    };
+    // "Undo" under the line that says it was archived: the listing is relisted by its id.
+    let undo_archive = {
+        let set_archived = set_archived.clone();
+        move |id: String| {
+            let place = Place { id, name: "the Space".to_string(), description: String::new(), thumbnail_url: None, status: SpaceStatus::Archived, visits: 0, favorites: 0, max_players: 0, tags: Vec::new(), tags_source: None, updated_at: String::new(), created_at: String::new(), is_public: false };
+            set_archived(place, false);
+        }
+    };
+
     // Filter spaces
     let filtered_spaces = move || {
         let query = search_query.get().to_lowercase();
@@ -196,7 +297,7 @@ pub fn ProjectsPage() -> impl IntoView {
                 let matches_search = query.is_empty()
                     || place.name.to_lowercase().contains(&query)
                     || place.description.to_lowercase().contains(&query)
-                    || place.genre.to_lowercase().contains(&query);
+                    || query_matches_tag(&query, &place.tags);
                 
                 let matches_status = status == "all"
                     || place.status.as_str() == status;
@@ -209,7 +310,9 @@ pub fn ProjectsPage() -> impl IntoView {
     // Stats
     let total_visits = move || spaces.get().iter().map(|p| p.visits).sum::<u64>();
     let total_favorites = move || spaces.get().iter().map(|p| p.favorites).sum::<u64>();
+    // Published means approved and public. A Space still in review is counted apart, so the number does not read as "nothing is there".
     let published_count = move || spaces.get().iter().filter(|p| p.status == SpaceStatus::Published).count();
+    let in_review_count = move || spaces.get().iter().filter(|p| p.status == SpaceStatus::UnderReview).count();
     
     view! {
         <div class="page page-projects-industrial">
@@ -231,6 +334,7 @@ pub fn ProjectsPage() -> impl IntoView {
                 </div>
                 <h1 class="projects-title">"Your Creations"</h1>
                 <p class="projects-subtitle">"Manage, customize, and publish your spaces"</p>
+                <SellNote />
                 
                 // Stats Row
                 <div class="stats-row">
@@ -260,6 +364,7 @@ pub fn ProjectsPage() -> impl IntoView {
                         <div class="stat-content">
                             <span class="stat-value">{published_count}</span>
                             <span class="stat-label">"Published"</span>
+                            {move || (in_review_count() > 0).then(|| view! { <span class="stat-sub">{format!("{} in review", in_review_count())}</span> })}
                         </div>
                     </div>
                 </div>
@@ -367,8 +472,7 @@ pub fn ProjectsPage() -> impl IntoView {
                             each=filtered_spaces
                             key=|place| place.id.clone()
                             children=move |place| {
-                                let place_id = place.id.clone();
-                                view! { <PlaceCard place=place active_menu=active_menu place_id=place_id review_open=review_open /> }
+                                view! { <PlaceCard place=place review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers /> }
                             }
                         />
                     </div>
@@ -463,6 +567,79 @@ pub fn ProjectsPage() -> impl IntoView {
                 </div>
             </section>
 
+            // A line that says what an archive just did, with the way back
+            {move || toast.get().map(|t| {
+                let undo = t.undo.clone();
+                let undo_archive = undo_archive.clone();
+                view! {
+                    <div class=if t.failed { "projects-toast failed" } else { "projects-toast" } role=if t.failed { "alert" } else { "status" }>
+                        <span>{t.message.clone()}</span>
+                        {undo.map(|id| view! {
+                            <button class="projects-toast-action" on:click=move |_| { let id = id.clone(); let undo_archive = undo_archive.clone(); after_event(move || { toast.set(None); undo_archive(id); }); }>"Undo"</button>
+                        })}
+                        <button class="projects-toast-close" aria-label="Dismiss" on:click=move |_| after_event(move || toast.set(None))>"x"</button>
+                    </div>
+                }
+            })}
+
+            // Archive asks first
+            {move || archive_ask.get().map(|place| {
+                let confirm_place = place.clone();
+                view! {
+                    <div class="modal-overlay" on:click=move |_| after_event(move || archive_ask.set(None))>
+                        <div class="modal-content archive-dialog" role="alertdialog" aria-modal="true" aria-labelledby="archive-title" on:click=|e| e.stop_propagation()>
+                            <h3 id="archive-title">{format!("Archive {}?", place.name)}</h3>
+                            <p>"It leaves the Gallery and only you can see it. Its review, its world and its counts stay as they are. You can unarchive it any time, and the line that appears after this has an Undo."</p>
+                            <div class="modal-actions">
+                                <button class="btn btn-secondary" on:click=move |_| after_event(move || archive_ask.set(None))>"Cancel"</button>
+                                <button class="btn btn-primary" on:click=move |_| { let p = confirm_place.clone(); after_event(move || { archive_ask.set(None); archive_now.run(p); }); }>"Archive"</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
+
+            // The listing's settings: what they are now, and where each one is changed
+            {move || settings_open.get().map(|place| {
+                let studio = format!("eustress://edit/{}", place.id);
+                let id = place.id.clone();
+                let has_review = place.status.has_review();
+                let archived = place.status == SpaceStatus::Archived;
+                let place_for_archive = place.clone();
+                let tags_now = place.tags.clone();
+                let tags_source = place.tags_source.clone();
+                let tags_name = place.name.clone();
+                let tags_locked = place.status == SpaceStatus::UnderReview;
+                view! {
+                    <div class="modal-overlay" on:click=move |_| after_event(move || settings_open.set(None))>
+                        <div class="modal-content settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" on:click=|e| e.stop_propagation()>
+                            <h3 id="settings-title">{format!("Settings: {}", place.name)}</h3>
+                            <dl class="settings-facts">
+                                <dt>"Status"</dt><dd>{place.status.display_name()}</dd>
+                                <dt>"Visibility"</dt><dd>{if place.is_public { "Public once approved" } else { "Private: only you" }}</dd>
+                                <dt>"Max players"</dt><dd>{format!("{} (from the last publish)", place.max_players)}</dd>
+                                <dt>"Description"</dt><dd>{if place.description.is_empty() { "None yet".to_string() } else { place.description.clone() }}</dd>
+                            </dl>
+                            <h4>"Tags"</h4>
+                            <TagEditor place_id=id.clone() place_name=tags_name tags=tags_now tags_source=tags_source locked=tags_locked on_saved=after_tags />
+                            <h4>"Where each one is changed"</h4>
+                            <ul class="settings-where">
+                                <li><strong>"Title and description"</strong>": the Publish dialog in Studio. Publishing again updates the listing, and a change to the words goes back to review."</li>
+                                <li><strong>"Tags"</strong>": here, or in the Publish dialog in Studio. A change to the tags goes back to review."</li>
+                                <li><strong>"Max players"</strong>": the Space's Players service in Studio (Properties, MaxPlayers). It reaches this page the next time you publish."</li>
+                                <li><strong>"Visibility"</strong>": Archive and Unarchive here, or the public setting in the Publish dialog."</li>
+                            </ul>
+                            <div class="modal-actions">
+                                <a href=studio class="btn btn-secondary">"Edit in Studio"</a>
+                                {has_review.then(|| { let id = id.clone(); view! { <button class="btn btn-secondary" on:click=move |_| { let id = id.clone(); after_event(move || { settings_open.set(None); review_open.set(Some(id)); }); }>"Open the review"</button> } })}
+                                <button class="btn btn-secondary" on:click=move |_| { let p = place_for_archive.clone(); after_event(move || { settings_open.set(None); on_archive.run(p); }); }>{if archived { "Unarchive" } else { "Archive" }}</button>
+                                <button class="btn btn-primary" on:click=move |_| after_event(move || settings_open.set(None))>"Close"</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
+
             // What review decided about a project, and the appeal
             {move || review_open.get().map(|id| view! {
                 <ReviewPanel
@@ -506,96 +683,98 @@ fn review_id_from_query(search: &str) -> Option<String> {
 // Place Card Component
 // -----------------------------------------------------------------------------
 
+/// What the page says after an archive or unarchive.
+#[derive(Clone, Debug, PartialEq)]
+struct Toast {
+    message: String,
+    /// The listing to relist when "Undo" is pressed.
+    undo: Option<String>,
+    failed: bool,
+}
+
 #[component]
 fn PlaceCard(
     place: Place,
-    active_menu: RwSignal<Option<String>>,
-    place_id: String,
     review_open: RwSignal<Option<String>>,
+    on_configure: Callback<Place>,
+    on_archive: Callback<Place>,
+    sellers: RwSignal<Vec<SellerSimulation>>,
 ) -> impl IntoView {
-    let play_url = format!("/play/{}", place.id);
-    let play_url2 = play_url.clone();
-    // Edit opens in desktop app via custom protocol
+    let playable = matches!(place.status, SpaceStatus::Published | SpaceStatus::Private);
+    // This page lists the signed-in person's own Spaces, so the reader is always the author: tags the review chose say so.
+    let card_tags = place.tags.clone();
+    let tags_note = suggested_label(&place.tags, place.tags_source.as_deref(), true);
+    let archived = place.status == SpaceStatus::Archived;
+    let has_review = place.status.has_review();
+    // Play opens the Play chooser in place, like every Play button on the site.
+    let chooser = expect_context::<crate::components::play_chooser::PlayChooserSlot>();
+    let play_id = place.id.clone();
+    // Edit opens Studio through its own link; Studio downloads the listing's world and opens it.
     let edit_url = format!("eustress://edit/{}", place.id);
-    let edit_url2 = edit_url.clone();
-    let configure_url = format!("/configure/{}", place.id);
-    
     let status_class = format!("status-badge {}", place.status.as_str());
-    
-    let place_id_check = place_id.clone();
-    let is_menu_open = move || active_menu.get() == Some(place_id_check.clone());
-    
-    let place_id_toggle = place_id.clone();
-    let toggle_menu = move |_| {
-        let current = active_menu.get();
-        if current == Some(place_id_toggle.clone()) {
-            active_menu.set(None);
-        } else {
-            active_menu.set(Some(place_id_toggle.clone()));
-        }
-    };
-    
+    let thumbnail = place.thumbnail_url.clone().filter(|u| u.starts_with("https://") || u.starts_with('/'));
+    // This project's selling entry, once the account's commerce record has loaded. No entry: no chip and no Sell button.
+    let seller_id = place.id.clone();
+    let seller = Memo::new(move |_| sellers.with(|list| seller_for(list, &seller_id).cloned()));
+
+    // Every item does something. Play only where the listing can be played; Review only where review has something to say.
+    let mut items = Vec::new();
+    if playable {
+        let id = play_id.clone();
+        items.push(Item::new("Play", "play.svg", Action::Call(Callback::new(move |_| chooser.open(&id)))));
+    }
+    items.push(Item::new("Edit in Studio", "edit.svg", Action::Open(edit_url.clone())));
+    if has_review {
+        let id = place.id.clone();
+        items.push(Item::new("Review", "shield.svg", Action::Call(Callback::new(move |_| review_open.set(Some(id.clone()))))));
+    }
+    let for_settings = place.clone();
+    items.push(Item::new("Settings", "settings.svg", Action::Call(Callback::new(move |_| on_configure.run(for_settings.clone())))));
+    let for_archive = place.clone();
+    items.push(
+        Item::new(if archived { "Unarchive" } else { "Archive" }, "archive.svg", Action::Call(Callback::new(move |_| on_archive.run(for_archive.clone()))))
+            .divided(),
+    );
+
     view! {
         <div class="place-card">
             <div class="card-thumbnail">
-                <img src="/assets/icons/gamepad.svg" alt="Place" class="thumbnail-icon" />
+                {match thumbnail {
+                    Some(src) => view! { <img src=src alt="" class="thumbnail-image" loading="lazy" /> }.into_any(),
+                    None => view! { <img src="/assets/icons/gamepad.svg" alt="" class="thumbnail-icon" /> }.into_any(),
+                }}
                 <div class=status_class>{place.status.display_name()}</div>
             </div>
-            
+
             <div class="card-body">
                 <div class="card-header">
                     <h3 class="card-title">{place.name.clone()}</h3>
                     <div class="menu-container">
-                        <button class="menu-trigger" on:click=toggle_menu title="More options">
-                            <img src="/assets/icons/more.svg" alt="Menu" />
-                        </button>
-                        
-                        <Show when=is_menu_open>
-                            <div class="context-menu">
-                                <a href=play_url.clone() class="menu-item">
-                                    <img src="/assets/icons/play.svg" alt="Play" />
-                                    "Play"
-                                </a>
-                                <a href=edit_url.clone() class="menu-item">
-                                    <img src="/assets/icons/edit.svg" alt="Edit" />
-                                    "Edit"
-                                </a>
-                                <a href=configure_url.clone() class="menu-item">
-                                    <img src="/assets/icons/settings.svg" alt="Configure" />
-                                    "Configure"
-                                </a>
-                                <div class="menu-divider"></div>
-                                <button class="menu-item">
-                                    <img src="/assets/icons/copy.svg" alt="Duplicate" />
-                                    "Duplicate"
-                                </button>
-                                <button class="menu-item">
-                                    <img src="/assets/icons/archive.svg" alt="Archive" />
-                                    "Archive"
-                                </button>
-                                <div class="menu-divider"></div>
-                                <button class="menu-item danger">
-                                    <img src="/assets/icons/trash.svg" alt="Delete" />
-                                    "Delete"
-                                </button>
-                            </div>
-                        </Show>
+                        <ActionMenu label=format!("Options for {}", place.name) items=items />
                     </div>
                 </div>
-                
+
                 <p class="card-description">{place.description.clone()}</p>
-                
+
                 <div class="card-meta">
-                    <span class="meta-item">
+                    // The number is the one the last publish stored, so it can lag until the next publish from Studio.
+                    <span class="meta-item" title="From the last publish. It updates the next time you publish from Studio.">
                         <img src="/assets/icons/users.svg" alt="Players" class="meta-icon" />
                         {format!("Max {}", place.max_players)}
                     </span>
-                    <span class="meta-item">
-                        <img src="/assets/icons/tag.svg" alt="Genre" class="meta-icon" />
-                        {place.genre.clone()}
+                    <span class="meta-item card-tags">
+                        <img src="/assets/icons/tag.svg" alt="Tags" class="meta-icon" />
+                        {if card_tags.is_empty() {
+                            view! { <span class="card-tag-note">"No tags yet"</span> }.into_any()
+                        } else {
+                            card_tags.iter().map(|t| view! { <span class="card-tag">{format!("#{t}")}</span> }).collect_view().into_any()
+                        }}
+                        {tags_note.map(|words| view! { <span class="card-tag-note">{words}</span> })}
                     </span>
                 </div>
-                
+
+                {move || seller.get().map(|sim| view! { <SellChip sim=sim /> })}
+
                 <div class="card-stats">
                     <span class="stat">
                         <img src="/assets/icons/play.svg" alt="Visits" class="stat-icon-sm" />
@@ -609,17 +788,19 @@ fn PlaceCard(
                         {place.updated_at.clone()}
                     </span>
                 </div>
-                
+
                 <div class="card-actions">
-                    <a href=play_url2 class="action-btn primary">
-                        <img src="/assets/icons/play.svg" alt="Play" />
-                        "Play"
-                    </a>
-                    <a href=edit_url2 class="action-btn secondary">
+                    {playable.then(|| view! {
+                        <button type="button" class="action-btn primary" on:click=move |_| chooser.open(&play_id)>
+                            <img src="/assets/icons/play.svg" alt="Play" />
+                            "Play"
+                        </button>
+                    })}
+                    <a href=edit_url.clone() class="action-btn secondary">
                         <img src="/assets/icons/edit.svg" alt="Edit" />
                         "Edit"
                     </a>
-                    {place.status.has_review().then(|| {
+                    {has_review.then(|| {
                         let id = place.id.clone();
                         view! {
                             <button class="action-btn secondary" on:click=move |_| review_open.set(Some(id.clone()))>
@@ -628,6 +809,7 @@ fn PlaceCard(
                             </button>
                         }
                     })}
+                    {move || seller.get().map(|sim| view! { <SellButton sim_id=sim.id /> })}
                 </div>
             </div>
         </div>
@@ -696,6 +878,9 @@ pub fn ApiKeysSection() -> impl IntoView {
     let newly_created_key = RwSignal::new(None::<String>);
     let copied_key_id = RwSignal::new(None::<String>);
     let key_error = RwSignal::new(None::<String>);
+    // A passkey session cannot create keys (revoking stays on).
+    let auth = app_state.auth;
+    let passkey_session = move || auth.with(|a| crate::pages::passkeys::key_change_blocked(a.user()));
     
     // Fetch API keys on mount
     let api_url = app_state.api_url.clone();
@@ -742,7 +927,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                 }
                 Err(e) => {
                     log::error!("Failed to create API key: {:?}", e);
-                    key_error.set(Some(format!("The key was not created: {e}")));
+                    key_error.set(Some(crate::pages::passkeys::identity_file_required_words(&e).unwrap_or_else(|| format!("The key was not created: {e}"))));
                 }
             }
         });
@@ -799,6 +984,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                 </div>
                 <button 
                     class="btn-create-key"
+                    disabled=move || passkey_session()
                     on:click=move |_| {
                         new_key_name.set(String::new());
                         newly_created_key.set(None);
@@ -813,6 +999,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                 </button>
             </div>
             
+            {move || passkey_session().then(|| view! { <p class="keys-note" role="status">{crate::pages::passkeys::EMAIL_AND_KEYS_SENTENCE}</p> })}
             {move || key_error.get().map(|e| view! { <p class="keys-error" role="alert">{e}</p> })}
 
             <Show when=move || is_loading.get()>
@@ -889,11 +1076,11 @@ pub fn ApiKeysSection() -> impl IntoView {
             
             // Create Key Modal
             <Show when=move || show_create_modal.get()>
-                <div class="modal-overlay" on:click=move |_| show_create_modal.set(false)>
+                <div class="modal-overlay" on:click=move |_| crate::utils::after_event(move || show_create_modal.set(false))>
                     <div class="modal-content" on:click=|e| e.stop_propagation()>
                         <div class="modal-header">
                             <h3>"Create API Key"</h3>
-                            <button class="modal-close" on:click=move |_| show_create_modal.set(false)>
+                            <button class="modal-close" on:click=move |_| crate::utils::after_event(move || show_create_modal.set(false))>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="18" y1="6" x2="6" y2="18"/>
                                     <line x1="6" y1="6" x2="18" y2="18"/>
@@ -933,7 +1120,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                                         </Show>
                                     </button>
                                 </div>
-                                <button class="btn-done" on:click=move |_| show_create_modal.set(false)>
+                                <button class="btn-done" on:click=move |_| crate::utils::after_event(move || show_create_modal.set(false))>
                                     "Done"
                                 </button>
                             </div>
@@ -1034,7 +1221,7 @@ pub fn ApiKeysSection() -> impl IntoView {
                             </div>
                             
                             <div class="modal-footer">
-                                <button class="btn-cancel" on:click=move |_| show_create_modal.set(false)>
+                                <button class="btn-cancel" on:click=move |_| crate::utils::after_event(move || show_create_modal.set(false))>
                                     "Cancel"
                                 </button>
                                 <button 

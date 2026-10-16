@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cleanText, cleanIcon, cleanProductId, purchaseKey, fitMetadata, resolveAttribution,
-  payableCreator, recordPurchase, listReceipts, aggregate, handlePurchases,
+  payableCreator, recordPurchase, listReceipts, aggregate, handlePurchases, signedThumbnails, MAX_SIGNED_THUMBNAILS,
 } from '../src/purchases.mjs';
+import { adultContentKey, verifyImageUrl } from '../src/adult_content.mjs';
 
 // KV as the Worker sees it: keys listed in byte order, a cursor per page, and
 // metadata over 1,024 bytes refused at write time the way Cloudflare refuses it.
@@ -229,4 +230,108 @@ test('totals span every page of receipts and say when they stop short', async ()
   const capped = await listReceipts(env, 'buyer-3', { maxPages: 2 });
   assert.equal(capped.items.length, 2000);
   assert.equal(capped.truncated, true);
+});
+
+// An adult or unrated simulation's thumbnail is served only at a signed URL
+// (src/adult_content.mjs), so the read signs one for the buyer when they may
+// see it: Adult content on, or their own simulation. Nobody else gets one, and
+// a history with the setting off reads no simulation records for it.
+const ADULT_SIM = 'dddddddd-4444-4444-8444-dddddddddddd';
+const UNRATED_SIM = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+const KIDS_SIM = 'ffffffff-6666-4666-8666-ffffffffffff';
+const BARE_SIM = 'cccccccc-7777-4777-8777-cccccccccccc';
+const NOW = Date.UTC(2026, 9, 8, 17, 0, 0);
+
+async function adultHistory(buyer = 'buyer-1') {
+  const env = { ...environment(), JWT_SECRET: 'test-secret-for-signed-thumbnails' };
+  seed(env);
+  const sim = (id, author, rating, thumb = true) => env.SOCIAL.store.set(`sim:${id}`, { value: JSON.stringify({
+    id, name: `World ${id.slice(0, 4)}`, author_id: author,
+    moderation: rating ? { status: 'approved', rating } : { status: 'approved' },
+    thumbnail_url: thumb ? `https://api.eustress.dev/api/simulations/${id}/thumbnail` : null,
+  }) });
+  sim(ADULT_SIM, 'creator-1', 'adult_18');
+  sim(UNRATED_SIM, 'creator-2', null);
+  sim(KIDS_SIM, 'creator-1', 'all_ages');
+  sim(BARE_SIM, 'creator-2', 'adult_18', false);
+  let s = 1;
+  for (const id of [ADULT_SIM, UNRATED_SIM, KIDS_SIM, BARE_SIM]) {
+    await recordPurchase(env, buyer, { ts: at(s++), currency: 'TKT', units: 10, title: `Pass ${id.slice(0, 4)}`, attribution: await resolveAttribution(env, { simulation_id: id }) });
+  }
+  // From here on, count the simulation records the read opens.
+  let reads = 0;
+  const get = env.SOCIAL.get;
+  env.SOCIAL.get = async (key) => { if (key.startsWith('sim:')) reads += 1; return get(key); };
+  return { env, reads: () => reads };
+}
+const purchasesAt = (token) => new Request('https://api.eustress.dev/api/purchases', { headers: { Authorization: `Bearer ${token}` } });
+const thumbsOf = (body) => Object.fromEntries(body.by_simulation.filter((g) => g.thumbnail_url).map((g) => [g.simulation_id, g.thumbnail_url]));
+
+test('a buyer with Adult content off gets no signed thumbnail, and the read opens no simulation for it', async () => {
+  const { env, reads } = await adultHistory();
+  const body = await (await handlePurchases(purchasesAt('buyer-1'), env, {}, deps)).json();
+  assert.deepEqual(thumbsOf(body), {});
+  assert.equal(body.purchases.some((p) => 'thumbnail_url' in p), false);
+  assert.equal(reads(), 0);
+});
+
+/// The buyer's identity record, verified, with the date of birth read off the document.
+const verifiedBorn = (env, buyer, dob) => {
+  env.KYC_STATUS = env.KYC_STATUS || kv();
+  env.KYC_STATUS.store.set(`kyc-${buyer}-front`, { value: JSON.stringify({ status: 'verified', age_verified: true, extracted_dob: dob }) });
+};
+const yearsAgo = (years, days = 0) => {
+  const d = new Date();
+  d.setUTCFullYear(d.getUTCFullYear() - years);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+test('a buyer with Adult content on and a verified age under 21 gets signed thumbnails for adult_18 only: an unrated simulation reads as adult_21', async () => {
+  for (const dob of [null, yearsAgo(19), yearsAgo(21, 1)]) {
+    const { env } = await adultHistory();
+    env.USERS.store.set(adultContentKey('buyer-1'), { value: '1' });
+    if (dob) verifiedBorn(env, 'buyer-1', dob);
+    const body = await (await handlePurchases(purchasesAt('buyer-1'), env, {}, deps)).json();
+    assert.deepEqual(Object.keys(thumbsOf(body)), [ADULT_SIM], `born ${dob}`);
+  }
+});
+
+test('a buyer with Adult content on and a verified age of 21 or over gets signed thumbnails for adult and unrated simulations only', async () => {
+  const { env } = await adultHistory();
+  env.USERS.store.set(adultContentKey('buyer-1'), { value: '1' });
+  verifiedBorn(env, 'buyer-1', yearsAgo(30));
+  const body = await (await handlePurchases(purchasesAt('buyer-1'), env, {}, deps)).json();
+  const thumbs = thumbsOf(body);
+  assert.deepEqual(Object.keys(thumbs).sort(), [ADULT_SIM, UNRATED_SIM].sort(), 'not the all-ages one, and not one with no thumbnail');
+  for (const [id, url] of Object.entries(thumbs)) {
+    assert.ok(url.startsWith(`https://api.eustress.dev/api/simulations/${id}/thumbnail?exp=`), url);
+    assert.deepEqual((await verifyImageUrl(env, url)).ok, true, url);
+  }
+  // each purchase carries its simulation's URL too
+  const pass = body.purchases.find((p) => p.simulation_id === ADULT_SIM);
+  assert.equal(pass.thumbnail_url, thumbs[ADULT_SIM]);
+  assert.equal('thumbnail_url' in body.purchases.find((p) => p.simulation_id === KIDS_SIM), false);
+  // the summary stays as small as it was
+  const summary = await (await handlePurchases(purchasesAt('buyer-1'), env, {}, deps, { summaryOnly: true })).json();
+  assert.equal('by_simulation' in summary, false);
+});
+
+test('an author sees their own adult simulation in their purchases with the setting off, and no one else\'s', async () => {
+  const { env } = await adultHistory('creator-1');
+  const body = await (await handlePurchases(purchasesAt('creator-1'), env, {}, deps)).json();
+  assert.deepEqual(Object.keys(thumbsOf(body)), [ADULT_SIM]);
+});
+
+test('signing stops at the cap, largest spend first', async () => {
+  const env = { ...environment(), JWT_SECRET: 'test-secret-for-signed-thumbnails' };
+  const groups = [];
+  for (let i = 0; i < MAX_SIGNED_THUMBNAILS + 5; i++) {
+    const id = `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, '0')}`;
+    env.SOCIAL.store.set(`sim:${id}`, { value: JSON.stringify({ id, author_id: 'creator-1', moderation: { rating: 'adult_18' }, thumbnail_url: 'x' }) });
+    groups.push({ simulation_id: id, creator_id: 'creator-1' });
+  }
+  const thumbs = await signedThumbnails(env, 'https://api.eustress.dev', { accountId: 'buyer-1', signedIn: true, adult: true }, groups, NOW);
+  assert.equal(thumbs.size, MAX_SIGNED_THUMBNAILS);
+  assert.ok(thumbs.has(groups[0].simulation_id) && !thumbs.has(groups.at(-1).simulation_id));
 });

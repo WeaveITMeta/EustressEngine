@@ -7,13 +7,17 @@
 //! particles, part materials and part colliders.
 
 pub mod apply;
+pub mod assemblies;
 pub mod assembly_mass;
 pub mod billboard_pipeline;
 pub mod billboards;
+pub mod body_easing;
 pub mod camera;
+pub mod crash_report;
 pub mod gui_images;
 pub mod hud;
 pub mod hud_input;
+pub mod joint_trace;
 pub mod joints;
 pub mod material_registry;
 pub mod materials;
@@ -21,8 +25,11 @@ pub mod part_colliders;
 pub mod part_mass;
 pub mod particle_render;
 pub mod particles;
+pub mod screen_menu;
+pub mod screen_notice;
 pub mod sound_bridge;
 pub mod sound_player;
+pub mod space_paths;
 
 use bevy::prelude::*;
 use eustress_common::play_session::{PlayDataModel, PlayRole, PlayScriptSet};
@@ -48,6 +55,9 @@ impl Plugin for PlayRuntimePlugin {
                 billboard_pipeline::BillboardPipelinePlugin,
                 materials::MaterialSyncPlugin,
                 particle_render::ParticleRenderPlugin,
+                // What the Player says when something stops it.
+                screen_menu::ScreenMenuPlugin,
+                screen_notice::ScreenNoticePlugin,
             ))
             // Sounds: the player, and the session's side of it.
             .add_plugins((sound_player::SoundPlayerPlugin, sound_bridge::SoundBridgePlugin))

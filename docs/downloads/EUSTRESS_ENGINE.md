@@ -25,8 +25,8 @@ Downloads require authentication. Your identity is verified via KYC for platform
 
 ### macOS
 1. Open the `.dmg`
-2. Drag `Eustress Engine.app` to Applications
-3. First launch: Right-click → Open (bypasses Gatekeeper)
+2. Drag `Eustress Engine.app` onto the `Applications` shortcut beside it
+3. First launch: macOS blocks an app Apple has not notarized. Open System Settings → Privacy & Security, find the message about Eustress Engine, click **Open Anyway**, and confirm. On macOS 13 and 14, Control-click → Open also works.
 
 ### Linux
 1. Extract: `tar xzf eustress-engine-*.tar.gz`

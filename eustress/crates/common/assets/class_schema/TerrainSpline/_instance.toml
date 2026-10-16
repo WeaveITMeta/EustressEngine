@@ -12,6 +12,18 @@
 # the channel, filled to water_fill (0 to 1) of its depth; they carve nothing
 # and nothing collides with the water. Moving the spline moves every point
 # with it.
+#
+# road_class (Road only): "None" keeps the plain corridor; a class
+# (Motorway, Arterial, Collector, Local, Mountain, Rural, Unpaved, Driveway)
+# designs the road to that class: alignment, graded profile, lanes,
+# shoulders, kerbs, markings and cut and fill slopes, with width as the
+# lanes' total width and shoulder_width as how far the slopes may reach.
+# profile: "Auto" grades to the ground, "Explicit" passes through each
+# point's height, "Ground" follows the ground.
+# lanes, one_way, parking, edge (designed roads): lanes each way (every lane
+# when one_way), 0 keeping the class's; one_way runs every lane toward the
+# last point; parking lays a striped parking lane along each kerb; edge is
+# "Auto" (the class's), "Sidewalk", "Ditch" or "None".
 
 [transform]
 position = [0.0, 0.0, 0.0]
@@ -30,6 +42,12 @@ bed_material = "Asphalt"
 shoulder_material = "Dirt"
 water_surface = true
 water_fill = 0.6
+road_class = "None"
+profile = "Auto"
+lanes = 0
+one_way = false
+parking = false
+edge = "Auto"
 
 [metadata]
 class_name = "TerrainSpline"

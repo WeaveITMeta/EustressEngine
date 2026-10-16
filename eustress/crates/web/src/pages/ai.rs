@@ -317,7 +317,7 @@ pub fn AiPage() -> impl IntoView {
                     <div class="flow-step">
                         <div class="step-number">"4"</div>
                         <h4>"Hot Reload"</h4>
-                        <p>"Changes are injected live into your running experience. See results instantly."</p>
+                        <p>"Changes are injected live into your running simulation. See results instantly."</p>
                     </div>
                 </div>
             </section>

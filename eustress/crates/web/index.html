@@ -7,7 +7,7 @@
     <!-- Primary Meta Tags -->
     <title>Eustress Engine | Simulation &amp; Data Platform</title>
     <meta name="title" content="Eustress Engine | Simulation & Data Platform">
-    <meta name="description" content="Eustress is a source-available simulation and data platform built in Rust. Model the real world, from a battery cell to a power grid. Drive it with real data. Run a year of simulation per second. Source-available under PolyForm Shield.">
+    <meta name="description" content="Source-available simulation and data platform built in Rust. Model a battery cell or a power grid, drive it with real data, and compress time up to a year per second.">
     <meta name="keywords" content="simulation platform, data platform, digital twin, agent-based modeling, real-time simulation, scientific computing, Rust simulation engine, Apache Arrow, Polars, point cloud, CAD, physics simulation, AI-native, MCP, Bevy, Rust, WASM">
     <meta name="author" content="Eustress Engine">
     <meta name="robots" content="index, follow">
@@ -21,7 +21,7 @@
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://eustress.dev/">
     <meta property="og:title" content="Eustress Engine | Simulation & Data Platform">
-    <meta property="og:description" content="Model the real world in Rust, from battery cells to power grids, driven by real data, at a year of simulation per second. Source-available under PolyForm Shield.">
+    <meta property="og:description" content="Source-available simulation and data platform built in Rust. Model a battery cell or a power grid, drive it with real data, and compress time up to a year per second.">
     <meta property="og:image" content="https://eustress.dev/assets/og-image.png">
     <meta property="og:image:width" content="1254">
     <meta property="og:image:height" content="1254">
@@ -32,7 +32,7 @@
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:url" content="https://eustress.dev/">
     <meta name="twitter:title" content="Eustress Engine | Simulation & Data Platform">
-    <meta name="twitter:description" content="Model the real world in Rust, from battery cells to power grids, driven by real data, at a year of simulation per second. Source-available under PolyForm Shield.">
+    <meta name="twitter:description" content="Source-available simulation and data platform built in Rust. Model a battery cell or a power grid, drive it with real data, and compress time up to a year per second.">
     <meta name="twitter:image" content="https://eustress.dev/assets/og-image.png">
     <meta name="twitter:site" content="@eustressengine">
     <meta name="twitter:creator" content="@eustressengine">
@@ -55,7 +55,10 @@
 
     <!-- Favicon -->
     <link data-trunk rel="copy-dir" href="assets" />
+    <!-- Measures the scrollbar so the full-width footer does not overflow the page. -->
+    <script src="/assets/scrollbar.js"></script>
     <link data-trunk rel="copy-file" href="_headers" />
+    <link data-trunk rel="copy-file" href="_redirects" />
     <link data-trunk rel="copy-dir" href=".well-known" />
     <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
@@ -71,15 +74,31 @@
     <!-- Styles -->
     <script type="module" src="/assets/vendor/model-viewer-4.0.0.min.js"></script>
     <link data-trunk rel="css" href="style/main.css">
+    <link data-trunk rel="css" href="style/take_it_down.css">
     <!-- Purchases page and the profile's spending card. A file of its own
          so it can be read and changed without the 550 KB main sheet. -->
     <link data-trunk rel="css" href="style/purchases.css">
     <!-- The creator dashboard (/creator) and a listing's pass store. -->
     <link data-trunk rel="css" href="style/creator.css">
+    <link data-trunk rel="css" href="style/projects_sell.css">
     <!-- A listing's Live or Offline badge and its Play hand-off panel. -->
     <link data-trunk rel="css" href="style/live.css">
     <!-- The review panel on /projects: what review decided, and the appeal. -->
     <link data-trunk rel="css" href="style/review.css">
+    <!-- A listing's play page (/play/:id): hero, Play area, details. -->
+    <link data-trunk rel="css" href="style/play.css">
+    <!-- The Gallery, a Space's page, the Play chooser and the search box. -->
+    <link data-trunk rel="css" href="style/gallery.css">
+    <link data-trunk rel="css" href="style/profile.css">
+    <!-- The home page: hero and closing-band backdrops, reference-build cards, folded comparison. -->
+    <link data-trunk rel="css" href="style/home.css">
+    <link data-trunk rel="css" href="style/legal_acts.css">
+    <!-- The tag chips and editor on /projects (src/pages/project_tags.rs). -->
+    <link data-trunk rel="css" href="style/project_tags.css">
+    <!-- The top bar (components/nav.rs). Last, so it wins over the sheets above. -->
+    <link data-trunk rel="css" href="style/login.css">
+    <link data-trunk rel="css" href="style/community.css">
+    <link data-trunk rel="css" href="style/topbar.css">
     
     <!-- Structured Data - Organization -->
     <script type="application/ld+json">
@@ -91,14 +110,14 @@
         "logo": "https://eustress.dev/assets/logo.svg",
         "description": "Source-available simulation and data platform built in Rust",
         "sameAs": [
-            "https://twitter.com/eustressengine",
-            "https://discord.gg/eustress",
-            "https://store.steampowered.com/app/eustress"
+            "https://x.com/eustressengine",
+            "https://discord.gg/DGP9my8DYN",
+            "https://github.com/WeaveITMeta/EustressEngine"
         ],
         "contactPoint": {
             "@type": "ContactPoint",
             "contactType": "customer support",
-            "url": "https://discord.gg/eustress"
+            "url": "https://discord.gg/DGP9my8DYN"
         }
     }
     </script>
@@ -127,9 +146,7 @@
             "Soul / Rune / Luau scripting",
             "Source-available (PolyForm Shield), cross-platform"
         ],
-        "screenshot": "https://eustress.dev/assets/screenshot.png",
-        "softwareVersion": "0.16.1",
-        "releaseNotes": "https://eustress.dev/changelog"
+        "softwareVersion": "0.16.1"
     }
     </script>
     
@@ -148,63 +165,7 @@
     }
     </script>
     
-    <!-- Structured Data - AI Training Service (EEP) -->
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "WebAPI",
-        "name": "Eustress Export Protocol (EEP)",
-        "description": "Train AI models with consented 3D spatial data. Export entities, scenes, and hierarchies in TOON format for 50% token reduction compared to JSON.",
-        "url": "https://eustress.dev/ai",
-        "documentation": "https://eustress.dev/docs/networking#eep-sdk",
-        "provider": {
-            "@type": "Organization",
-            "name": "Eustress Engine"
-        },
-        "termsOfService": "https://eustress.dev/terms",
-        "category": "AI Training Data",
-        "applicationCategory": "3D Spatial Data Export",
-        "offers": {
-            "@type": "Offer",
-            "price": "0",
-            "priceCurrency": "USD",
-            "description": "Free API access with rate limits"
-        }
-    }
-    </script>
-    
-    <!-- Structured Data - MCP Server API -->
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "WebAPI",
-        "name": "Eustress MCP Server",
-        "description": "Model Control Protocol server for AI-controllable 3D worlds. Execute Rune scripts, manage entities, and stream real-time spatial data via HTTP, WebTransport, or WebSocket.",
-        "url": "https://forge.eustress.io",
-        "documentation": "https://eustress.dev/docs/networking#mcp",
-        "provider": {
-            "@type": "Organization",
-            "name": "Eustress Engine"
-        },
-        "category": "AI Integration API",
-        "applicationCategory": "3D World Control"
-    }
-    </script>
-    
-    <!-- Structured Data - SDK Software -->
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "SoftwareSourceCode",
-        "name": "Eustress EEP SDK",
-        "description": "Official SDKs for Rust, Python, and Node.js to integrate with Eustress Export Protocol for 3D AI training pipelines.",
-        "codeRepository": "https://github.com/eustressengine/eep-sdk",
-        "programmingLanguage": ["Rust", "Python", "JavaScript"],
-        "runtimePlatform": ["Cargo", "PyPI", "npm"],
-        "license": "https://polyformproject.org/licenses/shield/1.0.0/",
-        "downloadUrl": "https://sdk.eustress.io"
-    }
-    </script>
+    <!-- Structured data lists only what the site can stand behind; the tests in src/seo.rs check each address. -->
     
     <!-- WASM -->
     <link data-trunk rel="rust" href="Cargo.toml" data-target-name="eustress-web" data-wasm-opt="0" />
@@ -221,55 +182,8 @@
     </div>
     <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     
-    <script>
-        // Check WebAssembly support
-        if (typeof WebAssembly === 'undefined') {
-            var status = document.getElementById('loading-status');
-            if (status) status.textContent = 'Your browser does not support WebAssembly.';
-        }
-        
-        // Track loading progress and errors
-        window.addEventListener('error', function(e) {
-            var status = document.getElementById('loading-status');
-            if (status) status.textContent = 'Error: ' + (e.message || 'Failed to load');
-            console.error('Load error:', e);
-        });
-        
-        // Catch unhandled promise rejections (WASM load failures)
-        window.addEventListener('unhandledrejection', function(e) {
-            var status = document.getElementById('loading-status');
-            if (status) status.textContent = 'WASM Error: ' + (e.reason?.message || e.reason || 'Load failed');
-            console.error('WASM load error:', e.reason);
-        });
-        
-        // Hide loader when WASM is ready (Trunk fires this event)
-        window.addEventListener('TrunkApplicationStarted', function() {
-            var loader = document.getElementById('loading');
-            if (loader) loader.style.display = 'none';
-        });
-        
-        // Fallback: also check for body content changes
-        var checkLoaded = setInterval(function() {
-            // Leptos mounts to body, check for .page class
-            if (document.querySelector('.page')) {
-                var loader = document.getElementById('loading');
-                if (loader) loader.style.display = 'none';
-                clearInterval(checkLoaded);
-            }
-        }, 100);
-        
-        // Timeout fallback - show error after 30 seconds
-        setTimeout(function() {
-            var loader = document.getElementById('loading');
-            var app = document.getElementById('app');
-            if (loader && loader.style.display !== 'none' && (!app || app.children.length === 0)) {
-                var status = document.getElementById('loading-status');
-                if (status) {
-                    status.innerHTML = 'Taking too long? <a href="javascript:location.reload()" style="color:#4682B4;">Reload</a> or check your connection.';
-                }
-            }
-        }, 30000);
-    </script>
+    <!-- The loading indicator's logic is a file, not an inline script (Content-Security-Policy). -->
+    <script src="/assets/loader.js"></script>
     
     <!-- Without scripts a prerendered page still reads; only the live parts
          (sign-in, the marketplace, anything that talks to the API) need

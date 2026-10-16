@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker, fakeEnv, fakeKv, fakeBucket, ctx } from './helpers/load_worker.mjs';
+import { startKycSession } from './helpers/kyc_session.mjs';
 
 const worker = await loadWorker();
 
@@ -21,7 +22,10 @@ async function upload(env, bytes, type, name = 'id') {
   const form = new FormData();
   form.set('side', 'front');
   form.set('id_type', 'Passport');
-  form.set('session_id', 'session-1234567890');
+  // A session started at /api/kyc/start, and its upload token.
+  const { session, upload_token } = await startKycSession(env);
+  form.set('session_id', session);
+  form.set('upload_token', upload_token);
   form.set('document', new File([bytes], name, { type }));
   const res = await worker.fetch(new Request('https://api.eustress.dev/api/kyc/upload', { method: 'POST', headers: { 'cf-ipcountry': 'US' }, body: form }), env, ctx);
   return { status: res.status, body: await res.json() };
@@ -43,7 +47,7 @@ test('a WebP or a PDF is refused with a message that says what to upload, and no
     assert.equal(res.status, 415);
     assert.equal(res.body.error, 'Please upload a JPEG or PNG photo of your ID.');
     assert.equal(env.KYC_BUCKET.objects.size, 0);
-    assert.equal(env.KYC_STATUS.store.size, 0);
+    assert.equal([...env.KYC_STATUS.store.keys()].filter((k) => !k.startsWith('kycsess:')).length, 0, 'nothing but the started session');
   }
 });
 

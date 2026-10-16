@@ -1,6 +1,6 @@
 # Motion matching
 
-Status: designed 2026-09-30. Phase 1 (the pure core) is being written; nothing is built or run yet. Companion to `ANIMATION_SYSTEM.md`, which owns the track model, the `Animator` runtime and the `Animate` script this builds on.
+Status: designed 2026-09-30. Phase 1 (the pure core) is built and its 39 tests pass under cargo; the clip sampler is in the tree; the classes and the shadow matcher are staged for a build wave. Companion to `ANIMATION_SYSTEM.md`, which owns the track model, the `Animator` runtime and the `Animate` script this builds on.
 
 ## What it is
 
@@ -35,7 +35,7 @@ Both are classes with properties, like the rest of the animation system. A Space
 | Name | Meaning |
 |---|---|
 | `Database` | The `MotionDatabase` it searches. |
-| `Enabled` | Off by default. Off means the `Animate` script's gait plays, as today. |
+| `Mode` | `Off` (the default: the `Animate` script's gait plays, as today), `Shadow` (the matcher searches and reports the clip it would pick, and moves nothing) or `Drive` (it plays the pose, once that is built). |
 | `SearchInterval` | Seconds between searches. Default 0.1. |
 | `BlendTime` | Seconds an inertialized switch takes to settle. Default 0.2. |
 | `MinDwell` | Seconds a clip plays before another may replace it. Default 0.15. |
@@ -143,13 +143,42 @@ About thirty clips, around ten thousand frames at 30 Hz.
 
 | Phase | Delivers | Visible at the end | Status |
 |---|---|---|---|
-| 1. The pure core | `animation/motion/`: trajectory prediction, features and database build, contact derivation, search with hysteresis and dwell, inertialization. Pure Rust, tested on synthetic clips. | Nothing on screen; the tests pass. | Being written. |
-| 2. Shadow, then drive | `MotionDatabase` and `MotionMatcher` classes, the clip sampler that builds a database from glTF and clip records, the `Inertialize` set. The matcher runs beside the `Animate` script with `Debug` on, then drives the graph with the four existing clips. | It looks like today's gait, with the path and chosen clip drawn. `Enabled` toggles it. | Designed. |
+| 1. The pure core | `animation/motion/`: trajectory prediction, features and database build, contact derivation, search with hysteresis and dwell, inertialization. Pure Rust, tested on synthetic clips. | Nothing on screen; the tests pass. | Built and tested: its 39 tests pass under cargo (build 16). |
+| 2a. The clip sampler | `motion/sample.rs`: the frames of a Bevy clip, through a forward pass over the skeleton. | Nothing on screen. | Built (build 18). |
+| 2b. The shadow matcher | The `MotionDatabase` and `MotionMatcher` classes, `AnimatorSet::Inertialize`, and a matcher in `Shadow` mode that builds its database from the clips the Animator loaded and reports what it would pick beside the `Animate` script's gait. | The Output (with `Debug` on) and the read-only `CurrentClip`, `CurrentTime` and `LastCost` show its choices. The gait is unchanged. | Staged for build 21. |
+| 2c. Drive | The matcher plays the pose from the four existing clips through the graph, with inertialized switches. | It looks like today's gait; `Mode` switches between the two. | Designed. |
 | 3. The library | The thirty clips, tags, live contacts, foot-lock hints. | Starts, stops, turns and strafes that the blend cannot make. | Designed. Needs the clips. |
 | 4. Jumps and remote characters | Jump phases as matched clips; the matcher on replicas. | Another player's avatar moves as well as yours. | Designed. |
 | 5. Parkour | Vault and mantle clips with warp windows replacing the keyed IK paths. | Vaulting a fence lands the hands and feet on it at any height. | Designed. |
 
 Not built: a search tree or learned matching, per-joint warping, contact extraction from in-place clips, replication of the matcher's state, matching for the upper body (action tracks stay tracks), any warp editor beyond markers.
+
+## Trying the shadow matcher
+
+The two classes are made by a script at the start of Play; a Space file cannot hold them yet, since saving a class in a Space needs the Studio class integration (the class's entry, its spawner and its serialization), which is a separate piece of work. A `LocalScript` in `StarterCharacterScripts`, beside the character's `Animate`, does it:
+
+```lua
+local humanoid = script.Parent:WaitForChild("Humanoid")
+
+local database = Instance.new("MotionDatabase")
+database.Name = "Locomotion"
+for _, clip in { { "idle", "rig://idle", 0 }, { "walk", "rig://walk", 1.45 }, { "run", "rig://run", 3.9 } } do
+	local animation = Instance.new("Animation")
+	animation.Name = clip[1]
+	animation.AnimationId = clip[2]
+	animation:SetAttribute("Speed", clip[3])
+	animation.Parent = database
+end
+database.Parent = humanoid
+
+local matcher = Instance.new("MotionMatcher")
+matcher.Database = database
+matcher.Mode = "Shadow"
+matcher.Debug = true
+matcher.Parent = humanoid
+```
+
+The matcher waits until the character's feet are calibrated to the ground and the Animate script has started the three clips, then builds its database and says so in the Output. After that, `matcher.CurrentClip`, `CurrentTime` and `LastCost` follow what it would play, and with `Debug` on each switch is printed. The matcher reads the character; it changes nothing.
 
 ## Risks and the early signal for each
 

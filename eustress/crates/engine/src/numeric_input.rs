@@ -117,9 +117,10 @@ impl NumericInputState {
         self.length_unit = None;
     }
 
-    fn reparse(&mut self) {
+    /// Re-read the buffer; `refs` is what `=name.field` references resolve in.
+    fn reparse(&mut self, refs: &PropertyRefTable) {
         self.relative = self.text.starts_with('+') || self.text.starts_with("-+");
-        self.override_value = parse_numeric_buffer(&self.text, self.length_unit);
+        self.override_value = parse_numeric_buffer_with(&self.text, self.length_unit, Some(refs));
     }
 
     /// The unit the floating input shows beside the number: the display
@@ -167,6 +168,16 @@ impl NumericInputState {
 ///
 /// Unit suffixes inside expressions are evaluated inline as multipliers.
 fn parse_numeric_buffer(text: &str, length_unit: Option<eustress_common::units::Unit>) -> Option<f32> {
+    parse_numeric_buffer_with(text, length_unit, None)
+}
+
+/// [`parse_numeric_buffer`] with the table `=name.field` references resolve
+/// in. Without one, a reference is unresolved and the expression has no value.
+fn parse_numeric_buffer_with(
+    text: &str,
+    length_unit: Option<eustress_common::units::Unit>,
+    refs: Option<&PropertyRefTable>,
+) -> Option<f32> {
     if text.is_empty() { return None; }
     let trimmed = text.trim();
     if trimmed.is_empty() { return None; }
@@ -175,7 +186,7 @@ fn parse_numeric_buffer(text: &str, length_unit: Option<eustress_common::units::
 
     // Expression mode — the buffer starts with `=`.
     if let Some(expr) = trimmed.strip_prefix('=') {
-        let (value, had_length_unit) = eval_expression_with_units(expr)?;
+        let (value, had_length_unit) = eval_expression_with_units(expr, refs)?;
         return Some(if had_length_unit { value } else { value * plain });
     }
 
@@ -234,11 +245,10 @@ fn length_multiplier(unit: &str) -> Option<f32> {
 // Property-reference table — `=other.x` / `=other.size.y` / `=other.rot.y`
 // ============================================================================
 //
-// Populated each frame by `refresh_property_ref_table`; the expression
-// evaluator reads from the snapshot via a thread-local clone. Keeps the
-// evaluator itself World-agnostic.
+// Filled by `refresh_property_ref_table` while a numeric entry is open. The
+// key handler passes the resource to the expression evaluator, which stays
+// World-agnostic. Names are keyed in lower case, as the parser reads them.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 #[derive(Resource, Default, Clone)]
@@ -250,25 +260,17 @@ pub struct PropertyRefTable {
 
 impl PropertyRefTable {
     fn insert(&mut self, name: &str, field: &str, value: f32) {
-        self.values.insert(format!("{name}.{field}"), value);
+        // The parser lower-cases identifiers, so "Part1.x" must be keyed
+        // "part1.x" or it never matches.
+        self.values.insert(format!("{}.{}", name.to_ascii_lowercase(), field), value);
     }
     pub fn get(&self, key: &str) -> Option<f32> {
         self.values.get(key).copied()
     }
 }
 
-thread_local! {
-    /// Parser-local view of the table. Refreshed by `thread_local_sync`
-    /// inside a system wrapper before every parse.
-    static PROPERTY_REFS: RefCell<PropertyRefTable> = RefCell::new(PropertyRefTable::default());
-}
-
-fn property_ref_lookup(key: &str) -> Option<f32> {
-    PROPERTY_REFS.with(|t| t.borrow().get(key))
-}
-
-/// Populates `PropertyRefTable` + the thread-local view every frame
-/// from live entities. Keyed on `Instance.name`; fields: position
+/// Populates `PropertyRefTable` from live entities while a numeric entry is
+/// open. Keyed on `Instance.name`; fields: position
 /// (`.x/.y/.z`), size (`size.x/.y/.z`), rotation (`rot.x/.y/.z/.w`).
 fn refresh_property_ref_table(
     // Only rebuild while the user is actively typing a numeric expression.
@@ -305,9 +307,6 @@ fn refresh_property_ref_table(
         table.insert(name, "rot.z", t.rotation.z);
         table.insert(name, "rot.w", t.rotation.w);
     }
-    // Push the snapshot into the thread-local the parser reads from.
-    let snap = table.clone();
-    PROPERTY_REFS.with(|t| *t.borrow_mut() = snap);
 }
 
 // ============================================================================
@@ -328,14 +327,22 @@ fn refresh_property_ref_table(
 /// animation tracks, Rune bridge, any future expression-driven
 /// property system. No leading `=` required — the caller has
 /// already stripped it.
+///
+/// `=name.field` references are unresolved here (there is no table to look
+/// in); use [`parse_expression_with_refs`] where one is available.
 pub fn parse_expression_public(src: &str) -> Option<f32> {
-    eval_expression_with_units(src).map(|(value, _)| value)
+    eval_expression_with_units(src, None).map(|(value, _)| value)
+}
+
+/// [`parse_expression_public`] that resolves `=name.field` references in `refs`.
+pub fn parse_expression_with_refs(src: &str, refs: &PropertyRefTable) -> Option<f32> {
+    eval_expression_with_units(src, Some(refs)).map(|(value, _)| value)
 }
 
 /// Evaluate an expression; also report whether any number in it carried a
 /// length unit.
-fn eval_expression_with_units(src: &str) -> Option<(f32, bool)> {
-    let mut p = ExprParser { src, pos: 0, had_length_unit: false };
+fn eval_expression_with_units(src: &str, refs: Option<&PropertyRefTable>) -> Option<(f32, bool)> {
+    let mut p = ExprParser { src, pos: 0, had_length_unit: false, refs };
     p.skip_ws();
     let v = p.parse_addsub()?;
     p.skip_ws();
@@ -343,7 +350,7 @@ fn eval_expression_with_units(src: &str) -> Option<(f32, bool)> {
     v.is_finite().then_some((v, p.had_length_unit))
 }
 
-struct ExprParser<'a> { src: &'a str, pos: usize, had_length_unit: bool }
+struct ExprParser<'a> { src: &'a str, pos: usize, had_length_unit: bool, refs: Option<&'a PropertyRefTable> }
 
 impl<'a> ExprParser<'a> {
     fn peek(&self) -> Option<char> { self.src[self.pos..].chars().next() }
@@ -455,7 +462,7 @@ impl<'a> ExprParser<'a> {
                 let _name = parts.next()?;
                 // The full key has `name.field` — pass directly to the
                 // table; it stores `name.field` formatted keys.
-                return property_ref_lookup(&key);
+                return self.refs.and_then(|table| table.get(&key));
             }
             // Constant.
             return match ident.as_str() {
@@ -680,6 +687,7 @@ fn handle_numeric_input_keys(
     mut keys: MessageReader<KeyboardInput>,
     mut committed: MessageWriter<NumericInputCommittedEvent>,
     mut cancelled: MessageWriter<NumericInputCancelledEvent>,
+    refs: Res<PropertyRefTable>,
 ) {
     if !numeric.active { return; }
 
@@ -765,7 +773,7 @@ fn handle_numeric_input_keys(
     }
 
     if dirty {
-        numeric.reparse();
+        numeric.reparse(&refs);
     }
 }
 
@@ -816,5 +824,22 @@ mod unit_tests {
             ..Default::default()
         };
         assert_eq!(state.unit_label(), Unit::Foot.symbol());
+    }
+
+    #[test]
+    fn a_property_reference_resolves_from_the_table_on_any_thread() {
+        let mut table = PropertyRefTable::default();
+        // Parts are named in mixed case; the parser reads identifiers in lower case.
+        table.insert("Part1", "x", 3.0);
+        table.insert("Part1", "size.y", 4.0);
+        assert!(close(parse_numeric_buffer_with("=Part1.x + 2", Some(Unit::Meter), Some(&table)), 5.0));
+        // The table is passed in, not read from a thread-local, so a worker thread sees it too.
+        let from_thread = std::thread::scope(|scope| {
+            scope.spawn(|| parse_numeric_buffer_with("=Part1.size.y * 2", Some(Unit::Meter), Some(&table))).join().unwrap()
+        });
+        assert!(close(from_thread, 8.0));
+        assert_eq!(parse_numeric_buffer_with("=Missing.x + 1", Some(Unit::Meter), Some(&table)), None);
+        assert_eq!(parse_numeric_buffer_with("=Part1.x + 2", Some(Unit::Meter), None), None, "no table, no reference");
+        assert!(close(parse_expression_with_refs("Part1.x * 2", &table), 6.0));
     }
 }

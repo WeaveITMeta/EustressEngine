@@ -59,6 +59,10 @@ pub struct Purchase {
     pub creator_id: Option<String>,
     #[serde(default)]
     pub creator_name: String,
+    /// The simulation's thumbnail at a signed URL, when the Worker signed one: an adult or unrated simulation the buyer may see.
+    /// Every other thumbnail is public and the page builds its URL.
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
 }
 
 impl Purchase {
@@ -91,6 +95,10 @@ pub struct CreatorSpend {
 pub struct SimulationSpend {
     #[serde(default)]
     pub simulation_id: Option<String>,
+    /// The simulation's thumbnail at a signed URL, when the Worker signed one: an adult or unrated simulation the buyer may see.
+    /// Every other thumbnail is public and the page builds its URL.
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
     #[serde(default)]
     pub simulation_name: String,
     #[serde(default)]

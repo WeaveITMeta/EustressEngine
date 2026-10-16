@@ -81,7 +81,7 @@ impl ToolHandler for CreateEntityTool {
         let position = parse_vec3(&input, "position", [0.0, 0.0, 0.0]);
         let size = parse_vec3(&input, "size", [1.0, 1.0, 1.0]);
         let material = input.get("material").and_then(|v| v.as_str()).map(str::to_string);
-        let color = parse_vec3(&input, "color", [0.639, 0.635, 0.647]);
+        let color = parse_color(&input, "color", [0.639, 0.635, 0.647]);
         let anchored = input.get("anchored").and_then(|v| v.as_bool());
         let can_collide = input.get("can_collide").and_then(|v| v.as_bool());
 
@@ -96,8 +96,8 @@ impl ToolHandler for CreateEntityTool {
 
         let workspace_dir = ctx.space_root.join("Workspace");
 
-        // Optional parent path: place entity inside a Model folder hierarchy.
-        // Reject path traversal attempts (no '..' components allowed).
+        // Optional parent path: place entity inside a Model folder hierarchy,
+        // contained by the shared rules in `crate::sandbox`.
         let parent_path = input.get("parent")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -105,17 +105,19 @@ impl ToolHandler for CreateEntityTool {
         let base_dir = if parent_path.is_empty() {
             workspace_dir.clone()
         } else {
-            if parent_path.contains("..") {
-                return ToolResult {
-                    tool_name: "create_entity".to_string(),
-                    tool_use_id: String::new(),
-                    success: false,
-                    content: "Invalid parent path: '..' is not allowed.".to_string(),
-                    structured_data: None,
-                    stream_topic: None,
-                };
+            match crate::sandbox::resolve(&workspace_dir, parent_path) {
+                Ok(dir) => dir,
+                Err(why) => {
+                    return ToolResult {
+                        tool_name: "create_entity".to_string(),
+                        tool_use_id: String::new(),
+                        success: false,
+                        content: format!("Invalid parent path: {why}"),
+                        structured_data: None,
+                        stream_topic: None,
+                    };
+                }
             }
-            workspace_dir.join(parent_path)
         };
 
         // Pick the mesh asset. Only `Part` gets one — `Model` / scripts
@@ -145,7 +147,9 @@ impl ToolHandler for CreateEntityTool {
         let unit_arg = input.get("unit").and_then(|v| v.as_str());
         let (unit_symbol, authored) = match unit_arg.and_then(eustress_common::units::Unit::from_any)
             .or_else(|| ctx.display_unit.as_deref().and_then(eustress_common::units::Unit::from_any))
-            .or_else(|| space_unit.as_deref().and_then(eustress_common::units::Unit::from_any)) {
+            // The Space's setting is a stored symbol, read strictly: "studs"
+            // there is the legacy stud, which `from_any` reads as Roblox's.
+            .or_else(|| space_unit.as_deref().and_then(eustress_common::units::Unit::from_symbol)) {
             Some(u) => (Some(u.symbol().to_string()), u),
             None => (None, eustress_common::units::ENGINE_NATIVE_UNIT),
         };
@@ -215,6 +219,16 @@ impl ToolHandler for CreateEntityTool {
 // Insert Gaussian Splats (3DGS)
 // ---------------------------------------------------------------------------
 
+/// True when the file at `path` starts with PLY's magic line, `ply`.
+fn starts_with_ply_magic(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|()| head[..3] == *b"ply" && matches!(head[3], b'\n' | b'\r'))
+        .unwrap_or(false)
+}
+
 pub struct InsertGaussianSplatsTool;
 
 impl ToolHandler for InsertGaussianSplatsTool {
@@ -267,10 +281,22 @@ impl ToolHandler for InsertGaussianSplatsTool {
         // place its file-watcher scans.
         let universe_root = ctx.universe_root.clone();
 
-        // Resolve the source `.ply` (absolute, or relative to the Universe root).
+        // Resolve the source `.ply`: an absolute path brings a cloud in from
+        // anywhere on this machine, and a relative one stays inside the
+        // Universe (the shared rules in `crate::sandbox`).
         let src = {
             let p = std::path::Path::new(path_str);
-            if p.is_absolute() { p.to_path_buf() } else { universe_root.join(path_str) }
+            if p.is_absolute() {
+                match crate::sandbox::local_absolute(path_str) {
+                    Ok(p) => p,
+                    Err(why) => return fail(format!("path refused: {why}")),
+                }
+            } else {
+                match crate::sandbox::resolve(&universe_root, path_str) {
+                    Ok(p) => p,
+                    Err(why) => return fail(format!("path refused: {why}")),
+                }
+            }
         };
         if !src.exists() {
             return fail(format!("source `.ply` not found: {}", src.display()));
@@ -282,6 +308,11 @@ impl ToolHandler for InsertGaussianSplatsTool {
             .unwrap_or(false);
         if !is_ply {
             return fail("only standard 3DGS `.ply` files are supported".to_string());
+        }
+        // A PLY file opens with the line `ply`, so only a point cloud is
+        // copied into the Universe, never another file named .ply.
+        if !starts_with_ply_magic(&src) {
+            return fail(format!("{} is not a PLY file: it does not start with the line `ply`", src.display()));
         }
 
         // Stage into `<Universe>/assets/splats/<basename>` — but NEVER re-copy a
@@ -482,6 +513,22 @@ impl ToolHandler for QueryEntitiesTool {
 // Update Entity
 // ---------------------------------------------------------------------------
 
+/// The files an entity named `name` can live in under `workspace`: its
+/// folder's `_instance.toml`, then the older flat `.part.toml` and
+/// `.glb.toml`. The name is one name (spaces and '/' read as '_', as when it
+/// was written), and every file is contained by the shared rules in
+/// [`crate::sandbox`].
+fn entity_files(workspace: &std::path::Path, name: &str) -> Result<[std::path::PathBuf; 3], String> {
+    let safe = crate::sandbox::plain_name(&name.replace(' ', "_").replace('/', "_"))
+        .map_err(|why| format!("Invalid entity name: {why}"))?;
+    let inside = |rel: String| crate::sandbox::resolve(workspace, &rel).map_err(|why| why.to_string());
+    Ok([
+        inside(format!("{safe}/_instance.toml"))?,
+        inside(format!("{safe}.part.toml"))?,
+        inside(format!("{safe}.glb.toml"))?,
+    ])
+}
+
 pub struct UpdateEntityTool;
 
 impl ToolHandler for UpdateEntityTool {
@@ -515,16 +562,17 @@ impl ToolHandler for UpdateEntityTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
 
         // Find the entity file: folder/_instance.toml or legacy flat files
-        let folder_path = workspace.join(&safe_name).join("_instance.toml");
-        let candidates = [
-            folder_path,
-            workspace.join(format!("{}.part.toml", safe_name)),
-            workspace.join(format!("{}.glb.toml", safe_name)),
-        ];
+        let candidates = match entity_files(&workspace, name) {
+            Ok(files) => files,
+            Err(e) => return ToolResult {
+                tool_name: "update_entity".to_string(), tool_use_id: String::new(),
+                success: false, content: e,
+                structured_data: None, stream_topic: None,
+            },
+        };
         let filepath = match candidates.iter().find(|p| p.exists()) {
             Some(p) => p.clone(),
             None => return ToolResult {
@@ -609,8 +657,14 @@ impl ToolHandler for UpdateEntityTool {
                 changes.push("material");
             }
             if let Some(color) = input.get("color").and_then(|v| v.as_array()) {
-                let mut arr: Vec<toml::Value> = color.iter().map(|v| toml::Value::Float(v.as_f64().unwrap_or(0.5))).collect();
-                if arr.len() == 3 { arr.push(toml::Value::Float(1.0)); }
+                // 0..1 like every loader reads it; 0-255 integers are accepted
+                // here too, as create_entity does.
+                let rgb = parse_color(&input, "color", [0.5, 0.5, 0.5]);
+                let alpha = color.get(3).and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let arr: Vec<toml::Value> = [rgb[0] as f64, rgb[1] as f64, rgb[2] as f64, alpha]
+                    .into_iter()
+                    .map(toml::Value::Float)
+                    .collect();
                 props.insert("color".to_string(), toml::Value::Array(arr));
                 changes.push("color");
             }
@@ -665,7 +719,7 @@ impl ToolHandler for DeleteEntityTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "delete_entity",
-            description: "Delete an entity from the Workspace by removing its .part.toml or .glb.toml file. The engine will despawn the entity on next file-watcher cycle.",
+            description: "Delete an entity from the Workspace by moving its folder (or legacy .part.toml / .glb.toml file) into the Space trash, <space>/.eustress/trash, where Studio's own Delete puts things: it is kept whole there and can be recovered by hand, and it is never committed. The engine despawns the entity on the next file-watcher cycle. If the move fails, nothing is deleted.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -681,46 +735,62 @@ impl ToolHandler for DeleteEntityTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
+        let [instance_toml, part_toml, glb_toml] = match entity_files(&workspace, name) {
+            Ok(files) => files,
+            Err(e) => return ToolResult {
+                tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
+                success: false, content: e,
+                structured_data: None, stream_topic: None,
+            },
+        };
 
-        // Try folder-based first, then legacy flat files
-        let folder_path = workspace.join(&safe_name);
-        if folder_path.is_dir() && folder_path.join("_instance.toml").exists() {
-            match std::fs::remove_dir_all(&folder_path) {
-                Ok(_) => return ToolResult {
+        // Try folder-based first, then legacy flat files. A delete is a move
+        // into the Space trash (`<space>/.eustress/trash`), as Studio's Delete
+        // does, never a permanent removal: what an approved delete took can
+        // be taken back out. A move that fails changes nothing.
+        let folder_path = instance_toml.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        if folder_path.is_dir() && instance_toml.exists() {
+            match eustress_common::space_trash::move_to_trash(&ctx.space_root, &folder_path) {
+                Ok(trashed) => return ToolResult {
                     tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
                     success: true,
-                    content: format!("Deleted entity '{}' (folder)", name),
-                    structured_data: Some(serde_json::json!({ "name": name, "file": folder_path.to_string_lossy() })),
+                    content: format!("Moved entity '{}' (folder) to the Space trash: {}", name, trashed.display()),
+                    structured_data: Some(serde_json::json!({
+                        "name": name, "file": folder_path.to_string_lossy(), "trash": trashed.to_string_lossy(),
+                    })),
                     stream_topic: Some("workshop.tool.delete_entity".to_string()),
                 },
                 Err(e) => return ToolResult {
                     tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
-                    success: false, content: format!("Failed to delete folder: {}", e),
+                    success: false, content: format!("Could not move the folder to the trash, so nothing was deleted: {}", e),
                     structured_data: None, stream_topic: None,
                 },
             }
         }
 
         // Legacy flat file fallback
-        let legacy_candidates = [
-            workspace.join(format!("{}.part.toml", safe_name)),
-            workspace.join(format!("{}.glb.toml", safe_name)),
-        ];
+        let legacy_candidates = [part_toml, glb_toml];
         for path in &legacy_candidates {
             if path.exists() {
-                match std::fs::remove_file(path) {
-                    Ok(_) => return ToolResult {
+                match eustress_common::space_trash::move_to_trash(&ctx.space_root, path) {
+                    Ok(trashed) => return ToolResult {
                         tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
                         success: true,
-                        content: format!("Deleted entity '{}' ({})", name, path.file_name().unwrap_or_default().to_string_lossy()),
-                        structured_data: Some(serde_json::json!({ "name": name, "file": path.to_string_lossy() })),
+                        content: format!(
+                            "Moved entity '{}' ({}) to the Space trash: {}",
+                            name,
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            trashed.display()
+                        ),
+                        structured_data: Some(serde_json::json!({
+                            "name": name, "file": path.to_string_lossy(), "trash": trashed.to_string_lossy(),
+                        })),
                         stream_topic: Some("workshop.tool.delete_entity".to_string()),
                     },
                     Err(e) => return ToolResult {
                         tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
-                        success: false, content: format!("Failed to delete: {}", e),
+                        success: false, content: format!("Could not move the file to the trash, so nothing was deleted: {}", e),
                         structured_data: None, stream_topic: None,
                     },
                 }
@@ -739,6 +809,28 @@ impl ToolHandler for DeleteEntityTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// An RGB colour as the files hold it, 0..1 per channel. The loaders read an
+/// array of three integers as 0-255 and anything with a float as 0..1, so
+/// `[200, 100, 50]` must be divided by 255 here; written as 200.0 it loaded
+/// as an over-range sRGB colour (blown-out white). A float array with a
+/// channel above 1.0 (`[255.0, 0.0, 0.0]`) can only mean 0-255, too. Every
+/// channel is clamped; a channel that is missing or not a number takes
+/// `default`'s.
+fn parse_color(input: &serde_json::Value, key: &str, default: [f32; 3]) -> [f32; 3] {
+    let Some(a) = input.get(key).and_then(|v| v.as_array()) else { return default };
+    let all_integers = a.len() >= 3 && a.iter().take(3).all(|v| v.is_i64() || v.is_u64());
+    let mut rgb = [0.0_f32; 3];
+    for (i, channel) in rgb.iter_mut().enumerate() {
+        *channel = a.get(i).and_then(|v| v.as_f64()).map_or(default[i] as f64, |v| v) as f32;
+    }
+    let scale = if all_integers || rgb.iter().any(|c| *c > 1.0) { 255.0 } else { 1.0 };
+    [
+        (rgb[0] / scale).clamp(0.0, 1.0),
+        (rgb[1] / scale).clamp(0.0, 1.0),
+        (rgb[2] / scale).clamp(0.0, 1.0),
+    ]
+}
+
 fn parse_vec3(input: &serde_json::Value, key: &str, default: [f32; 3]) -> [f32; 3] {
     input.get(key).and_then(|v| v.as_array()).map(|a| {
         [
@@ -747,4 +839,33 @@ fn parse_vec3(input: &serde_json::Value, key: &str, default: [f32; 3]) -> [f32; 
             a.get(2).and_then(|v| v.as_f64()).unwrap_or(default[2] as f64) as f32,
         ]
     }).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::parse_color;
+    use serde_json::json;
+
+    #[test]
+    fn integer_channels_are_0_to_255() {
+        let c = parse_color(&json!({ "color": [255, 0, 51] }), "color", [0.5; 3]);
+        assert_eq!(c, [1.0, 0.0, 0.2]);
+    }
+
+    #[test]
+    fn float_channels_stay_0_to_1() {
+        let c = parse_color(&json!({ "color": [0.25, 0.5, 1.0] }), "color", [0.0; 3]);
+        assert_eq!(c, [0.25, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn an_over_range_float_is_read_as_0_to_255() {
+        let c = parse_color(&json!({ "color": [255.0, 0.0, 0.0] }), "color", [0.0; 3]);
+        assert_eq!(c, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_missing_color_is_the_default() {
+        assert_eq!(parse_color(&json!({}), "color", [0.1, 0.2, 0.3]), [0.1, 0.2, 0.3]);
+    }
 }

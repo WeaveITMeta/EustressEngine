@@ -145,6 +145,27 @@ ACR = {
 
 # ── Curated tooltips for jargon-heavy / non-derivable ids ────────────────────
 OVERRIDE_TIP = {
+    # ── Marketing send surface (2026-10-08) ──
+    "mktg:campaign_composer": "Draft a campaign; AI-written drafts need approval before they can send",
+    "mktg:template_library": "Reusable campaign templates",
+    "mktg:approval_queue": "Campaigns waiting for a named approval",
+    "mktg:schedule_send": "Schedule an approved campaign for a set time",
+    "mktg:cancel_scheduled": "Cancel a scheduled campaign before it sends",
+    "mktg:postal_compose": "Compose a letter for postal mail",
+    "mktg:postal_send": "Send an approved letter by postal mail",
+    "mktg:audience_definition": "Describe who a campaign is for, without pulling contacts",
+    "mktg:source_provenance": "Record where each contact came from and on what terms",
+    "mktg:discover_contacts": "Find new contacts that match an audience",
+    "mktg:audience_build": "Build a contact list from an audience definition",
+    "mktg:lookalike_finder": "Find contacts similar to your best existing customers",
+    "mktg:verify_addresses": "Check that email addresses are deliverable",
+    "mktg:consent_check": "Confirm each recipient has a lawful basis to receive a message",
+    "mktg:sender_identity": "Set the sending name, address and domain for your messages",
+    "mktg:warmup_schedule": "Ramp sending volume gradually to protect deliverability",
+    "mktg:rate_limits": "Cap how many messages go out per hour and per day",
+    "mktg:suppression_list": "Addresses that must never receive a message",
+    "mktg:unsubscribe_handling": "Honor opt-outs and keep the record",
+    "mktg:postal_address_footer": "Put your postal address in every commercial message",
     # ── AI mode (2026-08-20) ──
     "ai:run_launcher": "Start a training run from the selected corpus",
     "ai:sweep_planner": "Plan a hyperparameter sweep across runs",
@@ -315,6 +336,27 @@ SUFFIX_TIP = [
 
 # ── Icon assignment: keyword rules (ordered) then prefix defaults ────────────
 ICON_RULES = [
+    # ── Marketing send surface (2026-10-08). Specific, first match. ──
+    (r"campaign_composer", "pen"),
+    (r"template_library", "layers"),
+    (r"approval_queue", "checklist"),
+    (r"schedule_send", "calendar"),
+    (r"cancel_scheduled", "clock"),
+    (r"postal_compose", "envelope"),
+    (r"postal_send", "stamp"),
+    (r"audience_definition", "funnel"),
+    (r"source_provenance", "fingerprint"),
+    (r"discover_contacts", "radar"),
+    (r"audience_build", "users"),
+    (r"lookalike_finder", "search"),
+    (r"verify_addresses", "certificate"),
+    (r"consent_check", "handshake"),
+    (r"sender_identity", "id-card"),
+    (r"warmup_schedule", "thermometer"),
+    (r"rate_limits", "gauge"),
+    (r"suppression_list", "shield"),
+    (r"unsubscribe_handling", "block"),
+    (r"postal_address_footer", "building"),
     # ── AI mode (2026-08-20). First, so ML vocabulary is not absorbed by the
     # generic checklist/chart/document catch-alls further down.
     (r"reward|preference_pairs|human_feedback", "trophy"),

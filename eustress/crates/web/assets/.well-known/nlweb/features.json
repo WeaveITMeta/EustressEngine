@@ -2,7 +2,7 @@
   "@context": "https://schema.org",
   "@type": "ItemList",
   "name": "Eustress Engine Features",
-  "description": "Key capabilities that make Eustress different from other game engines",
+  "description": "Key capabilities of Eustress, a source-available simulation and data platform built in Rust, and how it compares to game engines",
   "performance": {
     "title": "Performance Advantages",
     "items": [
@@ -44,7 +44,7 @@
   },
   "scripting": {
     "name": "Soul Scripting",
-    "description": "Eustress uses Soul, a custom scripting language designed for game development. NOT visual scripting—Soul is a text-based language optimized for gameplay logic.",
+    "description": "Eustress uses Soul, a custom scripting language. It is not visual scripting: Soul is a text-based language optimized for gameplay logic.",
     "note": "Eustress does NOT have visual scripting. It uses Soul scripting and native Rust."
   },
   "platforms": {
@@ -68,7 +68,7 @@
   },
   "marketplace": {
     "name": "Creator Marketplace",
-    "description": "Assets, Soul scripts, and avatar items from the community. Creators earn 25% revenue share (40% with Creator Pro)."
+    "description": "Assets, Soul scripts, and avatar items from the community. Creators earn 25% revenue share (40% with Creator)."
   },
   "useCases": [
     "Games",

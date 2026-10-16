@@ -94,15 +94,15 @@ pub struct EditorSettings {
     #[serde(default)]
     pub recent_inserts: Vec<String>,
 
-    /// Modern (dark/glass, high-tech) vs Classic (today's flat look)
+    /// Voltec (graphite and xenon blue) vs Classic (today's flat look)
     /// theme. Classic is the default for new/never-saved settings — see
-    /// `default_theme_modern`. Pushed into the Slint `Theme.modern`
+    /// `default_theme_modern`. Pushed into the Slint `Theme.voltec`
     /// global by `init_theme_to_slint` on startup and by the
     /// `SetThemeModern` drain handler on every live toggle.
     #[serde(default = "default_theme_modern")]
     pub theme_modern: bool,
 
-    /// Active TOML theme id (e.g. "classic", "modern", or a user theme's id).
+    /// Active TOML theme id (e.g. "classic", "voltec", or a user theme's id).
     /// `None` for settings written before the theme engine existed — the
     /// theme registry migrates from `theme_modern` in that case. `SelectTheme`
     /// writes it (and keeps `theme_modern` in sync for back-compat).
@@ -128,6 +128,16 @@ pub struct EditorSettings {
     /// independently.
     #[serde(default)]
     pub layout_preset_by_mode: std::collections::HashMap<String, String>,
+
+    /// Each mode and discipline's dock layout as the user left it
+    /// (`ui::layout_tables`), keyed "mode/discipline". It wins over the
+    /// mode's table until the Layout menu's "Reset to mode layout".
+    #[serde(default)]
+    pub layout_state_by_key: std::collections::HashMap<String, crate::ui::layout_tables::PanelLayout>,
+
+    /// Panels pinned to stay through every mode and discipline switch.
+    #[serde(default)]
+    pub pinned_panels: Vec<String>,
 
     /// Anonymous usage telemetry — counts which ribbon tools get clicked so
     /// the (mostly aspirational) tool surface can be wired in demand order.
@@ -184,6 +194,12 @@ pub struct EditorSettings {
     /// Music and Ambient sounds (and looping sounds in Play), 0 to 1.
     #[serde(default = "default_volume")]
     pub music_volume: f32,
+    /// Hardware ray tracing: Auto (the default), On or Off, applied at the
+    /// next launch. Read before the app exists by `crate::raytracing` under
+    /// this exact key (`raytracing::SETTINGS_KEY`), so a rename must change
+    /// both. Saved as "auto", "on" or "off".
+    #[serde(default)]
+    pub ray_tracing: crate::raytracing::RayTracingMode,
 }
 
 fn default_true() -> bool {
@@ -226,7 +242,7 @@ fn default_active_mode() -> String {
 /// A saved identity for quick-switch login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedIdentity {
-    /// Username extracted from the identity file.
+    /// The account's name, as the API gave it at the last sign-in.
     pub username: String,
     /// Absolute path to the identity TOML file.
     pub path: String,
@@ -287,6 +303,8 @@ impl Default for EditorSettings {
             active_mode_id: "engineering".to_string(),
             active_submode_id: String::new(),
             layout_preset_by_mode: std::collections::HashMap::new(),
+            layout_state_by_key: std::collections::HashMap::new(),
+            pinned_panels: Vec::new(),
             usage_telemetry_enabled: default_usage_telemetry_enabled(),
             telemetry_notice_shown: false,
             bliss_node_mode: default_bliss_node_mode(),
@@ -300,6 +318,7 @@ impl Default for EditorSettings {
             master_volume: default_volume(),
             effects_volume: default_volume(),
             music_volume: default_volume(),
+            ray_tracing: crate::raytracing::RayTracingMode::Auto,
         }
     }
 }
@@ -456,6 +475,12 @@ fn track_recent_spaces(
     let path = root.0.clone();
     if !path.is_dir() {
         return;
+    }
+    // The Space the next launch opens: the one open now, whichever way it
+    // was opened (File > Open, Open Recent, a portal, a revert, the browser).
+    let key = path.to_string_lossy().to_string();
+    if settings.last_space_path.as_deref() != Some(key.as_str()) {
+        settings.last_space_path = Some(key);
     }
     if settings.recent_spaces.first().map(|p| std::path::Path::new(p) == path).unwrap_or(false) {
         return;
@@ -721,26 +746,19 @@ pub(crate) fn git_commit_locked(
     identity: Option<&GitIdentity>,
     empty: EmptyCommit,
 ) -> Result<GitAutosave, String> {
-    use std::process::Command;
-
     // Wrapper so the one-off commands all share the same cwd + error
     // shape. Output is captured so nothing leaks to the engine stdout.
     //
-    // CREATE_NO_WINDOW (Windows): the autosave runs on a background
-    // thread every ~5 minutes; without this flag every `git` spawn flashes
-    // a console window over the engine. Mirrors `lsp_launcher.rs`. Routed
-    // through this single closure so all 8 git calls (init/config/rm/add/
-    // diff/commit/rev-parse) inherit it.
+    // `git_command` turns every hook off, so nothing under the Space's
+    // `.git/hooks` runs on a save, and on Windows it opens no console window
+    // (the autosave runs on a background thread every ~5 minutes, and each
+    // spawn would flash one over the engine). Routed through this single
+    // closure so all 8 git calls (init/config/rm/add/diff/commit/rev-parse)
+    // inherit both.
     let run = |args: &[&str]| -> Result<std::process::Output, String> {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(space_path);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        cmd.output()
+        eustress_tools::sandbox::git_command(space_path)
+            .args(args)
+            .output()
             .map_err(|e| format!("git {:?}: {}", args, e))
     };
 
@@ -784,6 +802,8 @@ pub(crate) fn git_commit_locked(
     // stays quiet when nothing matched).
     let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", "world.fjalldb"]);
     let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", ".eustress/host"]);
+    // Deleted parts wait in the trash; a commit must not keep them in history.
+    let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", ".eustress/trash"]);
     // Each file stays on disk and leaves the index once; that one time is
     // logged (git names what it removed).
     for &runtime in RUNTIME_STATE {
@@ -862,7 +882,8 @@ pub(crate) fn git_commit_locked(
 /// name the Space last opened under, so a rename is noticed.
 /// `review.toml`: the Gallery's review of the Space's listing, as last
 /// fetched from api.eustress.dev, and the temporary file it is written
-/// through.
+/// through. `ai_camera.png` and `capture.png`: the last capture of the AI
+/// camera and of the viewport, written again on every capture.
 pub(crate) const RUNTIME_STATE: &[&str] = &[
     ".eustress/last_reconcile",
     ".eustress/lsp.port",
@@ -870,6 +891,8 @@ pub(crate) const RUNTIME_STATE: &[&str] = &[
     ".eustress/.last_name",
     ".eustress/review.toml",
     ".eustress/review.toml.tmp",
+    ".eustress/ai_camera.png",
+    ".eustress/capture.png",
 ];
 
 /// Ensure the Space's autosave `.gitignore` excludes the binary Fjall DB,
@@ -930,6 +953,11 @@ fn ensure_autosave_gitignore(space_path: &std::path::Path) {
     // one (`world.fjalldb.restoring/`, `world.fjalldb.pre-restore-<id>/`).
     // `world.fjalldb/` matches only its exact name, so without this entry a
     // pre-restore copy would be committed by the next autosave.
+    // `.eustress/profile/`: the script profiler's flame graphs (armed only by
+    // EUSTRESS_SCRIPT_PROFILE), written every 60 s of Play when no Universe
+    // folder resolves; machine-local output, never part of a snapshot.
+    // `.eustress/clone-staging/`: a bridge clone is built there and moved into
+    // place in one rename; a copy a crash interrupted must never be committed.
     // `RUNTIME_STATE`: the engine's per-machine files (see there).
     let needed = [
         "world.fjalldb/",
@@ -938,6 +966,8 @@ fn ensure_autosave_gitignore(space_path: &std::path::Path) {
         ".eustress/host/",
         ".eustress/hosts/",
         ".eustress/snapshots/",
+        ".eustress/profile/",
+        ".eustress/clone-staging/",
         "*.bak-*",
     ];
     let mut additions = String::new();

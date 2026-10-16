@@ -2,13 +2,17 @@
 // sit inside a message item with `input_text` and `input_image` parts. Bare
 // `{type:'text'}` or `{type:'image_url'}` items at the top level are refused by
 // xAI with a 422, which failed every ID check and every moderation judgement
-// closed. These tests drive the three callers through their real code and pin
-// the shape of what each one sends.
+// closed. These tests drive the callers through their real code and pin the
+// shape of what each one sends. Under the Guardian Code v2.1 the moderation
+// judge is Claude (tests/moderation_code_v21.test.mjs pins its request) and the
+// Grok agent is retired; the xAI caller in moderation is the researcher.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker, fakeEnv, fakeKv, fakeBucket, ctx } from './helpers/load_worker.mjs';
-import { grokJudge, grokAgent } from '../src/moderation.mjs';
+import { startKycSession } from './helpers/kyc_session.mjs';
+import { runResearcher, researcherRequest, researchFacts } from '../src/moderation.mjs';
+import { grokClient, DEFAULT_GROK_MODEL } from '../src/grok_model.mjs';
 import { imagePart, textPart, userMessage } from '../src/xai.mjs';
 
 /// Throws unless `input` is a valid Responses API input list.
@@ -57,54 +61,34 @@ test('the helpers build the documented message', () => {
   assert.deepEqual(imagePart('https://example.com/a.png'), { type: 'input_image', image_url: 'https://example.com/a.png' });
 });
 
-// ── The moderation judge ─────────────────────────────────────────────────────
+// ── The moderation researcher ────────────────────────────────────────────────
 
-test('the moderation judge sends one user message: policy text, the captures, then the case', async () => {
+const TWIN = { name: 'Port of Tacoma Terminal', description: 'Category: Digital twin\nObjective: Inspect how the Port of Tacoma stages containers.\nLesson: How a terminal moves cargo from ship to rail.\nReal-world link: A twin of the Port of Tacoma terminal from public aerial imagery.' };
+
+test('the moderation researcher sends one user message, the instruction and the facts as text, with the web search tool', async () => {
   const sent = [];
-  const deps = { grokFetch: async (body) => { sent.push(body); return { ok: false, status: 500, text: async () => '' }; } };
-  await grokJudge({
-    sim: { name: 'Pong', description: '', genre: 'all', is_public: true }, dossier: {}, jev: {}, triage: {},
-    captures: [{ contentType: 'image/png', base64: 'AAAA', label: 'north' }, { contentType: 'image/png', base64: 'BBBB', label: 'south' }],
-    policyText: 'POLICY', policyHash: 'abc', env: { GROK_API_KEY: 'test' }, deps,
-  });
+  const deps = { grokModel: 'grok-test', grokFetch: async (body) => { sent.push(body); return { ok: false, status: 500, text: async () => '' }; } };
+  const r = await runResearcher({ facts: researchFacts(TWIN), trigger: 'real_place_or_business', env: { GROK_API_KEY: 'test' }, deps });
   assert.equal(sent.length, 1);
   assertResponsesInput(sent[0].input);
   assert.equal(sent[0].input.length, 1, 'one user message');
-  const kinds = sent[0].input[0].content.map((p) => p.type);
-  assert.deepEqual(kinds, ['input_text', 'input_image', 'input_image', 'input_text'], 'policy first (cacheable), captures, then the case');
-  assert.ok(sent[0].input[0].content.slice(1, 3).every((p) => p.detail === 'low'));
+  assert.deepEqual(sent[0].input[0].content.map((p) => p.type), ['input_text'], 'text only: the researcher never sees an image');
+  assert.deepEqual(sent[0].tools, [{ type: 'web_search' }]);
+  assert.deepEqual(sent[0], researcherRequest(researchFacts(TWIN)));
+  assert.deepEqual([r.ran, r.error, r.findings], [true, 'researcher_unavailable_500', []], 'a failure is recorded, not thrown');
 });
 
-test('the moderation judge with no captures still sends a valid message', async () => {
-  const sent = [];
-  const deps = { grokFetch: async (body) => { sent.push(body); return { ok: false, status: 500, text: async () => '' }; } };
-  await grokJudge({ sim: {}, dossier: {}, jev: {}, triage: {}, captures: [], policyText: 'P', policyHash: 'h', env: { GROK_API_KEY: 'test' }, deps });
-  assertResponsesInput(sent[0].input);
-  assert.deepEqual(sent[0].input[0].content.map((p) => p.type), ['input_text', 'input_text']);
-});
-
-// ── The moderation agent ─────────────────────────────────────────────────────
-
-test('the moderation agent starts with a user message and echoes tool calls as function items', async () => {
-  const sent = [];
-  let round = 0;
-  const deps = {
-    extractGrokText: () => 'done',
-    grokFetch: async (body) => {
-      sent.push(structuredClone(body));
-      round++;
-      const output = round === 1 ? [{ type: 'function_call', call_id: 'call_1', name: 'moderation_get_case', arguments: '{}' }] : [];
-      return { ok: true, status: 200, json: async () => ({ output }), text: async () => '' };
-    },
-  };
-  const transcript = await grokAgent({
-    caseRecord: { sim_id: 'x' }, playbookText: 'PLAYBOOK', env: { GROK_API_KEY: 'test' }, deps,
-    execute: async () => ({ summary: 'ok' }),
-  });
-  assert.equal(transcript.error, null);
-  assert.equal(sent.length, 2);
-  for (const body of sent) assertResponsesInput(body.input);
-  assert.deepEqual(sent[1].input.slice(1).map((i) => i.type), ['function_call', 'function_call_output']);
+test('the researcher goes through the Grok client: the resolved model, store: false, and the web search tool reach xAI', async () => {
+  const calls = [];
+  const env = { SOCIAL: fakeKv() };
+  const grok = await grokClient(env, { fetch: async (url, init) => { calls.push({ url: String(url), body: JSON.parse(init.body), signal: init.signal }); return new Response(JSON.stringify({ output: [] }), { status: 200 }); } });
+  await runResearcher({ facts: researchFacts(TWIN), trigger: 'real_place_or_business', env: { GROK_API_KEY: 'xai-test-not-real' }, deps: { grokFetch: grok.fetch, grokModel: grok.model } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.x.ai/v1/responses');
+  assert.deepEqual([calls[0].body.model, calls[0].body.store], [DEFAULT_GROK_MODEL, false], 'the model src/grok_model.mjs resolves, and not stored');
+  assert.deepEqual(calls[0].body.tools, [{ type: 'web_search' }]);
+  assert.ok(calls[0].signal instanceof AbortSignal, 'bounded by the researcher\'s time limit');
+  assertResponsesInput(calls[0].body.input);
 });
 
 // ── ID verification, through the real upload and submit routes ───────────────
@@ -114,13 +98,14 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0
 test('ID verification sends the document images and the prompt as one user message', async () => {
   const worker = await loadWorker();
   const env = { ...fakeEnv(), GROK_API_KEY: 'xai-test-not-real', KYC_STATUS: fakeKv(), SCREENING: fakeKv(), KYC_BUCKET: fakeBucket() };
-  const session = 'session-1234567890';
+  const { session, upload_token } = await startKycSession(env);
 
   for (const side of ['front', 'back']) {
     const form = new FormData();
     form.set('side', side);
     form.set('id_type', "Driver's license");
     form.set('session_id', session);
+    form.set('upload_token', upload_token);
     form.set('document', new File([PNG], `${side}.png`, { type: 'image/png' }));
     const res = await worker.fetch(new Request('https://api.eustress.dev/api/kyc/upload', { method: 'POST', headers: { 'cf-ipcountry': 'US' }, body: form }), env, ctx);
     assert.equal(res.status, 200, `${side} upload: ${await res.clone().text()}`);
@@ -135,7 +120,7 @@ test('ID verification sends the document images and the prompt as one user messa
   try {
     const res = await worker.fetch(new Request('https://api.eustress.dev/api/kyc/submit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: session, full_name: 'Test Person', birthday: '1990-01-01' }),
+      body: JSON.stringify({ session_id: session, upload_token, full_name: 'Test Person', birthday: '1990-01-01' }),
     }), env, ctx);
     assert.ok(res.status < 500, `submit answered ${res.status}`);
   } finally {

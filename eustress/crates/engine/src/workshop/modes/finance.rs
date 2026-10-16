@@ -48,7 +48,8 @@ impl ToolHandler for CalculateCostTool {
         let returns_cost = subtotal * returns;
         let total = subtotal + duties + returns_cost;
 
-        let margin = retail.map(|r| (r - total) / r * 100.0);
+        // A retail price of zero or less has no margin (it divided by zero).
+        let margin = retail.filter(|r| *r > 0.0).map(|r| (r - total) / r * 100.0);
 
         ToolResult {
             tool_name: "calculate_cost".to_string(), tool_use_id: String::new(),
@@ -98,13 +99,31 @@ impl ToolHandler for EstimateTaxTool {
             "US-NY" => (0.08, "Sales Tax"), "US-WA" => (0.065, "Sales Tax"),
             "US-FL" => (0.06, "Sales Tax"), "US-OR" => (0.0, "No Sales Tax"),
             "US-NH" => (0.0, "No Sales Tax"), "US-MT" => (0.0, "No Sales Tax"),
-            j if j.starts_with("EU-") => (0.20, "VAT"),
+            // The named members first: a prefix arm ahead of them made
+            // Germany's 19% and the Netherlands' 21% unreachable (both read
+            // 20%).
             "EU-DE" => (0.19, "VAT"), "EU-FR" => (0.20, "VAT"), "EU-NL" => (0.21, "VAT"),
+            // Any other member: 20%, the usual standard rate, stands in.
+            j if j.starts_with("EU-") => (0.20, "VAT"),
             "CA-ON" => (0.13, "HST"), "CA-BC" => (0.12, "GST+PST"), "CA-AB" => (0.05, "GST"),
             "GB" => (0.20, "VAT"), "AU" => (0.10, "GST"), "JP" => (0.10, "Consumption Tax"),
             _ => (0.0, "Unknown"),
         };
 
+        // An unlisted jurisdiction is not a 0% jurisdiction: answering
+        // "$0.00 Unknown" read as a real estimate.
+        if tax_type == "Unknown" {
+            return ToolResult {
+                tool_name: "estimate_tax".to_string(), tool_use_id: String::new(),
+                success: false,
+                content: format!(
+                    "No tax rate for '{}'. Known: US-CA, US-TX, US-NY, US-WA, US-FL, US-OR, US-NH, US-MT, EU-<country>, CA-ON, CA-BC, CA-AB, GB, AU, JP.",
+                    jurisdiction
+                ),
+                structured_data: None,
+                stream_topic: None,
+            };
+        }
         let tax = amount * rate;
 
         ToolResult {
@@ -117,5 +136,45 @@ impl ToolHandler for EstimateTaxTool {
             })),
             stream_topic: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::modes::test_context;
+    use serde_json::json;
+
+    fn tax_rate(jurisdiction: &str) -> Option<f64> {
+        let r = EstimateTaxTool.execute(json!({ "amount_usd": 100.0, "jurisdiction": jurisdiction }), &test_context());
+        r.success.then(|| r.structured_data.unwrap()["rate"].as_f64().unwrap())
+    }
+
+    #[test]
+    fn named_eu_members_keep_their_own_rate() {
+        assert_eq!(tax_rate("EU-DE"), Some(0.19));
+        assert_eq!(tax_rate("EU-NL"), Some(0.21));
+        assert_eq!(tax_rate("EU-FR"), Some(0.20));
+    }
+
+    #[test]
+    fn other_eu_members_take_the_standard_rate() {
+        assert_eq!(tax_rate("EU-PL"), Some(0.20));
+    }
+
+    #[test]
+    fn an_unlisted_jurisdiction_is_an_error_not_zero_tax() {
+        assert_eq!(tax_rate("ZZ"), None);
+        assert_eq!(tax_rate("US-OR"), Some(0.0));
+    }
+
+    #[test]
+    fn a_zero_retail_price_has_no_margin() {
+        let r = CalculateCostTool.execute(
+            json!({ "product": "x", "bom_cost_usd": 10.0, "retail_price_usd": 0.0 }),
+            &test_context(),
+        );
+        assert!(r.success);
+        assert!(r.structured_data.unwrap()["gross_margin_pct"].is_null());
     }
 }

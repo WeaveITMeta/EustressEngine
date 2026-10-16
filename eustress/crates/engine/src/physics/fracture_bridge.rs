@@ -370,12 +370,14 @@ pub fn apply_fracture(
         }
 
         // Neutralise the original WITHOUT destroying it — it is authored data
-        // and must survive to Stop.
+        // and must survive to Stop. Its welds hold no more: a weld group it was
+        // merged into plans without it.
         commands.entity(ev.entity).insert((
             Visibility::Hidden,
             ColliderDisabled,
             RigidBodyDisabled,
             FracturedOriginal,
+            eustress_play_runtime::assemblies::WeldsReleased,
         ));
 
         // The part is gone from the structure, so are its joints: release
@@ -419,7 +421,8 @@ pub fn restore_fractured_originals(
             .insert(Visibility::Inherited)
             .remove::<ColliderDisabled>()
             .remove::<RigidBodyDisabled>()
-            .remove::<FracturedOriginal>();
+            .remove::<FracturedOriginal>()
+            .remove::<eustress_play_runtime::assemblies::WeldsReleased>();
         restored += 1;
     }
 

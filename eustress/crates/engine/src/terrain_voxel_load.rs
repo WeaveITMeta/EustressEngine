@@ -138,11 +138,12 @@ use crate::space::world_db_plugin::WorldDbHandle;
 use crate::space::SpaceRoot;
 use crate::undo::UndoStack;
 
-/// Latch: the Space path the voxel-terrain load decision already ran for. A
-/// genuine Space switch (path change) re-arms it, so the decision runs
-/// exactly once per Space, as `WorldDbDecision` and `BinaryEcsLoadLatch` do.
+/// Latch: the Space open the voxel-terrain load decision already ran for, as
+/// its path and `SpaceLoadGeneration`. Every open re-arms it, a reopen of the
+/// same path included, so the decision runs exactly once per open, as
+/// `BinaryEcsLoadLatch` does.
 #[derive(Resource, Default)]
-pub struct VoxelTerrainLoadLatch(pub Option<PathBuf>);
+pub struct VoxelTerrainLoadLatch(pub Option<(PathBuf, u64)>);
 
 /// Marker on the `TerrainRoot` this loader spawns, so a Space switch and a
 /// landing build can despawn exactly the voxel-sourced terrain (and not a
@@ -391,11 +392,13 @@ fn load_voxel_terrain_on_space_open(
     load_in_progress: Res<LoadInProgress>,
     mut latch: ResMut<VoxelTerrainLoadLatch>,
     mut build: ResMut<VoxelTerrainBuild>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
 ) {
-    // Run once per Space path. Latch BEFORE any early-return-after-decision
-    // so a migrated Space with zero voxels (or a failed read) doesn't re-scan
+    // Run once per open. Latch BEFORE any early-return-after-decision so a
+    // migrated Space with zero voxels (or a failed read) doesn't re-scan
     // every frame.
-    if latch.0.as_deref() == Some(space_root.0.as_path()) {
+    let this_open = (space_root.0.clone(), generation.0);
+    if latch.0.as_ref() == Some(&this_open) {
         return;
     }
     // Wait until the file loader's pass finishes so we don't race service
@@ -409,8 +412,8 @@ fn load_voxel_terrain_on_space_open(
         return;
     }
 
-    // Commit the decision for this Space: from here this is a one-shot.
-    latch.0 = Some(space_root.0.clone());
+    // Commit the decision for this open: from here this is a one-shot.
+    latch.0 = Some(this_open);
 
     // Disk terrain is the disk loader's, as it is the Player's, except in a
     // converted Space, whose terrain is this loader's.
@@ -646,6 +649,7 @@ fn recentre_voxel_terrain_window(
     undo: Option<Res<UndoStack>>,
     time: Res<Time>,
     mut last_look: Local<f64>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
 ) {
     let now = time.elapsed_secs_f64();
     if now - *last_look < RECENTRE_CHECK_SECS {
@@ -654,7 +658,8 @@ fn recentre_voxel_terrain_window(
     *last_look = now;
     // One build at a time, none for a while after a failed re-centre, and
     // only the window of the open Space, once its load has run.
-    if build.is_running() || now < build.recentre_not_before || latch.0.as_deref() != Some(space_root.0.as_path()) {
+    let loaded_for_this_open = latch.0.as_ref().is_some_and(|(path, open)| path == &space_root.0 && *open == generation.0);
+    if build.is_running() || now < build.recentre_not_before || !loaded_for_this_open {
         return;
     }
     let Ok((root, config, window)) = roots.single() else { return };
@@ -707,8 +712,10 @@ fn reset_latch_on_space_switch(
     mut latch: ResMut<VoxelTerrainLoadLatch>,
     mut build: ResMut<VoxelTerrainBuild>,
     voxel_roots: Query<Entity, With<VoxelSourcedTerrain>>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
 ) {
-    if space_root.is_changed() && latch.0.as_deref() != Some(space_root.0.as_path()) {
+    let this_open = (space_root.0.clone(), generation.0);
+    if (space_root.is_changed() || generation.is_changed()) && latch.0.as_ref() != Some(&this_open) {
         // A different Space is now active: re-arm so the load runs for it.
         // (When the path is unchanged this is a no-op; the load system's own
         // latch comparison still guards against re-running for the same path.)

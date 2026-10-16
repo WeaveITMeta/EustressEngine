@@ -22,10 +22,26 @@
 // reported and skipped: a missing prerender degrades to today's behaviour,
 // not to a broken page. `--strict` turns any failure into a nonzero exit.
 //
+// Besides one page per route it writes, into the same `dist/`:
+//
+// - `404.html`: the router's own not-found page in the shell. Cloudflare Pages
+//   serves a top-level 404.html, with a 404 status, for any address that is no
+//   file and no rule in `_redirects`.
+// - `sitemap.xml`, again, with a `<lastmod>` on every URL: the build date (UTC),
+//   or `SOURCE_DATE_EPOCH` when it is set. One date for the whole site because
+//   the pages are one bundle; a page's own source file has no better date once
+//   the build checkout is shallow.
+// - `llms-full.txt`: the full text of the docs and learn pages (and of the
+//   Markdown docs `llms.txt` lists), from the markup rendered here, so it is
+//   as current as the build.
+//
+// The head and text rules live in `eustress_web::seo`, which the live app and
+// the tests share.
+//
 // Table of Contents:
 // 1. Arguments
 // 2. Rendering
-// 3. Splicing into the shell
+// 3. Files written besides the pages
 // 4. Main
 // =============================================================================
 
@@ -40,25 +56,17 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use eustress_web::seo::{
+    build_date, first_h1, is_doc_route, llms_full, pristine_shell, routes_from_sitemap, sitemap_with_lastmod, splice, splice_not_found,
+    strip_tags, DocPage, MarkdownDoc, MARKDOWN_DOCS, NOT_FOUND_PROBE,
+};
 use eustress_web::App;
 use hydration_context::{SharedContext, SsrSharedContext};
 use leptos::prelude::*;
 use leptos_router::location::RequestUrl;
-
-const SITE: &str = "https://eustress.dev";
-
-/// The mount point exactly as index.html writes it.
-const APP_MOUNT: &str = r#"<div id="app"></div>"#;
-const APP_OPEN: &str = r#"<div id="app">"#;
-
-/// The rendered markup is fenced inside `#app` so a later run can lift it
-/// back out. `/` is written over `index.html`, which is also the shell every
-/// other route is spliced into, so without this the bin could run once per
-/// `trunk build`.
-const RENDER_START: &str = "<!--prerender-->";
-const RENDER_END: &str = "<!--/prerender-->";
 
 // -----------------------------------------------------------------------------
 // 1. Arguments
@@ -75,7 +83,8 @@ fn print_usage() {
         "usage: prerender [--dist <dir>] [--strict] [/route ...]\n\
          \n\
          Renders each route into <dist>/<route>.html using <dist>/index.html as\n\
-         the shell. With no routes, every <loc> in <dist>/sitemap.xml is used."
+         the shell. With no routes, every <loc> in <dist>/sitemap.xml is used, and\n\
+         the sitemap, llms-full.txt and 404.html are written as well."
     );
 }
 
@@ -108,24 +117,14 @@ fn parse_args() -> Args {
     Args { dist, strict, routes }
 }
 
-/// Every `<loc>` in the sitemap, as a site-relative path.
-fn routes_from_sitemap(dist: &Path) -> Vec<String> {
+/// The sitemap's routes, as site-relative paths.
+fn sitemap_routes(dist: &Path) -> Vec<String> {
     let path = dist.join("sitemap.xml");
     let xml = fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("cannot read {}: {e}", path.display());
         std::process::exit(2);
     });
-    let mut routes = Vec::new();
-    let mut rest = xml.as_str();
-    while let Some(start) = rest.find("<loc>") {
-        let after = &rest[start + "<loc>".len()..];
-        let Some(end) = after.find("</loc>") else { break };
-        if let Some(path) = after[..end].trim().strip_prefix(SITE) {
-            routes.push(if path.is_empty() { "/".to_string() } else { path.to_string() });
-        }
-        rest = &after[end..];
-    }
-    routes
+    routes_from_sitemap(&xml)
 }
 
 // -----------------------------------------------------------------------------
@@ -163,108 +162,6 @@ fn render_route(route: &str) -> Result<String, String> {
     })
 }
 
-// -----------------------------------------------------------------------------
-// 3. Splicing into the shell
-// -----------------------------------------------------------------------------
-
-/// Visible text of a fragment. Each tag becomes a space so `<span>of</span>
-/// <br>Creation` reads "of Creation", not "ofCreation"; callers fold runs.
-fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                out.push(' ');
-            }
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Text of the first `<h1>` in the page, tags stripped and whitespace folded.
-fn first_h1(html: &str) -> Option<String> {
-    let start = html.find("<h1")?;
-    let open_end = start + html[start..].find('>')? + 1;
-    let close = open_end + html[open_end..].find("</h1>")?;
-    let text = strip_tags(&html[open_end..close]);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then_some(text)
-}
-
-/// Replace the text between the first `open` and the `close` that follows it,
-/// keeping both markers. Returns false when the shell has no such field.
-fn replace_between(page: &mut String, open: &str, close: &str, value: &str) -> bool {
-    let Some(start) = page.find(open) else { return false };
-    let value_start = start + open.len();
-    let Some(len) = page[value_start..].find(close) else { return false };
-    page.replace_range(value_start..value_start + len, value);
-    true
-}
-
-/// The shell with this route's markup inside `#app` and its own URL and
-/// title in the head.
-fn splice(shell: &str, route: &str, body: &str) -> Result<String, String> {
-    let Some(mount) = shell.find(APP_MOUNT) else {
-        return Err(format!("shell has no `{APP_MOUNT}`"));
-    };
-    let mut page = String::with_capacity(shell.len() + body.len());
-    page.push_str(&shell[..mount]);
-    page.push_str(APP_OPEN);
-    page.push_str(RENDER_START);
-    page.push_str(body);
-    page.push_str(RENDER_END);
-    page.push_str("</div>");
-    page.push_str(&shell[mount + APP_MOUNT.len()..]);
-
-    // Every prerendered page is canonical for its own URL. The shell says `/`
-    // everywhere, which is right for the SPA fallback and wrong for a page.
-    let url = format!("{SITE}{route}");
-    replace_between(&mut page, r#"<link rel="canonical" href=""#, "\"", &url);
-    replace_between(&mut page, r#"<meta property="og:url" content=""#, "\"", &url);
-    replace_between(&mut page, r#"<meta name="twitter:url" content=""#, "\"", &url);
-
-    // The home page keeps the hand-written title. Every other route is named
-    // after its own heading, so a search result or a link preview says what
-    // the page is rather than what the site is.
-    if route != "/" {
-        if let Some(h1) = first_h1(body) {
-            let title = format!("{h1} | Eustress Engine");
-            let attr = title.replace('"', "&quot;");
-            replace_between(&mut page, "<title>", "</title>", &title);
-            replace_between(&mut page, r#"<meta name="title" content=""#, "\"", &attr);
-            replace_between(&mut page, r#"<meta property="og:title" content=""#, "\"", &attr);
-            replace_between(&mut page, r#"<meta name="twitter:title" content=""#, "\"", &attr);
-        }
-    }
-    Ok(page)
-}
-
-/// `index.html` as Trunk wrote it. When a previous run has already put the
-/// home page inside `#app`, the fenced render is lifted out again; the head
-/// needs no undoing because `/` keeps the shell's own title and URLs.
-fn pristine_shell(html: &str) -> Option<String> {
-    if html.contains(APP_MOUNT) {
-        return Some(html.to_string());
-    }
-    let start = html.find(APP_OPEN)?;
-    let after_open = start + APP_OPEN.len();
-    if !html[after_open..].starts_with(RENDER_START) {
-        return None;
-    }
-    let end = after_open + html[after_open..].find(RENDER_END)? + RENDER_END.len();
-    let rest = html[end..].strip_prefix("</div>")?;
-    let mut shell = String::with_capacity(html.len());
-    shell.push_str(&html[..start]);
-    shell.push_str(APP_MOUNT);
-    shell.push_str(rest);
-    Some(shell)
-}
-
 /// `/` is the shell itself (which is also the SPA fallback); any other route
 /// becomes `<route>.html`, which Cloudflare Pages serves at the extensionless
 /// URL without adding a trailing slash.
@@ -274,6 +171,31 @@ fn output_path(dist: &Path, route: &str) -> PathBuf {
     } else {
         dist.join(format!("{}.html", route.trim_start_matches('/')))
     }
+}
+
+// -----------------------------------------------------------------------------
+// 3. Files written besides the pages
+// -----------------------------------------------------------------------------
+
+/// Write beside the target and rename over it, so a reader never sees half a
+/// file and an interrupted run leaves the old one.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let temp = path.with_extension("tmp-prerender");
+    fs::write(&temp, contents).map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    fs::rename(&temp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+}
+
+/// The Markdown docs `llms.txt` lists, as Trunk copied them into `dist/`. A
+/// missing one is reported and left out, not fatal.
+fn markdown_docs(dist: &Path) -> Vec<MarkdownDoc> {
+    let mut docs = Vec::new();
+    for path in MARKDOWN_DOCS {
+        match fs::read_to_string(dist.join(path)) {
+            Ok(text) => docs.push(MarkdownDoc { path: path.to_string(), text }),
+            Err(e) => eprintln!("note  {path} is not in {}: {e}", dist.display()),
+        }
+    }
+    docs
 }
 
 // -----------------------------------------------------------------------------
@@ -290,18 +212,15 @@ fn main() {
     });
     let Some(shell) = pristine_shell(&written) else {
         eprintln!(
-            "{} has neither an empty `{APP_MOUNT}` nor a fenced render inside it, \
+            "{} has neither an empty mount point nor a fenced render inside it, \
              so it is not a Trunk shell. Run `trunk build --release` first.",
             shell_path.display()
         );
         std::process::exit(2);
     };
 
-    let routes = if args.routes.is_empty() {
-        routes_from_sitemap(&args.dist)
-    } else {
-        args.routes.clone()
-    };
+    let whole_site = args.routes.is_empty();
+    let routes = if whole_site { sitemap_routes(&args.dist) } else { args.routes.clone() };
     if routes.is_empty() {
         eprintln!("no routes to render");
         std::process::exit(2);
@@ -337,7 +256,10 @@ fn main() {
         LAST_PANIC.with(|p| *p.borrow_mut() = Some(info.to_string()));
     }));
 
+    // Pages that failed, and every failure (pages and the files beside them).
+    let mut page_failed = 0usize;
     let mut failed = 0usize;
+    let mut guides: Vec<DocPage> = Vec::new();
     for route in &routes {
         match render_route(route).and_then(|body| splice(&shell, route, &body).map(|page| (body, page))) {
             Ok((body, page)) => {
@@ -357,8 +279,12 @@ fn main() {
                 let text = strip_tags(&body).split_whitespace().collect::<Vec<_>>().join(" ").chars().count();
                 let title = first_h1(&body).unwrap_or_else(|| "(no h1)".to_string());
                 println!("ok    {route:<26} {text:>6} chars  {title}");
+                if is_doc_route(route) {
+                    guides.push(DocPage { route: route.clone(), body });
+                }
             }
             Err(msg) => {
+                page_failed += 1;
                 failed += 1;
                 let one_line = msg.lines().map(str::trim).collect::<Vec<_>>().join(" | ");
                 eprintln!("FAIL  {route:<26} {one_line}");
@@ -366,7 +292,56 @@ fn main() {
         }
     }
 
-    println!("prerendered {} of {} routes into {}", routes.len() - failed, routes.len(), args.dist.display());
+    // The page for an address nothing owns: the router's own fallback.
+    match render_route(NOT_FOUND_PROBE).and_then(|body| splice_not_found(&shell, &body)) {
+        Ok(page) => match write_atomic(&args.dist.join("404.html"), &page) {
+            Ok(()) => println!("ok    {:<26} not-found page", "404.html"),
+            Err(msg) => {
+                failed += 1;
+                eprintln!("FAIL  404.html                   {msg}");
+            }
+        },
+        Err(msg) => {
+            failed += 1;
+            let one_line = msg.lines().map(str::trim).collect::<Vec<_>>().join(" | ");
+            eprintln!("FAIL  404.html                   {one_line}");
+        }
+    }
+
+    // The whole-site files describe the whole site, so a run for a few routes
+    // leaves them alone.
+    if whole_site {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let date = build_date(std::env::var("SOURCE_DATE_EPOCH").ok().as_deref(), now);
+
+        let sitemap_path = args.dist.join("sitemap.xml");
+        let stamped = fs::read_to_string(&sitemap_path)
+            .map_err(|e| format!("cannot read {}: {e}", sitemap_path.display()))
+            .and_then(|xml| write_atomic(&sitemap_path, &sitemap_with_lastmod(&xml, &date)));
+        match stamped {
+            Ok(()) => println!("ok    {:<26} lastmod {date} on {} URLs", "sitemap.xml", routes.len()),
+            Err(msg) => {
+                failed += 1;
+                eprintln!("FAIL  sitemap.xml                {msg}");
+            }
+        }
+
+        if guides.is_empty() {
+            failed += 1;
+            eprintln!("FAIL  llms-full.txt              no docs or learn page was rendered");
+        } else {
+            let text = llms_full(&guides, &markdown_docs(&args.dist), &date);
+            match write_atomic(&args.dist.join("llms-full.txt"), &text) {
+                Ok(()) => println!("ok    {:<26} {} guides, {} bytes", "llms-full.txt", guides.len(), text.len()),
+                Err(msg) => {
+                    failed += 1;
+                    eprintln!("FAIL  llms-full.txt              {msg}");
+                }
+            }
+        }
+    }
+
+    println!("prerendered {} of {} routes into {}", routes.len() - page_failed, routes.len(), args.dist.display());
     if failed > 0 && args.strict {
         std::process::exit(1);
     }

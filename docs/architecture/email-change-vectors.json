@@ -1,0 +1,33 @@
+{
+  "about": "Test vectors for the eustress-email-change-v1 message (docs/architecture/IDENTITY_KEY_ROTATION_AND_RECOVERY.md, \"Verified email\"). The key is the first test key of RFC 8032, public by design and no account's key. The Worker's tests (infrastructure/cloudflare/api/tests/account_email.test.mjs) and the website's (web/src/api/account_email.rs) read this one file. Each signature verifies only over its own message.",
+  "key": {
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "secret_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  },
+  "changes": [
+    {
+      "origin": "https://api.eustress.dev",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "address": "new@example.com",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-email-change-v1\nhttps://api.eustress.dev\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nnew@example.com\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "52359fc2f0ff5f434efc9364b7f685fd06fcd04e304eafba407a3280d911d066b99875a0e42b17fce7933ffbe4a9993869073c3a1c0aef5e462a808a50627b07"
+    },
+    {
+      "origin": "https://api-staging.eustress.dev",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "address": "new@example.com",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-email-change-v1\nhttps://api-staging.eustress.dev\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nnew@example.com\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "02a6bcce196d4c6f39d18941308cb59587b5c0e267f0bc69841dac104945120d9b867130d45f61d96275aaaff95f432464d1f5b2a86f3686f19d9204baae2501"
+    },
+    {
+      "origin": "https://api.eustress.dev",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "address": "someone.else+tag@sub.example.org",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-email-change-v1\nhttps://api.eustress.dev\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nsomeone.else+tag@sub.example.org\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "f845f6322f016e5fecbe2a8c0da7d2d04764cf09f8e7bcfe72af149ed7ffe37745ee2bb0c0de59fcb0c2122cb9518d0f4dd6bf8be39176e827b4f3853de5cd0d"
+    }
+  ]
+}

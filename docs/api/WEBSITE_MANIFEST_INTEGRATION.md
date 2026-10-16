@@ -173,7 +173,7 @@ A page that must show one exact state pins the hash:
 .../manifest?v=blake3:1c9fa83...
 ```
 
-A pinned response is immutable and cacheable for a year. Use it for anything
+A pinned response is cacheable for an hour (`max-age=3600`; the ETag revalidates it after that). Use it for anything
 quoting a specific revision, a signed document, or a figure a reader may return
 to. If the stored hash no longer matches, a pin returns `404` rather than
 silently serving a different state.

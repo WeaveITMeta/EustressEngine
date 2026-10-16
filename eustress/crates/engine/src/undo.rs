@@ -295,6 +295,25 @@ pub enum Action {
         containers: Vec<UngroupedContainer>,
     },
 
+    /// Ctrl+G on saved folders (`grouping.rs`): a new Model folder holds the
+    /// selection, moved on disk and in the database. Undo moves the members back
+    /// out and trashes the Model's folder; redo restores that folder and moves
+    /// the members in again. Entities are found by path on each step, because a
+    /// trashed and restored Model is a new entity.
+    GroupFolders {
+        model: FolderNode,
+        members: Vec<FolderMove>,
+    },
+
+    /// Ctrl+U on a saved container (`grouping.rs`): its children move out to the
+    /// container's folder and the container's folder is trashed. Undo restores
+    /// the container's folder and moves the children back in; redo moves them
+    /// out again.
+    UngroupFolders {
+        container: FolderNode,
+        members: Vec<FolderMove>,
+    },
+
     /// Objects created by Insert / Paste / Duplicate — the general
     /// "creation" entry. Undo despawns the recorded entities, purges
     /// their records from every Fjall store and moves their folders to
@@ -486,6 +505,31 @@ pub struct UngroupedContainer {
     pub children: Vec<GroupMember>,
 }
 
+/// A Model or Folder that Ctrl+G creates or Ctrl+U dissolves on disk: its
+/// folder, where that folder waits in the trash, and the folder it sits in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FolderNode {
+    /// The node's folder. Its `_instance.toml` lives inside it.
+    pub dir: PathBuf,
+    /// Where the folder waits in the trash while the node is absent.
+    pub trash: PathBuf,
+    /// The folder the node sits in. Its entity is the node's parent, or the node
+    /// is a root of the hierarchy when this is a service folder.
+    pub parent_dir: PathBuf,
+}
+
+/// One saved object moved into or out of a [`FolderNode`]: its folder before and
+/// after, and its local pose (relative to its parent) on each side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FolderMove {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub from_translation: [f32; 3],
+    pub from_rotation: [f32; 4],
+    pub to_translation: [f32; 3],
+    pub to_rotation: [f32; 4],
+}
+
 impl Action {
     /// Stable topic key used for Eustress Stream publication + history
     /// panel filtering. One word per variant so subscribers can pattern
@@ -521,6 +565,8 @@ impl Action {
             Action::ReparentEntities { .. }       => "reparent",
             Action::GroupEntities { .. }          => "group",
             Action::UngroupEntities { .. }        => "ungroup",
+            Action::GroupFolders { .. }           => "group",
+            Action::UngroupFolders { .. }         => "ungroup",
             Action::CreateEntities { .. }         => "create",
             Action::CreateBinaryInstance { .. }   => "create",
             Action::CadTreeEdit { .. }            => "cad",
@@ -567,6 +613,8 @@ impl Action {
             Action::MoveFolders { moves } => format!("Move {} objects", moves.len()),
             Action::ReparentEntities { entries } => format!("Reparent {} objects", entries.len()),
             Action::GroupEntities { members, .. } => format!("Group {} objects", members.len()),
+            Action::GroupFolders { members, .. } => format!("Group {} objects", members.len()),
+            Action::UngroupFolders { members, .. } => format!("Ungroup {} objects", members.len()),
             Action::UngroupEntities { containers } => format!(
                 "Ungroup {} container{}",
                 containers.len(),
@@ -1072,6 +1120,11 @@ pub fn handle_undo_events(world: &mut World) {
     if events.is_empty() {
         return;
     }
+    // During Play the History belongs to the authored scene, which Stop puts
+    // back: the requests are consumed above and refused here, not kept.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::Undo) {
+        return;
+    }
 
     // Ctrl+Z while a drag is still held means "not that": cancel the drag
     // and put everything back. Popping the history instead would undo an
@@ -1113,6 +1166,10 @@ fn handle_redo_events(world: &mut World) {
     if events.is_empty() {
         return;
     }
+    // Consumed above and refused during Play, as for undo.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::Redo) {
+        return;
+    }
 
     if cancel_live_drag(world) {
         return;
@@ -1150,6 +1207,10 @@ pub fn handle_undo_single_events(world: &mut World) {
     let targets: Vec<usize> = events.drain().map(|e| e.index).collect();
     drop(events);
     if targets.is_empty() { return; }
+    // Consumed above and refused during Play, as for undo.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::Undo) {
+        return;
+    }
     if refuse_during_terrain_stroke(world) {
         return;
     }
@@ -1182,6 +1243,10 @@ pub fn handle_revert_to_events(world: &mut World) {
     let targets: Vec<usize> = events.drain().map(|e| e.target).collect();
     drop(events);
     if targets.is_empty() { return; }
+    // Consumed above and refused during Play, as for undo.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::Undo) {
+        return;
+    }
     if refuse_during_terrain_stroke(world) {
         return;
     }
@@ -1228,6 +1293,13 @@ pub fn handle_history_jump_events(world: &mut World) {
     let mut events = world.resource_mut::<Messages<HistoryJumpEvent>>();
     let targets: Vec<usize> = events.drain().map(|e| e.target).collect();
     drop(events);
+    if targets.is_empty() {
+        return;
+    }
+    // Consumed above and refused during Play, as for undo.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::Undo) {
+        return;
+    }
     for target in targets {
         if cancel_live_drag(world) {
             return;
@@ -1616,6 +1688,17 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 let size = Vec3::from_array(*old_size);
 
                 let has_mesh_source = world.get::<crate::spawn::MeshSource>(entity).is_some();
+                // A Roblox import's folded mesh scale / offset: the drawn scale
+                // is size x fold.scale and the authored position has no offset.
+                let fold = world.get::<crate::space::instance_loader::MeshFold>(entity).copied();
+                let rotation = world.get::<Transform>(entity).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+                // A multiplier-kind mesh: the scale is a ratio on its natural
+                // size (size over scale, read before the change).
+                let is_ratio = world.get::<crate::space::instance_loader::MeshRatio>(entity).is_some();
+                let current = (
+                    world.get::<crate::classes::BasePart>(entity).map(|b| b.size),
+                    world.get::<Transform>(entity).map(|t| t.scale),
+                );
                 let part_shape = world.get::<crate::classes::Part>(entity)
                     .map(|p| p.shape);
 
@@ -1624,8 +1707,13 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                         transform.translation = Vec3::from_array(*old_pos);
                         if has_mesh_source {
                             // GLB mesh is unit-scale; world size lives
-                            // entirely in `Transform.scale`.
-                            transform.scale = size;
+                            // entirely in `Transform.scale` (times the fold).
+                            transform.scale = match (is_ratio, current) {
+                                (true, (Some(current_size), Some(current_scale))) => {
+                                    crate::scale_tool::ratio_scale(size, current_size, current_scale)
+                                }
+                                _ => crate::scale_tool::mesh_part_scale(size, fold.as_ref()),
+                            };
                         } else {
                             // Primitive: mesh holds the size; scale
                             // stays at ONE so a stale mid-drag ratio
@@ -1634,7 +1722,8 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                         }
                     }
                     if let Some(mut bp) = entity_mut.get_mut::<crate::classes::BasePart>() {
-                        bp.cframe.translation = Vec3::from_array(*old_pos);
+                        bp.cframe.translation =
+                            crate::space::instance_loader::file_position(Vec3::from_array(*old_pos), rotation, fold.as_ref());
                         bp.size = size;
                     }
                 }
@@ -1678,6 +1767,10 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                     match std::fs::rename(trash_path, original_path) {
                         Ok(_) => {
                             info!("↶ Restored {:?} from trash", original_path.file_name().unwrap_or_default());
+                            // Delete purged these from the database, so a
+                            // database-backed rescan below would find no
+                            // record to respawn them from: write them back.
+                            crate::space::active_db::seed_subtree(original_path);
                             any_restored = true;
                         }
                         Err(e) => warn!("Failed to restore {:?}: {}", original_path, e),
@@ -1774,6 +1867,12 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 None => warn!("↶ Undo group: wrapper not found (members already reparented?)"),
             }
             mark_explorer_dirty(world);
+        }
+        Action::GroupFolders { model, members } => {
+            crate::grouping::undo_group_folders(world, model, members);
+        }
+        Action::UngroupFolders { container, members } => {
+            crate::grouping::undo_ungroup_folders(world, container, members);
         }
         Action::UngroupEntities { containers } => {
             // Undo ungroup = re-group: re-spawn each dissolved
@@ -2071,7 +2170,7 @@ fn apply_cad_tree_toml(world: &mut World, entity_bits: u64, toml: &str) {
 /// handle and destroyed the only copy of the data. So: no fallback, 5
 /// attempts 60 ms apart, and on exhaustion log loudly and return `false`
 /// so the caller leaves everything untouched and the user can retry.
-fn rename_with_retry(from: &Path, to: &Path) -> bool {
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> bool {
     const ATTEMPTS: u32 = 5;
     let mut last_err: Option<std::io::Error> = None;
     for i in 0..ATTEMPTS {
@@ -2144,7 +2243,7 @@ fn unguard_rename(world: &mut World, from: &Path, to: &Path, is_dir: bool) {
 /// Flag the Explorer for an immediate re-sync. Structural undo changes
 /// the tree's shape without going through the file watcher, so nothing
 /// else marks the panel stale.
-fn mark_explorer_dirty(world: &mut World) {
+pub(crate) fn mark_explorer_dirty(world: &mut World) {
     if let Some(mut es) = world.get_resource_mut::<crate::ui::slint_ui::UnifiedExplorerState>() {
         es.dirty = true;
         es.needs_immediate_sync = true;
@@ -2170,7 +2269,7 @@ fn mark_explorer_dirty(world: &mut World) {
 ///
 /// Returns `false` — having logged — if the rename could not be made, in
 /// which case NOTHING was mutated.
-fn move_folder_and_rebase(world: &mut World, from: &Path, to: &Path) -> bool {
+pub(crate) fn move_folder_and_rebase(world: &mut World, from: &Path, to: &Path) -> bool {
     if from == to {
         return true;
     }
@@ -2202,6 +2301,14 @@ fn move_folder_and_rebase(world: &mut World, from: &Path, to: &Path) -> bool {
             return false;
         }
     }
+
+    // The world database keeps a tree record per file, keyed by path. Move
+    // them with the files, synchronously: the watcher's own tree sync is only
+    // the net (it is debounced, and a coalesced rename pair never reaches it),
+    // and without this the old keys would stay and the part would load twice
+    // after a reopen. Moves every record under `from` to the same place under
+    // `to`; a no-op without a database, or when the records already moved.
+    crate::space::active_db::rekey_subtree(from, to);
 
     // Rebase path references. Iterating the full component set is O(N)
     // per move, but structural undo is user-initiated and rare — worth
@@ -2479,6 +2586,9 @@ fn restore_created_folder(world: &mut World, folder: &Path, trash: &Path) -> boo
         return false;
     }
     info!("↷ Restored {:?} from trash", folder.file_name().unwrap_or_default());
+    // Undo of the create purged the folder from the database; put it back
+    // before the rescan looks for it.
+    crate::space::active_db::seed_subtree(folder);
     world.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
     mark_explorer_dirty(world);
     true
@@ -2592,6 +2702,15 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                 let size = Vec3::from_array(*new_size);
 
                 let has_mesh_source = world.get::<crate::spawn::MeshSource>(entity).is_some();
+                let fold = world.get::<crate::space::instance_loader::MeshFold>(entity).copied();
+                let rotation = world.get::<Transform>(entity).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+                // A multiplier-kind mesh: the scale is a ratio on its natural
+                // size (size over scale, read before the change).
+                let is_ratio = world.get::<crate::space::instance_loader::MeshRatio>(entity).is_some();
+                let current = (
+                    world.get::<crate::classes::BasePart>(entity).map(|b| b.size),
+                    world.get::<Transform>(entity).map(|t| t.scale),
+                );
                 let part_shape = world.get::<crate::classes::Part>(entity)
                     .map(|p| p.shape);
 
@@ -2599,13 +2718,19 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                     if let Some(mut transform) = entity_mut.get_mut::<Transform>() {
                         transform.translation = Vec3::from_array(*new_pos);
                         if has_mesh_source {
-                            transform.scale = size;
+                            transform.scale = match (is_ratio, current) {
+                                (true, (Some(current_size), Some(current_scale))) => {
+                                    crate::scale_tool::ratio_scale(size, current_size, current_scale)
+                                }
+                                _ => crate::scale_tool::mesh_part_scale(size, fold.as_ref()),
+                            };
                         } else {
                             transform.scale = Vec3::ONE;
                         }
                     }
                     if let Some(mut bp) = entity_mut.get_mut::<crate::classes::BasePart>() {
-                        bp.cframe.translation = Vec3::from_array(*new_pos);
+                        bp.cframe.translation =
+                            crate::space::instance_loader::file_position(Vec3::from_array(*new_pos), rotation, fold.as_ref());
                         bp.size = size;
                     }
                 }
@@ -2705,6 +2830,12 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             }
             info!("↷ Redo group: wrapped {} objects in a {}", members.len(), model_class);
             mark_explorer_dirty(world);
+        }
+        Action::GroupFolders { model, members } => {
+            crate::grouping::redo_group_folders(world, model, members);
+        }
+        Action::UngroupFolders { container, members } => {
+            crate::grouping::redo_ungroup_folders(world, container, members);
         }
         Action::UngroupEntities { containers } => {
             // Redo ungroup: raise the children back out to the
@@ -2844,29 +2975,12 @@ fn apply_property_value_to_entity(id: u32, property: &str, value: &PropertyValue
         }
         ("Material", PropertyValueSnapshot::Material(mat_str)) => {
             if let Some(mut bp) = world.get_mut::<BasePart>(entity) {
-                // Parse material from string
-                bp.material = match mat_str.as_str() {
-                    "Plastic" => crate::classes::Material::Plastic,
-                    "SmoothPlastic" => crate::classes::Material::SmoothPlastic,
-                    "Wood" => crate::classes::Material::Wood,
-                    "WoodPlanks" => crate::classes::Material::WoodPlanks,
-                    "Metal" => crate::classes::Material::Metal,
-                    "CorrodedMetal" => crate::classes::Material::CorrodedMetal,
-                    "DiamondPlate" => crate::classes::Material::DiamondPlate,
-                    "Foil" => crate::classes::Material::Foil,
-                    "Grass" => crate::classes::Material::Grass,
-                    "Concrete" => crate::classes::Material::Concrete,
-                    "Brick" => crate::classes::Material::Brick,
-                    "Granite" => crate::classes::Material::Granite,
-                    "Marble" => crate::classes::Material::Marble,
-                    "Slate" => crate::classes::Material::Slate,
-                    "Sand" => crate::classes::Material::Sand,
-                    "Fabric" => crate::classes::Material::Fabric,
-                    "Glass" => crate::classes::Material::Glass,
-                    "Neon" => crate::classes::Material::Neon,
-                    "Ice" => crate::classes::Material::Ice,
-                    _ => crate::classes::Material::Plastic,
-                };
+                // The Properties panel sets the enum and the custom name
+                // together (`material_name` wins for the registry lookup
+                // and for what a save writes), so undo and redo must too:
+                // restoring only the enum left the new name in force.
+                bp.material = crate::classes::Material::from_string(mat_str);
+                bp.material_name = mat_str.clone();
             }
         }
         ("Transparency", PropertyValueSnapshot::Float(t)) => {
@@ -3599,5 +3713,253 @@ mod coalesce_tests {
         assert!(world.get_entity(model).is_err(), "the Model is still spawned");
         assert!(world.get_entity(child).is_err(), "the child is still spawned");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A material change made in the Properties panel sets the enum and the
+    /// custom name together; undo and redo restore both.
+    #[test]
+    fn undoing_a_material_change_restores_the_custom_name() {
+        let mut world = World::new();
+        let part = world
+            .spawn((
+                crate::classes::Instance { id: 77, ..Default::default() },
+                crate::classes::BasePart {
+                    material: crate::classes::Material::Brick,
+                    material_name: "Brick".to_string(),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let change = Action::ChangeProperty {
+            id: 77,
+            property: "Material".to_string(),
+            old_value: PropertyValueSnapshot::Material("BrushedMetal".to_string()),
+            new_value: PropertyValueSnapshot::Material("Brick".to_string()),
+        };
+        apply_undo_action(&change, &mut world);
+        assert_eq!(world.get::<crate::classes::BasePart>(part).unwrap().material_name, "BrushedMetal");
+        apply_redo_action(&change, &mut world);
+        let redone = world.get::<crate::classes::BasePart>(part).unwrap();
+        assert_eq!(redone.material_name, "Brick");
+        assert_eq!(redone.material.as_str(), "Brick");
+    }
+
+    /// Moving a folder (undo and redo of a reparent) rebases the entities'
+    /// file paths and the file registry along with the files.
+    #[test]
+    fn moving_a_folder_rebases_the_entities_paths() {
+        let root = std::env::temp_dir().join(format!("eustress_move_rebase_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let from = root.join("Workspace").join("Part");
+        let to = root.join("Workspace").join("Model").join("Part");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::write(from.join("_instance.toml"), "[metadata]\nclass_name = \"Part\"\n").unwrap();
+
+        let mut world = World::new();
+        let part = world
+            .spawn(crate::space::instance_loader::InstanceFile {
+                toml_path: from.join("_instance.toml"),
+                mesh_path: std::path::PathBuf::new(),
+                name: "Part".to_string(),
+            })
+            .id();
+        let mut registry = crate::space::SpaceFileRegistry::default();
+        registry.file_to_entity.insert(from.join("_instance.toml"), part);
+        world.insert_resource(registry);
+
+        assert!(move_folder_and_rebase(&mut world, &from, &to));
+
+        assert!(!from.exists() && to.join("_instance.toml").is_file(), "the folder did not move");
+        assert_eq!(world.get::<crate::space::instance_loader::InstanceFile>(part).unwrap().toml_path, to.join("_instance.toml"));
+        let registry = world.resource::<crate::space::SpaceFileRegistry>();
+        assert_eq!(registry.file_to_entity.get(&to.join("_instance.toml")), Some(&part), "the registry still names the old path");
+        assert!(!registry.file_to_entity.contains_key(&from.join("_instance.toml")), "the old registry key is still there");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Undo and redo of a resize keep a Roblox import's folded mesh scale: the
+    /// drawn scale is the size times the fold, never the bare size.
+    #[test]
+    fn undoing_a_resize_keeps_the_folded_mesh_scale() {
+        use crate::space::instance_loader::MeshFold;
+        let mut world = World::new();
+        let fold = MeshFold { scale: Vec3::new(2.0, 0.5, 1.0), offset: Vec3::ZERO };
+        let part = world
+            .spawn((
+                Transform::from_scale(Vec3::new(8.0, 1.0, 6.0) * fold.scale),
+                crate::classes::BasePart::default(),
+                crate::spawn::MeshSource::new("assets/meshes/rbx-1.glb".to_string()),
+                fold,
+            ))
+            .id();
+        let resize = Action::ScaleEntities {
+            old_states: vec![(part.to_bits(), [0.0, 0.0, 0.0], [4.0, 2.0, 3.0])],
+            new_states: vec![(part.to_bits(), [0.0, 0.0, 0.0], [8.0, 1.0, 6.0])],
+        };
+        apply_undo_action(&resize, &mut world);
+        assert_eq!(world.get::<Transform>(part).unwrap().scale, Vec3::new(8.0, 1.0, 3.0));
+        assert_eq!(world.get::<crate::classes::BasePart>(part).unwrap().size, Vec3::new(4.0, 2.0, 3.0));
+        apply_redo_action(&resize, &mut world);
+        assert_eq!(world.get::<Transform>(part).unwrap().scale, Vec3::new(16.0, 0.5, 6.0));
+    }
+
+    /// Undo and redo of a resize of a multiplier-kind mesh restore the ratio,
+    /// not the bare size.
+    #[test]
+    fn undoing_a_resize_restores_a_multiplier_meshs_ratio() {
+        let mut world = World::new();
+        // Natural size (2, 3, 4): size (8, 6, 4) is ratio (4, 2, 1).
+        let part = world
+            .spawn((
+                Transform::from_scale(Vec3::new(4.0, 2.0, 1.0)),
+                crate::classes::BasePart { size: Vec3::new(8.0, 6.0, 4.0), ..Default::default() },
+                crate::spawn::MeshSource::new("assets/meshes/m.glb".to_string()),
+                crate::space::instance_loader::MeshRatio,
+            ))
+            .id();
+        let resize = Action::ScaleEntities {
+            old_states: vec![(part.to_bits(), [0.0, 0.0, 0.0], [4.0, 6.0, 8.0])],
+            new_states: vec![(part.to_bits(), [0.0, 0.0, 0.0], [8.0, 6.0, 4.0])],
+        };
+        apply_undo_action(&resize, &mut world);
+        assert!((world.get::<Transform>(part).unwrap().scale - Vec3::new(2.0, 2.0, 2.0)).abs().max_element() < 1e-5);
+        apply_redo_action(&resize, &mut world);
+        assert!((world.get::<Transform>(part).unwrap().scale - Vec3::new(4.0, 2.0, 1.0)).abs().max_element() < 1e-5);
+    }
+}
+
+/// During Play the History stays as the authored scene left it: every history
+/// request (Undo, Redo, Undo This Event, Revert to Here, a History row) is
+/// consumed and refused with the notice every path gives, and none applies.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::keybindings::{play_refusal, Action as EditorAction};
+    use crate::play_mode::PlayModeState;
+
+    /// A world in `state` whose History holds two applied steps and one
+    /// undone one, with every history message registered.
+    fn world_in(state: PlayModeState) -> World {
+        let mut world = World::new();
+        let part = world.spawn(Transform::from_xyz(2.0, 0.0, 0.0)).id();
+        let step = |from: f32, to: f32| Action::TransformEntities {
+            old_transforms: vec![(part.to_bits(), [from, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+            new_transforms: vec![(part.to_bits(), [to, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+        };
+        let mut stack = UndoStack::default();
+        stack.push(step(0.0, 1.0));
+        stack.push(step(1.0, 2.0));
+        stack.push(step(2.0, 3.0));
+        let _ = stack.undo();
+        world.insert_resource(stack);
+        world.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        world.insert_resource(crate::notifications::NotificationManager::new());
+        world.init_resource::<crate::ui::OutputConsole>();
+        world.init_resource::<Messages<UndoEvent>>();
+        world.init_resource::<Messages<RedoEvent>>();
+        world.init_resource::<Messages<UndoSingleEvent>>();
+        world.init_resource::<Messages<RevertToEvent>>();
+        world.init_resource::<Messages<HistoryJumpEvent>>();
+        world
+    }
+
+    fn warnings(world: &World) -> Vec<String> {
+        world
+            .resource::<crate::notifications::NotificationManager>()
+            .notifications
+            .iter()
+            .filter(|n| n.level == crate::notifications::NotificationLevel::Warning)
+            .map(|n| n.message.clone())
+            .collect()
+    }
+
+    /// Every line in the Output panel.
+    fn output(world: &World) -> Vec<String> {
+        world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// The history requests still queued.
+    fn queued(world: &mut World) -> usize {
+        world.resource_mut::<Messages<UndoEvent>>().drain().count()
+            + world.resource_mut::<Messages<RedoEvent>>().drain().count()
+            + world.resource_mut::<Messages<UndoSingleEvent>>().drain().count()
+            + world.resource_mut::<Messages<RevertToEvent>>().drain().count()
+            + world.resource_mut::<Messages<HistoryJumpEvent>>().drain().count()
+    }
+
+    type Request = (EditorAction, fn(&mut World), fn(&mut World));
+
+    /// One request of each kind, the editor action whose notice it gives,
+    /// and its handler.
+    fn requests() -> [Request; 5] {
+        [
+            (
+                EditorAction::Undo,
+                |w| {
+                    w.resource_mut::<Messages<UndoEvent>>().write(UndoEvent);
+                },
+                handle_undo_events,
+            ),
+            (
+                EditorAction::Redo,
+                |w| {
+                    w.resource_mut::<Messages<RedoEvent>>().write(RedoEvent);
+                },
+                handle_redo_events,
+            ),
+            (
+                EditorAction::Undo,
+                |w| {
+                    w.resource_mut::<Messages<UndoSingleEvent>>().write(UndoSingleEvent { index: 0 });
+                },
+                handle_undo_single_events,
+            ),
+            (
+                EditorAction::Undo,
+                |w| {
+                    w.resource_mut::<Messages<RevertToEvent>>().write(RevertToEvent { target: 0 });
+                },
+                handle_revert_to_events,
+            ),
+            (
+                EditorAction::Undo,
+                |w| {
+                    w.resource_mut::<Messages<HistoryJumpEvent>>().write(HistoryJumpEvent::to_row(-1));
+                },
+                handle_history_jump_events,
+            ),
+        ]
+    }
+
+    #[test]
+    fn play_and_pause_refuse_every_history_request() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for (i, (action, write, handle)) in requests().into_iter().enumerate() {
+                let mut world = world_in(state);
+                let revision = world.resource::<UndoStack>().revision();
+                write(&mut world);
+                handle(&mut world);
+                assert_eq!(world.resource::<UndoStack>().revision(), revision, "{state:?} request {i}: the History moved");
+                assert_eq!(warnings(&world), [play_refusal(state, action).unwrap()], "{state:?} request {i}");
+                assert_eq!(output(&world), warnings(&world), "{state:?} request {i}: the Output panel and the toasts disagree");
+                assert_eq!(queued(&mut world), 0, "{state:?} request {i} was left queued");
+            }
+        }
+    }
+
+    /// The same requests move the History while editing, so the test above
+    /// is not passing on handlers that do nothing here.
+    #[test]
+    fn editing_runs_every_history_request() {
+        for (i, (_, write, handle)) in requests().into_iter().enumerate() {
+            let mut world = world_in(PlayModeState::Editing);
+            let revision = world.resource::<UndoStack>().revision();
+            write(&mut world);
+            handle(&mut world);
+            assert_ne!(world.resource::<UndoStack>().revision(), revision, "request {i} did not move the History");
+            assert!(!warnings(&world).iter().any(|w| w.starts_with("Stop Play")), "request {i}");
+        }
     }
 }

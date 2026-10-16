@@ -411,6 +411,14 @@ pub(crate) fn flush_space(world: &mut World, terrain: FlushTerrain) -> Result<Sp
 }
 
 pub(crate) fn do_save_space(world: &mut World) {
+    // During Play the scene in memory is the running game, not the Space:
+    // writing it would save the game's state, and its git snapshot, as the
+    // user's work. Refused before anything is written, whoever asked (a key,
+    // the menu, a button, Close Space, Save As, Publish); auto-save already
+    // waits for Stop.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::SaveScene) {
+        return;
+    }
     // A manual Save repeats the unsaved-terrain warning autosave keeps quiet.
     // Re-armed before the flush, whose terrain save is what warns.
     if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
@@ -1060,6 +1068,11 @@ pub(crate) fn terrain_snapshot(world: &mut World) -> Option<eustress_common::ter
 /// saves/loads target the new folder. The file watcher is paused during the
 /// copy to avoid phantom delete/create events.
 fn do_save_space_as(world: &mut World) {
+    // Refused during Play before the save, the copy and the switch: Save As
+    // saves the Space first, and during Play the scene is the running game.
+    if crate::keybindings::refuse_during_play(world, crate::keybindings::Action::SaveSceneAs) {
+        return;
+    }
     // 1. Commit everything in-memory to disk at the current location first.
     do_save_space(world);
 
@@ -1160,9 +1173,53 @@ pub struct PublishProgress {
     pub percent: f32,
     pub error: Option<String>,
     pub complete: bool,
+    /// The listing the publish created or updated, once it exists.
+    pub sim_id: Option<String>,
+    /// The Gallery review at the end of the publish (an author-facing view).
+    pub review: Option<crate::moderation_dossier::ListingReview>,
+    /// Nothing had changed since the last publish, so nothing was uploaded.
+    pub no_changes: bool,
+    /// The change log this publish built (markdown), for the dialog's "Download change log (.md)". It is
+    /// kept even when storing it failed, so the download works either way.
+    pub changelog: Option<String>,
+    /// The version the change log is for (the file name is CHANGELOG-v{version}.md).
+    pub changelog_version: Option<u32>,
+    /// Whether the Worker stored the log (the dialog's list of earlier logs shows it).
+    pub changelog_stored: bool,
+}
+
+/// What a finished publish hands back: the listing, the state to remember once its review went out, and the change log it built.
+#[allow(dead_code)]
+struct PublishDone {
+    sim_id: String,
+    state: String,
+    changelog: Option<String>,
+    changelog_version: Option<u32>,
+    changelog_stored: bool,
+    /// The publish's notes (`Published::notes`): SoulService's notice and any
+    /// key warning, shown after the result.
+    notes: Vec<String>,
 }
 
 fn do_publish(world: &mut World, request: &PublishRequest) {
+    // Refused during Play before any step runs, so a publish never half-runs:
+    // it saves the Space, writes the manifests and Max players, and exports
+    // the live scene, which during Play is the running game. The dialog and
+    // the engine bridge's publish.submit both arrive here.
+    let action = if request.space_only {
+        crate::keybindings::Action::PublishSpace
+    } else {
+        crate::keybindings::Action::PublishUniverse
+    };
+    if crate::keybindings::refuse_during_play(world, action) {
+        return;
+    }
+    if publish_in_flight(world) {
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.warning("A publish is already in progress. Wait for it to finish, then publish again.");
+        }
+        return;
+    }
     do_save_space(world);
 
     let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
@@ -1193,6 +1250,19 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
             n.error(format!("Publish preparation failed: {}", e));
         }
         return;
+    }
+
+    // The Publish dialog's Max players goes into the Space's Players service
+    // before the export reads it, so hosting, Properties and the listing hold
+    // one value. `None` (the dialog is gone, or the MCP publish tool gave none)
+    // leaves the Space's own value as it is.
+    if let Some(max_players) = request.max_players {
+        if let Err(e) = crate::multiplayer::set_space_max_players(world, max_players) {
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Publish stopped: {}", e));
+            }
+            return;
+        }
     }
 
     // What the export reads, taken here where the World is: the open Space's
@@ -1239,8 +1309,11 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         );
     }
 
-    // Auto-capture thumbnail from viewport if none exists
-    capture_thumbnail_from_viewport(world, &universe_root);
+    // The thumbnail is one of the capture orbit's off-screen renders, made once
+    // the orbit is done (submit_for_review): never a capture of the Studio
+    // window. A thumbnail an older build took of the window (512x288) is
+    // removed here so the upload step does not send it as the author's own.
+    crate::moderation_dossier::remove_legacy_window_thumbnail(&universe_root.join(".eustress"));
 
     // Moderation inputs, built here with the World in hand: the dossier the
     // Gallery's text classifier reads, and the capture orbit its judge looks
@@ -1274,6 +1347,7 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         percent: 0.0,
         error: None,
         complete: false,
+        ..Default::default()
     }));
 
     let progress_for_thread = progress.clone();
@@ -1283,36 +1357,59 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
     let request = request.clone();
     let is_space_only = request.space_only;
     std::thread::spawn(move || {
+        // However this thread ends, the record ends complete.
+        let _guard = PublishGuard(progress_for_thread.clone());
         let mut dossier = dossier;
         let result = execute_publish_upload(&plan, &universe_root, &request, &token, &progress_for_thread, pending_manifest);
         match result {
-            Ok(sim_id) => {
+            Ok(PublishDone { sim_id, state, changelog, changelog_version, changelog_stored, notes }) => {
                 // The listing exists and the content is stored. Review is a
                 // separate step so a capture that never lands, or an API that
-                // is briefly down, degrades to "review pending" rather than
-                // failing a publish whose bytes are already up.
-                let summary = match submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, true, &progress_for_thread) {
-                    Ok(s) => s,
+                // is briefly down, degrades to "review not started" rather than
+                // failing a publish whose bytes are already up. The publish
+                // counts as done only once its review went out, so a review
+                // that did not is asked for again by the next publish.
+                let outcome = submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, true, &progress_for_thread);
+                if outcome.is_ok() {
+                    record_reviewed(&universe_root, &state);
+                }
+                let mut p = lock_progress(&progress_for_thread);
+                p.sim_id = Some(sim_id.clone());
+                p.changelog = changelog;
+                p.changelog_version = changelog_version;
+                p.changelog_stored = changelog_stored;
+                match outcome {
+                    Ok(review) => {
+                        p.stage = format!("Published {}: {}", sim_id, review.summary());
+                        p.review = Some(review);
+                    }
                     Err(e) => {
                         tracing::warn!("Review submission incomplete for {}: {}", sim_id, e);
-                        format!("Published {}. Review pending: {}", sim_id, e)
+                        p.stage = format!(
+                            "Published {}. The Gallery review could not be started from Studio ({}). The listing stays unlisted until it is reviewed.",
+                            sim_id, e
+                        );
                     }
-                };
-                let mut p = progress_for_thread.lock().unwrap();
-                p.stage = summary;
+                }
+                // SoulService's notice and any key warning, after the result.
+                for note in &notes {
+                    p.stage.push(' ');
+                    p.stage.push_str(note);
+                }
                 p.percent = 100.0;
                 p.complete = true;
                 tracing::info!("Published successfully: {} ({})", sim_id, p.stage);
             }
             Err(e) if e == NO_CHANGES => {
-                let mut p = progress_for_thread.lock().unwrap();
+                let mut p = lock_progress(&progress_for_thread);
                 p.stage = e;
+                p.no_changes = true;
                 p.percent = 100.0;
                 p.complete = true;
                 tracing::info!("Publish skipped: nothing changed since the last publish");
             }
             Err(e) => {
-                let mut p = progress_for_thread.lock().unwrap();
+                let mut p = lock_progress(&progress_for_thread);
                 p.stage = "Failed".to_string();
                 p.error = Some(e.clone());
                 p.complete = true;
@@ -1341,6 +1438,14 @@ use crate::space::echk_publish::NO_CHANGES;
 #[cfg(not(feature = "world-db"))]
 const NO_CHANGES: &str = "No changes since the last publish";
 
+/// The publish is done: its review went out (`echk_publish::record_reviewed`).
+#[cfg(feature = "world-db")]
+fn record_reviewed(universe_root: &Path, state: &str) {
+    crate::space::echk_publish::record_reviewed(universe_root, state);
+}
+#[cfg(not(feature = "world-db"))]
+fn record_reviewed(_universe_root: &Path, _state: &str) {}
+
 #[cfg(feature = "world-db")]
 fn publish_plan(world: &World, space_root: &Path) -> Result<PublishPlan, String> {
     // Called right after `do_save_space`, so the export waits for the tree.
@@ -1356,50 +1461,88 @@ fn publish_plan(_world: &World, _space_root: &Path) -> Result<PublishPlan, Strin
 #[derive(Resource)]
 pub struct PublishProgressHandle(pub std::sync::Arc<std::sync::Mutex<PublishProgress>>);
 
-/// Capture a thumbnail from the current viewport and save to .eustress/thumbnail.png.
-/// Spawns a Screenshot entity — Bevy captures the primary window next frame,
-/// then our observer resizes to 512x288 and saves to disk.
-fn capture_thumbnail_from_viewport(world: &mut World, universe_root: &std::path::Path) {
-    let thumb_path = universe_root.join(".eustress").join("thumbnail.png");
+/// Lock the progress record even if a panicking thread poisoned it. It is plain
+/// data, and a stuck publish is worse than a half-written stage line.
+fn lock_progress(handle: &ProgressHandle) -> std::sync::MutexGuard<'_, PublishProgress> {
+    handle.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
-    // If a thumbnail already exists and is recent (< 5 min), skip capture
-    if thumb_path.exists() {
-        if let Ok(meta) = std::fs::metadata(&thumb_path) {
-            if let Ok(modified) = meta.modified() {
-                if modified.elapsed().unwrap_or_default().as_secs() < 300 {
-                    tracing::info!("Recent thumbnail exists, skipping capture");
-                    return;
-                }
-            }
+/// Marks the publish finished however its thread ends. Without it a panic
+/// leaves `complete` false for good, and every later Publish click is refused
+/// as "already in progress" until Studio restarts.
+struct PublishGuard(ProgressHandle);
+
+impl Drop for PublishGuard {
+    fn drop(&mut self) {
+        let mut p = lock_progress(&self.0);
+        if !p.complete {
+            p.stage = "Failed".to_string();
+            p.error = Some("The publish stopped unexpectedly. Publish again to retry.".to_string());
+            p.complete = true;
         }
     }
+}
 
-    let _ = std::fs::create_dir_all(universe_root.join(".eustress"));
+/// A publish is running: the second click is refused rather than started
+/// alongside, where it would overwrite the progress record and upload twice.
+fn publish_in_flight(world: &World) -> bool {
+    world
+        .get_resource::<PublishProgressHandle>()
+        .map(|h| !lock_progress(&h.0).complete)
+        .unwrap_or(false)
+}
 
-    // Spawn a Screenshot entity targeting the primary window.
-    // The observer fires when the GPU readback completes (next frame).
-    let save_path = thumb_path.clone();
-    world.spawn(bevy::render::view::screenshot::Screenshot::primary_window())
-        .observe(move |trigger: bevy::ecs::observer::On<bevy::render::view::screenshot::ScreenshotCaptured>| {
-            let img = trigger.image.clone();
-            let path = save_path.clone();
-            // Resize + save on the async compute pool to avoid blocking render
-            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-                match img.try_into_dynamic() {
-                    Ok(dyn_img) => {
-                        let rgb = dyn_img.to_rgb8();
-                        let thumb = image::imageops::resize(&rgb, 512, 288, image::imageops::FilterType::Lanczos3);
-                        match thumb.save(&path) {
-                            Ok(_) => tracing::info!("Thumbnail captured: {:?} (512x288)", path),
-                            Err(e) => tracing::warn!("Failed to save thumbnail: {}", e),
-                        }
-                    }
-                    Err(e) => tracing::warn!("Thumbnail image conversion failed: {}", e),
-                }
-            }).detach();
-        });
+#[cfg(test)]
+mod publish_guard_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
 
-    tracing::info!("Screenshot queued for next frame → {:?}", thumb_path);
+    fn handle() -> ProgressHandle {
+        Arc::new(Mutex::new(PublishProgress::default()))
+    }
+
+    #[test]
+    fn a_publish_thread_that_panics_still_ends_complete_with_an_error() {
+        let h = handle();
+        let inner = h.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = PublishGuard(inner.clone());
+            // Held while panicking, so the mutex is poisoned when the guard drops.
+            let _lock = inner.lock().unwrap();
+            panic!("simulated publish failure");
+        })
+        .join();
+        assert!(joined.is_err());
+        let p = lock_progress(&h);
+        assert!(p.complete);
+        assert_eq!(p.stage, "Failed");
+        assert!(p.error.as_deref().unwrap_or("").contains("stopped unexpectedly"));
+    }
+
+    #[test]
+    fn a_finished_publish_is_left_exactly_as_it_was() {
+        let h = handle();
+        {
+            let mut p = lock_progress(&h);
+            p.complete = true;
+            p.stage = "Published x".into();
+        }
+        drop(PublishGuard(h.clone()));
+        let p = lock_progress(&h);
+        assert_eq!(p.stage, "Published x");
+        assert!(p.error.is_none());
+    }
+
+    #[test]
+    fn a_second_publish_is_refused_while_one_runs_and_allowed_after() {
+        let mut world = World::new();
+        assert!(!publish_in_flight(&world), "no publish yet");
+        let h = handle();
+        world.insert_resource(PublishProgressHandle(h.clone()));
+        assert!(publish_in_flight(&world), "running");
+        lock_progress(&h).complete = true;
+        assert!(!publish_in_flight(&world), "finished");
+    }
 }
 
 /// Auto-save system — saves Space to disk every 60 seconds during editing mode.
@@ -1458,7 +1601,8 @@ fn set_progress(handle: &ProgressHandle, stage: &str, percent: f32) {
 /// Export the Universe as `.echk`, upload the chunks the API lacks, and
 /// commit the world to the Universe's listing ([`crate::space::echk_publish`]).
 /// A Space-only publish swaps just the open Space into the published world.
-/// Runs on a background thread. Returns the listing id.
+/// Runs on a background thread. Returns the listing id, and what the publish
+/// sent, for `record_reviewed` once its review went out.
 #[cfg(feature = "world-db")]
 fn execute_publish_upload(
     plan: &PublishPlan,
@@ -1467,8 +1611,8 @@ fn execute_publish_upload(
     token: &str,
     progress: &ProgressHandle,
     pending_manifest: Option<crate::website::PendingManifest>,
-) -> Result<String, String> {
-    use crate::space::echk_publish::{publish, Listing};
+) -> Result<PublishDone, String> {
+    use crate::space::echk_publish::{publish_to, Listing};
 
     let listing = Listing {
         name: if request.experience_name.trim().is_empty() {
@@ -1480,11 +1624,12 @@ fn execute_publish_upload(
             request.experience_name.trim().to_string()
         },
         description: request.description.trim().to_string(),
-        genre: if request.genre.trim().is_empty() { "All".to_string() } else { request.genre.trim().to_string() },
         is_public: request.is_public,
         open_source: request.open_source,
+        tags: request.tags.clone(),
+        cover: request.cover.clone(),
     };
-    let published = publish(plan, token, &listing, request.space_only, &|stage: &str, percent: f32| {
+    let published = publish_to(plan, token, &listing, request.space_only, &request.target, &|stage: &str, percent: f32| {
         set_progress(progress, stage, percent)
     })?;
     let sim_id = published.sim_id.clone();
@@ -1562,7 +1707,14 @@ fn execute_publish_upload(
     }
 
     set_progress(progress, "Uploaded", 92.0);
-    Ok(sim_id)
+    Ok(PublishDone {
+        sim_id,
+        state: published.state,
+        changelog: published.changelog,
+        changelog_version: published.version,
+        changelog_stored: published.changelog_stored,
+        notes: published.notes,
+    })
 }
 
 #[cfg(not(feature = "world-db"))]
@@ -1573,7 +1725,7 @@ fn execute_publish_upload(
     _token: &str,
     _progress: &ProgressHandle,
     _pending_manifest: Option<crate::website::PendingManifest>,
-) -> Result<String, String> {
+) -> Result<PublishDone, String> {
     Err("Publishing exports the Space's database, and this build has no world-db feature.".into())
 }
 
@@ -1601,7 +1753,7 @@ fn submit_for_review(
     // whose hash `.last_publish_hash` now holds.
     bind_content_root: bool,
     progress: &ProgressHandle,
-) -> Result<String, String> {
+) -> Result<crate::moderation_dossier::ListingReview, String> {
     let auth = format!("Bearer {}", token);
 
     // Captures: wait for the orbit, then upload what it produced.
@@ -1636,6 +1788,29 @@ fn submit_for_review(
     }
     tracing::info!("Review captures uploaded: {}/{}", uploaded, paths.len());
 
+    // The listing's thumbnail: the best of the orbit's off-screen renders,
+    // unless the author keeps their own picture in .eustress/ (uploaded with
+    // the content). Sent before the submit, so the review sees what the
+    // Gallery will show.
+    let state_dir = universe_root.join(".eustress");
+    if !crate::moderation_dossier::has_author_thumbnail(&state_dir) {
+        let out = state_dir.join(crate::moderation_dossier::AUTO_THUMBNAIL_FILE);
+        match crate::moderation_dossier::write_listing_thumbnail(&paths, &out) {
+            Ok(()) => match std::fs::read(&out) {
+                Ok(bytes) => match ureq::put(&format!("{}/api/simulations/{}/thumbnail", api_base(), sim_id))
+                    .set("Authorization", &auth)
+                    .set("Content-Type", "image/png")
+                    .send_bytes(&bytes)
+                {
+                    Ok(_) => tracing::info!("Thumbnail uploaded from the capture orbit ({} bytes)", bytes.len()),
+                    Err(e) => tracing::warn!("Thumbnail upload failed: {}", e),
+                },
+                Err(e) => tracing::warn!("Thumbnail unreadable: {}", e),
+            },
+            Err(e) => tracing::warn!("No thumbnail made from the captures: {}", e),
+        }
+    }
+
     // Dossier: bind it to the package that was uploaded, then send it.
     set_progress(progress, "Submitting for review...", 96.0);
     if bind_content_root && dossier.content_root.is_none() {
@@ -1648,11 +1823,22 @@ fn submit_for_review(
     }
     let dossier_json = serde_json::to_string(dossier).map_err(|e| format!("dossier serialize: {}", e))?;
     let _ = std::fs::write(universe_root.join(".eustress").join("moderation-dossier.json"), &dossier_json);
-    ureq::put(&format!("{}/api/simulations/{}/dossier", api_base(), sim_id))
+    match ureq::put(&format!("{}/api/simulations/{}/dossier", api_base(), sim_id))
         .set("Authorization", &auth)
         .set("Content-Type", "application/json")
         .send_string(&dossier_json)
-        .map_err(|e| format!("dossier upload: {}", e))?;
+    {
+        Ok(_) => {}
+        // The API takes evidence only for a listing that is waiting for a
+        // review. A 409 means it is not: it was approved and nothing a
+        // reviewer reads changed (a player-count change, say), or a review is
+        // already reading what it has. The submit below answers where the
+        // listing stands, so this is not a failed publish.
+        Err(ureq::Error::Status(409, _)) => {
+            tracing::info!("Dossier not taken for {}: the listing is not waiting for evidence", sim_id);
+        }
+        Err(e) => return Err(format!("dossier upload: {}", e)),
+    }
 
     ureq::post(&format!("{}/api/simulations/{}/submit", api_base(), sim_id))
         .set("Authorization", &auth)
@@ -1682,7 +1868,7 @@ fn submit_for_review(
     if let Err(e) = review.save(universe_root) {
         tracing::warn!("listing review: {}", e);
     }
-    Ok(format!("Published {}: {}", sim_id, review.summary()))
+    Ok(review)
 }
 
 fn prepare_publish_manifests(project_root: &Path, request: &PublishRequest) -> Result<(), String> {
@@ -1728,8 +1914,9 @@ fn prepare_publish_manifests(project_root: &Path, request: &PublishRequest) -> R
     sync_manifest.remote.open_source = request.open_source;
     sync_manifest.remote.editable = request.studio_editable;
 
-    // Reset manifests on first Universe publish (no existing experience_id)
-    let is_first_publish = sync_manifest.remote.experience_id.is_none();
+    // Reset manifests on a Universe's first publish: no listing on any API
+    // (a first publish to staging keeps production's history).
+    let is_first_publish = sync_manifest.remote.experience_id.is_none() && sync_manifest.remote.listings.is_empty();
     if is_first_publish {
         publish_manifest.publish.version = 1;
         publish_manifest.publish.latest_release_id = None;
@@ -1738,7 +1925,6 @@ fn prepare_publish_manifests(project_root: &Path, request: &PublishRequest) -> R
         publish_manifest.releases.clear();
         journal_manifest = PublishJournalManifest::new(&now);
         sync_manifest.remote.project_id = None;
-        sync_manifest.remote.experience_id = None;
     }
 
     journal_manifest.journal.stage = "prepared".to_string();
@@ -2805,6 +2991,69 @@ mod tests {
         std::fs::write(dir.join("_terrain.toml"), "[terrain]\n").unwrap();
         assert!(plan_terrain_save(&mut world, root, Some(&dir)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// During Play, Save, Save As and Publish refuse before they write anything,
+/// whoever asks: a key, the menu, a button, the Publish dialog and the engine
+/// bridge all arrive at these three.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::keybindings::{play_refusal, Action};
+    use crate::play_mode::PlayModeState;
+
+    /// A world in `state`, with somewhere for notices to land.
+    fn world_in(state: PlayModeState) -> World {
+        let mut world = World::new();
+        world.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        world.insert_resource(NotificationManager::new());
+        world.init_resource::<crate::ui::OutputConsole>();
+        world
+    }
+
+    /// The toasts, each of which is also a line in the Output panel.
+    fn notices(world: &World) -> Vec<String> {
+        let toasts: Vec<String> = world.resource::<NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+        let output: Vec<String> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        assert_eq!(output, toasts, "the Output panel and the toasts disagree");
+        toasts
+    }
+
+    #[test]
+    fn save_is_refused_before_its_first_write() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut world = world_in(state);
+            let mut studio = crate::ui::StudioState::default();
+            studio.terrain_unsaved_warned = true;
+            world.insert_resource(studio);
+            do_save_space(&mut world);
+            assert_eq!(notices(&world), [play_refusal(state, Action::SaveScene).unwrap()], "{state:?}");
+            assert!(world.resource::<crate::ui::StudioState>().terrain_unsaved_warned, "{state:?}: the save ran past its refusal");
+        }
+    }
+
+    /// No Space is open here, so a Save As that got past its refusal would
+    /// say so instead of opening the folder picker.
+    #[test]
+    fn save_as_is_refused_before_the_save_the_copy_and_the_switch() {
+        let mut world = world_in(PlayModeState::Playing);
+        do_save_space_as(&mut world);
+        assert_eq!(notices(&world), [play_refusal(PlayModeState::Playing, Action::SaveSceneAs).unwrap()]);
+    }
+
+    /// No Space is open here either, so a publish that got past its refusal
+    /// would stop at the save or at "Publish requires an open Space folder".
+    #[test]
+    fn publish_is_refused_before_any_step() {
+        for (space_only, action) in [(false, Action::PublishUniverse), (true, Action::PublishSpace)] {
+            let mut world = world_in(PlayModeState::Playing);
+            let mut request = PublishRequest::default();
+            request.space_only = space_only;
+            do_publish(&mut world, &request);
+            assert_eq!(notices(&world), [play_refusal(PlayModeState::Playing, action).unwrap()], "{action:?}");
+        }
     }
 }
 

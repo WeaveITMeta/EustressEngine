@@ -40,6 +40,7 @@
 
 use bevy::asset::{embedded_asset, RenderAssetUsages};
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::MeshVertexBufferLayoutRef;
@@ -86,9 +87,53 @@ const WEATHER_CONTRAST: f32 = 0.6;
 /// and the reason the march can stop well short of the horizon.
 const FADE_DISTANCE: f32 = 38_000.0;
 
-/// Radius of the dome the clouds are drawn on, metres. Only its directions
-/// matter; it has to sit inside the far plane.
+/// Radius of the dome the clouds are drawn on, metres, for a camera with a
+/// depth prepass. Only its directions matter then; it has to sit inside the
+/// far plane.
 const DOME_RADIUS: f32 = 1_000.0;
+
+/// How far out the dome sits for a camera without a depth prepass, as a
+/// share of its far plane. The same as the sky dome's.
+const DOME_FAR_FRACTION: f32 = 0.9;
+
+/// The dome's radius for a camera whose far plane is `far`.
+///
+/// With a depth prepass the shader stops each ray at the scene and the dome
+/// is never depth tested, so only its directions matter. Without one (Play's
+/// cameras) the hardware depth test against the dome IS the occlusion: scene
+/// nearer than the dome hides the clouds and scene beyond it is painted
+/// over. So the dome goes out nearly to the far plane, behind everything the
+/// camera can see.
+fn dome_radius(far: f32, has_prepass: bool) -> f32 {
+    if has_prepass {
+        DOME_RADIUS.min(far * 0.5)
+    } else {
+        far * DOME_FAR_FRACTION
+    }
+}
+
+/// The layer to draw out of a Space's Clouds objects: the first enabled one,
+/// else the first. Spawn order differs between Studio's load and the
+/// Player's, so "the first" alone could pick a different layer in each.
+fn pick_layer<'a, T: Copy>(layers: impl Iterator<Item = (T, &'a Clouds)>) -> Option<(T, &'a Clouds)> {
+    let mut first = None;
+    for (id, clouds) in layers {
+        if clouds.enabled {
+            return Some((id, clouds));
+        }
+        first.get_or_insert((id, clouds));
+    }
+    first
+}
+
+/// What `sync_cloud_dome` last reported, so the log speaks only when the
+/// layer or the camera changes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CloudReport {
+    layers: usize,
+    drawn: Option<(Entity, f32, bool)>,
+    camera: (Entity, isize, Option<f32>, bool),
+}
 
 /// Transparent draws sort by distance plus this bias and draw from the most
 /// negative up: after the moon (`moon_disc::MOON_SORT_BIAS`), so the clouds
@@ -195,13 +240,18 @@ impl Material for CloudMaterial {
     ) -> Result<(), SpecializedMeshPipelineError> {
         // The camera is inside the dome: draw its inner faces, once.
         descriptor.primitive.cull_mode = Some(Face::Front);
+        // The clouds write their depth (the shader sets it): the volumetric
+        // fog, the sun's god rays, is composited after the transparent pass
+        // and stops at it, so the haze behind a cloud is hidden by the cloud.
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = Some(true);
+        }
         // With a depth prepass the shader stops each ray at the scene
         // itself, so the dome must not be depth tested against it: the
         // clouds between the camera and far terrain would be lost.
         if key.mesh_key.contains(MeshPipelineKey::DEPTH_PREPASS) {
             if let Some(depth) = descriptor.depth_stencil.as_mut() {
                 depth.depth_compare = Some(CompareFunction::Always);
-                depth.depth_write_enabled = Some(false);
             }
         }
         Ok(())
@@ -687,18 +737,19 @@ fn sync_cloud_dome(
     sky_light: Res<SkyLight>,
     medium: Res<SkyMedium>,
     scene: Res<crate::plugins::sky_atmosphere::SceneAtmosphere>,
-    authored: Query<&Clouds>,
-    cameras: Query<(&Camera, &GlobalTransform, Option<&Projection>), With<SkyCamera>>,
+    authored: Query<(Entity, &Clouds)>,
+    cameras: Query<(Entity, &Camera, &GlobalTransform, Option<&Projection>, Has<DepthPrepass>), With<SkyCamera>>,
     mut domes: Query<(&MeshMaterial3d<CloudMaterial>, &mut Transform), With<CloudDome>>,
     mut wind: Local<CloudWind>,
+    mut reported: Local<Option<CloudReport>>,
 ) {
     let (Some(shape), Some(detail)) = (noise.shape.clone(), noise.detail.clone()) else {
         return;
     };
-    let Some((_, view, projection)) = cameras
+    let Some((camera_entity, camera, view, projection, has_prepass)) = cameras
         .iter()
-        .filter(|(camera, ..)| camera.is_active)
-        .min_by_key(|(camera, ..)| camera.order)
+        .filter(|(_, camera, ..)| camera.is_active)
+        .min_by_key(|(_, camera, ..)| camera.order)
     else {
         return;
     };
@@ -706,19 +757,47 @@ fn sync_cloud_dome(
     // The Space's own Clouds; without one, none (see
     // `CLOUDS_WITHOUT_AN_OBJECT`).
     let fallback;
-    let clouds = match authored.iter().next() {
-        Some(clouds) => clouds,
+    let drawn = pick_layer(authored.iter());
+    let clouds = match drawn {
+        Some((_, clouds)) => clouds,
         None => {
             fallback = Clouds { enabled: CLOUDS_WITHOUT_AN_OBJECT, ..Clouds::default() };
             &fallback
         }
     };
     // Parallel rays have no sky to march through.
-    let (radius, perspective) = match projection {
-        Some(Projection::Perspective(p)) => (DOME_RADIUS.min(p.far * 0.5), true),
-        Some(Projection::Orthographic(_)) => (DOME_RADIUS, false),
-        _ => (DOME_RADIUS, true),
+    let (radius, perspective, far) = match projection {
+        Some(Projection::Perspective(p)) => (dome_radius(p.far, has_prepass), true, Some(p.far)),
+        Some(Projection::Orthographic(_)) => (DOME_RADIUS, false, None),
+        _ => (DOME_RADIUS, true, None),
     };
+
+    // Say what is drawn, once per change: how many Clouds objects exist,
+    // which one, and through which camera.
+    let report = CloudReport {
+        layers: authored.iter().count(),
+        drawn: drawn.map(|(entity, c)| (entity, c.altitude, c.enabled)),
+        camera: (camera_entity, camera.order, far, has_prepass),
+    };
+    if *reported != Some(report) {
+        info!(
+            "☁️ Clouds: {} object(s); drawing {}; camera {:?} order {} far {} depth prepass {}",
+            report.layers,
+            drawn.map_or("none".to_string(), |(e, c)| format!(
+                "{e:?} at {:.0} m ({})",
+                c.altitude,
+                if c.enabled { "enabled" } else { "disabled" }
+            )),
+            camera_entity,
+            camera.order,
+            far.map_or("n/a".to_string(), |f| format!("{f:.0} m")),
+            has_prepass,
+        );
+        if report.layers > 1 && reported.map_or(true, |r| r.layers != report.layers) {
+            warn!("☁️ {} Clouds objects in this Space: only one layer is drawn", report.layers);
+        }
+        *reported = Some(report);
+    }
     let visible = clouds.enabled && clouds.coverage > 0.0 && perspective;
 
     // Wind, wrapped to each tile. The detail runs a little faster than the
@@ -884,6 +963,30 @@ mod tests {
         assert!((p.light_direction.truncate() - sky.moon_direction).length() < 1e-5);
         assert_eq!(p.light_direction.w, 1.0);
         assert!(luminance(p.light_top.truncate()) > 1.0);
+    }
+
+    #[test]
+    fn a_camera_without_a_depth_prepass_gets_a_dome_out_to_its_far_plane() {
+        // Studio's editor camera: a prepass, far 10,000. The old radius.
+        assert_eq!(dome_radius(10_000.0, true), 1_000.0);
+        assert_eq!(dome_radius(600.0, true), 300.0);
+        // Play's cameras: no prepass, far 1,000. The hardware depth test
+        // against the dome is the occlusion, so it sits behind all the scene
+        // (it was 500 m, painting the clouds over everything beyond).
+        assert_eq!(dome_radius(1_000.0, false), 900.0);
+        assert!(dome_radius(1_000.0, false) < 1_000.0, "inside the far plane");
+    }
+
+    #[test]
+    fn the_layer_drawn_is_the_first_enabled_one_whatever_the_spawn_order() {
+        let off = Clouds { enabled: false, altitude: 100.0, ..Clouds::default() };
+        let on = Clouds { altitude: 1400.0, ..Clouds::default() };
+        let other = Clouds { altitude: 2500.0, ..Clouds::default() };
+        let (_, drawn) = pick_layer([(0usize, &off), (1, &on), (2, &other)].into_iter()).unwrap();
+        assert_eq!(drawn.altitude, 1400.0, "a disabled layer does not hide an enabled one");
+        let (_, drawn) = pick_layer([(0usize, &off)].into_iter()).unwrap();
+        assert!(!drawn.enabled, "all disabled: the first, which draws nothing");
+        assert!(pick_layer(std::iter::empty::<(usize, &Clouds)>()).is_none());
     }
 
     #[test]

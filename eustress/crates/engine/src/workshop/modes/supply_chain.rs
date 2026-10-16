@@ -41,7 +41,6 @@ impl ToolHandler for RunScenarioTool {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("Scenario");
         let branches = input.get("branches").and_then(|v| v.as_array());
         let evidence = input.get("evidence").and_then(|v| v.as_array());
-        let num_samples = input.get("num_samples").and_then(|v| v.as_u64()).unwrap_or(10000);
 
         // Simple Bayesian update: posterior ∝ prior × likelihood
         let mut results = Vec::new();
@@ -78,11 +77,22 @@ impl ToolHandler for RunScenarioTool {
             }
         }
 
+        // The update is analytic (prior x likelihood ratio, normalised): no
+        // samples are drawn, so none are reported (it echoed `num_samples`).
+        if results.is_empty() {
+            return ToolResult {
+                tool_name: "run_scenario".to_string(), tool_use_id: String::new(),
+                success: false,
+                content: format!("Scenario '{}' has no `branches` to update.", name),
+                structured_data: None,
+                stream_topic: None,
+            };
+        }
         ToolResult {
             tool_name: "run_scenario".to_string(), tool_use_id: String::new(),
             success: true,
-            content: format!("Scenario '{}' ({} samples): {} branches analyzed", name, num_samples, results.len()),
-            structured_data: Some(serde_json::json!({ "scenario": name, "results": results, "samples": num_samples })),
+            content: format!("Scenario '{}': {} branches updated by Bayes' rule", name, results.len()),
+            structured_data: Some(serde_json::json!({ "scenario": name, "results": results })),
             stream_topic: Some("workshop.tool.run_scenario".to_string()),
         }
     }
@@ -125,13 +135,23 @@ impl ToolHandler for ForecastDemandTool {
         let product = input.get("product").and_then(|v| v.as_str()).unwrap_or("Product");
         let forecast_days = input.get("forecast_days").and_then(|v| v.as_u64()).unwrap_or(30);
 
-        // Simple moving average forecast from history
-        let history = input.get("history").and_then(|v| v.as_array());
-        let avg_daily = if let Some(h) = history {
-            let total: f64 = h.iter().filter_map(|p| p.get("units").and_then(|v| v.as_f64())).sum();
-            let count = h.len().max(1) as f64;
-            total / count
-        } else { 0.0 };
+        // Simple moving average forecast from history: the mean of the
+        // entries that carry a number of units. An entry without one is
+        // missing, not zero demand (it used to count as a zero day), and no
+        // history at all is an error, not a forecast of nothing.
+        let units: Vec<f64> = input.get("history").and_then(|v| v.as_array())
+            .map(|h| h.iter().filter_map(|p| p.get("units").and_then(|v| v.as_f64())).collect())
+            .unwrap_or_default();
+        if units.is_empty() {
+            return ToolResult {
+                tool_name: "forecast_demand".to_string(), tool_use_id: String::new(),
+                success: false,
+                content: format!("No forecast for {}: `history` needs entries with a numeric `units`.", product),
+                structured_data: None,
+                stream_topic: None,
+            };
+        }
+        let avg_daily = units.iter().sum::<f64>() / units.len() as f64;
 
         // Apply signal multipliers
         let mut multiplier = 1.0f64;
@@ -154,7 +174,9 @@ impl ToolHandler for ForecastDemandTool {
                 "daily_forecast": forecast,
                 "total_forecast": total_forecast,
                 "forecast_days": forecast_days,
-                "confidence": 0.7,
+                // How many history entries the mean rests on. (It used to
+                // report a constant "confidence": 0.7 whatever the history.)
+                "history_entries_used": units.len(),
                 "multiplier": multiplier,
             })),
             stream_topic: Some("workshop.tool.forecast_demand".to_string()),
@@ -222,5 +244,37 @@ impl ToolHandler for ScoreSupplierRiskTool {
             })),
             stream_topic: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::modes::test_context;
+    use serde_json::json;
+
+    #[test]
+    fn the_forecast_averages_only_entries_with_units() {
+        let r = ForecastDemandTool.execute(
+            json!({
+                "product": "p", "forecast_days": 10,
+                "history": [{ "units": 10.0 }, { "note": "no number" }, { "units": 20.0 }],
+            }),
+            &test_context(),
+        );
+        assert!(r.success);
+        assert!((r.structured_data.unwrap()["daily_forecast"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_history_is_an_error() {
+        let r = ForecastDemandTool.execute(json!({ "product": "p" }), &test_context());
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn a_scenario_without_branches_is_an_error() {
+        let r = RunScenarioTool.execute(json!({ "name": "s" }), &test_context());
+        assert!(!r.success);
     }
 }

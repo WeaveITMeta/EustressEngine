@@ -39,6 +39,36 @@ pub struct BridgeRequest {
     /// Method-specific parameters.
     #[serde(default)]
     pub params: Value,
+    /// This launch's bridge token (`token_file`). `server::handle_connection`
+    /// checks it and takes it out before the request is queued, so nothing
+    /// past the socket holds it, and its Debug output never shows it.
+    #[serde(default)]
+    pub auth: Option<BridgeAuth>,
+    /// The connection this request came on, numbered by the server from 1
+    /// for the write log; never read from the request.
+    #[serde(skip)]
+    pub conn: u64,
+    /// The name the client gives itself, unverified (the write log says so).
+    #[serde(default)]
+    pub client: Option<String>,
+}
+
+/// A request's bridge token. Debug prints `"<redacted>"`, so a request
+/// formatted anywhere, before the check or after, never shows it.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct BridgeAuth(String);
+
+impl BridgeAuth {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BridgeAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"<redacted>\"")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +304,45 @@ pub enum MethodName {
     SnapshotRevert,
     /// Withdraw a revert waiting for the Space to reopen.
     SnapshotCancelRevert,
+    // Parameters (see `parameters.rs`): an instance's named values.
+    /// An instance's Parameters, with types, values and bindings.
+    ParametersGet,
+    /// Add or change one Parameter, with the Properties panel's rules.
+    ParametersSet,
+    /// On command, the running Play DataModel's instances under a root (see
+    /// `datamodel_list.rs`); read-only.
+    DataModelList,
+    // Properties (see `properties.rs`): any class's properties and methods.
+    /// Every property of an instance, as the Properties panel shows them.
+    PropertiesGet,
+    /// Set properties on one or several instances, as one undo step.
+    PropertiesSet,
+    /// Call a method its class declares.
+    ClassCallMethod,
+    // Attributes (see `attributes.rs`): read in Play or Edit; set in Edit.
+    /// An instance's attributes, typed.
+    AttributeGet,
+    /// Set or remove attributes on one instance, as one undo step.
+    AttributeSet,
+    // Whole-instance edits (see `instance_edit.rs`).
+    /// Move and turn an instance and everything under it, as one undo step.
+    TransformSubtree,
+    // Tree edits (see `instance_tree.rs`), each one undo step.
+    /// Rename an instance and its folder on disk.
+    InstanceRename,
+    /// Move an instance under a new parent, keeping its world pose.
+    InstanceReparent,
+    /// Copy an instance and its subtree, with fresh uuids.
+    InstanceClone,
+    /// Create an instance of a class from its template.
+    InstanceCreate,
+    // The open Space and its meshes (see `space_assets.rs`).
+    /// Open another Space of this Universe; answered once it has loaded.
+    SpaceOpen,
+    /// The mesh files the open Space's parts draw.
+    AssetsListMeshes,
+    /// Load a mesh file again.
+    AssetsReloadMesh,
     // Terrain (see `terrain.rs`). Reads answer for the ground the user sees,
     // layers included; each edit is one undo step through the terrain command
     // path the editor and scripts share; generation only queues.
@@ -305,6 +374,9 @@ pub enum MethodName {
     TerrainLayerCreate,
     /// Delete the terrain's files and entities, like the ribbon's Clear.
     TerrainClear,
+    /// Read the terrain again from its files under Workspace/Terrain and
+    /// replace the live terrain with it, without switching Spaces.
+    TerrainReload,
     Unknown(String),
 }
 
@@ -364,6 +436,22 @@ where
         "snapshot.diff" => MethodName::SnapshotDiff,
         "snapshot.revert" => MethodName::SnapshotRevert,
         "snapshot.cancel_revert" => MethodName::SnapshotCancelRevert,
+        "parameters.get" => MethodName::ParametersGet,
+        "parameters.set" => MethodName::ParametersSet,
+        "datamodel.list" => MethodName::DataModelList,
+        "properties.get" => MethodName::PropertiesGet,
+        "properties.set" => MethodName::PropertiesSet,
+        "class.call_method" => MethodName::ClassCallMethod,
+        "attribute.get" => MethodName::AttributeGet,
+        "attribute.set" => MethodName::AttributeSet,
+        "instance.transform_subtree" => MethodName::TransformSubtree,
+        "instance.rename" => MethodName::InstanceRename,
+        "instance.reparent" => MethodName::InstanceReparent,
+        "instance.clone" => MethodName::InstanceClone,
+        "instance.create" => MethodName::InstanceCreate,
+        "space.open" => MethodName::SpaceOpen,
+        "assets.list_meshes" => MethodName::AssetsListMeshes,
+        "assets.reload_mesh" => MethodName::AssetsReloadMesh,
         "engine.shutdown" => MethodName::EngineShutdown,
         "sim.run" => MethodName::SimRun,
         "sim.pause" => MethodName::SimPause,
@@ -382,6 +470,7 @@ where
         "terrain.replace_material" => MethodName::TerrainReplaceMaterial,
         "terrain.layer_create" => MethodName::TerrainLayerCreate,
         "terrain.clear" => MethodName::TerrainClear,
+        "terrain.reload" => MethodName::TerrainReload,
         _ => MethodName::Unknown(s),
     })
 }
@@ -755,7 +844,7 @@ pub mod handlers {
 
             let def = InstanceDefinition {
                 plasma: None,
-                asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string() }),
+                asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string(), scale_kind: None }),
                 transform: TransformData {
                     position,
                     rotation: [0.0, 0.0, 0.0, 1.0],
@@ -1503,7 +1592,12 @@ pub mod handlers {
         use std::io::Write as _;
 
         let run_id = req.params.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
-        if run_id.is_empty() || !run_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        // It names a file: ASCII letters, digits, - and _, and never a
+        // Windows device name (`COM1`, `NUL`).
+        if run_id.is_empty()
+            || !run_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || eustress_tools::sandbox::plain_name(run_id).is_err()
+        {
             return BridgeResponse::error(
                 req.id.clone(),
                 BridgeError::invalid_params("run_id is required and must be alphanumeric, dash or underscore"),
@@ -2671,41 +2765,6 @@ pub mod handlers {
         )
     }
 
-    /// `action.invoke` — fire any editor `Action` by its enum-variant name
-    /// (param `action`, e.g. "Copy", "Cut", "Paste", "Duplicate", "Group",
-    /// "Ungroup", "Delete", "SelectAll", "Undo", "Redo", "SaveScene",
-    /// "MoveTool"…). `Action` derives `Deserialize`, so the variant name
-    /// parses directly. Writes the SAME `MenuActionEvent` the keybinding
-    /// dispatch produces, so the handler chain runs exactly as if the
-    /// shortcut were pressed — the AI's "press the shortcut" surface for
-    /// systematic editor testing.
-    ///
-    /// NOTE: some actions are destructive (Delete/Cut). This is a
-    /// deliberately-driven test surface (`requires_approval` is handled at
-    /// the MCP-tool layer), so the handler does not gate them here.
-    pub fn action_invoke(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
-        // The one parse the permission gate also runs
-        // (`eustress_tools::capability::capability_of_call`), so the action
-        // run here is the one the gate judged. Nothing else reads the
-        // `action` field on a path that runs an action.
-        let Some(action) = eustress_common::editor_action::parse_action(&req.params) else {
-            // Nothing runs here, so the caller sees what it sent, raw.
-            let sent = req.params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal(format!(
-                    "unknown action '{sent}'. Use the Action enum variant name, exactly. The \
-                     accepted set is the WHOLE enum, not a safe subset: alongside \
-                     Copy/Cut/Paste/Duplicate/Group/Ungroup/SelectAll/Undo/Redo/\
-                     SaveScene/MoveTool/ScaleTool it includes irreversible actions \
-                     (Delete) and outward-facing ones (PublishSpace, PublishUniverse)."
-                )),
-            );
-        };
-        world.write_message(crate::ui::MenuActionEvent::new(action));
-        BridgeResponse::ok(req.id.clone(), serde_json::json!({ "invoked": format!("{action:?}") }))
-    }
-
     /// `viewport.capture` — screenshot the primary window (3D viewport +
     /// Slint overlay = what a human sees) to `<space>/.eustress/capture.png`
     /// and return the absolute path. The caller reads that path to view the
@@ -2786,20 +2845,21 @@ pub mod handlers {
         ))
     }
 
-    /// Write a pose onto the AI camera's `Transform`. Returns false if the
-    /// camera entity isn't present.
-    fn set_ai_camera_pose(world: &mut World, pos: Vec3, look_at: Option<Vec3>, rotation: Option<Quat>) -> bool {
-        let mut q = world.query_filtered::<&mut Transform, With<crate::ai_camera::AiCamera>>();
-        for mut tf in q.iter_mut(world) {
-            tf.translation = pos;
-            if let Some(target) = look_at {
-                tf.look_at(target, Vec3::Y);
-            } else if let Some(r) = rotation {
-                tf.rotation = r;
-            }
-            return true;
+    /// Write a pose onto the AI camera's `Transform`, putting the camera back
+    /// first when a Space opening or a delete removed it. `Err` says why
+    /// there is no camera (an engine without a renderer).
+    fn set_ai_camera_pose(world: &mut World, pos: Vec3, look_at: Option<Vec3>, rotation: Option<Quat>) -> Result<(), String> {
+        let camera = crate::ai_camera::ensure_in_world(world)?;
+        let Some(mut tf) = world.get_mut::<Transform>(camera) else {
+            return Err("the AI camera has no Transform".to_string());
+        };
+        tf.translation = pos;
+        if let Some(target) = look_at {
+            tf.look_at(target, Vec3::Y);
+        } else if let Some(r) = rotation {
+            tf.rotation = r;
         }
-        false
+        Ok(())
     }
 
     /// `physics.get` — the PhysicsService settings, each domain's flag, and
@@ -2846,11 +2906,8 @@ pub mod handlers {
                 None
             }
         });
-        if !set_ai_camera_pose(world, pos, look_at, rotation) {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal("AI camera entity not found"),
-            );
+        if let Err(e) = set_ai_camera_pose(world, pos, look_at, rotation) {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal(e));
         }
         BridgeResponse::ok(
             req.id.clone(),
@@ -2874,11 +2931,8 @@ pub mod handlers {
             .to_radians();
         let dir = Vec3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos());
         let pos = center + dir * distance;
-        if !set_ai_camera_pose(world, pos, Some(center), None) {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal("AI camera entity not found"),
-            );
+        if let Err(e) = set_ai_camera_pose(world, pos, Some(center), None) {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal(e));
         }
         BridgeResponse::ok(
             req.id.clone(),
@@ -2920,11 +2974,8 @@ pub mod handlers {
         let distance = (extent * 2.5).max(6.0);
         let dir = Vec3::new(1.0, 0.8, 1.0).normalize();
         let pos = center + dir * distance;
-        if !set_ai_camera_pose(world, pos, Some(center), None) {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal("AI camera entity not found"),
-            );
+        if let Err(e) = set_ai_camera_pose(world, pos, Some(center), None) {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal(e));
         }
         BridgeResponse::ok(
             req.id.clone(),
@@ -2936,16 +2987,22 @@ pub mod handlers {
         )
     }
 
-    /// `ai_camera.capture` — render the AI camera's independent view to a PNG
+    /// `ai_camera.capture`: render the AI camera's independent view to a PNG
     /// and return its path (the AI's own eyes, distinct from
-    /// `viewport.capture` = the user's window). On-demand: powers the
+    /// `viewport.capture`, the user's window). On-demand: powers the
     /// off-screen camera up for the capture, then back down.
     pub fn ai_camera_capture(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
-        let space_root = world
+        // A camera to render, or why there is none, before a path goes back:
+        // a path nothing will ever write left the caller waiting for it.
+        if let Err(e) = crate::ai_camera::ensure_in_world(world) {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal(e));
+        }
+        // The open Space's `.eustress` folder, or this machine's temp folder
+        // when no Space is open: never a guessed Space.
+        let dir = world
             .get_resource::<crate::space::SpaceRoot>()
-            .map(|sr| sr.0.clone())
-            .unwrap_or_else(crate::space::default_space_root);
-        let dir = space_root.join(".eustress");
+            .map(|sr| sr.0.join(".eustress"))
+            .unwrap_or_else(|| std::env::temp_dir().join("eustress-ai-camera"));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("ai_camera.png");
         // Clear the stale frame so a premature read errors instead of
@@ -2962,19 +3019,16 @@ pub mod handlers {
             req.id.clone(),
             serde_json::json!({
                 "path": path.to_string_lossy(),
-                "note": "AI camera capture queued; PNG lands within ~3 frames — read the path after a brief moment",
+                "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
             }),
         )
     }
 
-    // ── tools.list / tools.call — proxy ToolRegistry over the bridge ──
+    // ── tools.list: the engine's in-process ToolRegistry over the bridge ──
     //
-    // These two methods collapse the Workshop/MCP split: external IDEs
-    // connected via MCP no longer need their own tool implementations,
-    // they call `tools/list` + `tools/call` which forward to the
-    // engine's in-process `ToolRegistry`. Tool handlers run on the
-    // Bevy main thread with full live ECS access, then the result
-    // travels back over TCP.
+    // An external caller lists the registry here and calls a tool through
+    // `tools.call`, which runs it on a worker thread (`tools_call.rs`) and
+    // answers over TCP.
 
     /// Return every registered tool's public metadata (name,
     /// description, JSON Schema). Sibling processes use this to
@@ -3024,110 +3078,5 @@ pub mod handlers {
             req.id.clone(),
             serde_json::json!({ "tools": tools }),
         )
-    }
-
-    /// Dispatch a tool by name. Params mirror the Anthropic tool_use
-    /// frame shape so Claude-compatible callers need zero translation:
-    ///
-    /// ```text
-    /// { "name": "create_entity", "input": { ... }, "tool_use_id": "toolu_abc" }
-    /// ```
-    ///
-    /// `tool_use_id` is optional — when absent we synthesize one so
-    /// `ToolResult.tool_use_id` is always populated. `ToolContext` is
-    /// built from `SpaceRoot` + `AuthState` just like the Workshop
-    /// dispatcher, so the tool behaves identically whether it was
-    /// invoked in-process by Claude or remotely by an external IDE.
-    pub fn tools_call(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
-        let Some(name) = req.params.get("name").and_then(|v| v.as_str()) else {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::invalid_params("missing 'name' (tool id)"),
-            );
-        };
-        let input = req.params.get("input").cloned().unwrap_or(Value::Null);
-        let use_id = req
-            .params
-            .get("tool_use_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("bridge_{}", rand_id()));
-
-        // Build a ToolContext from current resources. We can't take
-        // `Res` here because we're already holding `&mut World` — go
-        // through `world.get_resource` which returns `Option<&T>`.
-        let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>() else {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal("SpaceRoot not loaded — no Space is active"),
-            );
-        };
-        let space_root_path = space_root.0.clone();
-        let universe_root = crate::space::universe_root_for_path(&space_root_path)
-            .unwrap_or_else(|| space_root_path.clone());
-
-        let (user_id, username) = world
-            .get_resource::<crate::auth::AuthState>()
-            .and_then(|a| a.user.as_ref().map(|u| (Some(u.id.clone()), Some(u.username.clone()))))
-            .unwrap_or((None, None));
-
-        let display_unit_sym = world
-            .get_resource::<eustress_common::units::DisplayUnit>()
-            .map(|d| d.0.symbol().to_string());
-
-        let ctx = crate::workshop::tools::ToolContext {
-            space_root: space_root_path,
-            universe_root,
-            user_id,
-            username,
-            luau_executor: None,
-            display_unit: display_unit_sym,
-            // Bridge `tools.call` is a single synchronous round-trip on the
-            // main thread — there's no window in which a cancel could arrive.
-            cancelled: None,
-            // CMMC AC.L1-3.1.2. The bridge listens on TCP and is reachable by
-            // anything that can read the `engine.port` file — it performs no
-            // peer authentication (IA.L1-3.5.2, still open). Until it does,
-            // it gets the standard set: Read and Write, never Execute,
-            // Destructive, or Network. That is what stops an unauthenticated
-            // local peer from calling `run_bash` or `delete_entity`.
-            permissions: eustress_tools::Permissions::standard()
-                .for_principal("engine-bridge"),
-        };
-
-        let Some(registry) =
-            world.get_resource::<crate::workshop::tools::ToolRegistry>()
-        else {
-            return BridgeResponse::error(
-                req.id.clone(),
-                BridgeError::internal("ToolRegistry not available"),
-            );
-        };
-
-        let result = registry.dispatch(name, &use_id, input, &ctx);
-
-        BridgeResponse::ok(
-            req.id.clone(),
-            serde_json::json!({
-                "tool_name":       result.tool_name,
-                "tool_use_id":     result.tool_use_id,
-                "success":         result.success,
-                "content":         result.content,
-                "structured_data": result.structured_data,
-                "stream_topic":    result.stream_topic,
-            }),
-        )
-    }
-
-    /// Cheap per-request id without pulling in uuid here. The bridge
-    /// ID space is private to sibling-initiated calls, so a random
-    /// 64-bit int collision is astronomically unlikely.
-    fn rand_id() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("{:x}", nanos)
     }
 }

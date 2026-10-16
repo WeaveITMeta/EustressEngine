@@ -1,8 +1,9 @@
 //! =============================================================================
-//! Keypair — Ed25519 key generation, challenge-response, zeroize
+//! Keypair — Ed25519 key generation, signing, zeroize
 //! =============================================================================
 //! One keypair serves two roles:
-//!   1. EustressEngine login (challenge-response)
+//!   1. EustressEngine login: the key signs the `eustress-login-v1` message
+//!      (`eustress_common::api_base::login_message`), never a bare challenge
 //!   2. Bliss wallet address (derived from public key)
 //! The private key never touches the server after issuance.
 //! =============================================================================
@@ -57,12 +58,6 @@ impl UserKeypair {
         })
     }
 
-    /// Sign a challenge nonce (for login proof-of-possession).
-    pub fn sign_challenge(&self, nonce: &[u8]) -> String {
-        let signature = self.signing_key.sign(nonce);
-        STANDARD.encode(signature.to_bytes())
-    }
-
     /// Sign arbitrary bytes and return base64 signature.
     pub fn sign_bytes(&self, data: &[u8]) -> String {
         let signature = self.signing_key.sign(data);
@@ -75,40 +70,6 @@ impl UserKeypair {
 // The previous impl called `to_bytes()` which creates a *copy* on the stack,
 // then zeroized only that copy — leaving the actual key material untouched.
 // By relying on SigningKey's own Drop, the real key bytes are zeroized.
-
-/// Build a domain-and-timestamp-bound challenge payload.
-///
-/// SECURITY: The challenge includes the server domain and a timestamp to prevent:
-///   - Relay attacks (challenge from server A replayed to server B)
-///   - Replay attacks (old challenge reused after window expires)
-///
-/// Format: "challenge|{domain}|{timestamp_secs}|{nonce_hex}"
-pub fn build_challenge_payload(domain: &str, timestamp_secs: i64, nonce: &[u8]) -> Vec<u8> {
-    format!(
-        "challenge|{}|{}|{}",
-        domain,
-        timestamp_secs,
-        hex::encode(nonce),
-    )
-    .into_bytes()
-}
-
-/// Verify a challenge-response signature against a base64-encoded public key.
-/// Used by servers to prove the user holds the private key matching their TOML.
-///
-/// For domain-bound challenges, pass the output of `build_challenge_payload()`
-/// as the `payload` parameter. For legacy compatibility, raw nonces are also accepted.
-pub fn verify_challenge(
-    public_key_b64: &str,
-    payload: &[u8],
-    signature_b64: &str,
-) -> Result<(), IdentityError> {
-    let verifying_key = decode_public_key(public_key_b64)?;
-    let signature = decode_signature(signature_b64)?;
-    verifying_key
-        .verify(payload, &signature)
-        .map_err(|_| IdentityError::InvalidSignature)
-}
 
 /// Verify a signature over arbitrary data against a base64-encoded public key.
 pub fn verify_signed_data(

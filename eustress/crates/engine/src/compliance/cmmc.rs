@@ -248,7 +248,7 @@ pub fn level_1_controls() -> Vec<Control> {
             responsibility: Responsibility::Technical,
             status: Status::Partial,
             evidence: vec![file("eustress/crates/identity/src/verifier.rs"), file("eustress/crates/engine/src/auth.rs")],
-            notes: "Signature verification exists. Gap: no authentication required to reach the engine bridge; BYOK API keys are stored unencrypted at ~/.eustress_engine/soul_settings.json.",
+            notes: "Signature verification exists. Gap: no authentication required to reach the engine bridge. BYOK API keys are kept in the system credential store; while the store cannot take one, it waits in an owner-only fallback file (readable by the user, not encrypted).",
         },
         Control {
             id: "MP.L1-3.8.3", nist_id: "3.8.3", far_paragraph: Some("(vii)"),

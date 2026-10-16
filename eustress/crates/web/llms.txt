@@ -2,7 +2,7 @@
 
 > Eustress is a source-available simulation and data platform built in Rust. Model the real world, from a battery cell to a power grid, drive it with real data, compress time for clock-driven models by up to a year per second, and let AI agents work inside the same Spaces you do.
 
-Eustress ships as a desktop application for Windows, macOS and Linux with an editor (Studio), a play mode, scripting in Rune and Luau, a command line and headless runtime, and an MCP server so agents can drive the engine directly. The web platform at eustress.dev holds accounts, publishing, the marketplace and the Bliss ledger. The 3D scene and the entity component system underneath are implementation details; the product is the simulation and the data it produces.
+Eustress ships as a desktop application for Windows, macOS and Linux with an editor (Studio), a play mode, scripting in Rune and Luau, a command line and headless runtime, and an MCP server so agents can drive the engine directly. The web platform at eustress.dev holds accounts, publishing, the marketplace and the Bliss ledger. The 3D scene and the entity component system underneath are implementation details; the product is the simulation and the data it produces. Eustress also builds games and interactive worlds.
 
 The source is public at https://github.com/WeaveITMeta/EustressEngine under PolyForm Shield 1.0.0. That is a source-available license, which is a different thing from an open source license: anyone can read, build and use it, and it may not be used to build a competing product.
 
@@ -10,6 +10,7 @@ The source is public at https://github.com/WeaveITMeta/EustressEngine under Poly
 
 Every guide describes what Eustress Engine does today and ends with a What's Next section for work that is planned.
 
+- [All guides in one file](https://eustress.dev/llms-full.txt): the full text of every guide below and of the Website Service Markdown docs, for an agent that wants them in one request
 - [Getting Started](https://eustress.dev/docs/getting-started): install, create a Universe and a Space, add a part, press Play, save, and run a first script
 - [Studio](https://eustress.dev/docs/studio): the editor; Explorer and its search language, Properties, Insert Object, selection, tools and snapping, undo and History, shortcuts, saving, modes and MindSpace
 - [Building](https://eustress.dev/docs/building): parts and their properties in meters, Models and Folders, booleans, the material library and .mat.toml, terrain, lights and atmosphere, large Spaces

@@ -1,0 +1,41 @@
+# Old addresses. /simulations was a page of invented Spaces; the Gallery is the one list. /play/<id> is the old play page:
+# a Space's page now opens the Play chooser itself when it is asked to (?play=1).
+/simulations /gallery 301
+/play/:id /simulation/:id?play=1 302
+# The seller dashboard moved into Projects: /creator was the list, /creator/<id> one project's selling page.
+/creator /projects 301
+/creator/:id /projects/:id 301
+
+# The app's own pages. They are no files, so each is rewritten (status 200) to the app shell and the router draws it.
+# The target is "/", never "/index.html": Pages redirects /index.html to / (308), and a rewrite to it answers that 308.
+# Every other address that is no file and no rule here gets 404.html with a 404 status. (Cloudflare Pages serves the app shell for
+# every unknown address only when the project has no 404.html.) A new route in src/app.rs needs a line here; a test checks it.
+# One page per address, from a family: a Space, a marketplace item, a profile, a project's selling page, a legal act, a case.
+/simulation/:id / 200
+/marketplace/:id / 200
+/profile/:username / 200
+/projects/:sim_id / 200
+/legal/:act / 200
+/cases/:reference / 200
+# Pages the prerender does not write: sign-in, accounts, settings, the unlisted pages.
+# /economics-draft is left out on purpose: it answers like any address the site does not have, status included.
+/login / 200
+/delta/thanks / 200
+/economics / 200
+/verify-email / 200
+/cancel-email-change / 200
+/replacement-key / 200
+/undo-key-replacement / 200
+/profile / 200
+/purchases / 200
+/account/cases / 200
+/dashboard / 200
+/projects / 200
+/settings / 200
+/friends / 200
+/tickets / 200
+/admin / 200
+/admin/telemetry / 200
+/kyc / 200
+/verify / 200
+/verify-account / 200

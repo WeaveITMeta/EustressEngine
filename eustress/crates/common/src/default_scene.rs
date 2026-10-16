@@ -346,8 +346,9 @@ fn spawn_scene_entity(
                 PartType::Block => meshes.add(Cuboid::new(size.x, size.y, size.z)),
                 PartType::Ball => meshes.add(Sphere::new(size.x.min(size.y).min(size.z) * 0.5)),
                 PartType::Cylinder => meshes.add(Cylinder::new(size.x * 0.5, size.y)),
-                PartType::Wedge => meshes.add(Cuboid::new(size.x, size.y, size.z)),
-                _ => meshes.add(Cuboid::new(size.x, size.y, size.z)),
+                PartType::Wedge | PartType::CornerWedge | PartType::Cone => {
+                    meshes.add(crate::space_read::primitive_mesh(part.shape).scaled_by(size))
+                }
             };
             
             let material_handle = materials.add(StandardMaterial {

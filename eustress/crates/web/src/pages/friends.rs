@@ -8,8 +8,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use crate::api::{self, ApiClient};
-use crate::api::friends::{Friend, FriendRequest, get_friends, get_friend_requests, send_friend_request};
+use crate::api::friends::{Friend, FriendRequest, get_friends, get_friend_requests};
 use crate::components::{CentralNav, Footer};
+use crate::pages::profile::{follow_path, follow_shown, viewer_of, FollowRequest, FollowShown};
 use crate::state::{AppState, AuthState};
 
 // -----------------------------------------------------------------------------
@@ -58,7 +59,11 @@ pub fn FriendsPage() -> impl IntoView {
     let search_query = RwSignal::new(String::new());
     let search_results = RwSignal::new(Vec::<api::community::PublicUser>::new());
     let is_searching = RwSignal::new(false);
-    let request_sent = RwSignal::new(Option::<String>::None);
+    // People followed from a search result during this visit, the person a follow or unfollow is waiting on, and what to say
+    // when a search or a follow failed.
+    let followed = RwSignal::new(Vec::<String>::new());
+    let follow_busy = RwSignal::new(Option::<String>::None);
+    let notice = RwSignal::new(Option::<String>::None);
 
     // Fetch friends on mount
     {
@@ -91,26 +96,41 @@ pub fn FriendsPage() -> impl IntoView {
             return;
         }
         is_searching.set(true);
+        notice.set(None);
         let api_url = api_url_stored.get_value();
         spawn_local(async move {
             let client = ApiClient::new(&api_url);
-            if let Ok(response) = api::community::search_users(&client, &query, None, Some(20)).await {
-                search_results.set(response.users);
+            match api::community::search_users(&client, &query, Some(20)).await {
+                Ok(response) => search_results.set(response.users),
+                Err(e) => {
+                    search_results.set(vec![]);
+                    notice.set(Some(api::failure_sentence(&e)));
+                }
             }
             is_searching.set(false);
         });
     };
 
-    // Send friend request handler
-    let send_request = move |user_id: String| {
+    // Follow or unfollow a person from a search result, by username: the profile page's routes. The result changes only once
+    // the Worker said yes.
+    let toggle_follow = move |username: String| {
+        if follow_busy.get_untracked().is_some() {
+            return;
+        }
+        let was = is_followed(&followed.get_untracked(), &username);
+        follow_busy.set(Some(username.clone()));
+        notice.set(None);
         let api_url = api_url_stored.get_value();
-        let auth_clone = auth;
-        let uid = user_id.clone();
         spawn_local(async move {
-            if let AuthState::Authenticated(_user) = auth_clone.get_untracked() {
-                let client = ApiClient::new(&api_url);
-                if let Ok(_) = send_friend_request(&client, &uid).await {
-                    request_sent.set(Some(uid));
+            let client = ApiClient::new(&api_url);
+            let answer = client.post::<serde_json::Value, _>(follow_path(!was), &FollowRequest { username: &username }).await;
+            follow_busy.try_set(None);
+            match answer {
+                Ok(_) => {
+                    followed.try_update(|list| *list = with_follow(list, &username, !was));
+                }
+                Err(e) => {
+                    notice.try_set(Some(api::failure_sentence(&e)));
                 }
             }
         });
@@ -197,6 +217,7 @@ pub fn FriendsPage() -> impl IntoView {
                                                                 let in_experience = friend.current_server_id.is_some();
                                                                 let initial = friend.display_name.chars().next().unwrap_or('?').to_string();
                                                                 let name = friend.display_name.clone();
+                                                                let handle = crate::pages::profile::handle_of(&friend.username);
                                                                 view! {
                                                                     <div class="friend-card online">
                                                                         <div class="friend-avatar">
@@ -205,8 +226,9 @@ pub fn FriendsPage() -> impl IntoView {
                                                                         </div>
                                                                         <div class="friend-info">
                                                                             <span class="friend-name">{name}</span>
+                                                                            <span class="friend-handle">{handle}</span>
                                                                             <span class="friend-status">
-                                                                                {if in_experience { "In Experience" } else { "Online" }}
+                                                                                {if in_experience { "In a Simulation" } else { "Online" }}
                                                                             </span>
                                                                         </div>
                                                                         {if in_experience {
@@ -243,6 +265,7 @@ pub fn FriendsPage() -> impl IntoView {
                                                         let is_online = friend.online;
                                                         let initial = friend.display_name.chars().next().unwrap_or('?').to_string();
                                                         let name = friend.display_name.clone();
+                                                        let handle = crate::pages::profile::handle_of(&friend.username);
                                                         let profile_link = format!("/profile/{}", friend.username);
                                                         view! {
                                                             <div class="friend-card" class:online=is_online>
@@ -254,6 +277,7 @@ pub fn FriendsPage() -> impl IntoView {
                                                                     <a href=profile_link class="friend-name">
                                                                         {name}
                                                                     </a>
+                                                                    <span class="friend-handle">{handle}</span>
                                                                     <span class="friend-status">
                                                                         {if is_online { "Online" } else { "Offline" }}
                                                                     </span>
@@ -338,6 +362,8 @@ pub fn FriendsPage() -> impl IntoView {
                                                     </button>
                                                 </div>
 
+                                                {move || notice.get().map(|m| view! { <p class="search-status" role="alert">{m}</p> })}
+
                                                 {if is_searching.get() {
                                                     view! { <p class="search-status">"Searching..."</p> }.into_any()
                                                 } else if results.is_empty() && !search_query.get().is_empty() {
@@ -346,13 +372,16 @@ pub fn FriendsPage() -> impl IntoView {
                                                     view! {
                                                         <div class="search-results">
                                                             {results.into_iter().map(|user| {
-                                                                let user_id = user.id.clone();
-                                                                let was_sent = move || request_sent.get().as_deref() == Some(&user_id);
-                                                                let uid_for_click = user.id.clone();
                                                                 let initial = user.username.chars().next().unwrap_or('?').to_string();
                                                                 let uname = user.username.clone();
                                                                 let profile_link = format!("/profile/{}", user.username);
                                                                 let display = user.display_name.clone().unwrap_or_default();
+                                                                let facts = user.facts().join(" \u{b7} ");
+                                                                let own = match auth.get_untracked() {
+                                                                    AuthState::Authenticated(me) => me.username == uname,
+                                                                    _ => false,
+                                                                };
+                                                                let follow_name = uname.clone();
                                                                 view! {
                                                                     <div class="friend-card search-result">
                                                                         <div class="friend-avatar">
@@ -360,25 +389,29 @@ pub fn FriendsPage() -> impl IntoView {
                                                                         </div>
                                                                         <div class="friend-info">
                                                                             <a href=profile_link class="friend-name">
-                                                                                {uname}
+                                                                                {crate::pages::profile::handle_of(&uname)}
                                                                             </a>
                                                                             <span class="friend-status">
                                                                                 {display}
                                                                             </span>
+                                                                            {(!facts.is_empty()).then(|| view! { <span class="friend-status">{facts}</span> })}
                                                                         </div>
-                                                                        {if was_sent() {
-                                                                            view! {
-                                                                                <span class="request-sent-badge">"Request Sent"</span>
-                                                                            }.into_any()
-                                                                        } else {
-                                                                            view! {
-                                                                                <button
-                                                                                    class="btn-add-friend"
-                                                                                    on:click=move |_| send_request(uid_for_click.clone())
-                                                                                >
-                                                                                    "Add Friend"
-                                                                                </button>
-                                                                            }.into_any()
+                                                                        {move || match follow_shown(&viewer_of(&auth.get()), own, is_followed(&followed.get(), &follow_name)) {
+                                                                            FollowShown::Hidden => ().into_any(),
+                                                                            FollowShown::SignIn => view! { <a class="g-btn g-btn-primary" href="/login">"Sign in to follow"</a> }.into_any(),
+                                                                            FollowShown::Follow => {
+                                                                                let name = follow_name.clone();
+                                                                                view! {
+                                                                                    <button type="button" class="g-btn g-btn-primary" aria-pressed="false" disabled=move || follow_busy.get().is_some() on:click=move |_| toggle_follow(name.clone())>"Follow"</button>
+                                                                                }.into_any()
+                                                                            }
+                                                                            FollowShown::Following => {
+                                                                                let name = follow_name.clone();
+                                                                                view! {
+                                                                                    <span class="g-chip live">"Following"</span>
+                                                                                    <button type="button" class="g-btn" aria-pressed="true" disabled=move || follow_busy.get().is_some() on:click=move |_| toggle_follow(name.clone())>"Unfollow"</button>
+                                                                                }.into_any()
+                                                                            }
                                                                         }}
                                                                     </div>
                                                                 }
@@ -399,7 +432,7 @@ pub fn FriendsPage() -> impl IntoView {
                         <div class="auth-gate">
                             <div class="gate-card">
                                 <h2>"Sign In to See Friends"</h2>
-                                <p>"Connect with other players, see who is online, and join friends in experiences."</p>
+                                <p>"Connect with other players, see who is online, and join friends in simulations."</p>
                                 <a href="/login" class="btn-primary-steel">"Sign In"</a>
                             </div>
                         </div>
@@ -409,5 +442,51 @@ pub fn FriendsPage() -> impl IntoView {
 
             <Footer />
         </div>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Who was followed from a search
+// -----------------------------------------------------------------------------
+
+/// Whether `name` is among the people followed from this page's search results. Usernames are exact, as the Worker keys them.
+pub fn is_followed(followed: &[String], name: &str) -> bool {
+    followed.iter().any(|f| f == name)
+}
+
+/// The list once `name` is followed (`now`) or no longer followed, with no name twice.
+pub fn with_follow(followed: &[String], name: &str, now: bool) -> Vec<String> {
+    let mut list: Vec<String> = followed.iter().filter(|f| f.as_str() != name).cloned().collect();
+    if now {
+        list.push(name.to_string());
+    }
+    list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_follow_from_a_result_is_remembered_and_an_unfollow_forgets_it() {
+        let none: Vec<String> = vec![];
+        assert!(!is_followed(&none, "ada"));
+        let one = with_follow(&none, "ada", true);
+        assert!(is_followed(&one, "ada"));
+        assert!(!is_followed(&one, "Ada"), "usernames are exact");
+        assert!(!is_followed(&one, "adam"));
+        let again = with_follow(&one, "ada", true);
+        assert_eq!(again, vec!["ada"], "no name twice");
+        let two = with_follow(&again, "bob", true);
+        assert_eq!(two, vec!["ada", "bob"]);
+        assert_eq!(with_follow(&two, "ada", false), vec!["bob"]);
+        assert_eq!(with_follow(&two, "zed", false), vec!["ada", "bob"], "an unfollow of someone not listed changes nothing");
+    }
+
+    #[test]
+    fn a_result_follows_through_the_profile_routes_by_username() {
+        assert_eq!(follow_path(true), "/api/social/follow");
+        assert_eq!(follow_path(false), "/api/social/unfollow");
+        assert_eq!(serde_json::to_string(&FollowRequest { username: "ada_builds" }).unwrap(), r#"{"username":"ada_builds"}"#);
     }
 }

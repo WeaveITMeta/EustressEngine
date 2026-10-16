@@ -597,6 +597,15 @@ pub(crate) fn bridge_physics_set(
     world: &mut World,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    // During Play a physics edit waits for Stop: it writes the Space's
+    // PhysicsService file, which Stop does not put back. Refused before
+    // anything is applied, as the bridge's other edits are.
+    if world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .is_some_and(|s| *s.get() != crate::play_mode::PlayModeState::Editing)
+    {
+        return Err("the editor is in Play. Stop first: physics.set writes the Space's PhysicsService file, which Stop does not put back".to_string());
+    }
     let parsed = parse_update(params)?;
     // Checked before anything is applied, so a request that cannot be honoured
     // in full changes nothing.
@@ -1444,6 +1453,22 @@ mod tests {
         assert!(world.resource::<PhysicsService>().chemistry, "chemistry was applied anyway");
     }
 
+    /// During Play the bridge's physics edit is refused before anything is
+    /// applied: it would write the Space's PhysicsService file, which Stop
+    /// does not put back.
+    #[test]
+    fn bridge_set_is_refused_during_play() {
+        for state in [crate::play_mode::PlayModeState::Playing, crate::play_mode::PlayModeState::Paused] {
+            let mut world = World::new();
+            world.insert_resource(State::new(state));
+            world.insert_resource(PhysicsService::default());
+            let fluids = world.resource::<PhysicsService>().fluids;
+            let err = bridge_physics_set(&mut world, &json!({ "fluids": !fluids })).expect_err("refused during Play");
+            assert!(err.contains("Stop first"), "{state:?}: {err}");
+            assert_eq!(world.resource::<PhysicsService>().fluids, fluids, "{state:?}: the edit was applied");
+        }
+    }
+
     #[test]
     fn bridge_get_reports_running_separately_from_the_flag() {
         let mut world = World::new();
@@ -1533,9 +1558,8 @@ mod tests {
 
     fn density_app() -> App {
         let mut app = App::new();
-        // Avian's collider plugin makes this required; its plugins are not
-        // in this app.
-        app.register_required_components::<avian3d::prelude::Collider, avian3d::prelude::ColliderDensity>();
+        // `Collider` requires `ColliderDensity` itself (Avian's `#[require]`), so
+        // a collider starts at Avian's default of 1 kg/m³ without its plugins.
         add_part_density(&mut app);
         app
     }

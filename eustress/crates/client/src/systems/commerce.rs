@@ -15,7 +15,8 @@
 //!
 //! A signed-out player joins as a guest: it plays, and the host never offers
 //! it anything. The signed-in account is the one Studio and the Player share
-//! (`<local data>/EustressEngine/auth_token`).
+//! (`<local data>/EustressEngine/auth_token`, or `auth_token.<scope>` for an
+//! API other than production; see [`auth_token`]).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -126,7 +127,10 @@ fn drive_player_commerce(
                     Ok((sim_id, ticket, pin)) => {
                         commerce.host = HostCheck::Checking(Instant::now());
                         let inbox = commerce.inbox.clone();
-                        spawn(inbox, move || Reply::Host(check_host(&ticket, &hex32(&pin), &sim_id)));
+                        // The signed-in token goes on each Worker call the check
+                        // makes: the Worker's adult gate refuses without it.
+                        let token = auth_token();
+                        spawn(inbox, move || Reply::Host(check_host(token.as_deref(), &ticket, &hex32(&pin), &sim_id)));
                     }
                     Err(why) => commerce.host = HostCheck::Refused(why.to_string()),
                 }
@@ -176,6 +180,19 @@ fn drive_player_commerce(
     // One prompt at a time, as the host's scripts expect.
     while !commerce.busy {
         let Some(ask) = commerce.asks.front().copied() else { break };
+        // Nothing can be bought without an account, and an adult listing would be
+        // refused with a bare 403 that the player never sees: say so in words.
+        let Some(token) = auth_token() else {
+            info!("commerce: sign in to Eustress to buy in this session");
+            commerce.asks.pop_front();
+            commerce.busy = true;
+            let inbox = commerce.inbox.clone();
+            spawn(inbox, move || {
+                tell("Sign in to buy", "Sign in to Eustress to buy from this host.");
+                Reply::Answered { prompt: ask.prompt, bought: Ok(None) }
+            });
+            continue;
+        };
         let listing = match next_step(&commerce.host, Instant::now()) {
             NextStep::Wait => break,
             NextStep::Ask(listing) => listing.clone(),
@@ -187,11 +204,6 @@ fn drive_player_commerce(
             }
         };
         commerce.asks.pop_front();
-        let Some(token) = auth_token() else {
-            info!("commerce: sign in to Eustress to buy in this session");
-            closes.write(ClosePurchase { prompt: ask.prompt, purchased: false });
-            continue;
-        };
         commerce.busy = true;
         let inbox = commerce.inbox.clone();
         spawn(inbox, move || Reply::Answered { prompt: ask.prompt, bought: ask_and_buy(&token, &listing, ask) });
@@ -248,11 +260,12 @@ fn kind_refusal(expects: u8, is_pass: bool) -> Option<&'static str> {
 }
 
 /// The host is the listing's creator: its ticket, for this connection's pin,
-/// names the listing's author.
-fn check_host(ticket: &str, audience: &str, sim_id: &str) -> Result<Listing, String> {
-    let who = request(None, None, "POST", "/api/identity/verify", Some(&json!({ "ticket": ticket, "audience": audience })), REQUEST_TIMEOUT)?;
+/// names the listing's author. `token`: the signed-in account's, sent on both
+/// calls (the Worker's adult gate needs it).
+fn check_host(token: Option<&str>, ticket: &str, audience: &str, sim_id: &str) -> Result<Listing, String> {
+    let who = request(token, None, "POST", "/api/identity/verify", Some(&json!({ "ticket": ticket, "audience": audience })), REQUEST_TIMEOUT)?;
     let host_account = who.get("account_id").and_then(Value::as_str).ok_or("the host's ticket names no account")?;
-    let sim = request(None, None, "GET", &format!("/api/simulations/{sim_id}"), None, REQUEST_TIMEOUT)?;
+    let sim = request(token, None, "GET", &format!("/api/simulations/{sim_id}"), None, REQUEST_TIMEOUT)?;
     let author = sim.get("author_id").and_then(Value::as_str).ok_or("the listing names no author")?;
     if author != host_account {
         return Err("the host is not this listing's creator".into());
@@ -264,7 +277,7 @@ fn check_host(ticket: &str, audience: &str, sim_id: &str) -> Result<Listing, Str
 /// Ask the player about the product, and buy it live if the player agrees.
 /// `Ok(None)`: the player did not buy.
 fn ask_and_buy(token: &str, listing: &Listing, ask: Ask) -> Result<Option<String>, String> {
-    let catalog = request(None, None, "GET", &format!("/api/commerce/catalog/{}", listing.sim_id), None, REQUEST_TIMEOUT)?;
+    let catalog = request(Some(token), None, "GET", &format!("/api/commerce/catalog/{}", listing.sim_id), None, REQUEST_TIMEOUT)?;
     let product = catalog
         .get("data")
         .and_then(Value::as_array)
@@ -360,9 +373,13 @@ fn tell(title: &str, text: &str) {
         .show();
 }
 
-/// The signed-in account's token, shared with Studio.
-fn auth_token() -> Option<String> {
-    let path = dirs::data_local_dir()?.join("EustressEngine").join("auth_token");
+/// The signed-in account's token, shared with Studio: Studio's saved login
+/// for the API in use ([`eustress_common::api_base::login_file`]), so a
+/// Player pointed at a test API never sends it production's.
+pub fn auth_token() -> Option<String> {
+    let path = dirs::data_local_dir()?
+        .join("EustressEngine")
+        .join(eustress_common::api_base::login_file());
     let token = std::fs::read_to_string(path).ok()?.trim().to_string();
     (!token.is_empty()).then_some(token)
 }
@@ -373,9 +390,17 @@ fn api_base() -> String {
     eustress_common::api_base::api_base().to_string()
 }
 
-/// One request. `live`: a commerce request names its mode, and a player's
-/// purchases are always live.
-fn request(token: Option<&str>, live: Option<bool>, method: &str, path: &str, body: Option<&Value>, timeout: Duration) -> Result<Value, String> {
+/// One request, built. `token`: the signed-in account's, sent as a bearer token.
+/// `live`: a commerce request names its mode, and a player's purchases are
+/// always live.
+fn build_request(
+    token: Option<&str>,
+    live: Option<bool>,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<reqwest::blocking::RequestBuilder, String> {
     let base = api_base();
     let client = reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())?;
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
@@ -389,7 +414,15 @@ fn request(token: Option<&str>, live: Option<bool>, method: &str, path: &str, bo
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().map_err(|e| format!("could not reach {base}: {e}"))?;
+    Ok(request)
+}
+
+/// One request, sent and read. See [`build_request`].
+fn request(token: Option<&str>, live: Option<bool>, method: &str, path: &str, body: Option<&Value>, timeout: Duration) -> Result<Value, String> {
+    let base = api_base();
+    let response = build_request(token, live, method, path, body, timeout)?
+        .send()
+        .map_err(|e| format!("could not reach {base}: {e}"))?;
     let status = response.status();
     let reply: Value = response.json().unwrap_or(Value::Null);
     if status.is_success() {
@@ -461,5 +494,23 @@ mod tests {
         }
         assert!(kind_refusal(1, true).is_some(), "a product prompt for a pass");
         assert!(kind_refusal(2, false).is_some(), "a pass prompt for a product");
+    }
+
+    /// The Worker's adult gate answers an adult listing's request only with the
+    /// signed-in account's token: a request with a token carries it, and a
+    /// guest's carries none.
+    #[test]
+    fn a_signed_in_request_carries_the_bearer_token() {
+        let path = "/api/commerce/catalog/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        let signed = build_request(Some("eit1.session"), None, "GET", path, None, REQUEST_TIMEOUT)
+            .expect("the request builds")
+            .build()
+            .expect("the request is complete");
+        assert_eq!(signed.headers().get(reqwest::header::AUTHORIZATION).and_then(|v| v.to_str().ok()), Some("Bearer eit1.session"));
+        let guest = build_request(None, None, "GET", path, None, REQUEST_TIMEOUT)
+            .expect("the request builds")
+            .build()
+            .expect("the request is complete");
+        assert!(guest.headers().get(reqwest::header::AUTHORIZATION).is_none(), "a guest's request sends no token");
     }
 }

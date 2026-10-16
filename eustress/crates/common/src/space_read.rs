@@ -240,6 +240,10 @@ struct InstanceFile {
     properties: Properties,
     #[serde(default)]
     attributes: toml::Table,
+    /// The `scale_kind` the format-3 stamp would give this file
+    /// (`scale_kind::kind_for`), used only in a Space below format 3.
+    #[serde(skip)]
+    planned_scale_kind: Option<&'static str>,
 }
 
 impl InstanceFile {
@@ -259,6 +263,16 @@ impl InstanceFile {
     }
 }
 
+/// Whether a part came from a Roblox import, whose poses were always
+/// Roblox's and so are never migrated.
+fn is_roblox_import(file: &InstanceFile) -> bool {
+    crate::part_meshes::is_roblox_import(|key| match key {
+        "roblox_color_srgb" => file.metadata.roblox_color_srgb.is_some(),
+        "roblox_brick_color" => file.metadata.roblox_brick_color.is_some(),
+        _ => false,
+    })
+}
+
 /// What a folder hands down to everything inside it, and whether the folder
 /// is itself a Model, the only thing a rig makes a character.
 #[derive(Debug, Clone, Copy, Default)]
@@ -266,6 +280,13 @@ struct Inherited {
     climbable: Option<bool>,
     in_character: bool,
     is_model: bool,
+    /// The Space predates Roblox-correct wedges (`space_format` below 2), so
+    /// native wedges are drawn with the turn Studio bakes in when it opens it.
+    migrate_wedges: bool,
+    /// The Space predates `[asset] scale_kind` (`space_format` below 3), so a
+    /// custom mesh with none reads as its stamp would write it
+    /// (`scale_kind::kind_for`, the decision `scale_kind::plan` makes).
+    migrate_scale_kinds: bool,
 }
 
 /// `[asset]`: the mesh a part draws, and so, for a primitive, its shape.
@@ -273,10 +294,18 @@ struct Inherited {
 struct AssetBlock {
     #[serde(default)]
     mesh: Option<String>,
+    /// Whether a custom mesh's scale is a length or a ratio (`scale_kind`).
+    #[serde(default)]
+    scale_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct Metadata {
+    /// A Roblox import's colour keys: their presence marks an imported part.
+    #[serde(default)]
+    roblox_color_srgb: Option<toml::Value>,
+    #[serde(default)]
+    roblox_brick_color: Option<toml::Value>,
     #[serde(default)]
     class_name: Option<String>,
     #[serde(default)]
@@ -312,11 +341,14 @@ fn ident_quat() -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
 
-#[derive(Debug, Deserialize, Default)]
+/// A part's `[properties]`. Whatever a file leaves out, the whole section
+/// included, is Studio's Part template's (`class_schema/Part`), so a sparse
+/// part reads the same here as in Studio.
+#[derive(Debug, Deserialize)]
 struct Properties {
     #[serde(default)]
     color: Option<Vec<toml::Value>>,
-    #[serde(default = "yes")]
+    #[serde(default)]
     anchored: bool,
     #[serde(default = "yes")]
     can_collide: bool,
@@ -328,14 +360,25 @@ struct Properties {
     material: Option<String>,
 }
 
+impl Default for Properties {
+    fn default() -> Self {
+        Self { color: None, anchored: false, can_collide: true, transparency: 0.0, reflectance: 0.0, material: None }
+    }
+}
+
 fn yes() -> bool {
     true
+}
+
+/// The Part template's colour, for a part that names none.
+fn template_color() -> Color {
+    Color::srgb_u8(163, 162, 165)
 }
 
 /// Decode the colour array under the engine's own rule.
 pub fn decode_color(raw: &[toml::Value]) -> Color {
     if raw.len() < 3 {
-        return Color::srgb(0.6, 0.6, 0.6);
+        return template_color();
     }
     // All-integer means 0-255; ANY float means 0-1. Mixing the two silently
     // reinterprets every channel, so the test is over the whole array.
@@ -356,16 +399,30 @@ pub fn decode_color(raw: &[toml::Value]) -> Color {
 /// `units_v1` on (the engine's default), and reads every file in metres
 /// without it, so this does too. A missing or unknown unit is metres.
 pub fn authored_pose(position: [f32; 3], rotation: [f32; 4], size: [f32; 3], unit: Option<&str>) -> Transform {
+    authored_pose_scaled(position, rotation, size, unit, true)
+}
+
+/// [`authored_pose`], for a scale that may not be a length: a custom mesh's
+/// scale multiplies the mesh's own size (`scale_kind`), so it is a ratio and
+/// no unit converts it. `scale_is_length` comes from
+/// [`crate::scale_kind::is_length`]. The position is always converted.
+pub fn authored_pose_scaled(
+    position: [f32; 3],
+    rotation: [f32; 4],
+    size: [f32; 3],
+    unit: Option<&str>,
+    scale_is_length: bool,
+) -> Transform {
     #[cfg(feature = "units_v1")]
     let (position, size) = match unit.and_then(crate::units::Unit::from_symbol) {
         Some(u) => (
             crate::units::authored_to_engine_vec3_f32(position, u),
-            crate::units::authored_to_engine_vec3_f32(size, u),
+            if scale_is_length { crate::units::authored_to_engine_vec3_f32(size, u) } else { size },
         ),
         None => (position, size),
     };
     #[cfg(not(feature = "units_v1"))]
-    let _ = unit;
+    let _ = (unit, scale_is_length);
     clean_pose(position, rotation, size)
 }
 
@@ -408,7 +465,13 @@ pub fn read_space_parts(space_root: &Path) -> Result<SpaceGeometry, String> {
         ));
     }
     let mut out = SpaceGeometry::default();
-    walk(&workspace, Transform::IDENTITY, Inherited::default(), &mut out);
+    let format = crate::space_format::of_space_text(std::fs::read_to_string(space_root.join("space.toml")).ok().as_deref());
+    let top = Inherited {
+        migrate_wedges: crate::space_format::needs_wedge_migration(format),
+        migrate_scale_kinds: crate::space_format::needs_scale_kind_migration(format),
+        ..Inherited::default()
+    };
+    walk(&workspace, Transform::IDENTITY, top, &mut out);
     Ok(out)
 }
 
@@ -486,6 +549,8 @@ fn walk(dir: &Path, parent: Transform, inherited: Inherited, out: &mut SpaceGeom
         climbable: inherited.climbable,
         in_character: inherited.in_character || rigged,
         is_model: false,
+        migrate_wedges: inherited.migrate_wedges,
+        migrate_scale_kinds: inherited.migrate_scale_kinds,
     };
 
     for (stem, path, file) in &flat {
@@ -521,8 +586,18 @@ fn parse(path: &Path, out: &mut SpaceGeometry) -> Option<InstanceFile> {
             return None;
         }
     };
-    match toml::from_str(&text) {
-        Ok(f) => Some(f),
+    // Parsed once: the stamp's decision reads the document, the rest the
+    // typed file.
+    let doc: toml::Value = match toml::from_str(&text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            out.errors.push(format!("{}: {e}", path.display()));
+            return None;
+        }
+    };
+    let planned_scale_kind = crate::scale_kind::kind_for(&doc);
+    match doc.try_into::<InstanceFile>() {
+        Ok(f) => Some(InstanceFile { planned_scale_kind, ..f }),
         Err(e) => {
             out.errors.push(format!("{}: {e}", path.display()));
             None
@@ -545,7 +620,15 @@ fn ingest(
         out.errors.push(format!("{}: unknown unit {symbol:?}, read as metres", path.display()));
     }
     let t = &file.transform;
-    let world = compose(parent, &authored_pose(t.position, t.rotation, t.scale, unit));
+    // A custom mesh's scale is a length or a ratio of the mesh's own size
+    // (`scale_kind`); a Space below format 3 reads as its stamp would write it.
+    let asset = file.asset.as_ref();
+    let kind = asset
+        .and_then(|a| a.scale_kind.as_deref())
+        .or_else(|| file.planned_scale_kind.filter(|_| inherited.migrate_scale_kinds));
+    let scale_is_length = crate::scale_kind::is_length_of(asset.and_then(|a| a.mesh.as_deref()), kind);
+    let local = authored_pose_scaled(t.position, t.rotation, t.scale, unit, scale_is_length);
+    let world = compose(parent, &local);
     let class = file.class().to_owned();
 
     // Every BasePart draws as a part (a SpawnLocation, a Seat, a WedgePart,
@@ -562,12 +645,25 @@ fn ingest(
             None => (PartType::Block, Some(mesh.to_owned())),
         },
     };
+    // A Space from before Roblox-correct wedges draws a native wedge as Studio
+    // migrates it. Its children still nest under `world`, its pose before the
+    // turn, which keeps them where they were.
+    // Only a part the shared classifier calls a wedge, drawn as that wedge.
+    let mesh = file.asset.as_ref().and_then(|a| a.mesh.as_deref());
+    let native = crate::part_meshes::native_wedge_shape(&class, mesh).filter(|s| *s == shape);
+    let drawn = match native {
+        Some(wedge) if inherited.migrate_wedges && !is_roblox_import(file) => {
+            let (rotation, size) = crate::part_meshes::migrate_native_wedge(wedge, local.rotation, local.scale);
+            compose(parent, &Transform { rotation, scale: size, ..local })
+        }
+        _ => world,
+    };
     let p = &file.properties;
     out.parts.push(SpacePart {
         name: file.metadata.name.clone().unwrap_or_else(|| fallback_name.to_owned()),
         class_name: class,
-        transform: world,
-        color: p.color.as_deref().map(decode_color).unwrap_or(Color::srgb(0.6, 0.6, 0.6)),
+        transform: drawn,
+        color: p.color.as_deref().map(decode_color).unwrap_or_else(template_color),
         material: p.material.clone().unwrap_or_else(|| "Plastic".into()),
         shape,
         custom_mesh,
@@ -583,27 +679,31 @@ fn ingest(
 
 // ── Shapes, meshes and materials ───────────────────────────────────────────
 
-/// The engine's primitive meshes by the shape each one is. ORDER MATTERS, as
-/// in the engine loader's `PRIMITIVE_MESHES`: the first hint found in the
-/// file name wins, and `corner_wedge` contains `wedge`.
-const PRIMITIVE_HINTS: &[(&str, PartType)] = &[
-    ("corner_wedge", PartType::CornerWedge),
-    ("block", PartType::Block),
-    ("ball", PartType::Ball),
-    ("cylinder", PartType::Cylinder),
-    ("wedge", PartType::Wedge),
-    ("cone", PartType::Cone),
-];
 
-/// The primitive an `[asset] mesh` names, read as the engine loader reads it:
-/// by the file name alone, ignoring case. `None` is a custom mesh.
+/// The primitive an `[asset] mesh` names: one of the engine's unit meshes,
+/// `<shape>.glb` in a `parts` folder (`parts/block.glb`, or the older
+/// `assets/parts/block.glb`), ignoring case, separators and a `#label`. Studio's loader,
+/// its save and the Player all decide by this. `None` is a custom mesh: a
+/// file merely named like a primitive (`meshes/block.glb`) is the author's
+/// own.
 pub fn primitive_shape(mesh: &str) -> Option<PartType> {
-    let lower = mesh.to_lowercase();
-    let file = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
-    PRIMITIVE_HINTS
-        .iter()
-        .find(|(hint, _)| file.contains(hint))
-        .map(|&(_, shape)| shape)
+    let lower = mesh.trim().to_lowercase().replace('\\', "/");
+    // A `#Mesh0/Primitive0` label names a part of the file, not the file.
+    let lower = lower.split('#').next().unwrap_or("");
+    let mut segments = lower.rsplit('/');
+    let file = segments.next()?;
+    if segments.next() != Some("parts") {
+        return None;
+    }
+    match file {
+        "block.glb" => Some(PartType::Block),
+        "ball.glb" => Some(PartType::Ball),
+        "cylinder.glb" => Some(PartType::Cylinder),
+        "wedge.glb" => Some(PartType::Wedge),
+        "corner_wedge.glb" => Some(PartType::CornerWedge),
+        "cone.glb" => Some(PartType::Cone),
+        _ => None,
+    }
 }
 
 /// A unit mesh of `shape`, filling the cube from -0.5 to 0.5 exactly as the
@@ -611,48 +711,25 @@ pub fn primitive_shape(mesh: &str) -> Option<PartType> {
 /// and tessellation. A part's size scales it through `Transform.scale`.
 ///
 /// Cylinders and cones stand on the Y axis, with a cone's tip at +Y. The wedge
-/// keeps its full face on the bottom and the back (-Z) and slopes down toward
-/// +Z. The corner wedge is the tetrahedron whose right-angled corner sits at
-/// (-0.5, -0.5, -0.5).
+/// and the corner wedge are Roblox's, from the shared table in
+/// [`crate::part_meshes`] the GLBs are generated from: the wedge's full faces
+/// are the bottom and the back (+Z) and it slopes down toward the front (-Z);
+/// the corner wedge is a square base with its apex over the right front corner.
 pub fn primitive_mesh(shape: PartType) -> Mesh {
     match shape {
         PartType::Block => Mesh::from(Cuboid::new(1.0, 1.0, 1.0)),
         PartType::Ball => Sphere::new(0.5).mesh().uv(32, 16),
         PartType::Cylinder => Cylinder::new(0.5, 1.0).mesh().resolution(32).build(),
         PartType::Cone => Cone::new(0.5, 1.0).mesh().resolution(32).build(),
-        PartType::Wedge => faceted_mesh(&WEDGE_CORNERS, WEDGE_FACES),
-        PartType::CornerWedge => faceted_mesh(&CORNER_WEDGE_CORNERS, CORNER_WEDGE_FACES),
+        PartType::Wedge => {
+            faceted_mesh(&crate::part_meshes::WEDGE_CORNERS.map(Vec3::from_array), crate::part_meshes::WEDGE_FACES)
+        }
+        PartType::CornerWedge => faceted_mesh(
+            &crate::part_meshes::CORNER_WEDGE_CORNERS.map(Vec3::from_array),
+            crate::part_meshes::CORNER_WEDGE_FACES,
+        ),
     }
 }
-
-/// Bottom back left, bottom back right, bottom front right, bottom front
-/// left, top back left, top back right.
-const WEDGE_CORNERS: [Vec3; 6] = [
-    Vec3::new(-0.5, -0.5, -0.5),
-    Vec3::new(0.5, -0.5, -0.5),
-    Vec3::new(0.5, -0.5, 0.5),
-    Vec3::new(-0.5, -0.5, 0.5),
-    Vec3::new(-0.5, 0.5, -0.5),
-    Vec3::new(0.5, 0.5, -0.5),
-];
-/// Bottom, back, left, right, slope; each counter-clockwise from outside.
-const WEDGE_FACES: &[&[usize]] = &[
-    &[0, 1, 2, 3],
-    &[0, 4, 5, 1],
-    &[0, 3, 4],
-    &[1, 5, 2],
-    &[4, 3, 2, 5],
-];
-
-/// The right-angled corner, then the corners along +X, +Z and +Y from it.
-const CORNER_WEDGE_CORNERS: [Vec3; 4] = [
-    Vec3::new(-0.5, -0.5, -0.5),
-    Vec3::new(0.5, -0.5, -0.5),
-    Vec3::new(-0.5, -0.5, 0.5),
-    Vec3::new(-0.5, 0.5, -0.5),
-];
-/// Bottom, back, left, slope; each counter-clockwise from outside.
-const CORNER_WEDGE_FACES: &[&[usize]] = &[&[0, 1, 2], &[0, 3, 1], &[0, 2, 3], &[1, 3, 2]];
 
 /// A flat-shaded mesh from convex faces. Each face lists its corners
 /// counter-clockwise seen from outside and gets its own copy of them, so its
@@ -681,20 +758,14 @@ fn faceted_mesh(corners: &[Vec3], faces: &[&[usize]]) -> Mesh {
         .with_inserted_indices(Indices::U32(indices))
 }
 
-/// The unit collider Studio gives each shape (`safe_collider_from` in the
-/// engine loader), which Avian scales by the part's `Transform.scale`. Studio
-/// collides a cone as a cylinder and both wedges as boxes, and so does this,
-/// so a body meets the same surfaces in Studio and the Player.
+/// The collider Studio gives each shape (`safe_collider_from` in the engine
+/// loader), for a unit mesh that `scale`, the part's `Transform.scale` and so
+/// its size, stretches. Studio collides a cone as a cylinder and a wedge or
+/// corner wedge as the convex hull of its drawn corners, and so does this, so
+/// a body meets the same surfaces in Studio and the Player.
 #[cfg(feature = "physics")]
-pub fn primitive_collider(shape: PartType) -> avian3d::prelude::Collider {
-    use avian3d::prelude::Collider;
-    match shape {
-        PartType::Ball => Collider::sphere(0.5),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(0.5, 1.0),
-        PartType::Block | PartType::Wedge | PartType::CornerWedge => {
-            Collider::cuboid(1.0, 1.0, 1.0)
-        }
-    }
+pub fn primitive_collider(shape: PartType, scale: Vec3) -> avian3d::prelude::Collider {
+    crate::part_draw::shape_collider(shape, Vec3::ONE, scale)
 }
 
 /// Studio's material for a part with no `.mat.toml` of its own
@@ -812,7 +883,7 @@ pub fn spawn_space_parts(
         ));
 
         if p.can_collide {
-            e.insert((primitive_collider(p.shape), RigidBody::Static));
+            e.insert((primitive_collider(p.shape, s), RigidBody::Static));
             // Every part here is Static, so what the climb rules would read
             // off an unanchored part's body, or off a part's attributes and
             // class in Studio, is recorded on the entity instead.
@@ -945,57 +1016,40 @@ mod tests {
             ("parts/cone.glb", PartType::Cone),
             // `corner_wedge` contains `wedge`, and case and separators vary.
             ("PARTS\\Corner_Wedge.GLB", PartType::CornerWedge),
+            // The older location, and a leading `./`.
+            ("assets/parts/block.glb", PartType::Block),
+            ("./parts/cone.glb", PartType::Cone),
+            // A sub-asset label is not part of the path.
+            ("parts/block.glb#Mesh0/Primitive0", PartType::Block),
         ] {
             assert_eq!(primitive_shape(mesh), Some(shape), "{mesh}");
         }
         assert_eq!(primitive_shape("meshes/Paddle.glb"), None);
+        // A custom mesh merely named like a primitive is the author's own.
+        for custom in ["meshes/block.glb", "parts/my_block.glb", "Assets/Meshes/BlockHouse.glb", "cone_tower.glb", "block.glb", "parts/block.glb.bak"] {
+            assert_eq!(primitive_shape(custom), None, "{custom}");
+        }
     }
 
-    /// The two hand-built meshes against the engine's GLBs, whose vertex data
-    /// gives these corners, face normals and triangle counts. Matching the
-    /// outward normals also proves every face is wound to face out.
+    /// The Player draws wedges from the shared table the engine's GLBs are
+    /// generated from: the same corners, every triangle wound to face out
+    /// along its normal, one normal per face.
     #[test]
-    fn wedges_match_the_engine_glbs() {
+    fn wedges_are_drawn_from_the_shared_table() {
         use bevy::mesh::VertexAttributeValues;
-        let (h, t) = (std::f32::consts::FRAC_1_SQRT_2, 1.0 / 3f32.sqrt());
-        let wedge_corners = [
-            [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, -0.5],
-            [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5],
+        let cases: [(PartType, &[[f32; 3]], &[&[usize]]); 2] = [
+            (PartType::Wedge, &crate::part_meshes::WEDGE_CORNERS, crate::part_meshes::WEDGE_FACES),
+            (PartType::CornerWedge, &crate::part_meshes::CORNER_WEDGE_CORNERS, crate::part_meshes::CORNER_WEDGE_FACES),
         ];
-        let wedge_normals = [
-            [0.0, -1.0, 0.0],
-            [0.0, 0.0, -1.0],
-            [-1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, h, h],
-        ];
-        let corner_corners = [
-            [-0.5, -0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [-0.5, 0.5, -0.5],
-            [0.5, -0.5, -0.5],
-        ];
-        let corner_normals = [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [t, t, t]];
-        let cases: [(PartType, &[[f32; 3]], &[[f32; 3]], usize); 2] = [
-            (PartType::Wedge, &wedge_corners, &wedge_normals, 8),
-            (PartType::CornerWedge, &corner_corners, &corner_normals, 4),
-        ];
-        for (shape, corners, face_normals, triangles) in cases {
+        for (shape, corners, faces) in cases {
             let mesh = primitive_mesh(shape);
-            let Some(VertexAttributeValues::Float32x3(positions)) =
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-            else {
+            let Some(VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
                 panic!("{shape:?}: no positions");
             };
-            let Some(VertexAttributeValues::Float32x3(normals)) =
-                mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
-            else {
+            let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else {
                 panic!("{shape:?}: no normals");
             };
-            let Some(Indices::U32(indices)) = mesh.indices() else {
-                panic!("{shape:?}: no indices")
-            };
-
+            let Some(Indices::U32(indices)) = mesh.indices() else { panic!("{shape:?}: no indices") };
             let key = |p: &[f32; 3]| p.map(|c| (c * 2.0).round() as i32);
             let mut got: Vec<_> = positions.iter().map(key).collect();
             got.sort();
@@ -1003,29 +1057,132 @@ mod tests {
             let mut want: Vec<_> = corners.iter().map(key).collect();
             want.sort();
             assert_eq!(got, want, "{shape:?}: corners");
+            let triangles: usize = faces.iter().map(|f| f.len() - 2).sum();
             assert_eq!(indices.len() / 3, triangles, "{shape:?}: triangle count");
-
             for tri in indices.chunks(3) {
-                let [a, b, c] =
-                    [tri[0], tri[1], tri[2]].map(|i| Vec3::from_array(positions[i as usize]));
+                let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from_array(positions[i as usize]));
                 let n = Vec3::from_array(normals[tri[0] as usize]);
-                assert!(
-                    (b - a).cross(c - a).normalize().dot(n) > 0.999,
-                    "{shape:?}: winding disagrees with normal"
-                );
-                assert!(
-                    face_normals.iter().any(|f| Vec3::from_array(*f).dot(n) > 0.999),
-                    "{shape:?}: normal {n} is not one of the engine mesh's"
-                );
-            }
-            for f in face_normals {
-                let f = Vec3::from_array(*f);
-                assert!(
-                    normals.iter().any(|n| Vec3::from_array(*n).dot(f) > 0.999),
-                    "{shape:?}: face {f} missing"
-                );
+                assert!((b - a).cross(c - a).normalize().dot(n) > 0.999, "{shape:?}: winding disagrees with normal");
             }
         }
+    }
+
+    /// A Space from before Roblox-correct wedges (no `[space] format`) draws a
+    /// native wedge with the turn Studio bakes in when it opens it, leaves an
+    /// imported one and the wedge's children where they were; a Space at the
+    /// current format is drawn as stored.
+    #[test]
+    fn an_older_space_draws_its_native_wedges_migrated() {
+        let root = std::env::temp_dir().join(format!("eustress_space_read_wedge_format_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("Workspace");
+        std::fs::create_dir_all(workspace.join("Ramp")).unwrap();
+        let wedge = |name: &str, extra_meta: &str, position: &str| {
+            format!(
+                "[metadata]\nclass_name = \"Part\"\nname = \"{name}\"\n{extra_meta}\n\
+                 [asset]\nmesh = \"parts/wedge.glb\"\n\n\
+                 [transform]\nposition = {position}\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 2.0, 6.0]\n"
+            )
+        };
+        std::fs::write(workspace.join("Ramp/_instance.toml"), wedge("Ramp", "", "[0.0, 1.0, 0.0]")).unwrap();
+        std::fs::write(workspace.join("Roof.instance.toml"), wedge("Roof", "roblox_brick_color = 194\n", "[10.0, 1.0, 0.0]"))
+            .unwrap();
+        std::fs::write(
+            workspace.join("Ramp/Post.instance.toml"),
+            "[metadata]\nclass_name = \"Part\"\nname = \"Post\"\n\n[transform]\nposition = [0.0, 0.0, 2.0]\nscale = [1.0, 1.0, 1.0]\n",
+        )
+        .unwrap();
+        let read = |root: &Path| {
+            let geo = read_space_parts(root).expect("space reads");
+            assert!(geo.errors.is_empty(), "{:?}", geo.errors);
+            let at = |name: &str| geo.parts.iter().find(|p| p.name == name).expect(name).transform;
+            (at("Ramp"), at("Roof"), at("Post"))
+        };
+        let half = Quat::from_rotation_y(std::f32::consts::PI);
+        let (ramp, roof, post) = read(&root);
+        assert!(ramp.rotation.angle_between(half) < 1e-4, "a native wedge in an older Space turns: {:?}", ramp.rotation);
+        assert_eq!(ramp.scale, Vec3::new(4.0, 2.0, 6.0), "a wedge keeps its size");
+        assert!(roof.rotation.angle_between(Quat::IDENTITY) < 1e-4, "an imported wedge never turns");
+        assert!(post.translation.distance(Vec3::new(0.0, 1.0, 2.0)) < 1e-4, "the wedge's child stays put: {}", post.translation);
+
+        std::fs::write(root.join("space.toml"), "[space]\nformat = 2\n").unwrap();
+        let (ramp, _, post) = read(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(ramp.rotation.angle_between(Quat::IDENTITY) < 1e-4, "a migrated Space is drawn as stored");
+        assert!(post.translation.distance(Vec3::new(0.0, 1.0, 2.0)) < 1e-4);
+    }
+
+    /// A custom mesh's scale converts by the file's unit only when it is a
+    /// length: an explicit kind wins, and a Space below format 3 reads an
+    /// import's mesh as a length and anyone else's as a ratio.
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn a_custom_mesh_scale_converts_only_as_a_length() {
+        let root = std::env::temp_dir().join(format!("eustress_space_read_scale_kind_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("Workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let part = |name: &str, meta: &str, asset: &str| {
+            format!(
+                "[metadata]\nclass_name = \"Part\"\nname = \"{name}\"\nunit = \"ft\"\n{meta}\n\
+                 [asset]\n{asset}\n\n\
+                 [transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [2.0, 2.0, 2.0]\n"
+            )
+        };
+        let files = [
+            ("Block", "", "mesh = \"parts/block.glb\""),
+            ("Mine", "", "mesh = \"meshes/car.glb\""),
+            ("Imported", "roblox_brick_color = 194\n", "mesh = \"meshes/rock.glb\""),
+            ("SaysLength", "", "mesh = \"meshes/beam.glb\"\nscale_kind = \"length\""),
+            ("SaysRatio", "roblox_brick_color = 194\n", "mesh = \"meshes/tree.glb\"\nscale_kind = \"multiplier\""),
+        ];
+        for (name, meta, asset) in files {
+            std::fs::write(workspace.join(format!("{name}.instance.toml")), part(name, meta, asset)).unwrap();
+        }
+        let scales = |root: &Path| {
+            let geo = read_space_parts(root).expect("space reads");
+            assert!(geo.errors.is_empty(), "{:?}", geo.errors);
+            let at = |name: &str| {
+                let t = geo.parts.iter().find(|p| p.name == name).expect(name).transform;
+                assert!((t.translation.x - 3.048).abs() < 1e-4, "{name}: a position always converts");
+                t.scale.x
+            };
+            [at("Block"), at("Mine"), at("Imported"), at("SaysLength"), at("SaysRatio")]
+        };
+        let ft = 2.0 * 0.3048;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Format 1: no kind on Mine or Imported, read as the stamp writes them.
+        let [block, mine, imported, says_length, says_ratio] = scales(&root);
+        assert!(near(block, ft), "a primitive's scale is its size: {block}");
+        assert!(near(mine, 2.0), "a Studio custom mesh is a ratio: {mine}");
+        assert!(near(imported, ft), "an import's mesh is a length: {imported}");
+        assert!(near(says_length, ft) && near(says_ratio, 2.0), "an explicit kind wins");
+        // Format 3: no kind means a ratio, import or not (the stamp has run).
+        std::fs::write(root.join("space.toml"), "[space]\nformat = 3\n").unwrap();
+        let [_, mine, imported, ..] = scales(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(near(mine, 2.0) && near(imported, 2.0), "format 3 reads only the key: {mine} {imported}");
+    }
+
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn a_ratio_scale_never_converts() {
+        let ratio = authored_pose_scaled([10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 4.0, 1.0], Some("ft"), false);
+        assert!((ratio.translation.x - 3.048).abs() < 1e-5);
+        assert_eq!(ratio.scale, Vec3::new(2.0, 4.0, 1.0));
+        let length = authored_pose([10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 4.0, 1.0], Some("ft"));
+        assert_eq!(length, authored_pose_scaled([10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 4.0, 1.0], Some("ft"), true));
+    }
+
+    /// What a part file leaves out is Studio's Part template's: no
+    /// `[properties]` at all, or a section that names only some keys.
+    #[test]
+    fn a_sparse_part_reads_the_part_template() {
+        let bare: InstanceFile = toml::from_str("[metadata]\nclass_name = \"Part\"\n").unwrap();
+        assert!(!bare.properties.anchored && bare.properties.can_collide, "no [properties] at all");
+        let some: InstanceFile = toml::from_str("[properties]\ncolor = [10, 20, 30]\n").unwrap();
+        assert!(!some.properties.anchored && some.properties.can_collide, "a section naming only its colour");
+        assert_eq!(decode_color(&[]).to_srgba(), template_color().to_srgba());
     }
 
     /// What decides whether characters climb a part, read from a Space: an

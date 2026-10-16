@@ -3,8 +3,11 @@
 //! Note: Player and Lighting are now in services/ module
 
 pub mod agent_control;
+pub mod asset_sources;
 pub mod commerce;
 pub mod frame_capture;
+pub mod join_notice;
+pub mod link_handler;
 pub mod window_icon;
 pub mod scene_loader;
 pub mod live_world;

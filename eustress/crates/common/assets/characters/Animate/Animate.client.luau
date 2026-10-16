@@ -72,7 +72,9 @@ RunService.Heartbeat:Connect(function()
 		if runSpeed then runSpeed * stride else (humanoid:GetAttribute("RunSpeed") or walkAt * 2),
 		walkAt + 0.05
 	)
-	local s = if climbing then 0 else speed
+	-- A seated character holds the seat's idle: its legs take no gait.
+	local seated = humanoid.SeatPart ~= nil
+	local s = if climbing or seated then 0 else speed
 
 	local wi, ww, wr = 1, 0, 0
 	if s >= 0.08 and s <= walkAt then
@@ -82,8 +84,9 @@ RunService.Heartbeat:Connect(function()
 		wr = math.clamp((s - walkAt) / (runAt - walkAt), 0, 1)
 		wi, ww = 0, 1 - wr
 	end
-	-- Climbing holds idle under the limb solve; the air takes the jump clip.
-	local ground = if airborne and not climbing then 0 else 1
+	-- Climbing and sitting hold idle under the limb solve; the air takes the
+	-- jump clip.
+	local ground = if airborne and not (climbing or seated) then 0 else 1
 
 	weight(idle, "idle", wi * ground)
 	weight(walk, "walk", ww * ground)

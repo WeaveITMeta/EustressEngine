@@ -118,11 +118,14 @@ fn write_section<T: FieldTable>(path: &Path, component: &T) -> Result<(), String
 /// ("Workspace/Tank/Water") or to Workspace ("Tank/Water").
 fn resolve(ctx: &ToolContext, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim().trim_matches('/');
-    if rel.is_empty() || rel.contains("..") {
-        return Err(format!("invalid instance path '{rel}'"));
+    if rel.is_empty() {
+        return Err("invalid instance path ''".to_string());
     }
+    crate::sandbox::relative(rel).map_err(|why| format!("invalid instance path: {why}"))?;
     for base in [ctx.space_root.clone(), ctx.space_root.join("Workspace")] {
-        let candidate = base.join(rel).join("_instance.toml");
+        // Contained by the shared rules: links on disk are followed and must
+        // stay inside the folder.
+        let Ok(candidate) = crate::sandbox::resolve(&base, &format!("{rel}/_instance.toml")) else { continue };
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -176,10 +179,12 @@ fn describe() -> ToolResult {
 fn create(input: &Value, ctx: &ToolContext) -> Result<ToolResult, String> {
     let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("ParticleSimulation");
     let parent = input.get("parent").and_then(|v| v.as_str()).unwrap_or("").trim().trim_matches('/');
-    if parent.contains("..") {
-        return Err("invalid parent path".into());
-    }
-    let base = if parent.is_empty() { ctx.space_root.join("Workspace") } else { ctx.space_root.join("Workspace").join(parent) };
+    let workspace = ctx.space_root.join("Workspace");
+    let base = if parent.is_empty() {
+        workspace
+    } else {
+        crate::sandbox::resolve(&workspace, parent).map_err(|why| format!("invalid parent path: {why}"))?
+    };
     let position = input.get("position").and_then(|v| v.as_array()).and_then(|a| {
         let f: Vec<f32> = a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
         (f.len() == 3).then(|| [f[0], f[1], f[2]])

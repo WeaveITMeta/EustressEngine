@@ -37,7 +37,10 @@ pub mod content;
 pub mod easing;
 pub mod graph;
 pub mod humanoid;
+pub mod motion;
 pub mod runtime;
+#[cfg(feature = "physics")]
+pub mod seat_hands;
 pub mod tree;
 
 pub use clip::JointPose;
@@ -88,6 +91,9 @@ pub enum AnimatorSet {
     Drive,
     /// `PostUpdate`, after Bevy samples the graphs: `RootMotionMode` `Pin`.
     RootMotion,
+    /// The motion matcher's decaying offset, composed onto the sampled pose, so
+    /// a switch between clips is hidden before the procedural layers run.
+    Inertialize,
     /// Breathing, exertion, idle breaks, landing flex, look-at: composed onto
     /// the animated pose, never assigned.
     Procedural,
@@ -139,6 +145,7 @@ impl Plugin for AnimatorPlugin {
             PostUpdate,
             (
                 AnimatorSet::RootMotion,
+                AnimatorSet::Inertialize,
                 AnimatorSet::Procedural,
                 AnimatorSet::Ik,
                 AnimatorSet::Facing,
@@ -170,6 +177,20 @@ impl Plugin for AnimatorPlugin {
                 runtime::motor_forward_pass.in_set(AnimatorSet::Joints),
                 runtime::probe_liveness.in_set(AnimatorSet::Joints).after(runtime::motor_forward_pass),
             ),
+        );
+        // A matcher in Shadow mode watches a character and reports what it
+        // would pick; it moves nothing.
+        #[cfg(feature = "physics")]
+        app.init_resource::<motion::shadow::ShadowMatchers>().add_systems(
+            Update,
+            motion::shadow::shadow_matchers.in_set(AnimatorSet::Drive).after(runtime::pose_ready_fallback),
+        );
+        // A seated avatar's hands reach its seat's grips after the foot IK, so
+        // they hold where the wheel is this frame.
+        #[cfg(feature = "physics")]
+        app.add_systems(
+            PostUpdate,
+            seat_hands::seat_hands.in_set(AnimatorSet::Ik).after(crate::avatar::AvatarSystems::PostAnim),
         );
     }
 }

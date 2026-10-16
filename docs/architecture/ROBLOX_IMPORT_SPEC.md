@@ -941,7 +941,7 @@ the string lookup, then `ClassName::from_str` for the typed value.
 | `BallSocketConstraint`   | `BallSocketConstraint`   | inherited                   | Direct (Avian BallSocketConstraint).                                   |
 | `ScreenGui`              | `ScreenGui`              | `StarterGui/`               | Direct.                                                                |
 | `BillboardGui`           | `BillboardGui`           | inherited                   | Direct.                                                                |
-| `SurfaceGui`             | `SurfaceGui`             | inherited                   | Direct.                                                                |
+| `SurfaceGui`             | `SurfaceGui`             | inherited                   | Direct; its canvas and density come from its part (§9.1).             |
 | `Frame`                  | `Frame`                  | inherited                   | Direct.                                                                |
 | `TextLabel`              | `TextLabel`              | inherited                   | Direct.                                                                |
 | `TextButton`             | `TextButton`             | inherited                   | Direct.                                                                |
@@ -985,6 +985,44 @@ the string lookup, then `ClassName::from_str` for the typed value.
 materialised as instances. They become routing decisions per §5.
 
 ---
+
+### 9.1 SurfaceGui
+
+A SurfaceGui draws on the face of the part it sits in (its parent part). Its
+`[gui]` section holds these keys. A SurfaceGui draws from a file only once the
+SurfaceGui renderer and loader land; the keys are written ahead of them:
+
+- `face`: the NormalId label; `Front` when the file lacks one.
+- `canvas_size` and `pixels_per_unit`: worked out from the part. `SizingMode`
+  `PixelsPerStud` gives a canvas of the face's size in studs times
+  `PixelsPerStud`; `FixedSize` gives `CanvasSize`. Either way the canvas covers
+  the face, so `pixels_per_unit` is the canvas width over the face's width in
+  metres.
+- `max_distance` (metres): Roblox's `MaxDistance`. Roblox's 0 (no limit) is
+  written as 1,000,000 m, so the file never asks for a 0 metre limit.
+- `always_on_top`, `brightness`, `light_influence`, `clips_descendants`,
+  `enabled`, `active`, `reset_on_spawn` and `z_index_behavior`: the Roblox values.
+- `sizing_mode`, `pixels_per_stud`, `z_offset` and `tool_punch_through_distance`
+  (metres): the Roblox values, kept for a renderer that reads them. Nothing reads
+  them yet.
+
+A key the file lacks takes the reflection database's default. The database
+says SizingMode defaults to `FixedSize`, where the Creator Hub's SurfaceGui page
+says `PixelsPerStud`; the importer follows the database.
+
+Adornee is not followed. A SurfaceGui whose Adornee names another instance draws
+on its own part, and the import report records the difference.
+
+A child element (Frame, TextLabel, ImageLabel, ...) holds its Position as the one
+UDim2 `position` (`[scale_x, offset_x, scale_y, offset_y]`), which the loader
+reads, and its Size as `size` with `size_scale` and `size_offset`. Imports made
+before this mapping wrote `position_scale` and `position_offset`, which no loader
+reads, so their children sit at the origin. Re-import to fix them.
+
+The UI helper classes (UICorner, UIStroke, UIListLayout, UIPadding and the
+rest) keep their Roblox properties in `[properties.extras]`. Studio's file
+loader does not read those classes from disk yet, so they have no effect on a
+disk-loaded Space.
 
 ## 10. Property mapping
 
@@ -1309,24 +1347,22 @@ perspective — the integrator decides whether to follow it.
 
 ---
 
-### 11.1 Re-importing a Space that is being rebuilt
+### 11.1 Re-importing a Space
 
 `rbx_import --clean` moves the old Space to `Spaces/.trash` and imports the
-place fresh. Two things a rebuild keeps of its own come back from the
-trashed copy (`carry_over.rs`): every folder named `Rebuild` directly under
-a top-level folder (`Workspace/Rebuild`, `ServerScriptService/Rebuild`, ...),
-copied whole, and `.eustress/rebuild_patches.toml`, the rebuild's edits to
-imported instances, replayed onto the fresh files:
+place fresh. The new Space holds exactly what the place holds; anything made
+in the old Space stays in its trashed copy. Work built on an imported place
+therefore lives in a Space of its own, which a re-import never touches.
 
-```toml
-[[patch]]
-path = "Workspace/Cars/Sedan"   # the instance folder, Space-relative
-key = "attributes.MaxSpeed"     # a dotted key into its _instance.toml
-value = 120                     # or `remove = true`
-```
+### 11.2 The batch table
 
-A patch whose instance no longer exists goes to
-`.eustress/rebuild_patches_orphaned.toml`, and the importer prints the counts.
+`rbx_import` reads which places to import from a TOML table,
+`<Eustress>/rbx_import_places.toml` by default (`--places <file>`): an
+optional `source_dir` (the folder holding the `.rbxl` files) and one
+`[[place]]` per place with its file stem, its Universe and, optionally, its
+Space name. `--eustress <dir>` and `--source <dir>` override the two
+folders. `rbx_import --place <stem> --space <name> --universe <name>`
+imports one place with no table at all.
 
 ## 12. Idempotency + deterministic UUIDs
 

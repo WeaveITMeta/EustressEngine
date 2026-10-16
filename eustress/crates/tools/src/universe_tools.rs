@@ -115,12 +115,10 @@ impl ToolHandler for ListSpacesTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let universe_name = input.get("universe").and_then(|v| v.as_str());
         let universe_root = match universe_name {
-            Some(name) => {
-                ctx.universe_root
-                    .parent()
-                    .unwrap_or(ctx.universe_root.as_path())
-                    .join(name)
-            }
+            Some(name) => match named_universe(ctx, name) {
+                Ok(root) => root,
+                Err(e) => return err_result("list_spaces", e),
+            },
             None => ctx.universe_root.clone(),
         };
 
@@ -502,16 +500,12 @@ impl ToolHandler for CreateScriptTool {
         // The parent folder: the caller's Space-relative path, or the service
         // where this kind of script belongs.
         let parent_dir = match input.get("parent").and_then(|v| v.as_str()).map(str::trim).filter(|p| !p.is_empty()) {
-            Some(rel) => {
-                let rel_path = std::path::Path::new(rel);
-                let stays_inside = rel_path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
-                if !stays_inside {
-                    return fail(format!(
-                        "parent '{}' must be a folder inside the Space, like \"ServerScriptService\" or \"ReplicatedStorage/Shared\"", rel,
-                    ));
-                }
-                ctx.space_root.join(rel_path)
-            }
+            Some(rel) => match crate::sandbox::resolve(&ctx.space_root, rel) {
+                Ok(dir) => dir,
+                Err(why) => return fail(format!(
+                    "parent must be a folder inside the Space, like \"ServerScriptService\" or \"ReplicatedStorage/Shared\": {why}",
+                )),
+            },
             None => match run_context {
                 "Client" => {
                     // Some Spaces have a top-level StarterPlayerScripts
@@ -699,6 +693,17 @@ impl ToolHandler for SetDefaultUniverseTool {
                 structured_data: None, stream_topic: None,
             };
         };
+        // The engine opens this name on its next launch, so it is one
+        // Universe folder name, never a path.
+        let checked = match crate::sandbox::plain_name(name) {
+            Ok(n) => n,
+            Err(why) => return ToolResult {
+                tool_name: "set_next_launch_universe".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Invalid Universe name: {why}"),
+                structured_data: None, stream_topic: None,
+            },
+        };
+        let name = checked.as_str();
         // Sentinel lives next to the Eustress documents root so it
         // survives per-Universe resets.
         let sentinel = ctx
@@ -763,6 +768,14 @@ impl ToolHandler for GetConversationTool {
                 structured_data: None, stream_topic: None,
             };
         };
+        // One file in the sessions folder, never a path out of it.
+        if let Err(why) = crate::sandbox::plain_name(session_id) {
+            return ToolResult {
+                tool_name: "get_conversation".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Invalid session_id: {why}"),
+                structured_data: None, stream_topic: None,
+            };
+        }
         // Workshop conversations are persisted under
         // `<universe>/.eustress/workshop/sessions/<id>.json` —
         // convention from `workshop/persistence.rs`.
@@ -832,17 +845,10 @@ impl ToolHandler for NewUniverseTool {
             .unwrap_or_else(default_eustress_root);
 
         let parent_dir = match input.get("parent_path").and_then(|v| v.as_str()) {
-            Some(p) if !p.trim().is_empty() => {
-                let cleaned = p.replace('\\', "/");
-                if cleaned.contains("..") {
-                    return err_result(TOOL, "Invalid parent_path: '..' is not allowed.".into());
-                }
-                let resolved = eustress_root.join(&cleaned);
-                if !resolved.starts_with(&eustress_root) {
-                    return err_result(TOOL, "Invalid parent_path: escapes the Eustress root.".into());
-                }
-                resolved
-            }
+            Some(p) if !p.trim().is_empty() => match crate::sandbox::resolve(&eustress_root, p) {
+                Ok(resolved) => resolved,
+                Err(why) => return err_result(TOOL, format!("Invalid parent_path: {why}")),
+            },
             _ => eustress_root.clone(),
         };
 
@@ -1166,18 +1172,37 @@ fn err_result(tool: &str, msg: String) -> ToolResult {
     }
 }
 
-/// Validate a single path component (Universe name, Space name, …):
-/// non-empty, no path separators, and no `..` traversal. Mirrors the
-/// `.contains("..")` convention used by `file_tools`/`entity_tools`/
-/// `spatial_tools`, extended to also reject embedded separators since
-/// these names must stay single path components.
+/// The Universe a caller names: a sibling of the active Universe, by its
+/// folder name, or the absolute path of a folder holding `Spaces/` (the rule
+/// `set_active_universe` applies).
+fn named_universe(ctx: &ToolContext, raw: &str) -> Result<std::path::PathBuf, String> {
+    let raw = raw.trim();
+    let path = std::path::Path::new(raw);
+    if path.is_absolute() {
+        let path = crate::sandbox::local_absolute(raw).map_err(|why| format!("Invalid Universe path: {why}"))?;
+        return if path.join("Spaces").is_dir() {
+            Ok(path)
+        } else {
+            Err(format!("'{raw}' is not a Universe (no Spaces/ folder in it)"))
+        };
+    }
+    let name = crate::sandbox::plain_name(raw).map_err(|why| format!("Invalid Universe name: {why}"))?;
+    Ok(ctx.universe_root.parent().unwrap_or(ctx.universe_root.as_path()).join(name))
+}
+
+/// Validate a single path component (Universe name, Space name, …): one
+/// ordinary name by the shared rules in [`crate::sandbox::plain_name`], with
+/// no space at either end, since callers use the name as given.
 fn validate_path_component(name: &str) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Name cannot be empty".to_string());
     }
-    if trimmed.contains("..") || trimmed.contains('/') || trimmed.contains('\\') {
-        return Err(format!("Invalid name '{}': must be a single path component (no '..', '/', or '\\\\').", name));
+    if trimmed != name {
+        return Err(format!("Invalid name '{name}': it starts or ends with a space"));
+    }
+    if let Err(why) = crate::sandbox::plain_name(name) {
+        return Err(format!("Invalid name: {why}"));
     }
     if eustress_common::instance_create::is_eep_reserved_name(trimmed) {
         return Err(format!("'{}' is a reserved EEP name and cannot be used.", trimmed));
@@ -1261,7 +1286,7 @@ target/\n";
 /// Sky/Sun, also via `create_instance`, each from its class_schema template).
 ///
 /// Returns the new Space's root path on success.
-fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &str) -> Result<std::path::PathBuf, String> {
+pub fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &str) -> Result<std::path::PathBuf, String> {
     use eustress_common::{
         AssetIndexManifest, PackageIndexManifest, ProjectManifest, ProjectSettingsManifest,
         PublishJournalManifest, PublishManifest, SyncManifest, save_toml_file,
@@ -1298,8 +1323,10 @@ fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &s
     std::fs::write(
         space_root.join("space.toml"),
         format!(
-            "# EEP Space metadata\n[space]\nname = \"{}\"\nauthor = \"{}\"\nversion = \"0.1.0\"\ncreated_with = \"Eustress Engine\"\n\n[metadata]\ncreated = \"{}\"\nlast_modified = \"{}\"\n",
-            space_name, author, now, now,
+            "# EEP Space metadata\n[space]\nname = \"{}\"\nauthor = \"{}\"\nversion = \"0.1.0\"\ncreated_with = \"Eustress Engine\"\nformat = {}\n\n[metadata]\ncreated = \"{}\"\nlast_modified = \"{}\"\n",
+            // Born at the current Space format, so the open-time migration
+            // never treats this Space as an older one.
+            space_name, author, eustress_common::space_format::CURRENT, now, now,
         ),
     ).map_err(|e| e.to_string())?;
     std::fs::write(space_root.join("simulation.toml"), SIMULATION_TOML_CONTENT).map_err(|e| e.to_string())?;

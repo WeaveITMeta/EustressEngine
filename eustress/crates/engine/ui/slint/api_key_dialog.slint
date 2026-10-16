@@ -4,10 +4,13 @@
 // SAM.gov needs a free API key; Grants.gov needs none. The key must not go in
 // a Space folder, because that folder is what an auditor reads and what gets
 // committed, so the Connector stores only the credential's NAME and the value
-// is saved to %LOCALAPPDATA%\Eustress\credentials.toml.
+// is saved in the system credential store (Windows Credential Manager, the
+// macOS Keychain, the Linux Secret Service), or, while that cannot take it, in
+// a private file under %LOCALAPPDATA%\Eustress\keys\.
 //
-// The masked-status line is the point of the whole dialog: pasting a key and
-// then having no way to tell whether it took is the failure this replaces.
+// The status line is the point of the whole dialog: pasting a key and then
+// having no way to tell whether it took is the failure this replaces. It says
+// when the key was saved and never shows any part of it.
 // ============================================================================
 
 import { Button, LineEdit } from "std-widgets.slint";
@@ -17,7 +20,7 @@ export component ApiKeyDialog inherits Rectangle {
     // Credential name, e.g. "SAM_API_KEY". Shown, never editable here: it is
     // the Connector's `secret_ref` and changing it in two places would drift.
     in property <string> key-name: "SAM_API_KEY";
-    // "SAM_API_KEY is saved (••••••••3f9a)" or "… is not set".
+    // "SAM_API_KEY is saved (2026-10-01 15:40 UTC)" or "… is not set".
     in property <string> status-line: "";
     in property <bool> present: false;
     // True when the value came from an environment variable, which Remove

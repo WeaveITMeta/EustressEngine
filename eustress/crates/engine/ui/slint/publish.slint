@@ -14,8 +14,29 @@ import {
     SettingsGroup, SettingRow, KitNotice, KitSectionLabel,
 } from "dialog_kit.slint";
 import { ListingStatusRow, ListingReason } from "listing_status.slint";
+import { HashtagInput } from "hashtag_input.slint";
 
 // Tree node for hierarchy panel
+// One place a publish can go: the new listing (id "") or one of the
+// author's listings. Rust fills these from the API.
+// One earlier change log of the target listing.
+export struct ChangeLogRow {
+    id: string,
+    // "Version 7".
+    title: string,
+    // When it was published and how big the log is.
+    detail: string,
+    // Where a download saved it, or why it could not.
+    note: string,
+    failed: bool,
+}
+
+export struct PublishTargetRow {
+    id: string,
+    title: string,
+    detail: string,
+}
+
 export struct PublishTreeNode {
     name: string,
     depth: int,
@@ -119,6 +140,69 @@ export component PublishDialog inherits Rectangle {
     in property <string> pak-size-estimate: "";
     in property <bool> is-publishing: false;
     in property <string> error-message: "";
+    // The running publish's stage, e.g. "Uploading Universe... 45%".
+    in property <string> progress: "";
+    // How many players a session holds: the start Space's
+    // Players.MaxPlayers, written back on Publish.
+    in-out property <string> max-players: "10";
+    // Sessions above this many players have not been load-tested yet.
+    in property <int> load-tested-players: 4;
+    // Where the publish goes: "" for a new listing, else a listing's id.
+    in property <[PublishTargetRow]> targets: [];
+    in-out property <string> target-id: "";
+    in-out property <string> target-title: "New listing";
+    in-out property <int> target-index: 0;
+    // This Universe's own listing, which publishes without a confirm.
+    in property <string> own-listing-id: "";
+    // "Loading your listings...", or why they could not be listed.
+    in property <string> targets-note: "";
+    // Publish As... opens with the picker taking the keyboard.
+    in property <bool> focus-targets: false;
+    // The change logs (`publish_changelog`): the one the publish that just
+    // finished built, and the target listing's earlier ones.
+    in property <bool> changelog-ready: false;
+    in property <int> changelog-version: 0;
+    in property <bool> changelog-stored: true;
+    in property <[ChangeLogRow]> changelogs: [];
+    in property <string> changelogs-note: "";
+    property <bool> changelogs-open: false;
+    callback on-changelog-save();
+    callback on-changelog-download(string);
+    // The listing's cover (`publish_cover`): "keep", "set" or "remove",
+    // a preview of a picked image, its size line, and why a pick was refused;
+    // whether the target listing has a cover now ("yes", "no", "" not known).
+    in property <string> cover-state: "keep";
+    in property <string> cover-now: "";
+    in property <image> cover-image;
+    in property <string> cover-info: "";
+    in property <string> cover-error: "";
+    callback on-cover-choose();
+    callback on-cover-remove();
+    callback on-cover-keep();
+    // The listing's hashtags (`publish_targets`), in two rows of four.
+    in property <[string]> tags-row-0: [];
+    in property <[string]> tags-row-1: [];
+    in property <int> tags-count: 0;
+    // The review chose the tags shown, because the author gave none.
+    in property <bool> tags-suggested: false;
+    in property <string> tags-error: "";
+    in-out property <string> tags-text: "";
+    callback on-tag-add(string);
+    callback on-tag-typed(string);
+    callback on-tag-remove(int);
+    // Publishing into another listing replaces it: Publish asks twice.
+    property <bool> confirm-armed: false;
+    property <bool> needs-confirm: root.publish-mode != "space" && root.target-id != "" && root.target-id != root.own-listing-id;
+    changed target-id => { root.confirm-armed = false; }
+    function pick-target(i: int) {
+        root.target-index = i;
+        root.target-id = root.targets[i].id;
+        root.target-title = root.targets[i].title;
+    }
+    property <float> max-players-number: root.max-players.to-float();
+    property <bool> max-players-valid: root.max-players.is-float()
+        && root.max-players-number >= 1 && root.max-players-number <= 10000
+        && floor(root.max-players-number) == root.max-players-number;
     in property <bool> is-update: false;
     in property <string> publish-mode: "universe";
 
@@ -135,17 +219,27 @@ export component PublishDialog inherits Rectangle {
     in property <bool> listing-can-appeal: false;
     in property <bool> listing-appeal-busy: false;
     in property <string> listing-appeal-error: "";
+    in property <bool> listing-can-rerequest: false;
+    in property <bool> listing-rerequest-busy: false;
+    in property <string> listing-rerequest-note: "";
     callback on-listing-appeal(string);
     callback on-listing-open-review();
+    callback on-listing-rerequest();
 
-    property <bool> can-publish: !root.is-publishing && root.experience-name != "";
+    property <bool> can-publish: !root.is-publishing && root.experience-name != "" && root.max-players-valid;
 
     width: 100%;
     height: 100%;
     background: transparent;
 
     DialogScrim {
-        dismiss => { root.on-close(); }
+        // While a publish runs the dialog shows its progress, so a stray
+        // click on the backdrop does not close it (its Close button does).
+        dismiss => {
+            if !root.is-publishing {
+                root.on-close();
+            }
+        }
 
         keys := FocusScope {
             x: (parent.width - self.width) / 2;
@@ -156,7 +250,9 @@ export component PublishDialog inherits Rectangle {
             init => { self.focus(); }
             key-pressed(event) => {
                 if (event.text == Key.Escape) {
-                    root.on-close();
+                    if !root.is-publishing {
+                        root.on-close();
+                    }
                     return accept;
                 }
                 reject
@@ -169,7 +265,9 @@ export component PublishDialog inherits Rectangle {
                 title: root.publish-mode == "space"
                     ? (root.is-update ? "Update Space" : "Publish Space")
                     : (root.is-update ? "Update Universe" : "Publish Universe");
-                subtitle: "Target: " + root.publish-target + "  ·  " + root.sync-status;
+                subtitle: root.is-publishing
+                    ? (root.progress != "" ? root.progress : "Publishing...")
+                    : "Target: " + root.publish-target + "  ·  " + root.sync-status;
                 close => { root.on-close(); }
 
                 HorizontalLayout {
@@ -246,6 +344,96 @@ export component PublishDialog inherits Rectangle {
                             spacing: 16px;
                             alignment: start;
 
+                            // Where this publish goes: a new listing, or one of the
+                            // author's listings on this API (Publish As...). A
+                            // Space-only publish always goes to this Universe's
+                            // own listing, so it has no picker.
+                            if root.publish-mode != "space": SettingsGroup {
+                                title: "PUBLISH TO";
+                                targets-keys := FocusScope {
+                                    init => {
+                                        if root.focus-targets {
+                                            self.focus();
+                                        }
+                                    }
+                                    key-pressed(event) => {
+                                        if event.text == Key.UpArrow && root.target-index > 0 {
+                                            root.pick-target(root.target-index - 1);
+                                            return accept;
+                                        }
+                                        if event.text == Key.DownArrow && root.target-index < root.targets.length - 1 {
+                                            root.pick-target(root.target-index + 1);
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 2px;
+
+                                        for target[i] in root.targets: Rectangle {
+                                            height: 36px;
+                                            border-radius: Theme.radius-sm;
+                                            background: target.id == root.target-id ? Theme.accent-cyan.with-alpha(0.12)
+                                                : target-ta.has-hover ? Theme.button-hover : transparent;
+                                            border-width: target.id == root.target-id && targets-keys.has-focus ? 1px : 0px;
+                                            border-color: Theme.accent-cyan.with-alpha(0.6);
+
+                                            target-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    root.pick-target(i);
+                                                    targets-keys.focus();
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 10px;
+                                                        height: 10px;
+                                                        border-radius: 5px;
+                                                        border-width: 1px;
+                                                        border-color: target.id == root.target-id ? Theme.accent-cyan : Theme.border-color;
+                                                        background: target.id == root.target-id ? Theme.accent-cyan : transparent;
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 1px;
+                                                    horizontal-stretch: 1;
+                                                    Text {
+                                                        text: target.title;
+                                                        color: Theme.text-primary;
+                                                        font-size: 12px;
+                                                        overflow: elide;
+                                                    }
+                                                    if target.detail != "": Text {
+                                                        text: target.detail;
+                                                        color: Theme.text-secondary;
+                                                        font-size: Theme.font-xs;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if root.targets-note != "": Text {
+                                            text: root.targets-note;
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.font-xs;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
                             SettingsGroup {
                                 title: "LISTING";
                                 HorizontalLayout {
@@ -262,6 +450,10 @@ export component PublishDialog inherits Rectangle {
                                         appeal-error: root.listing-appeal-error;
                                         appeal(text) => { root.on-listing-appeal(text); }
                                         open-review => { root.on-listing-open-review(); }
+                                        can-rerequest: root.listing-can-rerequest;
+                                        rerequest-busy: root.listing-rerequest-busy;
+                                        rerequest-note: root.listing-rerequest-note;
+                                        rerequest => { root.on-listing-rerequest(); }
                                     }
                                 }
                             }
@@ -298,12 +490,155 @@ export component PublishDialog inherits Rectangle {
                                     }
                                 }
 
+                                // What the listing is, in the author's words: tags.
+                                // A Space-only publish never touches them.
+                                if root.publish-mode != "space": VerticalLayout {
+                                    padding-top: 9px;
+                                    padding-bottom: 10px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Tags (optional)";
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                    }
+                                    HashtagInput {
+                                        row-0: root.tags-row-0;
+                                        row-1: root.tags-row-1;
+                                        count: root.tags-count;
+                                        error: root.tags-error;
+                                        text <=> root.tags-text;
+                                        add-tag(tag) => { root.on-tag-add(tag); }
+                                        typed(text) => { root.on-tag-typed(text); }
+                                        remove-tag(i) => { root.on-tag-remove(i); }
+                                    }
+                                    if root.tags-suggested: Text {
+                                        text: "Suggested by review. Keep them, or change them to your own.";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.font-xs;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: "Leave them empty and the review chooses tags for you. Changing tags sends the listing back to review.";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.font-xs;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
                                 SettingRow {
-                                    label: "Genre";
-                                    ComboBox {
-                                        width: 200px;
-                                        model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
-                                        current-value <=> root.genre;
+                                    label: "Max players";
+                                    description: "Everyone in a session, you included when you play. 1 to 10,000 (the gallery's limit).";
+                                    LineEdit {
+                                        width: 90px;
+                                        horizontal-alignment: right;
+                                        text <=> root.max-players;
+                                    }
+                                }
+                                if !root.max-players-valid: Text {
+                                    text: "Enter a whole number from 1 to 10,000.";
+                                    color: Theme.text-warning;
+                                    font-size: Theme.font-xs;
+                                    wrap: word-wrap;
+                                }
+                                // A note, never a refusal: the number stands as authored.
+                                if root.max-players-valid && root.max-players-number > root.load-tested-players: Text {
+                                    text: "Sessions above " + root.load-tested-players + " players haven't been load-tested yet.";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                    wrap: word-wrap;
+                                }
+
+                                // The listing's cover (optional), shown in the
+                                // Gallery once approved. A Space-only publish
+                                // never touches it.
+                                if root.publish-mode != "space": VerticalLayout {
+                                    padding-top: 9px;
+                                    padding-bottom: 10px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Cover (optional)";
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Rectangle {
+                                            width: 72px;
+                                            height: 72px;
+                                            border-radius: Theme.radius-sm;
+                                            background: Theme.background-tertiary;
+                                            border-width: 1px;
+                                            border-color: Theme.border-color;
+                                            if root.cover-state == "set": Image {
+                                                width: parent.width - 4px;
+                                                height: parent.height - 4px;
+                                                source: root.cover-image;
+                                                image-fit: contain;
+                                            }
+                                            if root.cover-state != "set": Text {
+                                                text: root.cover-state == "remove" ? "Removed"
+                                                    : root.cover-now == "yes" ? "Current cover"
+                                                    : root.cover-now == "no" ? "No cover" : "No new cover";
+                                                color: Theme.text-disabled;
+                                                font-size: Theme.font-xs;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                wrap: word-wrap;
+                                                width: parent.width - 8px;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            horizontal-stretch: 1;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: start;
+                                                KitButton {
+                                                    height: 24px;
+                                                    text: root.cover-state == "set" ? "Choose another..." : "Choose...";
+                                                    clicked => { root.on-cover-choose(); }
+                                                }
+                                                if root.cover-state == "set": KitButton {
+                                                    height: 24px;
+                                                    kind: "ghost";
+                                                    text: "Clear";
+                                                    clicked => { root.on-cover-keep(); }
+                                                }
+                                                if root.cover-state == "keep" && root.cover-now != "no": KitButton {
+                                                    height: 24px;
+                                                    kind: "ghost";
+                                                    text: "Remove current cover";
+                                                    clicked => { root.on-cover-remove(); }
+                                                }
+                                                if root.cover-state == "remove": KitButton {
+                                                    height: 24px;
+                                                    kind: "ghost";
+                                                    text: "Keep current cover";
+                                                    clicked => { root.on-cover-keep(); }
+                                                }
+                                            }
+                                            if root.cover-error != "": Text {
+                                                text: root.cover-error;
+                                                color: Theme.text-warning;
+                                                font-size: Theme.font-xs;
+                                                wrap: word-wrap;
+                                            }
+                                            if root.cover-error == "" && root.cover-info != "": Text {
+                                                text: root.cover-info;
+                                                color: Theme.text-secondary;
+                                                font-size: Theme.font-xs;
+                                            }
+                                            Text {
+                                                text: "Portrait box art or 16:9: PNG, JPEG or WebP, up to 2 MB, at least 320 px on the short side. Your cover appears after review.";
+                                                color: Theme.text-disabled;
+                                                font-size: Theme.font-xs;
+                                                wrap: word-wrap;
+                                            }
+                                            // Reserved for an AI cover suggestion, not decided yet.
+                                        }
                                     }
                                 }
                             }
@@ -328,6 +663,96 @@ export component PublishDialog inherits Rectangle {
                                 kind: "error";
                                 text: root.error-message;
                             }
+
+                            // The change log of the publish that just finished
+                            // (`publish_changelog`): saved as Markdown, even when
+                            // storing it on the server failed.
+                            if root.changelog-ready: VerticalLayout {
+                                spacing: 6px;
+                                KitNotice {
+                                    kind: root.changelog-stored ? "info" : "warn";
+                                    text: (root.changelog-version > 0 ? "Version " + root.changelog-version + "'s change log" : "The change log")
+                                        + (root.changelog-stored ? " is ready to download." : " was not stored on the server; save it now to keep it.");
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    KitButton {
+                                        text: "Download change log (.md)";
+                                        clicked => { root.on-changelog-save(); }
+                                    }
+                                }
+                            }
+
+                            // The target listing's earlier change logs, newest
+                            // first. A new listing has none.
+                            if root.target-id != "": SettingsGroup {
+                                title: "CHANGE LOGS";
+                                VerticalLayout {
+                                    padding-top: 8px;
+                                    padding-bottom: 8px;
+                                    spacing: 6px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: root.changelogs.length > 0 ? "Earlier change logs (" + root.changelogs.length + ")" : "Earlier change logs";
+                                            color: Theme.text-primary;
+                                            font-size: 12px;
+                                            font-weight: 500;
+                                            vertical-alignment: center;
+                                        }
+                                        KitButton {
+                                            kind: "ghost";
+                                            text: root.changelogs-open ? "Hide" : "Show";
+                                            clicked => { root.changelogs-open = !root.changelogs-open; }
+                                        }
+                                    }
+                                    if root.changelogs-open && root.changelogs-note != "": Text {
+                                        text: root.changelogs-note;
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.font-xs;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.changelogs-open: VerticalLayout {
+                                        spacing: 4px;
+                                        for log in root.changelogs: VerticalLayout {
+                                            spacing: 2px;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: log.title;
+                                                    color: Theme.text-primary;
+                                                    font-size: 12px;
+                                                    vertical-alignment: center;
+                                                }
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    text: log.detail;
+                                                    color: Theme.text-secondary;
+                                                    font-size: Theme.font-xs;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                                KitButton {
+                                                    kind: "ghost";
+                                                    text: "Download";
+                                                    clicked => { root.on-changelog-download(log.id); }
+                                                }
+                                            }
+                                            if log.note != "": Text {
+                                                text: log.note;
+                                                color: log.failed ? Theme.text-warning : Theme.text-secondary;
+                                                font-size: Theme.font-xs;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if root.confirm-armed: KitNotice {
+                                kind: "warn";
+                                text: "This replaces the published version of " + root.target-title + ". Its players, visits and review history stay; the new content is reviewed again. Click Publish again to confirm.";
+                            }
                         }
                     }
                 }
@@ -339,12 +764,19 @@ export component PublishDialog inherits Rectangle {
                         clicked => { root.on-close(); }
                     }
                     KitButton {
-                        text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
+                        text: root.is-publishing ? "Publishing..."
+                            : root.confirm-armed ? "Replace and publish"
+                            : root.is-update ? "Update" : "Publish";
                         kind: "primary";
                         has-icon: true;
                         icon: @image-url("../../assets/icons/ui/rocket.svg");
                         enabled: root.can-publish;
                         clicked => {
+                            if root.needs-confirm && !root.confirm-armed {
+                                root.confirm-armed = true;
+                                return;
+                            }
+                            root.confirm-armed = false;
                             root.on-publish(
                                 root.experience-name,
                                 root.description,

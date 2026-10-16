@@ -15,8 +15,10 @@
 //! ## Trust
 //!
 //! - **Certificate.** Each host mints a fresh self-signed ECDSA P-256
-//!   certificate valid for 14 days. A player pins its SHA-256, carried in the
-//!   join link. Without a pin, a player may only connect to this machine.
+//!   certificate valid for a minute under 14 days, starting a day before the
+//!   host started, so a Player whose clock runs behind still takes it. A player pins its
+//!   SHA-256, carried in the join link. Without a pin, a player may only
+//!   connect to this machine.
 //! - **Join key.** A session is requested at `/join/<key>`. A wrong key is
 //!   refused with HTTP 403 before any connection state exists. The key
 //!   `open` is honoured only from a loopback address.
@@ -139,13 +141,33 @@ pub fn pin_prefix(pin: &[u8; 32]) -> String {
     pin[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// How far before now a host's certificate starts. A Player checks the
+/// certificate's start against its own clock, so one whose clock runs behind
+/// the host's would refuse a host that started moments ago as "not valid
+/// yet". A day covers any clock that drifted without anyone noticing.
+const CERT_BACKDATE_HOURS: i64 = 24;
+/// How long a host's certificate lasts in all, in minutes: a minute under
+/// the 14 days wtransport's Player and a browser allow a pinned certificate.
+const CERT_VALIDITY_MINUTES: i64 = 14 * 24 * 60 - 1;
+
+/// The host's self-signed certificate, valid from [`CERT_BACKDATE_HOURS`]
+/// before now for [`CERT_VALIDITY_MINUTES`]. Names are informational:
+/// players pin the certificate hash, not a name.
+fn host_identity() -> Result<Identity, String> {
+    use wtransport::tls::self_signed::time::{Duration as Span, OffsetDateTime};
+    Identity::self_signed_builder()
+        .subject_alt_names(["localhost", "127.0.0.1"])
+        .not_before(OffsetDateTime::now_utc() - Span::hours(CERT_BACKDATE_HOURS))
+        .offset_from_not_before(Span::minutes(CERT_VALIDITY_MINUTES))
+        .build()
+        .map_err(|e| format!("could not create the host certificate: {e}"))
+}
+
 /// Start listening. Returns at once; the link reports
 /// [`LinkEvent::Listening`] with the certificate pin, or
 /// [`LinkEvent::Failed`] if the port could not be bound.
 pub fn start_host(options: HostOptions) -> Result<NetLink, String> {
-    // Names are informational: players pin the certificate hash, not a name.
-    let identity = Identity::self_signed(["localhost", "127.0.0.1"])
-        .map_err(|e| format!("could not create the host certificate: {e}"))?;
+    let identity = host_identity()?;
     let pin = certificate_pin(&identity);
     let (link, ends) = link_pair();
     std::thread::Builder::new()
@@ -650,6 +672,42 @@ mod tests {
         assert!(read_host_file(&dir, 7788).is_some(), "writing it again makes it current");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(pin_prefix(&[0xab; 32]), "abababab");
+    }
+
+    /// A certificate's validity in Unix seconds, read from its DER: the first
+    /// two UTCTime values are its notBefore and notAfter.
+    fn validity(der: &[u8]) -> (i64, i64) {
+        let times: Vec<i64> = der
+            .windows(15)
+            .filter(|w| w[0] == 0x17 && w[1] == 13 && w[14] == b'Z' && w[2..14].iter().all(u8::is_ascii_digit))
+            .map(|w| {
+                let n = |i: usize| i64::from(w[i] - b'0') * 10 + i64::from(w[i + 1] - b'0');
+                // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+                let (y, m, d) = (2000 + n(2), n(4), n(6));
+                let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+                let (era, yoe) = (y / 400, y % 400);
+                let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + d - 1;
+                let days = era * 146_097 + doe - 719_468;
+                days * 86_400 + n(8) * 3_600 + n(10) * 60 + n(12)
+            })
+            .take(2)
+            .collect();
+        (times[0], times[1])
+    }
+
+    /// A Player whose clock runs behind the host's still takes a host that
+    /// just started: the certificate starts a day back, and lasts a minute
+    /// under the 14 days a pinned certificate may.
+    #[test]
+    fn a_host_certificate_starts_a_day_back_and_lasts_under_fourteen_days() {
+        let identity = host_identity().unwrap();
+        let (not_before, not_after) = validity(identity.certificate_chain().as_slice()[0].der());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let back = now - not_before;
+        assert!((23 * 3_600..=25 * 3_600).contains(&back), "it starts {back} s before now");
+        assert_eq!(not_after - not_before, 14 * 86_400 - 60, "it lasts a minute under 14 days");
+        assert!(not_after - now > 12 * 86_400, "and stays valid for any session");
+        assert_eq!(certificate_pin(&identity), certificate_pin(&identity.clone_identity()), "the pin is its hash");
     }
 
     #[test]

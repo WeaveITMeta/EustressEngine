@@ -2,6 +2,16 @@
 //!
 //! Wire format: `[ 8-byte LE payload_len ][ bincode(Frame) ]`
 //! Max frame size is enforced by `NodeConfig::frame_max_bytes`.
+//! Frames read before login are capped at 64 KB (`auth::PRE_LOGIN_MAX_FRAME`).
+//!
+//! bincode encodes an enum variant by its position, so new frames are only
+//! ever appended to the end of each enum. Inserting one in the middle would
+//! renumber every frame after it and break every older peer.
+//!
+//! Every frame that expects a reply gets exactly one, and replies come back
+//! in the order the frames arrived, so a client matches them with one
+//! first-in, first-out queue and needs no request ids. `Message` frames are
+//! not replies.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -52,9 +62,15 @@ pub enum ClientFrame {
     PublishBatchNoAck { topic: String, payloads: Vec<Vec<u8>> },
 
     /// List all active topics with stats.
+    /// A logged-in party sees only the topics it holds a grant on.
     ListTopics,
     /// Health check — node replies with Pong.
     Ping,
+
+    /// Login reply to `ServerFrame::Challenge`. Must be the first frame a
+    /// client sends. `signature` is Ed25519 over the channel's login
+    /// transcript (`auth::tcp_transcript`, `auth::quic_transcript`).
+    Hello { protocol_version: u16, party_id: String, signature: Vec<u8> },
 }
 
 /// Frames sent from a node to a client.
@@ -75,9 +91,25 @@ pub enum ServerFrame {
     /// - Wire size: **12 bytes fixed** (vs `count × 8` bytes for `BatchAck`).
     BatchAckCompact { first_offset: u64, count: u32 },
     /// Error response.
+    /// A refused acknowledged publish or a refused subscribe (no grant, quota
+    /// reached) is answered this way. A refused fire-and-forget publish gets
+    /// no reply at all: its sender reads none.
     Error { code: u32, message: String },
     /// Health check reply.
     Pong,
+
+    /// The first frame on every connection: the node id and a fresh 32-byte
+    /// nonce for this connection's login transcript.
+    Challenge { node_id: String, nonce: [u8; 32] },
+    /// Login accepted. The connection now carries this party's grants.
+    Welcome { party_id: String },
+    /// Login refused, then the node closes the connection. `reason` is
+    /// `"auth_failed"` or `"version_unsupported"`, nothing else.
+    AuthFailed { reason: String },
+    /// The success reply to `Subscribe`. `head` is the topic's head when the
+    /// subscription starts. It is written before any `Message` for that
+    /// subscription, replays included.
+    Subscribed { head: u64 },
 }
 
 /// Per-topic statistics reported in TopicList.
@@ -117,8 +149,14 @@ where
     W: AsyncWriteExt + Unpin,
 {
     let len = payload.len() as u64;
-    writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(payload).await?;
+    // One write, then a flush. Over TLS two writes would be two records, and
+    // a TLS stream holds written records until it is flushed, so a request
+    // could wait on bytes still sitting in a buffer.
+    let mut framed = Vec::with_capacity(8 + payload.len());
+    framed.extend_from_slice(&len.to_le_bytes());
+    framed.extend_from_slice(payload);
+    writer.write_all(&framed).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -144,6 +182,14 @@ where
     let payload = read_framed(reader, max_bytes).await?;
     bincode::deserialize(&payload)
         .map_err(|e| NodeError::Decode(e.to_string()))
+}
+
+/// Read one frame's payload bytes without decoding them.
+pub async fn read_raw_frame<R>(reader: &mut R, max_bytes: usize) -> Result<Bytes, NodeError>
+where
+    R: AsyncReadExt + Unpin,
+{
+    read_framed(reader, max_bytes).await
 }
 
 async fn read_framed<R>(reader: &mut R, max_bytes: usize) -> Result<Bytes, NodeError>
@@ -222,5 +268,44 @@ mod tests {
         // max_bytes = 10 — should fail
         let result = read_client_frame(&mut b, 10).await;
         assert!(matches!(result, Err(NodeError::FrameTooLarge(_))));
+    }
+
+    #[tokio::test]
+    async fn round_trip_login_frames() {
+        let (mut a, mut b) = duplex(65536);
+        write_server_frame(&mut a, &ServerFrame::Challenge { node_id: "n".into(), nonce: [7; 32] }).await.unwrap();
+        match read_server_frame(&mut b, 1024).await.unwrap() {
+            ServerFrame::Challenge { node_id, nonce } => {
+                assert_eq!(node_id, "n");
+                assert_eq!(nonce, [7; 32]);
+            }
+            other => panic!("expected Challenge, got {other:?}"),
+        }
+        let hello = ClientFrame::Hello { protocol_version: 1, party_id: "p".into(), signature: vec![1; 64] };
+        write_client_frame(&mut a, &hello).await.unwrap();
+        assert!(matches!(read_client_frame(&mut b, 1024).await.unwrap(), ClientFrame::Hello { protocol_version: 1, .. }));
+        write_server_frame(&mut a, &ServerFrame::Subscribed { head: 9 }).await.unwrap();
+        assert!(matches!(read_server_frame(&mut b, 1024).await.unwrap(), ServerFrame::Subscribed { head: 9 }));
+    }
+
+    /// bincode numbers variants by position. The frames that existed before
+    /// login keep their numbers, and the login frames come after them.
+    #[test]
+    fn variant_numbers_are_append_only() {
+        fn index<T: Serialize>(frame: &T) -> u32 {
+            let bytes = bincode::serialize(frame).unwrap();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+        assert_eq!(index(&ClientFrame::Subscribe { topic: String::new(), from_offset: None }), 0);
+        assert_eq!(index(&ClientFrame::ListTopics), 7);
+        assert_eq!(index(&ClientFrame::Ping), 8);
+        assert_eq!(index(&ClientFrame::Hello { protocol_version: 1, party_id: String::new(), signature: vec![] }), 9);
+        assert_eq!(index(&ServerFrame::Message { topic: String::new(), offset: 0, timestamp: 0, payload: vec![] }), 0);
+        assert_eq!(index(&ServerFrame::Error { code: 0, message: String::new() }), 5);
+        assert_eq!(index(&ServerFrame::Pong), 6);
+        assert_eq!(index(&ServerFrame::Challenge { node_id: String::new(), nonce: [0; 32] }), 7);
+        assert_eq!(index(&ServerFrame::Welcome { party_id: String::new() }), 8);
+        assert_eq!(index(&ServerFrame::AuthFailed { reason: String::new() }), 9);
+        assert_eq!(index(&ServerFrame::Subscribed { head: 0 }), 10);
     }
 }

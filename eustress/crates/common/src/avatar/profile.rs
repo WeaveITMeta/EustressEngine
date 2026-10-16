@@ -1,6 +1,6 @@
 //! Fetch the signed-in avatar off the render thread, then use the sealed spawner.
-use super::space_character::SpaceCharacterPolicy;
-use super::{AvatarDescriptor, AvatarSystems, DespawnAllAvatars, SpawnAvatar};
+use super::space_character::{SpaceCharacterPolicy, SpaceOwnsMotion};
+use super::{AvatarDescriptor, AvatarSystems, DespawnAllAvatars, MotionOverrides, SpawnAvatar};
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
 
@@ -55,8 +55,12 @@ fn cancel_pending(
 }
 
 /// The descriptor as the open Space dresses it: its own body for the
-/// account's body option, when it has one.
-fn dress(policy: Option<&SpaceCharacterPolicy>, descriptor: AvatarDescriptor) -> AvatarDescriptor {
+/// account's body option, when it has one, and its motion alone when
+/// `space_owns_motion`.
+fn dress(policy: Option<&SpaceCharacterPolicy>, mut descriptor: AvatarDescriptor, space_owns_motion: bool) -> AvatarDescriptor {
+    if space_owns_motion {
+        descriptor.motion = MotionOverrides::default();
+    }
     match policy {
         Some(p) => p.apply(descriptor),
         None => descriptor,
@@ -67,9 +71,11 @@ fn request_profile(
     mut requests: MessageReader<SpawnSavedAvatar>,
     pending: Res<ProfileRequests>,
     policy: Option<Res<SpaceCharacterPolicy>>,
+    space_owns_motion: Option<Res<SpaceOwnsMotion>>,
     mut spawn: MessageWriter<SpawnAvatar>,
 ) {
     let policy = policy.as_deref();
+    let space_owns_motion = space_owns_motion.is_some();
     for request in requests.read() {
         // Useful for offline Studio authoring and website descriptor exports.
         if let Some(path) = std::env::var_os("EUSTRESS_AVATAR_FILE") {
@@ -81,7 +87,7 @@ fn request_profile(
                 .and_then(|d| d.validate().map(|_| d));
             match result {
                 Ok(d) => {
-                    spawn.write(SpawnAvatar::new(dress(policy, d), request.at));
+                    spawn.write(SpawnAvatar::new(dress(policy, d, space_owns_motion), request.at));
                 }
                 Err(e) => {
                     tracing::error!("avatar: cannot load EUSTRESS_AVATAR_FILE: {e}");
@@ -90,7 +96,7 @@ fn request_profile(
             continue;
         }
         let Some(token) = request.token.clone().filter(|t| !t.trim().is_empty()) else {
-            spawn.write(SpawnAvatar::new(dress(policy, AvatarDescriptor::default()), request.at));
+            spawn.write(SpawnAvatar::new(dress(policy, AvatarDescriptor::default(), space_owns_motion), request.at));
             continue;
         };
         let sender = pending.sender.clone();
@@ -136,9 +142,11 @@ fn fetch_profile(token: &str) -> Result<AvatarDescriptor, String> {
 fn finish_profile(
     pending: Res<ProfileRequests>,
     policy: Option<Res<SpaceCharacterPolicy>>,
+    space_owns_motion: Option<Res<SpaceOwnsMotion>>,
     mut spawn: MessageWriter<SpawnAvatar>,
 ) {
     let policy = policy.as_deref();
+    let space_owns_motion = space_owns_motion.is_some();
     let Ok(receiver) = pending.receiver.lock() else {
         return;
     };
@@ -153,6 +161,23 @@ fn finish_profile(
                 AvatarDescriptor::default()
             }
         };
-        spawn.write(SpawnAvatar::new(dress(policy, descriptor), at));
+        spawn.write(SpawnAvatar::new(dress(policy, descriptor, space_owns_motion), at));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A joined Player's own avatar moves at the Space's pace, as the host
+    /// measures it; elsewhere the account's own motion stands.
+    #[test]
+    fn a_joined_player_keeps_none_of_its_accounts_motion() {
+        let mut mine = AvatarDescriptor::default();
+        mine.motion = MotionOverrides { walk_speed_mps: Some(40.0), jump_speed_mps: Some(90.0), ..Default::default() };
+        assert_eq!(dress(None, mine.clone(), true).motion, MotionOverrides::default());
+        assert_eq!(dress(None, mine.clone(), false).motion, mine.motion);
+        let space = SpaceCharacterPolicy::default();
+        assert_eq!(dress(Some(&space), mine.clone(), true).motion, space.apply(AvatarDescriptor::default()).motion);
     }
 }

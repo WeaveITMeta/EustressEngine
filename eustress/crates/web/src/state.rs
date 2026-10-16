@@ -45,6 +45,16 @@ pub fn api_base_for_host(host: &str) -> &'static str {
     }
 }
 
+/// The name the Player knows the API by: `staging` for the staging website, `production` for any other site. It is chosen
+/// from the same exact host as `api_base_for_host`, so the page and the link it hands the Player name the same API.
+pub fn api_name_for_host(host: &str) -> &'static str {
+    if host == STAGING_SITE_HOST {
+        "staging"
+    } else {
+        "production"
+    }
+}
+
 /// The API for the page in front of the visitor. The prerender has no page,
 /// and its output carries no API calls, so it answers with production.
 pub fn api_base() -> String {
@@ -77,6 +87,54 @@ pub struct User {
     #[serde(default)]
     pub ticket_balance: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// How many times the account has replaced its identity key. `None` when
+    /// the Worker did not say (an older session, or a deployment without account
+    /// objects).
+    #[serde(default)]
+    pub key_epoch: Option<u32>,
+    /// When the one-time "replace your key" prompt was shown, if it was.
+    #[serde(default)]
+    pub key_prompt_seen_at: Option<String>,
+    /// When the address on file was verified, if it is.
+    #[serde(default)]
+    pub email_verified_at: Option<String>,
+    /// A change of address that was asked for and has not taken effect.
+    #[serde(default)]
+    pub email_change_pending: Option<crate::api::EmailPending>,
+    /// What replacing the key pauses, in whole days, as the Worker enforces it. `None` when the
+    /// Worker did not say; the prompt then names no number.
+    #[serde(default)]
+    pub key_replace_terms: Option<KeyReplaceTerms>,
+    /// The time zone the account's emails are written in, as the Worker has it (`America/Phoenix`).
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    /// The Worker says so when the account was made before identity verification was required: it may sign in and
+    /// read, and every change is refused until it verifies (/verify-account). Absent for an account that need not.
+    #[serde(default)]
+    pub kyc_required: bool,
+    /// How this session signed in: `"key"` (the identity file) or `"passkey"`. `None` when the Worker
+    /// did not say (an older answer), which is read as the identity file.
+    #[serde(default)]
+    pub auth_method: Option<String>,
+}
+
+impl User {
+    /// This session signed in with a passkey. Such a session cannot change keys: replacing the
+    /// identity file, adding a passkey and removing a passkey need an identity-file session.
+    pub fn signed_in_with_passkey(&self) -> bool {
+        self.auth_method.as_deref() == Some("passkey")
+    }
+}
+
+/// The pause after a key replacement, from the Worker's own constants.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct KeyReplaceTerms {
+    /// Payouts and transfers pause this long.
+    pub pause_days: u32,
+    /// ...and this long when the account holds value.
+    pub pause_days_with_value: u32,
+    /// The payout bank account cannot be changed this long.
+    pub payout_pin_days: u32,
 }
 
 /// Authentication state.
@@ -144,6 +202,22 @@ pub struct AppState {
 
     /// Detected jurisdiction from Cloudflare trace.
     pub jurisdiction: RwSignal<JurisdictionState>,
+
+    /// The signed-in account's Delta balance, for the top bar.
+    pub delta: RwSignal<DeltaState>,
+}
+
+/// Where the Delta balance stands. The top bar shows a chip only for `Balance`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum DeltaState {
+    /// Not asked for yet, or signed out.
+    #[default]
+    Unknown,
+    /// The request is out; nothing else asks while it is.
+    Loading,
+    /// The Worker has no Delta route, or the request failed: show no chip.
+    Absent,
+    Balance(crate::api::DeltaBalance),
 }
 
 impl AppState {
@@ -169,6 +243,7 @@ impl AppState {
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             jurisdiction: RwSignal::new(JurisdictionState::Detecting),
+            delta: RwSignal::new(DeltaState::Unknown),
         }
     }
     

@@ -1,6 +1,7 @@
 # Who may join a hosted gallery session
 
-Status: **plan, not built; approved 2026-09-30.** It gates guests on hosted
+Status: **accounts built (build 16); the admission timing below lands in
+build 17; guests not built.** Approved 2026-09-30. It gates guests on hosted
 sessions (`docs/architecture/GUEST_PLAY.md` section 8). Owners: Website writes
 the Worker half (`live.mjs`, and the ticket id in `identity.mjs`, coordinated
 with Commerce); Multiplayer writes the host half (networking, Studio).
@@ -83,19 +84,66 @@ ticket; the `used` refusal says so.
 ### Host (Multiplayer)
 
 - Networking (`session.rs`): a new peer stage between `Hello` and `Welcome`,
-  `AwaitingAdmission`. When the host requires admission, a `Hello` surfaces
-  as `NetNotice::Admit { peer, ticket }` and nothing of the world is sent.
-  The shell answers with `HostSession::admit(peer, guest)` (the Welcome
-  follows) or `refuse(peer, reason)` (`ToPlayer::Refused`, then close).
-  Unanswered after 15 s, the host refuses: "the gallery could not confirm
-  this join". Chat from a guest peer is dropped, never relayed.
-- `HostConfig.admission`: `Open` (today) or `Gallery`. Studio sets `Gallery`
-  when it hosts a listing (the session has a `sim_id` and heartbeats), and
-  `Open` otherwise.
-- Studio (`play_datamodel/remote_players.rs`): admission calls `/live/admit`
-  (in place of `/api/identity/verify` for gallery sessions) on its own
-  thread, and records `guest`. The commerce host path refuses purchase prompts
-  for a guest (CLI Commerce's file).
+  `AwaitingAdmission`. When the session requires admission, a `Hello`
+  surfaces as `NetNotice::Admit { peer, ticket }` and nothing of the world is
+  sent. The shell answers with an `AdmissionVerdict`: admitted (the Welcome
+  follows, and the ticket's id is kept for the heartbeat) or refused with the
+  reason the player is shown (`ToPlayer::Refused`, then close). Unanswered
+  after 15 s (`ADMISSION_TIMEOUT`, under the Player's 20 s Welcome wait), the
+  host refuses: "The gallery could not confirm this join right now. Join
+  again from the gallery." A world request before admission is kicked, an
+  appearance dropped, and a guest's chat goes nowhere.
+- When joins wait (Studio, `multiplayer.rs`, with
+  `HostSession::require_admission()` and `release_admission()`):
+  - Every heartbeat that lists the link turns admission on as it is sent, so
+    no join gets in while the gallery stores the link and its answer is on
+    its way.
+  - Each heartbeat POST carries a number, and its answer comes back with
+    it; every answer is read, in the order they came.
+  - An answer that may have stored the link (ok, no answer, a server error),
+    whatever its number, marks the session maybe listed: admission then
+    holds for the rest of the session, whatever a later heartbeat hears,
+    since the gallery shows a stored link for 90 s after its last heartbeat.
+  - A session never maybe listed turns admission off again when the gallery
+    certainly stored nothing: it refused the heartbeat (any 4xx), or the
+    request never left this machine (no address, no connection), and every
+    heartbeat of this hosting session is answered. An earlier heartbeat's
+    refusal, arriving after a later one went out, leaves admission on: the
+    later one may store the link. Stopping hosting forgets the unanswered
+    numbers, so an answer from before never opens the next session.
+  - A listing that does not serve (unapproved, held, quarantined, or approved
+    on bytes other than the ones reviewed: the same test the download uses,
+    `simForServing`) is answered 200 by its heartbeat, and its link is kept for
+    the author alone; the gallery lists it only when it is listable. So
+    admission stays on for the whole hosting session, and `/live/admit` admits
+    only the listing's author: the ticket's account is checked before the
+    Durable Object spends the ticket. Any other joiner is told "This session is
+    not available right now.", whatever the reason, so the answer says nothing
+    about the listing. No admin joins a session that does not serve. An invite
+    list the author sets is the later extension.
+  - A serving listing admits any signed-in account with a ticket, whatever its
+    privacy setting: a private listing is joined by link, as its download is.
+    Privacy is the author's choice to be unlisted, not a moderation state.
+  - A session that never sends a heartbeat to the gallery (F9 on a LAN) stays
+    open, as before.
+- Known gap, booked for build 26 or later: a session already admitted keeps its
+  place when its listing stops serving (a quarantine, a serve_block or
+  content_lock hold, or an approval voided by a changed object). Closing it
+  needs two halves. The heartbeat for a held listing answers a definitive
+  refusal, which the host's Studio obeys by closing the session (a modified
+  Studio can ignore it). The Player rechecks the listing every few minutes
+  while connected and leaves with a plain message when it no longer serves.
+  The Worker cannot cut a host-to-player connection by itself. Until this
+  lands, a held session's current players stay until they leave.
+- Studio (`multiplayer.rs`): `admit_gallery_joins` asks `/live/admit` with the
+  author's token on a thread of its own and answers the session. The
+  gallery's refusal reaches the player in its own words (printable, at most
+  200 characters); `busy`, `not_live`, `not_author` and an unreachable gallery
+  all read as unconfirmed. Heartbeats carry `admitted`. A player's account and
+  name still come from its identity ticket (`remote_players.rs`), which the
+  gallery's single use does not spend.
+- Guests, later: the commerce host path refuses purchase prompts for a guest
+  (CLI Commerce's file).
 - The Player: before joining a gallery session, it mints an identity ticket
   (signed in) or a guest ticket (guest lease, browser Player), as it already
   mints identity tickets for any pinned join.
@@ -105,9 +153,14 @@ ticket; the `used` refusal says so.
 - Worker: a ticket admits once; a second use, a ticket for another pin, an
   expired one and no ticket are refused with their codes; `/live` hides the
   link from an anonymous caller and shows it to a session and a lease.
-- Networking: with `Gallery` admission, a `Hello` sends no Welcome until
-  `admit`; `refuse` sends `Refused` and closes; the 15 s timeout refuses;
-  a guest's chat is dropped. With `Open`, today's behaviour holds.
+- Networking (`session.rs`, driving the real host systems through a link
+  pair): with admission required, a `Hello` sends no Welcome until the
+  gallery admits it, and an early world request is kicked
+  (`a_listed_session_waits_for_the_gallery_before_the_welcome`); a refusal
+  reaches the player in the gallery's words, and silence past the timeout
+  refuses (`a_refused_or_unanswered_join_is_turned_away`); an open session
+  welcomes at once, and a guest's chat goes nowhere
+  (`an_open_session_welcomes_at_once_and_guests_do_not_chat`).
 - A live two-machine test through the tunnel: a pasted link without a ticket
   is refused; a signed-in Player joins; the same ticket twice is refused.
 
@@ -115,7 +168,8 @@ ticket; the `used` refusal says so.
 
 1. Worker: ticket ids, `/live/admit`, the GET gate. Accounts work without
    guest leases.
-2. Host: the admission stage, `HostConfig.admission`, Studio's admit call.
+2. Host: the admission stage, `require_admission` at the first listing,
+   Studio's admit call.
 3. Guests, once `guest.mjs` and the browser Player exist: guest tickets,
    `guest: true`, the guest rules, lease debiting through heartbeats.
 

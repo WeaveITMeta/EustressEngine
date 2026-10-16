@@ -79,11 +79,19 @@
 //! Systems run only `in_state(PlayModeState::Playing)`, matching the
 //! mover runtime in [`crate::physics::movers`] — joints only need binding
 //! once the Avian solver is live.
+//!
+//! A constraint whose two parts do not simulate (two anchored parts, a
+//! welded anchored model) waits as [`AwaitingSimulatedBody`] and binds the
+//! frame either part does: Avian 0.7 links every joint into the islands of
+//! its two bodies, only a dynamic or kinematic body has one, and linking a
+//! joint between two bodies that have none panics ("Neither body ... is in
+//! an island").
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use avian3d::dynamics::solver::islands::BodyIslandNode;
 use avian3d::prelude::{
     AngleLimit, DistanceJoint, FixedJoint, JointCollisionDisabled, JointDisabled, PrismaticJoint,
     RevoluteJoint, RigidBody, SphericalJoint,
@@ -151,6 +159,17 @@ pub struct ConstraintBound;
 #[derive(Component, Debug, Clone, Copy, Default, Reflect)]
 #[reflect(Component)]
 pub struct ConstraintScanned;
+
+/// A loaded constraint whose two bodies resolved while neither simulated (two
+/// anchored parts): Avian 0.7 panics linking a joint between bodies that have
+/// no island, so it waits. [`wake_constraint_joints`] hands it back to the
+/// resolver once either body simulates, and it binds then.
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
+pub struct AwaitingSimulatedBody {
+    pub body0: Entity,
+    pub body1: Entity,
+}
 
 /// Load-path staging component: everything needed to materialise a loaded
 /// constraint's Avian joint, parsed from its `_instance.toml` **once** by
@@ -551,10 +570,11 @@ fn cache_loaded_constraint_refs(
 /// I/O-free.
 fn resolve_pending_constraint_joints(
     mut commands: Commands,
-    pending: Query<(Entity, &Instance, &PendingConstraintJoint)>,
+    pending: Query<(Entity, &Instance, &PendingConstraintJoint), Without<AwaitingSimulatedBody>>,
     instances: Query<(Entity, &Instance)>,
     child_of: Query<&ChildOf>,
     bodies: Query<(), With<RigidBody>>,
+    in_island: Query<(), With<BodyIslandNode>>,
     transforms: Query<&GlobalTransform>,
     avatars: Query<(), With<AvatarBody>>,
     attachment_components: Query<&eustress_common::classes::Attachment>,
@@ -617,6 +637,13 @@ fn resolve_pending_constraint_joints(
             continue;
         }
 
+        // Neither body simulates (two anchored parts): no joint yet, or Avian
+        // panics linking it. It binds the frame either body is released.
+        if !in_island.contains(b0) && !in_island.contains(b1) {
+            commands.entity(entity).insert(AwaitingSimulatedBody { body0: b0, body1: b1 });
+            continue;
+        }
+
         if let (Some(c0), Some(c1), Ok(t0), Ok(t1)) = (p.c0, p.c1, transforms.get(b0), transforms.get(b1)) {
             if let Some((gap, turn)) = weld_mismatch(t0, t1, c0, c1) {
                 *mismatched += 1;
@@ -669,6 +696,22 @@ fn resolve_pending_constraint_joints(
         // joint (mirrors the spawner's `JointDisabled` insert).
         if !p.enabled {
             ec.insert(JointDisabled);
+        }
+    }
+}
+
+/// Pass 1 (first): a constraint waiting on two bodies that did not simulate
+/// goes back to the resolver once either does, or is gone, and binds in the
+/// same pass.
+fn wake_constraint_joints(
+    mut commands: Commands,
+    waiting: Query<(Entity, &AwaitingSimulatedBody)>,
+    in_island: Query<(), With<BodyIslandNode>>,
+    alive: Query<()>,
+) {
+    for (entity, w) in &waiting {
+        if [w.body0, w.body1].into_iter().any(|b| in_island.contains(b) || !alive.contains(b)) {
+            commands.entity(entity).remove::<AwaitingSimulatedBody>();
         }
     }
 }
@@ -953,9 +996,13 @@ impl Plugin for JointResolverPlugin {
             .register_type::<ConstraintBound>()
             .register_type::<ConstraintScanned>()
             .register_type::<PendingConstraintJoint>()
+            .register_type::<AwaitingSimulatedBody>()
             .add_systems(
                 Update,
                 (
+                    // A constraint between two parts that did not simulate
+                    // goes back to Pass 1b once one does.
+                    wake_constraint_joints,
                     // Pass 1a: read each loaded constraint's TOML once →
                     // stage `PendingConstraintJoint`.
                     cache_loaded_constraint_refs,
@@ -1033,5 +1080,67 @@ mod tests {
         assert_eq!(weld_mismatch(&t0, &t1, c0, Transform::IDENTITY), None, "the parts' sizes are not part of the pose");
         let (gap, _) = weld_mismatch(&t0, &t1, Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(turn), Transform::IDENTITY).unwrap();
         assert!((gap - 1.0).abs() < 1e-5);
+    }
+
+    /// Two anchored parts welded in the Space's files: Avian 0.7 panics
+    /// linking a joint between two bodies that have no island, so the weld
+    /// waits and binds the frame one part simulates.
+    #[test]
+    fn a_loaded_weld_between_anchored_parts_waits_until_one_simulates() {
+        use avian3d::prelude::{Collider, PhysicsPlugins};
+        let mut app = App::new();
+        bevy::tasks::IoTaskPool::get_or_init(Default::default);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::diagnostic::DiagnosticsPlugin,
+        ));
+        app.init_resource::<avian3d::spatial_query::SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        app.init_asset::<Mesh>();
+        app.add_plugins(PhysicsPlugins::default());
+        app.add_systems(Update, (wake_constraint_joints, resolve_pending_constraint_joints).chain());
+        let part = |app: &mut App, uuid: &str, y: f32| {
+            app.world_mut()
+                .spawn((
+                    Instance { name: uuid.into(), class_name: ClassName::Part, archivable: true, id: 0, uuid: uuid.into(), ai: false },
+                    RigidBody::Static,
+                    Collider::cuboid(1.0, 1.0, 1.0),
+                    Transform::from_xyz(0.0, y, 0.0),
+                ))
+                .id()
+        };
+        part(&mut app, "a0", 3.0);
+        let lid = part(&mut app, "a1", 4.0);
+        app.world_mut().spawn((
+            Instance { name: "Weld".into(), class_name: ClassName::WeldConstraint, archivable: true, id: 0, uuid: "a2".into(), ai: false },
+            PendingConstraintJoint {
+                ref0_uuid: Some("a0".into()),
+                ref1_uuid: Some("a1".into()),
+                enabled: true,
+                lower: f32::NAN,
+                upper: f32::NAN,
+                length: f32::NAN,
+                ..Default::default()
+            },
+        ));
+        let joints = |app: &mut App| {
+            let mut q = app.world_mut().query::<&FixedJoint>();
+            q.iter(app.world()).count()
+        };
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(joints(&mut app), 0, "no joint between two anchored parts");
+        app.world_mut().entity_mut(lid).insert(RigidBody::Dynamic);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(joints(&mut app), 1, "bound once the lid simulates");
     }
 }

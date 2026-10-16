@@ -154,13 +154,22 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // among them. This is its base class: `capability_of_call` judges a
         // call by the action it names, and one that names none stays here.
         "invoke_action" => Destructive,
+        // Calls a method its class declares. This is its base class:
+        // `capability_of_call` judges a call by the method's declared effect,
+        // and an undeclared one keeps this class.
+        "call_method" => Destructive,
         // The same reasoning covers the rest of the UI-driving family: each can
         // reach ANY control. `ui_click` presses whatever is at a coordinate,
         // `ui_sequence` chains clicks and tool picks, and `invoke_mode_tool` runs
         // any ribbon tool's real handler -- Delete and Publish included. Filed
         // as Write, any of them would bypass the Destructive tier that
         // `delete_entity` sits behind.
-        "ui_click" | "ui_sequence" | "invoke_mode_tool" => Destructive,
+        // `ui_sequence` is judged per call by its steps (`capability_of_call`):
+        // a step that can press Play makes it Execute.
+        "ui_sequence" | "invoke_mode_tool" => Destructive,
+        // A coordinate reaches every control, the Play button included, and
+        // Play runs the Space's scripts.
+        "ui_click" => Execute,
         // Uploads the open Space to the PUBLIC gallery: irreversible and
         // outward-facing. Deliberately NOT Network, even though it leaves the
         // machine. The MCP server grants Network to anyone holding
@@ -173,6 +182,10 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // Remove ground: a carve empties a shape of the terrain, and a clear
         // deletes the whole terrain's files with no undo.
         "terrain_carve" | "terrain_clear" => Destructive,
+        // Replaces the live terrain with its files; with `discard_unsaved` it
+        // loses edits. This is its base class: `capability_of_call` lowers a
+        // call that cannot lose anything to Write.
+        "terrain_reload" => Destructive,
         // Presses keys and buttons in a running game: it changes the live
         // session, never the Space on disk.
         "play_input" => Write,
@@ -199,6 +212,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "remove_tag"
         | "datastore_set"
         | "set_sim_value"
+        // Steps the running simulation: it advances the world.
+        | "sim_step"
         | "generate_docs"
         | "cad_create_part"
         | "cad_set_variable"
@@ -270,7 +285,36 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // a pending restore plan and leaves the Space as it is.
         | "save_snapshot"
         | "revert_to_snapshot"
-        | "cancel_pending_revert" => Write,
+        | "cancel_pending_revert"
+        // Adds or changes one Parameter with the Properties panel's rules,
+        // saved into the instance's record; it never deletes one.
+        | "parameters_set"
+        // Sets properties through the Properties panel's own edits, as one
+        // undo step; it never deletes or renames.
+        | "set_properties"
+        // Sets or removes attributes on one instance in Edit, as one undo
+        // step, saved into its own record.
+        | "attribute_set"
+        // Moves and turns an instance and its subtree in Edit, as one
+        // undo step, saved into each moved record.
+        | "transform_subtree"
+        // Tree edits in Edit, each one undo step; a clone or a move from
+        // a server-only service to a player one needs expose_to_clients.
+        | "rename_instance"
+        | "reparent_instance"
+        | "clone_instance"
+        | "create_instance"
+        // Loads a mesh file again; changes no record.
+        | "reload_mesh"
+        // Copies a GLB from inside the Universe into the Space and writes
+        // Parts that draw it; a different file already at the destination is
+        // replaced only when the call says overwrite, as write_file replaces.
+        | "import_asset"
+        | "place_instances" => Write,
+
+        // Changes the Space the person works in and clears the undo
+        // history; neither can be undone.
+        "open_space" => Destructive,
 
         // Removing a Reference deletes an instance folder.
         "website_remove_reference" => Destructive,
@@ -344,7 +388,6 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "website_manifest_url"
         | "sim_bindings"
         | "oplog_tail"
-        | "sim_step"
         | "get_editor_state"
         | "read_output"
         | "get_conversation"
@@ -374,6 +417,16 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // ls-files in the Space's repo.
         | "list_snapshots"
         | "diff_snapshot"
+        // Lists an instance's Parameters.
+        | "parameters_get"
+        // Lists an instance's attributes.
+        | "attribute_get"
+        // Lists an instance's properties and methods.
+        | "get_properties"
+        // Lists the mesh files the open Space draws.
+        | "list_meshes"
+        // Lists what scripts made in the running Play session.
+        | "list_play_instances"
         // Terrain reads: stats, surface samples, terrain-only raycasts and
         // voxel reads of the live engine's terrain.
         | "terrain_stats"
@@ -468,6 +521,7 @@ pub fn action_capability(action: Action) -> Capability {
         // Open a dialog or a search box inside the editor window.
         | Action::InsertObject
         | Action::FindReplace
+        | Action::FindInScripts
         | Action::FocusExplorerSearch
         | Action::FocusPropertiesFilter
         // Arm a modal tool. Its edit takes clicks, which `ui_click` gates.
@@ -481,6 +535,7 @@ pub fn action_capability(action: Action) -> Capability {
         | Action::ToolRadialArray
         | Action::ToolGridArray
         | Action::ToolPathArray
+        | Action::ToolPaintBucket
         // Keyboard nudges; nothing handles them as an action.
         | Action::LiftSelection
         | Action::SettleSelection
@@ -511,6 +566,8 @@ pub fn action_capability(action: Action) -> Capability {
         | Action::TerrainMirror
         | Action::TerrainMirrorAxis
         | Action::TerrainSampleMaterial
+        // Samples the look under the cursor; changes no part.
+        | Action::SampleLook
         // Copy fills the region clipboard. Paste only arms a placement; the
         // write is a later click.
         | Action::TerrainRegionCopy
@@ -538,6 +595,8 @@ pub fn action_capability(action: Action) -> Capability {
         | Action::Cut
         | Action::CSGNegate
         | Action::CSGUnion
+        | Action::MeshSplitParts
+        | Action::MeshSplitEdges
         | Action::CSGIntersect
         | Action::CSGSeparate
         | Action::TerrainRegionCut
@@ -548,6 +607,11 @@ pub fn action_capability(action: Action) -> Capability {
         | Action::Redo
         // Only partly reversible for a folder-backed group (grouping.rs).
         | Action::Ungroup
+        // Renames the Universe or Space folder on disk, which moves every
+        // path inside it; the chooser can reach either.
+        | Action::Rename
+        | Action::RenameUniverse
+        | Action::RenameSpace
         // Switch the open Space, or block the editor on a native dialog.
         | Action::NewSpace
         | Action::NewUniverse
@@ -581,13 +645,69 @@ pub fn invoke_action_params(input: &serde_json::Value) -> serde_json::Value {
 /// action it would run ([`action_capability`]), read with the engine's own
 /// [`parse_action`] from the request the tool sends; an input that names no
 /// action keeps the tool's base class, so a malformed or misspelt request
-/// fails closed. Every other tool has its base class.
+/// fails closed. `ui_sequence` is judged by its steps
+/// ([`ui_sequence_capability`]). Every other tool has its base class.
 pub fn capability_of_call(tool_name: &str, input: &serde_json::Value) -> Option<Capability> {
     match tool_name {
         "invoke_action" => parse_action(&invoke_action_params(input))
             .map(action_capability)
             .or_else(|| capability_of(tool_name)),
+        "ui_sequence" => Some(ui_sequence_capability(input)),
+        "terrain_reload" => Some(terrain_reload_capability(input)),
+        "call_method" => Some(call_method_capability(input)),
         _ => capability_of(tool_name),
+    }
+}
+
+/// The class of a `ui_sequence` call: its base class, Destructive, or Execute
+/// when a step can run code. An `action` step is judged as `invoke_action`
+/// judges that action, from the same request the step sends, and a `click`
+/// step can press any control, Play included.
+fn ui_sequence_capability(input: &serde_json::Value) -> Capability {
+    let runs_code = input
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .any(|step| match step.get("op").and_then(|v| v.as_str()) {
+            Some("click") => true,
+            Some("action") => {
+                parse_action(&invoke_action_params(step)).map(action_capability) == Some(Capability::Execute)
+            }
+            _ => false,
+        });
+    if runs_code {
+        Capability::Execute
+    } else {
+        Capability::Destructive
+    }
+}
+
+/// The class of a `call_method` call: the effect its method declares
+/// (`eustress_common::class_methods`), read from the "Class:Name" it names.
+/// An undeclared or unreadable method keeps the base class, Destructive.
+fn call_method_capability(input: &serde_json::Value) -> Capability {
+    use eustress_common::class_methods::{declared, split_qualified, MethodEffect};
+    input
+        .get("method")
+        .and_then(|v| v.as_str())
+        .and_then(split_qualified)
+        .and_then(|(class, name)| declared(class, name))
+        .map_or(Capability::Destructive, |m| match m.effect {
+            MethodEffect::Read => Capability::Read,
+            MethodEffect::Write => Capability::Write,
+            MethodEffect::Destructive => Capability::Destructive,
+        })
+}
+
+/// The class of a `terrain_reload` call: Write when it cannot lose an edit
+/// (`discard_unsaved` absent, null or false, so the engine refuses a terrain
+/// with unsaved edits), Destructive for any other value. A value the engine
+/// would not read as true is still judged the stronger way.
+fn terrain_reload_capability(input: &serde_json::Value) -> Capability {
+    match input.get("discard_unsaved") {
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => Capability::Write,
+        Some(_) => Capability::Destructive,
     }
 }
 
@@ -754,7 +874,7 @@ mod tests {
     fn invoke_action_is_judged_by_the_action_it_runs() {
         use serde_json::json;
         let class = |action: &str| capability_of_call("invoke_action", &json!({ "action": action }));
-        for write in ["ViewMode2D", "ViewTop", "SelectAll", "MoveTool", "Copy", "Group", "SaveScene"] {
+        for write in ["ViewMode2D", "ViewTop", "SelectAll", "MoveTool", "Copy", "Group", "SaveScene", "FindInScripts"] {
             assert_eq!(class(write), Some(Capability::Write), "{write}");
         }
         for destructive in [
@@ -764,6 +884,8 @@ mod tests {
             "Redo",
             "Ungroup",
             "CSGUnion",
+            "MeshSplitParts",
+            "MeshSplitEdges",
             "OpenFile",
             "NewSpace",
             "SaveSceneAs",
@@ -833,13 +955,89 @@ mod tests {
     }
 
     #[test]
+    fn a_ui_sequence_is_as_strong_as_its_strongest_step() {
+        use serde_json::json;
+        let class = |steps: serde_json::Value| capability_of_call("ui_sequence", &json!({ "steps": steps }));
+        assert_eq!(
+            class(json!([{ "op": "set_mode", "mode": "build" }, { "op": "action", "action": "Delete" }])),
+            Some(Capability::Destructive)
+        );
+        // Play runs the Space's scripts, whichever step presses it.
+        assert_eq!(class(json!([{ "op": "action", "action": "PlaySolo" }])), Some(Capability::Execute));
+        assert_eq!(class(json!([{ "op": "wait", "ms": 10 }, { "op": "click", "x": 10, "y": 10 }])), Some(Capability::Execute));
+        assert_eq!(capability_of_call("ui_sequence", &json!({})), Some(Capability::Destructive));
+        let without_execute = Permissions::full().revoke(Capability::Execute);
+        assert!(authorize_call("ui_sequence", &json!({ "steps": [{ "op": "action", "action": "PlaySolo" }] }), &without_execute).is_err());
+    }
+
+    #[test]
+    fn a_coordinate_click_can_press_play() {
+        assert_eq!(capability_of("ui_click"), Some(Capability::Execute));
+    }
+
+    #[test]
+    fn stepping_the_simulation_changes_the_world() {
+        assert_eq!(capability_of("sim_step"), Some(Capability::Write));
+        assert!(authorize("sim_step", &Permissions::read_only()).is_err());
+    }
+
+    /// Every bridge tool added in builds 30 and 31 keeps the class Security
+    /// approved: reads are Read, edits Write, and opening a Space (which
+    /// clears the undo history) Destructive, so auto mode asks first.
+    #[test]
+    fn the_bridge_edit_tools_are_classified() {
+        for read in ["attribute_get", "list_play_instances", "list_meshes"] {
+            assert_eq!(capability_of(read), Some(Capability::Read), "{read}");
+        }
+        for write in [
+            "attribute_set",
+            "transform_subtree",
+            "rename_instance",
+            "reparent_instance",
+            "clone_instance",
+            "create_instance",
+            "reload_mesh",
+        ] {
+            assert_eq!(capability_of(write), Some(Capability::Write), "{write}");
+        }
+        assert_eq!(capability_of("open_space"), Some(Capability::Destructive));
+    }
+
+    #[test]
+    fn the_property_tools_are_classified() {
+        use serde_json::json;
+        assert_eq!(capability_of("get_properties"), Some(Capability::Read));
+        assert_eq!(capability_of("set_properties"), Some(Capability::Write));
+        assert_eq!(capability_of("call_method"), Some(Capability::Destructive));
+        // No method is declared yet, so every call keeps the base class.
+        for input in [json!({ "method": "Road:Split" }), json!({ "method": "Split" }), json!({})] {
+            assert_eq!(capability_of_call("call_method", &input), Some(Capability::Destructive), "{input}");
+        }
+        assert!(authorize_call("call_method", &json!({ "method": "Road:Split" }), &Permissions::standard()).is_err());
+    }
+
+    #[test]
+    fn a_terrain_reload_is_destructive_only_when_it_can_lose_edits() {
+        use serde_json::json;
+        assert_eq!(capability_of("terrain_reload"), Some(Capability::Destructive));
+        for input in [json!({}), json!({ "discard_unsaved": null }), json!({ "discard_unsaved": false })] {
+            assert_eq!(capability_of_call("terrain_reload", &input), Some(Capability::Write), "{input}");
+        }
+        for input in [json!({ "discard_unsaved": true }), json!({ "discard_unsaved": "true" }), json!({ "discard_unsaved": 1 })] {
+            assert_eq!(capability_of_call("terrain_reload", &input), Some(Capability::Destructive), "{input}");
+        }
+        let mcp = Permissions::standard().for_principal("mcp-client");
+        assert!(authorize_call("terrain_reload", &json!({}), &mcp).is_ok());
+        assert!(authorize_call("terrain_reload", &json!({ "discard_unsaved": true }), &mcp).is_err());
+    }
+
+    #[test]
     fn other_tools_keep_their_base_class_whatever_the_input() {
         let input = serde_json::json!({ "action": "ViewMode2D" });
         for tool in [
             "run_bash",
             "delete_entity",
             "ui_click",
-            "ui_sequence",
             "invoke_mode_tool",
             "publish_space",
             "read_file",

@@ -127,6 +127,16 @@ instead.
 the root of `dist/` by `index.html`, along with Markdown copies of the Website
 Service docs under `dist/docs/`.
 
+A full run (no routes given) writes three more files into `dist/`. `404.html` is the
+router's not-found page; Cloudflare Pages serves it with a 404 status for any address that
+is no file and no rule in `_redirects`. (A project with a top-level 404.html no longer
+falls back to the app shell for every unknown address, so `_redirects` rewrites each page
+that only the app draws, and a test in `src/seo.rs` fails when `src/app.rs` gains a route
+with no line there.) `sitemap.xml` is written again with a `<lastmod>` on every URL: the
+build date in UTC, or `SOURCE_DATE_EPOCH` when that is set. `llms-full.txt` is the full text
+of the docs and learn pages, linked from `llms.txt`. Every page's description and canonical
+address come from one table in `src/seo.rs`, which the live app's `TitleSync` reads too.
+
 ## Next Steps
 
 1. **Create `crates/backend`** with Axum + SQLx for the API

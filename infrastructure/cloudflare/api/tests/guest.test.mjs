@@ -330,6 +330,10 @@ test('only approved, public, all-ages simulations are guest-playable', async () 
     const rated = await play(env, SIM_A);
     assert.equal(rated.status, 403);
     assert.equal(rated.body.reason, 'rating');
+    // Guardian Code v2.1's ages_10 is above all_ages: guest play stays all_ages only.
+    await env.SOCIAL.put(`sim:${SIM_A}`, JSON.stringify(sim(SIM_A, { rating: 'ages_10' })));
+    const ten = await play(env, SIM_A);
+    assert.deepEqual([ten.status, ten.body.reason], [403, 'rating']);
     assert.equal((await play(env, SIM_B)).status, 404, 'pending reads as missing');
     assert.equal((await play(env, SIM_C)).status, 404, 'private reads as missing');
     assert.equal((await play(env, SIM_D)).status, 403, 'unrated is refused, not assumed');

@@ -16,88 +16,7 @@ pub fn HomePage() -> impl IntoView {
             // ═══════════════════════════════════════════════════════════════
             <CentralNav active="home".to_string() />
 
-            <section class="hero-industrial">
-                <div class="hero-bg">
-                    <div class="grid-overlay"></div>
-                    <div class="glow-orb glow-1"></div>
-                    <div class="glow-orb glow-2"></div>
-                </div>
-
-                <div class="hero-main">
-                    <div class="hero-text">
-                        <div class="beta-tag">
-                            <span class="tag-dot"></span>
-                            "SIMULATION & DATA PLATFORM · PUBLIC ALPHA"
-                        </div>
-
-                        <h1 class="hero-headline">
-                            "The Future of"<br/>
-                            <span class="headline-accent">"Creation"</span>
-                        </h1>
-
-                        <p class="hero-description">
-                            "Build anything at the speed of thought. "
-                            <strong>"100% Rust."</strong>
-                            <br/>
-                            "Zero compromises."
-                        </p>
-
-                        <div class="hero-buttons">
-                            <a href="/login" class="btn-primary-steel">
-                                "Start Building"
-                                <span class="btn-icon">"→"</span>
-                            </a>
-                            <a href="/gallery" class="btn-secondary-steel">
-                                "Explore"
-                            </a>
-                            <a href="/about" class="btn-secondary-steel">
-                                "About"
-                            </a>
-                        </div>
-                    </div>
-
-                    // The demo reel: real Studio captures and live simulation, no
-                    // mock application chrome around it.
-                    <div class="hero-visual-new">
-                        <HeroReel />
-                    </div>
-                </div>
-
-                    // Real platform metrics, given their own strip so the hero
-                    // stays a single message rather than a spec sheet.
-                    <div class="metric-strip">
-                        <div class="metric">
-                            <span class="metric-value">"10M+"</span>
-                            <span class="metric-label">"Entities"</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value">"1 yr/s"</span>
-                            <span class="metric-label">"Sim Speed"</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value">"60+"</span>
-                            <span class="metric-label">"FPS"</span>
-                        </div>
-                    </div>
-
-                <div class="platform-bar">
-                    <div class="platform-bar-inner">
-                        <span class="bar-label">"RUNS ON"</span>
-                        <div class="bar-divider"></div>
-                        <div class="platform-list">
-                            <div class="plat"><img src="/assets/icons/windows.svg" alt="Windows" />"Windows"</div>
-                            <div class="plat"><img src="/assets/icons/macos.svg" alt="macOS" />"macOS"</div>
-                            <div class="plat"><img src="/assets/icons/linux.svg" alt="Linux" />"Linux"</div>
-                            <div class="plat"><img src="/assets/icons/ios.svg" alt="iOS" />"iOS"</div>
-                            <div class="plat"><img src="/assets/icons/android.svg" alt="Android" />"Android"</div>
-                            <div class="plat"><img src="/assets/icons/web.svg" alt="Web" />"Web"</div>
-                            <div class="plat"><img src="/assets/icons/meta-quest.svg" alt="Quest" />"Quest"</div>
-                            <div class="plat"><img src="/assets/icons/openxr.svg" alt="OpenXR" />"OpenXR"</div>
-                            <div class="plat"><img src="/assets/icons/psvr.svg" alt="PSVR2" />"PSVR2"</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
+            <HomeHero />
 
             // ═══════════════════════════════════════════════════════════════
             // WHAT'S INSIDE - consolidated tabbed panel (Worlds / Systems / Data / Superpowers)
@@ -109,107 +28,237 @@ pub fn HomePage() -> impl IntoView {
             // ═══════════════════════════════════════════════════════════════
             // COMPARISON - simulation software FIRST, then game engines
             // ═══════════════════════════════════════════════════════════════
-            <section class="comparison-section">
-                <div class="section-header">
-                    <span class="section-tag">"THE TRUTH"</span>
-                    <h2 class="section-title-epic">"How We Compare"</h2>
-                    <p class="section-desc">"Honest, category by category. We do not win every row. We will show you the ones we lose."</p>
+            <HomeComparison />
+
+            // ═══════════════════════════════════════════════════════════════
+            // WHAT EUSTRESS SIMULATES - real reference builds (no fake metrics)
+            // ═══════════════════════════════════════════════════════════════
+            <HomeShowcase />
+
+            // ═══════════════════════════════════════════════════════════════
+            // PROOF - the source is the evidence, and it is open to the reader.
+            // One section: three ticked lines, the GitHub actions, the terminal.
+            // ═══════════════════════════════════════════════════════════════
+            <HomeProof />
+
+            // ═══════════════════════════════════════════════════════════════
+            // CTA
+            // ═══════════════════════════════════════════════════════════════
+            <HomeCta />
+
+            <Footer />
+        </div>
+    }
+}
+
+/// The hero: headline, the Studio capture over the city backdrop, metrics and platforms.
+#[component]
+fn HomeHero() -> impl IntoView {
+    view! {
+        <section class="hero-industrial hero-city">
+            <div class="hero-bg">
+                <div class="grid-overlay"></div>
+                <div class="glow-orb glow-1"></div>
+                <div class="glow-orb glow-2"></div>
+            </div>
+
+            <div class="hero-main">
+                <div class="hero-text">
+                    <div class="beta-tag">
+                        <span class="tag-dot"></span>
+                        "SIMULATION & DATA PLATFORM · PUBLIC ALPHA"
+                    </div>
+
+                    <h1 class="hero-headline">
+                        "The Future of"<br/>
+                        <span class="headline-accent">"Creation"</span>
+                    </h1>
+
+                    <p class="hero-description">
+                        "Eustress is a source-available simulation and data platform "
+                        <strong>"built in Rust"</strong>
+                        "; it also builds games and interactive worlds."
+                    </p>
+
+                    // One primary action; the second is the way to look before installing.
+                    <div class="hero-buttons">
+                        <a href="/download" class="btn-primary-steel">
+                            "Download Studio"
+                            <span class="btn-icon">"→"</span>
+                        </a>
+                        <a href="/gallery" class="btn-secondary-steel">
+                            "Browse the Gallery"
+                        </a>
+                    </div>
                 </div>
 
-                // ── Simulation software (FIRST) ──
-                <h3 class="comparison-subtitle">"Simulation Software Comparison"</h3>
-                <div class="comparison-table-wrapper">
-                    <table class="comparison-table">
-                        <thead>
-                            <tr>
-                                <th class="feature-col">"Capability"</th>
-                                <th class="engine-col eustress">
-                                    <img src="/assets/icons/eustress-gear.svg" alt="Eustress" class="engine-logo" />
-                                    "Eustress"
-                                </th>
-                                <th class="engine-col">
-                                    <img src="/assets/icons/omniverse.svg" alt="Omniverse" class="engine-logo" />
-                                    "Omniverse"
-                                </th>
-                                <th class="engine-col">
-                                    <img src="/assets/icons/anylogic.svg" alt="AnyLogic" class="engine-logo" />
-                                    "AnyLogic"
-                                </th>
-                                <th class="engine-col">
-                                    <img src="/assets/icons/matlab.svg" alt="MATLAB" class="engine-logo" />
-                                    "MATLAB"
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td class="feature-name">"Real-time 3D world"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" 60+ FPS"</td>
-                                <td><span class="check">"✓"</span>" RTX"</td>
-                                <td><span class="warn">"~"</span>" Basic 3D"</td>
-                                <td><span class="cross">"✗"</span>" Plots only"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Scale (entities)"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" 10M+"</td>
-                                <td><span class="check">"✓"</span>" Large (USD)"</td>
-                                <td><span class="warn">"~"</span>" 100Ks agents"</td>
-                                <td><span class="warn">"~"</span>" Matrix-bound"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Time compression"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" ~1 yr/sec"</td>
-                                <td><span class="warn">"~"</span>" Limited"</td>
-                                <td><span class="check">"✓"</span>" Discrete-event"</td>
-                                <td><span class="check">"✓"</span>" Numerical"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Agent-based modeling"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" ECS-native"</td>
-                                <td><span class="warn">"~"</span>" Via Kit"</td>
-                                <td><span class="check">"✓"</span>" Specialty"</td>
-                                <td><span class="warn">"~"</span>" Toolbox"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Numerical / control libs"</td>
-                                <td class="eustress"><span class="warn">"~"</span>" Growing"</td>
-                                <td><span class="warn">"~"</span>" Partial"</td>
-                                <td><span class="warn">"~"</span>" Partial"</td>
-                                <td><span class="check">"✓"</span>" Gold standard"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Photoreal rendering"</td>
-                                <td class="eustress"><span class="warn">"~"</span>" PBR"</td>
-                                <td><span class="check">"✓"</span>" RTX path-traced"</td>
-                                <td><span class="cross">"✗"</span>" None"</td>
-                                <td><span class="cross">"✗"</span>" None"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"AI-native control"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" MCP bridge"</td>
-                                <td><span class="warn">"~"</span>" Kit/USD"</td>
-                                <td><span class="cross">"✗"</span>" None"</td>
-                                <td><span class="warn">"~"</span>" Scripted"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Source open / forkable"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" PolyForm Shield"</td>
-                                <td><span class="cross">"✗"</span>" Proprietary"</td>
-                                <td><span class="cross">"✗"</span>" Commercial"</td>
-                                <td><span class="cross">"✗"</span>" Commercial"</td>
-                            </tr>
-                            <tr>
-                                <td class="feature-name">"Pricing"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Free, no royalty"</td>
-                                <td><span class="warn">"~"</span>" Free indie, paid ent."</td>
-                                <td><span class="cross">"✗"</span>" $$$ license"</td>
-                                <td><span class="cross">"✗"</span>" $$$ per seat"</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                // The demo reel: real Studio captures and live simulation, no
+                // mock application chrome around it.
+                <div class="hero-visual-new">
+                    <figure
+                        class="hero-render"
+                        on:mousemove=move |ev| on_tilt_move(&ev)
+                        on:mouseleave=move |ev| on_tilt_leave(&ev)
+                    >
+                        <div class="hero-render-glow" aria-hidden="true"></div>
+                        <img
+                            src="/assets/hero-render.png"
+                            alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
+                            class="hero-render-img"
+                            width="1334"
+                            height="714"
+                            fetchpriority="high"
+                            decoding="async"
+                        />
+                    </figure>
+                </div>
+            </div>
+
+                // Real platform metrics, given their own strip so the hero
+                // stays a single message rather than a spec sheet.
+                <div class="metric-strip">
+                    <div class="metric">
+                        <span class="metric-value">"10M+"</span>
+                        <span class="metric-label">"Entities"</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value">"1 yr/s"</span>
+                        <span class="metric-label">"Sim Speed"</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value">"60+"</span>
+                        <span class="metric-label">"FPS"</span>
+                    </div>
                 </div>
 
-                // ── Game engines (SECOND) ──
+            <div class="platform-bar">
+                <div class="platform-bar-inner">
+                    <span class="bar-label">"RUNS ON"</span>
+                    <div class="bar-divider"></div>
+                    <div class="platform-list">
+                        <div class="plat"><img src="/assets/icons/windows.svg" alt="Windows" />"Windows"</div>
+                        <div class="plat"><img src="/assets/icons/macos.svg" alt="macOS" />"macOS"</div>
+                        <div class="plat"><img src="/assets/icons/linux.svg" alt="Linux" />"Linux"</div>
+                        <div class="plat"><img src="/assets/icons/ios.svg" alt="iOS" />"iOS"</div>
+                        <div class="plat"><img src="/assets/icons/android.svg" alt="Android" />"Android"</div>
+                        <div class="plat"><img src="/assets/icons/web.svg" alt="Web" />"Web"</div>
+                        <div class="plat"><img src="/assets/icons/meta-quest.svg" alt="Quest" />"Quest"</div>
+                        <div class="plat"><img src="/assets/icons/openxr.svg" alt="OpenXR" />"OpenXR"</div>
+                        <div class="plat"><img src="/assets/icons/psvr.svg" alt="PSVR2" />"PSVR2"</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    }
+}
+
+/// "How We Compare": the simulation table, open, then the game engine table folded away.
+#[component]
+fn HomeComparison() -> impl IntoView {
+    view! {
+        <section class="comparison-section">
+            <div class="section-header">
+                <span class="section-tag">"THE TRUTH"</span>
+                <h2 class="section-title-epic">"How We Compare"</h2>
+                <p class="section-desc">"Honest, category by category. We do not win every row. We will show you the ones we lose."</p>
+            </div>
+
+            // ── Simulation software (FIRST) ──
+            <h3 class="comparison-subtitle">"Simulation Software Comparison"</h3>
+            <div class="comparison-table-wrapper">
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th class="feature-col">"Capability"</th>
+                            <th class="engine-col eustress">
+                                <img src="/assets/icons/eustress-gear.svg" alt="Eustress" class="engine-logo" />
+                                "Eustress"
+                            </th>
+                            <th class="engine-col">
+                                <img src="/assets/icons/omniverse.svg" alt="Omniverse" class="engine-logo" />
+                                "Omniverse"
+                            </th>
+                            <th class="engine-col">
+                                <img src="/assets/icons/anylogic.svg" alt="AnyLogic" class="engine-logo" />
+                                "AnyLogic"
+                            </th>
+                            <th class="engine-col">
+                                <img src="/assets/icons/matlab.svg" alt="MATLAB" class="engine-logo" />
+                                "MATLAB"
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="feature-name">"Real-time 3D world"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" RTX"</td>
+                            <td><span class="check">"✓"</span>" RTX"</td>
+                            <td><span class="warn">"~"</span>" Basic 3D"</td>
+                            <td><span class="cross">"✗"</span>" Plots only"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Scale (entities)"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" 10M+"</td>
+                            <td><span class="check">"✓"</span>" Large (USD)"</td>
+                            <td><span class="warn">"~"</span>" 100Ks agents"</td>
+                            <td><span class="warn">"~"</span>" Matrix-bound"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Time compression"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" ~1 yr/sec"</td>
+                            <td><span class="warn">"~"</span>" Limited"</td>
+                            <td><span class="check">"✓"</span>" Discrete-event"</td>
+                            <td><span class="check">"✓"</span>" Numerical"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Agent-based modeling"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" ECS-native"</td>
+                            <td><span class="warn">"~"</span>" Via Kit"</td>
+                            <td><span class="check">"✓"</span>" Specialty"</td>
+                            <td><span class="warn">"~"</span>" Toolbox"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Numerical / control libs"</td>
+                            <td class="eustress"><span class="warn">"~"</span>" Growing"</td>
+                            <td><span class="warn">"~"</span>" Partial"</td>
+                            <td><span class="warn">"~"</span>" Partial"</td>
+                            <td><span class="check">"✓"</span>" Gold standard"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Photoreal rendering"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" RTX ray-traced"</td>
+                            <td><span class="check">"✓"</span>" RTX path-traced"</td>
+                            <td><span class="cross">"✗"</span>" None"</td>
+                            <td><span class="cross">"✗"</span>" None"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"AI-native control"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" MCP bridge"</td>
+                            <td><span class="warn">"~"</span>" Kit/USD"</td>
+                            <td><span class="cross">"✗"</span>" None"</td>
+                            <td><span class="warn">"~"</span>" Scripted"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Source open / forkable"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" PolyForm Shield"</td>
+                            <td><span class="cross">"✗"</span>" Proprietary"</td>
+                            <td><span class="cross">"✗"</span>" Commercial"</td>
+                            <td><span class="cross">"✗"</span>" Commercial"</td>
+                        </tr>
+                        <tr>
+                            <td class="feature-name">"Pricing"</td>
+                            <td class="eustress"><span class="check">"✓"</span>" Free, no royalty"</td>
+                            <td><span class="warn">"~"</span>" Free indie, paid ent."</td>
+                            <td><span class="cross">"✗"</span>" $$$ license"</td>
+                            <td><span class="cross">"✗"</span>" $$$ per seat"</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            // ── Game engines: folded away, closed by default. The simulation table above is the main comparison. ──
+            <details class="comparison-more">
+                <summary class="comparison-more-summary">"Compare with Roblox, Unity and Unreal"</summary>
                 <h3 class="comparison-subtitle">"Game Engine Comparison"</h3>
                 <div class="comparison-table-wrapper">
                     <table class="comparison-table">
@@ -294,223 +343,311 @@ pub fn HomePage() -> impl IntoView {
                         </tbody>
                     </table>
                 </div>
+            </details>
 
-                <div class="comparison-verdict">
-                    <div class="verdict-card">
-                        <h3>"Best for fidelity"</h3>
-                        <p>"Game-grade 3D meets real physics and real data. The simulation does not cheat, and it still runs at interactive FPS."</p>
-                    </div>
-                    <div class="verdict-card">
-                        <h3>"Best for ownership"</h3>
-                        <p>"PolyForm Shield means no platform tax, no royalty, and a roadmap you control. Fork it, ship it, keep the work. The one limit is reselling the engine itself."</p>
-                    </div>
-                    <div class="verdict-card">
-                        <h3>"Best for AI-native work"</h3>
-                        <p>"Drive the live engine over MCP. An agent can build a scene, run a year of consequences, and read back the result."</p>
+            <div class="comparison-verdict">
+                <div class="verdict-card">
+                    <h3>"Best for fidelity"</h3>
+                    <p>"Game-grade 3D meets real physics and real data. The simulation does not cheat, and it still runs at interactive FPS."</p>
+                </div>
+                <div class="verdict-card">
+                    <h3>"Best for ownership"</h3>
+                    <p>"PolyForm Shield means no platform tax, no royalty, and a roadmap you control. Fork it, ship it, keep the work. The one limit is reselling the engine itself."</p>
+                </div>
+                <div class="verdict-card">
+                    <h3>"Best for AI-native work"</h3>
+                    <p>"Drive the live engine over MCP. An agent can build a scene, run a year of consequences, and read back the result."</p>
+                </div>
+            </div>
+        </section>
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Reference builds: "What Eustress Simulates". One card per build, each with an
+// image slot. A build whose capture is None shows a quiet striped placeholder
+// with its name; one with a capture shows the image, sized, with alt text.
+// -----------------------------------------------------------------------------
+
+/// One reference build on the home page.
+struct ShowcaseBuild {
+    /// Kebab-case name of the build; the capture file is named after it.
+    slug: &'static str,
+    /// The small label over the name.
+    tag: &'static str,
+    name: &'static str,
+    /// One line under the name. Only what the build is, or a number that is
+    /// measured. Nothing invented.
+    line: &'static str,
+    /// The capture, as a site path, or None while there is none yet.
+    capture: Option<&'static str>,
+    /// Figures shown in a row under the line, as (figure, label). Empty for most builds.
+    stats: &'static [(&'static str, &'static str)],
+}
+
+/// The reference builds, in card order. The first is the large featured card.
+///
+/// Captures go in assets/showcase/<slug>.webp, taken from the engine (Studio
+/// or the Player running the build), 1280 x 800. When a file exists, set the
+/// build's capture to Some("/assets/showcase/<slug>.webp"); until then the
+/// card shows the placeholder, never a broken image.
+/// Under the V-Cell figures: every one of them comes from the engine, and no cell has been built (the V-Cell session, spec 2.1).
+const SIMULATED_NOTE: &str = "Simulated in Eustress. No V-Cell has been built yet.";
+
+const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
+    ShowcaseBuild {
+        slug: "v-cell",
+        tag: "DIGITAL TWIN",
+        name: "V-Cell Battery",
+        line: "An anode-lean lithium-sulfur cell that stacks 459 bipolar layers inside one 300 × 100 × 100 mm can, so a single cell delivers 987 V and 2,386 Wh.",
+        capture: None,
+        stats: &[
+            ("544", "Wh/kg, pack"),
+            ("987", "volts, one cell"),
+            ("2,386", "watt-hours"),
+            ("889", "cycles to 80%, device duty"),
+            ("591", "kWh/kg over a service life, vehicle duty"),
+        ],
+    },
+    ShowcaseBuild {
+        slug: "fusion-exosuit",
+        tag: "ENERGY",
+        name: "Fusion Exosuit",
+        line: "A fusion-powered exosuit, built and run in Studio.",
+        capture: None,
+        stats: &[],
+    },
+    ShowcaseBuild {
+        slug: "climate-model",
+        tag: "DATA",
+        name: "Climate Model",
+        line: "A climate model driven by data, built and run in Studio.",
+        capture: None,
+        stats: &[],
+    },
+    ShowcaseBuild {
+        slug: "supply-chain-twin",
+        tag: "EPCIS / GS1",
+        name: "Supply-Chain Twin",
+        line: "A supply chain twin that speaks EPCIS and GS1.",
+        capture: None,
+        stats: &[],
+    },
+    ShowcaseBuild {
+        slug: "lenr-cold-fusion",
+        tag: "LENR",
+        name: "LENR / Cold Fusion",
+        line: "A low-energy nuclear reaction model, built and run in Studio.",
+        capture: None,
+        stats: &[],
+    },
+];
+
+/// Size of every capture, in pixels. Written on the <img> so the card does not
+/// jump while the image loads.
+const SHOWCASE_SHOT_WIDTH: u32 = 1280;
+const SHOWCASE_SHOT_HEIGHT: u32 = 800;
+
+/// The image slot of a card: the capture when there is one, otherwise the
+/// striped placeholder carrying the build's name.
+fn build_slot(build: &ShowcaseBuild) -> impl IntoView {
+    let name = build.name;
+    match build.capture {
+        Some(path) => view! {
+            <img
+                class="build-shot"
+                src=path
+                alt=format!("{name} running in Eustress Studio")
+                width=SHOWCASE_SHOT_WIDTH
+                height=SHOWCASE_SHOT_HEIGHT
+                loading="lazy"
+                decoding="async"
+            />
+        }
+        .into_any(),
+        None => view! {
+            <div class="build-slot build-slot-empty" aria-hidden="true">
+                <span class="build-slot-name">{name}</span>
+            </div>
+        }
+        .into_any(),
+    }
+}
+
+#[component]
+fn HomeShowcase() -> impl IntoView {
+    view! {
+        <section class="showcase-industrial">
+            <div class="showcase-header">
+                <div class="header-line"></div>
+                <span class="header-tag">"REFERENCE BUILDS"</span>
+                <div class="header-line"></div>
+            </div>
+            <h2 class="showcase-title">"What Eustress Simulates"</h2>
+            <p class="showcase-subtitle">"Real models running in the engine today"</p>
+
+            <div class="showcase-grid-industrial">
+                {SHOWCASE_BUILDS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, build)| {
+                        view! {
+                            <article
+                                class={if i == 0 { "showcase-card featured" } else { "showcase-card" }}
+                                data-build={build.slug}
+                            >
+                                <div class="card-visual">{build_slot(build)}</div>
+                                <div class="card-info">
+                                    <span class="info-tag">{build.tag}</span>
+                                    <h4>{build.name}</h4>
+                                    <p>{build.line}</p>
+                                    {(!build.stats.is_empty()).then(|| {
+                                        view! {
+                                            <ul class="build-stats">
+                                                {build
+                                                    .stats
+                                                    .iter()
+                                                    .map(|(figure, label)| {
+                                                        view! {
+                                                            <li class="build-stat">
+                                                                <span class="build-stat-figure">{*figure}</span>
+                                                                <span class="build-stat-label">{*label}</span>
+                                                            </li>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </ul>
+                                            <p class="build-note">{SIMULATED_NOTE}</p>
+                                        }
+                                    })}
+                                </div>
+                            </article>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+
+            <a href="/gallery" class="btn-secondary-steel showcase-btn">
+                "Explore All Simulations"
+                <span class="btn-icon">"→"</span>
+            </a>
+        </section>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The proof and the invitation, one section: the source is the evidence, and
+// the source is open to the reader.
+// -----------------------------------------------------------------------------
+
+#[component]
+fn HomeProof() -> impl IntoView {
+    view! {
+        <section class="github-section proof-section">
+            <div class="github-bg">
+                <div class="github-grid-overlay"></div>
+            </div>
+            <div class="github-inner">
+                <div class="github-copy">
+                    <span class="section-tag">"The proof is the source"</span>
+                    <h2 class="section-title-epic">"Read every line. Build it with us."</h2>
+
+                    <ul class="proof-points">
+                        <li>
+                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span>
+                                <strong>"Source-available:"</strong>
+                                " the clock, the physics and the data layer, under PolyForm Shield."
+                            </span>
+                        </li>
+                        <li>
+                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span>
+                                <strong>"Rust end to end:"</strong>
+                                " memory safety is structural."
+                            </span>
+                        </li>
+                        <li>
+                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span>
+                                <strong>"Contributors rank up:"</strong>
+                                " open a pull request, earn points, become a contributor."
+                            </span>
+                        </li>
+                    </ul>
+
+                    <div class="github-cta">
+                        <a href="https://github.com/WeaveITMeta/EustressEngine" target="_blank" rel="noopener" class="btn-primary-steel">
+                            "★ Star on GitHub"
+                            <span class="btn-icon">"→"</span>
+                        </a>
+                        <a href="https://github.com/WeaveITMeta/EustressEngine/pulls" target="_blank" rel="noopener" class="btn-secondary-steel">
+                            "Open a pull request"
+                        </a>
                     </div>
                 </div>
-            </section>
 
-            // ═══════════════════════════════════════════════════════════════
-            // WHAT EUSTRESS SIMULATES - real reference builds (no fake metrics)
-            // ═══════════════════════════════════════════════════════════════
-            <section class="showcase-industrial">
-                <div class="showcase-header">
-                    <div class="header-line"></div>
-                    <span class="header-tag">"REFERENCE BUILDS"</span>
-                    <div class="header-line"></div>
-                </div>
-                <h2 class="showcase-title">"What Eustress Simulates"</h2>
-                <p class="showcase-subtitle">"Real models running in the engine today"</p>
-
-                <div class="showcase-grid-industrial">
-                    <div class="showcase-card featured">
-                        <div class="card-visual">
-                            <div class="visual-icon">"🔋"</div>
-                            <div class="visual-scanline"></div>
-                        </div>
-                        <div class="card-info">
-                            <span class="info-tag">"DIGITAL TWIN"</span>
-                            <h4>"V-Cell Battery"</h4>
-                            <p>"Anode-free lithium-sulfur, 569 bipolar layers in one can: 1,223 V and 1,032 Wh/kg, aged 699 cycles in seconds"</p>
-                        </div>
+                <div class="github-terminal">
+                    <div class="term-header">
+                        <span class="term-dots">
+                            <span class="dot red"></span>
+                            <span class="dot yellow"></span>
+                            <span class="dot green"></span>
+                        </span>
+                        <span class="term-title">"bash"</span>
                     </div>
-                    <div class="showcase-card">
-                        <div class="card-visual">
-                            <div class="visual-icon">"⚡"</div>
-                        </div>
-                        <div class="card-info">
-                            <h4>"Fusion Exosuit"</h4>
-                            <span class="info-tag">"ENERGY"</span>
-                        </div>
+                    <div class="term-body">
+                        <div class="term-line"><span class="term-prompt">"$ "</span>"git clone github.com/WeaveITMeta/EustressEngine"</div>
+                        <div class="term-line term-dim">"Cloning into 'EustressEngine'..."</div>
+                        <div class="term-line"><span class="term-prompt">"$ "</span>"cargo run"</div>
+                        <div class="term-line term-ok">"✓ Eustress running. The world is yours."</div>
                     </div>
-                    <div class="showcase-card">
-                        <div class="card-visual">
-                            <div class="visual-icon">"🌡️"</div>
-                        </div>
-                        <div class="card-info">
-                            <h4>"Climate Model"</h4>
-                            <span class="info-tag">"DATA"</span>
-                        </div>
-                    </div>
-                    <div class="showcase-card">
-                        <div class="card-visual">
-                            <div class="visual-icon">"📦"</div>
-                        </div>
-                        <div class="card-info">
-                            <h4>"Supply-Chain Twin"</h4>
-                            <span class="info-tag">"EPCIS / GS1"</span>
-                        </div>
-                    </div>
-                    <div class="showcase-card">
-                        <div class="card-visual">
-                            <div class="visual-icon">"☢️"</div>
-                        </div>
-                        <div class="card-info">
-                            <h4>"Fission Reactor"</h4>
-                            <span class="info-tag">"PID CONTROL"</span>
-                        </div>
+                    <div class="github-badges">
+                        <span class="gh-badge">"PolyForm Shield"</span>
+                        <span class="gh-badge">"100% Rust"</span>
+                        <span class="gh-badge">"PRs welcome"</span>
                     </div>
                 </div>
+            </div>
+        </section>
+    }
+}
 
-                <a href="/gallery" class="btn-secondary-steel showcase-btn">
-                    "Explore All Simulations"
+/// The closing band: the same backdrop treatment as the hero, one action.
+#[component]
+fn HomeCta() -> impl IntoView {
+    view! {
+        <section class="cta-industrial cta-horizon">
+            <div class="cta-bg">
+                <div class="cta-grid-overlay"></div>
+                <div class="cta-glow-orb"></div>
+            </div>
+            <div class="cta-container">
+                <h2 class="cta-headline">"Ready to Model the "<span class="cta-accent">"Real World"</span>"?"</h2>
+                <p class="cta-subtext">"Join the builders simulating reality, and owning every bit of it."</p>
+
+                <a href="/download" class="btn-primary-steel cta-btn">
+                    "Download Studio"
                     <span class="btn-icon">"→"</span>
                 </a>
-            </section>
 
-            // ═══════════════════════════════════════════════════════════════
-            // PROOF - honest, source-backed (replaces fabricated testimonials)
-            // ═══════════════════════════════════════════════════════════════
-            <section class="testimonials-industrial">
-                <div class="testimonials-header">
-                    <div class="header-line"></div>
-                    <span class="header-tag">"THE PROOF IS THE SOURCE"</span>
-                    <div class="header-line"></div>
-                </div>
-                <h2 class="testimonials-title">"Don't Take Our Word For It"</h2>
-
-                <div class="systems-grid">
-                    <div class="systems-card">
-                        <div class="systems-icon">"🔓"</div>
-                        <h3>"Read the code"</h3>
-                        <p>"Source-available, top to bottom. The clock, the physics, the data layer, all of it readable under PolyForm Shield. If a claim on this page matters to you, go read the source."</p>
+                <div class="cta-features">
+                    <div class="cta-feature">
+                        <span class="feature-check">"✓"</span>
+                        "Source-available, PolyForm Shield"
                     </div>
-                    <div class="systems-card">
-                        <div class="systems-icon">"🦀"</div>
-                        <h3>"Built in Rust"</h3>
-                        <p>"Memory safety is structural, not aspirational. The bug that eats other teams' weeks does not compile here."</p>
+                    <div class="cta-feature">
+                        <span class="feature-check">"✓"</span>
+                        "Free forever, no platform tax"
                     </div>
-                    <div class="systems-card">
-                        <div class="systems-icon">"▶️"</div>
-                        <h3>"Runs today"</h3>
-                        <p>"Not a render. Thousands of entities, interactive frame rates, click-select and raycast. A real engine you can launch right now."</p>
+                    <div class="cta-feature">
+                        <span class="feature-check">"✓"</span>
+                        "Fork it and ship your fork"
                     </div>
                 </div>
-            </section>
-
-            // ═══════════════════════════════════════════════════════════════
-            // SOURCE-AVAILABLE - build it with us (GitHub + contributor ladder)
-            // ═══════════════════════════════════════════════════════════════
-            <section class="github-section">
-                <div class="github-bg">
-                    <div class="github-grid-overlay"></div>
-                </div>
-                <div class="github-inner">
-                    <div class="github-copy">
-                        <span class="section-tag">"SOURCE-AVAILABLE"</span>
-                        <h2 class="section-title-epic">"Build It With Us"</h2>
-                        <p class="github-lead">"The best simulation engine should not be a walled garden. It should be free."</p>
-                        <p class="github-sub">"Eustress ships under PolyForm Shield: free to clone, fork, and build on. The work you put in is the equity you keep."</p>
-
-                        <div class="ladder">
-                            <div class="ladder-step">
-                                <span class="ladder-num">"1"</span>
-                                <span class="ladder-text">"Open a Pull Request"</span>
-                            </div>
-                            <span class="ladder-arrow">"→"</span>
-                            <div class="ladder-step">
-                                <span class="ladder-num">"2"</span>
-                                <span class="ladder-text">"Earn Points & Rank"</span>
-                            </div>
-                            <span class="ladder-arrow">"→"</span>
-                            <div class="ladder-step">
-                                <span class="ladder-num">"3"</span>
-                                <span class="ladder-text">"Become a Contributor"</span>
-                            </div>
-                        </div>
-
-                        <div class="github-cta">
-                            <a href="https://github.com/WeaveITMeta/EustressEngine" target="_blank" rel="noopener" class="btn-primary-steel">
-                                "★ Star on GitHub"
-                                <span class="btn-icon">"→"</span>
-                            </a>
-                            <a href="https://github.com/WeaveITMeta/EustressEngine/pulls" target="_blank" rel="noopener" class="btn-secondary-steel">
-                                "Open a Pull Request"
-                            </a>
-                        </div>
-                    </div>
-
-                    <div class="github-terminal">
-                        <div class="term-header">
-                            <span class="term-dots">
-                                <span class="dot red"></span>
-                                <span class="dot yellow"></span>
-                                <span class="dot green"></span>
-                            </span>
-                            <span class="term-title">"bash"</span>
-                        </div>
-                        <div class="term-body">
-                            <div class="term-line"><span class="term-prompt">"$ "</span>"git clone github.com/WeaveITMeta/EustressEngine"</div>
-                            <div class="term-line term-dim">"Cloning into 'EustressEngine'..."</div>
-                            <div class="term-line"><span class="term-prompt">"$ "</span>"cargo run"</div>
-                            <div class="term-line term-ok">"✓ Eustress running. The world is yours."</div>
-                        </div>
-                        <div class="github-badges">
-                            <span class="gh-badge">"PolyForm Shield"</span>
-                            <span class="gh-badge">"100% Rust"</span>
-                            <span class="gh-badge">"PRs welcome"</span>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            // ═══════════════════════════════════════════════════════════════
-            // CTA
-            // ═══════════════════════════════════════════════════════════════
-            <section class="cta-industrial">
-                <div class="cta-bg">
-                    <div class="cta-grid-overlay"></div>
-                    <div class="cta-glow-orb"></div>
-                </div>
-                <div class="cta-container">
-                    <h2 class="cta-headline">"Ready to Model the "<span class="cta-accent">"Real World"</span>"?"</h2>
-                    <p class="cta-subtext">"Join the builders simulating reality, and owning every bit of it."</p>
-
-                    <a href="/login" class="btn-primary-steel cta-btn">
-                        "Start Free Today"
-                        <span class="btn-icon">"→"</span>
-                    </a>
-
-                    <div class="cta-features">
-                        <div class="cta-feature">
-                            <span class="feature-check">"✓"</span>
-                            "Source-available, PolyForm Shield"
-                        </div>
-                        <div class="cta-feature">
-                            <span class="feature-check">"✓"</span>
-                            "Free forever, no platform tax"
-                        </div>
-                        <div class="cta-feature">
-                            <span class="feature-check">"✓"</span>
-                            "Fork it and ship your fork"
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <Footer />
-        </div>
+            </div>
+        </section>
     }
 }
 
@@ -613,6 +750,8 @@ impl ReelControls {
     }
 }
 
+// Not shown: the home page hero is the still image again. Kept for when the reel returns.
+#[allow(dead_code)]
 #[component]
 fn HeroReel() -> impl IntoView {
     let video_ref = NodeRef::<leptos::html::Video>::new();
@@ -1150,5 +1289,424 @@ fn WhatsInsideTabs() -> impl IntoView {
                 }}
             </div>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render<V: IntoView>(f: impl FnOnce() -> V) -> String {
+        let owner = Owner::new();
+        owner.with(|| f().to_html())
+    }
+
+    /// The visible text of rendered markup: tags gone, block tags and <br/> read as a space.
+    fn text_of(html: &str) -> String {
+        let mut out = String::new();
+        let mut rest = html;
+        while let Some(open) = rest.find('<') {
+            out.push_str(&rest[..open]);
+            let close = rest[open..].find('>').map(|i| open + i + 1).unwrap_or(rest.len());
+            let name: String = rest[open + 1..close]
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if matches!(
+                name.as_str(),
+                "br" | "div" | "li" | "ul" | "p" | "h1" | "h2" | "h3" | "h4" | "section" | "summary"
+                    | "details" | "tr" | "td" | "th" | "article" | "figure"
+            ) {
+                out.push(' ');
+            }
+            rest = &rest[close..];
+        }
+        out.push_str(rest);
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The first tag named NAME at or after FROM, up to and including its closing tag.
+    fn element<'a>(html: &'a str, name: &str, from: usize) -> &'a str {
+        let open = from + html[from..].find(&format!("<{name}")).unwrap_or_else(|| panic!("no <{name}> in {html}"));
+        if matches!(name, "img" | "br") {
+            // a void element has no closing tag
+            return &html[open..open + html[open..].find('>').expect("end of tag") + 1];
+        }
+        let close_tag = format!("</{name}>");
+        let close = open + html[open..].find(&close_tag).unwrap_or_else(|| panic!("no {close_tag}")) + close_tag.len();
+        &html[open..close]
+    }
+
+    /// The element named NAME whose opening tag is the nearest one before MARKER, through its closing tag.
+    fn around<'a>(html: &'a str, marker: &str, name: &str) -> &'a str {
+        let at = html.find(marker).unwrap_or_else(|| panic!("no {marker:?} in {html}"));
+        let open = html[..at].rfind(&format!("<{name}")).unwrap_or_else(|| panic!("no <{name}> before {marker:?}"));
+        element(html, name, open)
+    }
+
+    fn hero() -> String {
+        render(HomeHero)
+    }
+
+    fn no_dashes(label: &str, html: &str) {
+        let text = text_of(html);
+        assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{label} has an em or en dash: {text}");
+    }
+
+    // ---- the hero ----
+
+    #[test]
+    fn the_hero_has_one_primary_action_and_it_downloads_studio() {
+        let html = hero();
+        let start = html.find("class=\"hero-buttons\"").expect("hero buttons");
+        let end = start + html[start..].find("</div>").expect("end of buttons");
+        let buttons = &html[start..end];
+        let first = element(buttons, "a", 0);
+        assert!(first.contains("href=\"/download\""), "primary goes to /download: {first}");
+        assert!(first.contains("btn-primary-steel"), "primary is the filled button: {first}");
+        assert!(text_of(first).starts_with("Download Studio"), "label: {first}");
+        assert!(first.contains("btn-icon\">→<"), "arrow: {first}");
+        let second = element(buttons, "a", buttons.find(first).unwrap() + first.len());
+        assert!(second.contains("href=\"/gallery\"") && second.contains("btn-secondary-steel"), "{second}");
+        assert_eq!(text_of(second), "Browse the Gallery");
+        assert_eq!(buttons.matches("<a ").count(), 2, "two actions, no third: {buttons}");
+    }
+
+    #[test]
+    fn no_hero_button_goes_to_about() {
+        let html = hero();
+        assert!(!html.contains("/about"), "the About button is gone from the hero");
+        assert!(!text_of(&html).contains("About"), "{}", text_of(&html));
+    }
+
+    #[test]
+    fn the_headline_and_metrics_are_unchanged_and_the_description_says_what_eustress_is() {
+        let html = hero();
+        assert_eq!(text_of(element(&html, "h1", 0)), "The Future of Creation");
+        assert!(html.contains("<span class=\"headline-accent\">Creation</span>"), "{html}");
+        let desc = text_of(around(&html, "hero-description", "p"));
+        assert_eq!(desc, "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds.");
+        no_dashes("the hero paragraph", around(&html, "hero-description", "p"));
+        for (value, label) in [("10M+", "Entities"), ("1 yr/s", "Sim Speed"), ("60+", "FPS")] {
+            let cell = format!("<span class=\"metric-value\">{value}</span><span class=\"metric-label\">{label}</span>");
+            assert!(html.contains(&cell), "{value} {label}: {html}");
+        }
+        assert!(html.contains("RUNS ON"), "platform bar");
+    }
+
+    #[test]
+    fn the_hero_keeps_the_real_studio_capture_and_the_city_backdrop_is_css_only() {
+        let html = hero();
+        let img = around(&html, "src=\"/assets/hero-render.png\"", "img");
+        assert!(img.contains("src=\"/assets/hero-render.png\""), "{img}");
+        assert!(img.contains("width=\"1334\"") && img.contains("height=\"714\"") && img.contains("alt=\"The Eustress Studio editor"), "{img}");
+        // The backdrop is decoration: it is a CSS background, so no element, no alt text, nothing announced.
+        assert!(html.contains("hero-industrial hero-city"));
+        assert!(!html.contains("hero-city.webp") && !html.contains("cta-horizon.webp"), "no <img> for a backdrop");
+        let css = include_str!("../../style/home.css");
+        assert!(css.contains(".hero-industrial.hero-city"), "the hero backdrop rule");
+        assert!(css.contains("url(\"/assets/home/hero-city.webp\")"), "hero backdrop file");
+        assert!(css.contains("linear-gradient(90deg"), "dark gradient from the left");
+        assert!(css.contains("background-position: right"), "anchored right");
+        assert!(css.contains("background-size: cover"), "covers the hero");
+        assert!(css.contains("@media (max-width: 768px)"), "a separate phone treatment");
+    }
+
+    #[test]
+    fn the_new_stylesheet_is_linked_after_main_css() {
+        let index = include_str!("../../index.html");
+        let main = index.find("href=\"style/main.css\"").expect("main.css link");
+        let home = index.find("<link data-trunk rel=\"css\" href=\"style/home.css\">").expect("home.css must be linked in index.html");
+        assert!(home > main, "home.css after main.css so its rules win");
+    }
+
+    #[test]
+    fn the_backdrop_images_exist_and_are_webp() {
+        let hero: &[u8] = include_bytes!("../../assets/home/hero-city.webp");
+        let cta: &[u8] = include_bytes!("../../assets/home/cta-horizon.webp");
+        for (name, bytes) in [("hero-city", hero), ("cta-horizon", cta)] {
+            assert!(bytes.len() > 10_000, "{name} is a real file: {} bytes", bytes.len());
+            assert_eq!(&bytes[0..4], b"RIFF", "{name}");
+            assert_eq!(&bytes[8..12], b"WEBP", "{name}");
+        }
+        let css = include_str!("../../style/home.css");
+        assert!(css.contains("url(\"/assets/home/cta-horizon.webp\")"));
+    }
+
+    // ---- the comparison ----
+
+    #[test]
+    fn the_simulation_table_is_first_and_open_and_the_game_engine_table_is_folded_away() {
+        let html = render(HomeComparison);
+        let sim_title = html.find("Simulation Software Comparison").expect("sim title");
+        let omniverse = html.find("Omniverse").expect("sim table");
+        let details = html.find("<details").expect("a <details> holds the game engine table");
+        assert!(sim_title < omniverse && omniverse < details, "the simulation table comes first, outside the <details>");
+        assert_eq!(html.matches("<details").count(), 1);
+        let open_tag = &html[details..details + html[details..].find('>').unwrap()];
+        assert!(!open_tag.contains("open"), "closed by default: {open_tag}");
+        let end = details + html[details..].find("</details>").expect("</details>");
+        let inside = &html[details..end];
+        assert!(text_of(element(inside, "summary", 0)) == "Compare with Roblox, Unity and Unreal", "{inside}");
+        for needle in ["Game Engine Comparison", "Roblox", "Unity", "Unreal", "Lua VM"] {
+            assert!(inside.contains(needle), "{needle} lives inside the <details>");
+        }
+        for needle in ["Omniverse", "AnyLogic", "MATLAB", "Simulation Software Comparison"] {
+            assert!(!inside.contains(needle), "{needle} stays outside the <details>");
+        }
+        let verdict = html.find("comparison-verdict").expect("verdict cards");
+        assert!(verdict > end, "the verdict cards follow the folded table");
+        assert_eq!(html.matches("<table").count(), 2);
+    }
+
+    #[test]
+    fn eustress_matches_omniverse_on_rtx_for_the_real_time_world_and_photoreal_rows() {
+        // McKale (2026-10-15): Eustress supports RTX like Omniverse in these two rows.
+        let html = render(HomeComparison);
+        for (row, cell) in [("Real-time 3D world", " RTX"), ("Photoreal rendering", " RTX ray-traced")] {
+            let at = html.find(row).unwrap_or_else(|| panic!("{row} row"));
+            let tr = &html[at..at + html[at..].find("</tr>").expect("</tr>")];
+            let eustress = &tr[tr.find("class=\"eustress\"").expect("eustress cell")..];
+            let eustress = &eustress[..eustress.find("</td>").unwrap()];
+            assert!(eustress.contains("✓") && eustress.ends_with(cell), "{row}: {eustress}");
+        }
+    }
+
+    // ---- the reference builds ----
+
+    #[test]
+    fn the_showcase_has_five_builds_and_v_cell_is_the_featured_one_with_its_real_line() {
+        assert_eq!(SHOWCASE_BUILDS.len(), 5);
+        let names: Vec<_> = SHOWCASE_BUILDS.iter().map(|b| (b.name, b.tag)).collect();
+        assert_eq!(
+            names,
+            [
+                ("V-Cell Battery", "DIGITAL TWIN"),
+                ("Fusion Exosuit", "ENERGY"),
+                ("Climate Model", "DATA"),
+                ("Supply-Chain Twin", "EPCIS / GS1"),
+                ("LENR / Cold Fusion", "LENR"),
+            ]
+        );
+        let slugs: Vec<_> = SHOWCASE_BUILDS.iter().map(|b| b.slug).collect();
+        assert_eq!(slugs, ["v-cell", "fusion-exosuit", "climate-model", "supply-chain-twin", "lenr-cold-fusion"]);
+        assert_eq!(
+            SHOWCASE_BUILDS[0].line,
+            "An anode-lean lithium-sulfur cell that stacks 459 bipolar layers inside one 300 × 100 × 100 mm can, so a single cell delivers 987 V and 2,386 Wh."
+        );
+        let html = render(HomeShowcase);
+        assert_eq!(html.matches("showcase-card featured").count(), 1);
+        let featured = around(&html, "showcase-card featured", "article");
+        assert!(featured.contains("data-build=\"v-cell\""), "{featured}");
+        assert_eq!(html.matches("<article").count(), 5);
+    }
+
+    #[test]
+    fn the_v_cell_card_shows_its_five_figures_in_order_and_none_of_the_old_ones() {
+        let html = render(HomeShowcase);
+        let card = around(&html, "data-build=\"v-cell\"", "article");
+        let want = [
+            ("544", "Wh/kg, pack"),
+            ("987", "volts, one cell"),
+            ("2,386", "watt-hours"),
+            ("889", "cycles to 80%, device duty"),
+            ("591", "kWh/kg over a service life, vehicle duty"),
+        ];
+        assert_eq!(SHOWCASE_BUILDS[0].stats, &want[..]);
+        assert!(card.contains(&format!("<p class=\"build-note\">{SIMULATED_NOTE}</p>")), "the figures say they are simulated");
+        assert_eq!(html.matches("class=\"build-note\"").count(), 1, "only the card with figures carries the note");
+        let mut last = 0;
+        for (figure, label) in want {
+            let pair = format!("<span class=\"build-stat-figure\">{figure}</span><span class=\"build-stat-label\">{label}</span>");
+            let at = card.find(&pair).unwrap_or_else(|| panic!("missing {figure} / {label} in {card}"));
+            assert!(at > last, "{figure} is out of order");
+            last = at;
+        }
+        assert_eq!(card.matches("build-stat-figure").count(), 5);
+        assert_eq!(html.matches("build-stat-figure").count(), 5, "only the V-Cell card has figures");
+        let text = text_of(&html);
+        for old in ["569", "1,223", "1,032", "699", "Anode-free", "2,930", "station, projected"] {
+            assert!(!text.contains(old), "the old V-Cell figure {old} is still on the page");
+        }
+        assert!(text.contains("so a single cell delivers 987 V and 2,386 Wh."), "{text}");
+        let css = include_str!("../../style/home.css");
+        assert!(css.contains("font-variant-numeric: tabular-nums"), "figures use tabular numbers");
+        assert!(css.contains(".build-stat-figure") && css.contains("var(--font-mono)"), "figures use the mono face");
+    }
+
+    #[test]
+    fn the_four_other_builds_carry_no_invented_numbers() {
+        for b in &SHOWCASE_BUILDS[1..] {
+            assert!(b.stats.is_empty(), "{} has figures nobody gave", b.name);
+            // A word with a digit may only be one the card already names (GS1).
+            for word in b.line.split_whitespace().filter(|w| w.chars().any(|c| c.is_ascii_digit())) {
+                let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                assert!(b.tag.contains(word) || b.name.contains(word), "{}: an invented number {word:?} in {}", b.name, b.line);
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_without_a_capture_shows_the_placeholder_and_never_a_bare_image() {
+        let html = render(HomeShowcase);
+        let without = SHOWCASE_BUILDS.iter().filter(|b| b.capture.is_none()).count();
+        let with = SHOWCASE_BUILDS.len() - without;
+        assert_eq!(html.matches("build-slot-empty").count(), without, "one placeholder per card with no capture");
+        assert_eq!(html.matches("<img").count(), with, "an image only where there is a capture");
+        for chunk in html.split("<img").skip(1) {
+            let tag = &chunk[..chunk.find('>').unwrap()];
+            assert!(tag.contains("src=\"") && !tag.contains("src=\"\""), "an <img> without a src: {tag}");
+        }
+        for b in SHOWCASE_BUILDS.iter().filter(|b| b.capture.is_none()) {
+            let marker = format!("data-build=\"{}\"", b.slug);
+            let card = around(&html, &marker, "article");
+            assert!(card.contains("build-slot-empty"), "{}: {card}", b.name);
+            assert!(card.contains(&format!("<span class=\"build-slot-name\">{}</span>", b.name)), "{}: the placeholder names the build", b.name);
+            assert!(card.contains("aria-hidden=\"true\""), "the placeholder is decoration");
+        }
+    }
+
+    #[test]
+    fn a_card_with_a_capture_shows_the_image_with_size_and_alt_text() {
+        let build = ShowcaseBuild {
+            slug: "test-build",
+            tag: "TEST",
+            name: "Test Build",
+            line: "A line.",
+            capture: Some("/assets/showcase/test-build.webp"),
+            stats: &[],
+        };
+        let html = render(|| build_slot(&build));
+        let img = element(&html, "img", 0);
+        assert!(img.contains("src=\"/assets/showcase/test-build.webp\""), "{img}");
+        assert!(img.contains(&format!("width=\"{SHOWCASE_SHOT_WIDTH}\"")) && img.contains(&format!("height=\"{SHOWCASE_SHOT_HEIGHT}\"")), "{img}");
+        assert!(img.contains("alt=\"Test Build running in Eustress Studio\""), "{img}");
+        assert!(!html.contains("build-slot-empty"), "{html}");
+    }
+
+    #[test]
+    fn every_capture_path_follows_the_slug_and_the_file_exists() {
+        let mut slugs = std::collections::HashSet::new();
+        for b in SHOWCASE_BUILDS {
+            assert!(slugs.insert(b.slug), "duplicate slug {}", b.slug);
+            assert!(b.slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'), "{}", b.slug);
+            if let Some(path) = b.capture {
+                assert_eq!(path, format!("/assets/showcase/{}.webp", b.slug));
+                let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path.trim_start_matches('/'));
+                assert!(file.exists(), "{} names a capture that is not in assets/showcase: {}", b.name, file.display());
+            }
+        }
+    }
+
+    // ---- the proof and the invitation ----
+
+    #[test]
+    fn the_proof_and_the_github_invitation_are_one_section() {
+        let html = render(HomeProof);
+        assert_eq!(html.matches("<section").count(), 1);
+        let text = text_of(&html);
+        assert!(text.contains("The proof is the source"), "{text}");
+        assert_eq!(text_of(element(&html, "h2", 0)), "Read every line. Build it with us.");
+        for line in [
+            "Source-available: the clock, the physics and the data layer, under PolyForm Shield.",
+            "Rust end to end: memory safety is structural.",
+            "Contributors rank up: open a pull request, earn points, become a contributor.",
+        ] {
+            assert!(text.contains(line), "missing tick line {line:?} in {text}");
+        }
+        assert_eq!(html.matches("feature-check").count(), 3, "three ticked lines");
+        let star = around(&html, "Star on GitHub", "a");
+        assert!(star.contains("href=\"https://github.com/WeaveITMeta/EustressEngine\""), "{star}");
+        let pr = around(&html, "Open a pull request", "a");
+        assert!(pr.contains("href=\"https://github.com/WeaveITMeta/EustressEngine/pulls\""), "{pr}");
+        assert!(text.contains("$ git clone github.com/WeaveITMeta/EustressEngine"), "the terminal stays: {text}");
+        assert!(text.contains("✓ Eustress running. The world is yours."), "{text}");
+        // the old pieces are gone
+        for gone in ["Don't Take Our Word For It", "Build It With Us", "ladder", "testimonials-industrial", "Runs today"] {
+            assert!(!html.contains(gone), "{gone} should be gone");
+        }
+    }
+
+    // ---- the closing band ----
+
+    #[test]
+    fn the_closing_band_asks_for_the_download_and_matches_the_hero() {
+        let html = render(HomeCta);
+        assert_eq!(text_of(element(&html, "h2", 0)), "Ready to Model the Real World?");
+        assert!(html.contains("<span class=\"cta-accent\">Real World</span>"), "{html}");
+        let text = text_of(&html);
+        assert!(text.contains("Join the builders simulating reality, and owning every bit of it."), "{text}");
+        for tick in ["Source-available, PolyForm Shield", "Free forever, no platform tax", "Fork it and ship your fork"] {
+            assert!(text.contains(tick), "{tick}");
+        }
+        let button = element(&html, "a", 0);
+        assert!(button.contains("href=\"/download\""), "{button}");
+        assert!(button.contains("btn-primary-steel") && button.contains("cta-btn"), "{button}");
+        assert!(text_of(button).starts_with("Download Studio") && button.contains("btn-icon\">→<"), "{button}");
+        assert_eq!(html.matches("<a ").count(), 1, "one action");
+        assert!(!html.contains("/login") && !html.contains("Start Free Today"));
+        assert!(html.contains("cta-industrial cta-horizon"), "the band carries the horizon backdrop class");
+        assert!(include_str!("../../style/home.css").contains(".cta-industrial.cta-horizon"));
+    }
+
+    // ---- the page as a whole ----
+
+    #[test]
+    fn the_page_is_the_nav_then_six_sections_in_order_then_the_footer() {
+        let src = include_str!("home.rs");
+        let start = src.find("pub fn HomePage()").expect("HomePage");
+        let end = src.find("fn HomeHero(").expect("HomeHero");
+        let page = &src[start..end];
+        assert!(!page.contains("<section"), "every section is its own component");
+        let mut last = 0;
+        for name in ["CentralNav", "HomeHero", "WhatsInsideTabs", "HomeComparison", "HomeShowcase", "HomeProof", "HomeCta", "Footer"] {
+            let tag = format!("<{name} ");
+            assert_eq!(page.matches(tag.as_str()).count(), 1, "{name} appears once in HomePage");
+            let at = page.find(tag.as_str()).unwrap();
+            assert!(at > last, "{name} is out of order");
+            last = at;
+        }
+    }
+
+    /// The whole home page, rendered as the prerender does: nav, every section and the footer.
+    #[cfg(feature = "ssr")]
+    fn render_home_page() -> String {
+        use hydration_context::{SharedContext, SsrSharedContext};
+        use leptos_router::location::RequestUrl;
+        let shared: std::sync::Arc<dyn SharedContext + Send + Sync> = std::sync::Arc::new(SsrSharedContext::new());
+        let owner = Owner::new_root(Some(shared));
+        let html = owner.with(|| {
+            provide_context(RequestUrl::new("/"));
+            crate::app::App().to_html()
+        });
+        owner.cleanup();
+        html
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn the_home_page_renders_the_footer_after_the_closing_band() {
+        let html = render_home_page();
+        assert!(html.contains("The Future of"), "this is the home page");
+        let cta = html.find("Ready to Model the").expect("closing band");
+        let footer = html.find("<footer").expect("the home page renders its footer");
+        assert!(html.contains("footer-industrial"), "the site footer");
+        assert!(cta < footer, "the footer comes after the closing band");
+        assert_eq!(html.matches("<footer").count(), 1);
+        let end = footer + html[footer..].find("</footer>").expect("</footer>") + "</footer>".len();
+        assert!(!text_of(&html[end..]).contains("Ready to Model"), "nothing of the page follows the footer");
+    }
+
+    #[test]
+    fn no_dashes_in_the_text_people_read() {
+        no_dashes("hero", &hero());
+        no_dashes("comparison", &render(HomeComparison));
+        no_dashes("showcase", &render(HomeShowcase));
+        no_dashes("proof", &render(HomeProof));
+        no_dashes("cta", &render(HomeCta));
+        for b in SHOWCASE_BUILDS {
+            assert!(!b.line.contains('\u{2014}') && !b.line.contains('\u{2013}'), "{}", b.line);
+        }
     }
 }

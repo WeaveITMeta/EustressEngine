@@ -41,6 +41,10 @@ export component ExplorerPanel inherits Rectangle {
     // alongside `tree-nodes` so we don't have to filter+count in Slint.
     in property <[int]> visible-node-ids: [];
     in-out property <string> search-text: "";
+    // The search box has the keyboard. Bevy handles bare letters and Delete
+    // as shortcuts, so it has to be told.
+    callback on-search-focus-changed(bool);
+    init => { root.on-search-focus-changed(false); }
 
     // Programmatic scroll target — used by 3D-viewport selection to
     // bring the corresponding tree row to the top of the visible area.
@@ -136,6 +140,7 @@ export component ExplorerPanel inherits Rectangle {
                 search-input := LineEdit {
                     property <int> pulse: root.focus-pulse;
                     changed pulse => { self.focus(); }
+                    changed has-focus => { root.on-search-focus-changed(self.has-focus); }
                     horizontal-stretch: 1;
                     placeholder-text: "Search  (is:Part, tag:Door, Locked = true)";
                     text <=> root.search-text;

@@ -28,7 +28,7 @@
 
 use bevy::prelude::*;
 use eustress_common::plugins::camera_look::{
-    auto_exposure_on, bloom_on, gtao_on, msaa_samples, smaa_on, ViewCamera,
+    auto_exposure_on, bloom_on, gtao_on, msaa_samples, smaa_on, OwnsClipPlanes, ViewCamera,
 };
 
 use crate::default_scene::StudioCamera;
@@ -70,12 +70,13 @@ impl Plugin for PhotorealPlugin {
 }
 
 /// A Studio camera is a view camera: it takes the shared look the frame
-/// after it appears.
+/// after it appears. Its clip planes are the user's to edit (the
+/// FarClipPlane property), so the view look keeps its hands off them.
 fn mark_studio_cameras(
     mut commands: Commands,
     cameras: Query<Entity, (Added<StudioCamera>, Without<ViewCamera>)>,
 ) {
     for entity in &cameras {
-        commands.entity(entity).insert(ViewCamera);
+        commands.entity(entity).insert((ViewCamera, OwnsClipPlanes));
     }
 }

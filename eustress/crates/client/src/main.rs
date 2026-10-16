@@ -27,6 +27,7 @@ use avian3d::prelude::*;
 use eustress_common::{spawn_baseplate, spawn_welcome_cube};
 use eustress_common::services::TeamServicePlugin;
 use eustress_networking::JoinLink;
+use eustress_networking::join_link::{split_link_extras, LinkExtras};
 use plugins::{
     EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin,
     PauseMenuPlugin, ClientTerrainPlugin, CharacterAnimationPlugin,
@@ -49,64 +50,117 @@ usage:
   eustress-client --sim <simulation id>    play a published simulation
   eustress-client eustress-player://play/<simulation id>
   eustress-client --version                print the version and exit
+  --api-url <url>                          use this Eustress API (as EUSTRESS_API_URL does); the
+                                           eustress-player:// link a staging Player registers carries it
 links written with eustress:// in place of eustress-player:// open the same way";
 
 /// The Player's own URL scheme. On Windows one application owns a scheme, and
 /// `eustress://` belongs to Studio, so a Player installer registers this one;
 /// both spell the same links.
 const PLAYER_SCHEME: &str = "eustress-player://";
+/// Studio's scheme. A link in either scheme is read in this one.
+const STUDIO_SCHEME: &str = "eustress://";
 
-/// How the Player was launched.
-#[derive(Debug, Clone)]
+/// What follows the scheme when `arg` is a link to the Player: it starts with
+/// [`PLAYER_SCHEME`] or [`STUDIO_SCHEME`], in any case, with any spaces
+/// around it. Such an argument is always read as a link, so it never becomes
+/// a scene file's path, which the log shows.
+fn player_link(arg: &str) -> Option<&str> {
+    let arg = arg.trim();
+    for scheme in [PLAYER_SCHEME, STUDIO_SCHEME] {
+        if arg.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme)) {
+            return Some(&arg[scheme.len()..]);
+        }
+    }
+    None
+}
+
+/// An unknown option's name, without whatever follows it, for its error: an
+/// argument such as `--connect=<link>` must not put the link in a message.
+fn option_name(arg: &str) -> String {
+    arg.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect()
+}
+
+/// [`JoinLink::parse`], whose errors can quote a link's address. Query text
+/// (a `ticket=`, `pin=` or `key=`) sits in that address when no `?` comes
+/// before it (`host:port&pin=..`), and [`split_link_extras`] takes out only
+/// what follows a `?`. So an error that holds `=` or `&` is replaced by one
+/// that quotes nothing.
+fn parse_join_link(text: &str) -> Result<JoinLink, String> {
+    JoinLink::parse(text).map_err(|e| {
+        if e.contains('=') || e.contains('&') { "this link is malformed".to_string() } else { e }
+    })
+}
+
+/// How the Player was launched. Not `Clone`: a join can carry the ticket a
+/// gallery's Play page put in its link, which is never copied
+/// (`docs/networking/PLAYER_JOIN_TICKET.md`). Its `Debug` prints no ticket
+/// text, since [`LinkExtras`]'s prints none.
+#[derive(Debug)]
 pub enum Launch {
     /// A Space from this computer, or a legacy scene file.
     Local { scene_path: Option<PathBuf> },
-    /// Join a Studio host.
-    Join { link: JoinLink, name: String },
-    /// Play a published simulation.
-    Published { sim_id: String },
+    /// Join a Studio host. `extras`: the ticket and API an
+    /// `eustress-player://` link carries; none for `--connect`.
+    Join { link: JoinLink, name: String, extras: LinkExtras },
+    /// Play a published simulation. `extras`: the API its link names.
+    Published { sim_id: String, extras: LinkExtras },
 }
 
 impl Launch {
     fn from_args(args: &[String]) -> Result<Self, String> {
-        let mut link: Option<JoinLink> = None;
-        let (mut key, mut pin, mut name, mut sim, mut scene) = (None, None, None, None, None);
+        // Each kind of launch keeps the extras of the link that named it.
+        let mut link: Option<(JoinLink, LinkExtras)> = None;
+        let mut sim: Option<(String, LinkExtras)> = None;
+        let (mut key, mut pin, mut name, mut scene) = (None, None, None, None);
         let mut it = args.iter().skip(1);
-        while let Some(arg) = it.next() {
+        while let Some(raw) = it.next() {
             let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
-            let normalized;
-            let arg: &str = match arg.strip_prefix(PLAYER_SCHEME) {
+            // A link gives up its ticket before anything reads it, and only
+            // the link without it is parsed below, so no error, usage text or
+            // log line can quote the ticket. `--connect` and `https://`
+            // arguments carry no ticket the Player reads.
+            let without_ticket;
+            let (arg, extras): (&str, LinkExtras) = match player_link(raw) {
                 Some(rest) => {
-                    normalized = format!("eustress://{rest}");
-                    &normalized
+                    let (link_text, found) = split_link_extras(&format!("{STUDIO_SCHEME}{rest}"))?;
+                    without_ticket = link_text;
+                    (without_ticket.as_str(), found)
                 }
-                None => arg.as_str(),
+                None => (raw.as_str(), LinkExtras::default()),
             };
             match arg {
-                "--connect" => link = Some(JoinLink::parse(&value("--connect")?)?),
+                "--connect" => link = Some((parse_join_link(&value("--connect")?)?, LinkExtras::default())),
                 "--key" => key = Some(value("--key")?),
                 "--pin" => pin = Some(value("--pin")?),
                 "--name" => name = Some(value("--name")?),
-                "--sim" => sim = Some(value("--sim")?),
+                "--sim" => sim = Some((value("--sim")?, LinkExtras::default())),
+                // Taken by `main` before anything reads the API.
+                "--api-url" => drop(value("--api-url")?),
+                // `play/<id>`, or `play/<id>?api=<name>`: the id is the path
+                // alone.
                 other if other.starts_with("eustress://play/") => {
-                    sim = Some(other["eustress://play/".len()..].trim_end_matches('/').to_string());
+                    let id = other["eustress://play/".len()..].split('?').next().unwrap_or("");
+                    sim = Some((id.trim_end_matches('/').to_string(), extras));
                 }
-                other if other.starts_with("eustress://") || other.starts_with("https://") => {
-                    link = Some(JoinLink::parse(other)?);
+                other if other.starts_with(STUDIO_SCHEME) || other.starts_with("https://") => {
+                    link = Some((parse_join_link(other)?, extras));
                 }
-                other if other.starts_with("--") => return Err(format!("unknown option {other}")),
+                other if other.starts_with("--") => return Err(format!("unknown option {}", option_name(other))),
                 other => scene = Some(PathBuf::from(other)),
             }
         }
 
-        if let Some(sim_id) = sim {
+        if let Some((sim_id, extras)) = sim {
             let valid = !sim_id.is_empty() && sim_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
             if !valid {
-                return Err(format!("{sim_id:?} is not a simulation id"));
+                // Not quoted: whatever was pasted after `--sim` stays out of
+                // the message.
+                return Err("the simulation id must be hex digits and dashes".into());
             }
-            return Ok(Launch::Published { sim_id });
+            return Ok(Launch::Published { sim_id, extras });
         }
-        if let Some(mut link) = link {
+        if let Some((mut link, extras)) = link {
             if key.is_some() {
                 link.key = key;
             }
@@ -130,13 +184,23 @@ impl Launch {
                 .or_else(|| std::env::var("USERNAME").ok())
                 .or_else(|| std::env::var("USER").ok())
                 .unwrap_or_else(|| "Player".to_string());
-            return Ok(Launch::Join { link, name });
+            return Ok(Launch::Join { link, name, extras });
         }
         Ok(Launch::Local { scene_path: scene })
     }
 
     fn is_network(&self) -> bool {
         !matches!(self, Launch::Local { .. })
+    }
+
+    /// A link names the API it belongs to, and this Player opens it only on
+    /// `player_api`, the API it is set up for: its `--api-url`, else
+    /// production. A link that names none takes the Player's own.
+    fn check_api(&self, player_api: &str) -> Result<(), String> {
+        match self {
+            Launch::Join { extras, .. } | Launch::Published { extras, .. } => extras.check_api(player_api),
+            Launch::Local { .. } => Ok(()),
+        }
     }
 }
 
@@ -153,6 +217,30 @@ struct PublishedTarget(String);
 /// Player logs kept, newest first; older ones are deleted at launch.
 const PLAYER_LOG_RETAIN: usize = 8;
 
+/// The folder the Player writes its logs to: `~/.eustress_engine/logs`, or a
+/// `logs` folder beside the exe when the home folder is unknown.
+fn player_log_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join(".eustress_engine").join("logs"))
+        .or_else(|| std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("logs"))))
+}
+
+/// This run's log file, the one `player_log_fmt_layer` writes. The panic hook
+/// appends its PANIC lines to the same file.
+fn player_log_path() -> Option<PathBuf> {
+    player_log_dir().map(|dir| dir.join(format!("player-{}.log", std::process::id())))
+}
+
+/// A message box in plain words: a panic, or a link the Player cannot open. A
+/// release Player has no console, so this is the only place it can be read.
+fn show_message(title: &str, body: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(body)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+}
+
 /// `LogPlugin::fmt_layer`: Bevy's usual stderr layer plus one over
 /// `~/.eustress_engine/logs/player-<pid>.log`, because a release Player has
 /// no console (see `windows_subsystem` above). Studio does the same with
@@ -161,9 +249,7 @@ const PLAYER_LOG_RETAIN: usize = 8;
 fn player_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
     use bevy::log::tracing_subscriber::fmt;
 
-    let dir = dirs::home_dir()
-        .map(|home| home.join(".eustress_engine").join("logs"))
-        .or_else(|| std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("logs"))))?;
+    let dir = player_log_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     // One file per run, so two Players never truncate each other's; a log
     // another Player still holds open cannot be deleted on Windows, so
@@ -214,6 +300,25 @@ pub fn build_app(launch: Launch) -> App {
     // never registered `bundled://` at all, so every character GLB and all
     // eight animation clips 404'd and the player was invisible. Three separate
     // audit findings were this one omission.
+    //
+    // The default source (the engine's assets) and `bundled://` open only
+    // inside their folders (play-runtime `ContainedFileReader`): the Player
+    // runs with UnapprovedPathMode::Allow, so a raw path a Space or a host
+    // carries (`//host/share/x`, `C:/x`, `../x`) would otherwise reach the
+    // disk or the network. The one absolute path the Player loads on purpose
+    // is its enhancement cache (`systems::asset_applicator`).
+    {
+        use bevy::asset::io::{AssetSourceBuilder, AssetSourceId, ErasedAssetReader};
+        app.register_asset_source(
+            AssetSourceId::Default,
+            AssetSourceBuilder::new(|| -> Box<dyn ErasedAssetReader> { Box::new(systems::asset_sources::default_reader()) }),
+        );
+        app.register_asset_source(
+            "bundled",
+            AssetSourceBuilder::new(|| -> Box<dyn ErasedAssetReader> { Box::new(systems::asset_sources::bundled_reader()) }),
+        );
+        eustress_common::avatar::boot::note_asset_sources_registered_externally();
+    }
     eustress_common::avatar::boot::register_avatar_asset_sources(&mut app);
 
     // `space://` resolves against the Space `space_world` opens, the same
@@ -230,9 +335,14 @@ pub fn build_app(launch: Launch) -> App {
         None => systems::space_world::resolve_space(),
     };
     if let Some(space_root) = space_source {
+        // Opens only what lies inside the Space (play-runtime `space_paths`):
+        // the Player runs with UnapprovedPathMode::Allow, so Bevy itself
+        // refuses no path.
         app.register_asset_source(
             "space",
-            bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
+            bevy::asset::io::AssetSourceBuilder::new(move || -> Box<dyn bevy::asset::io::ErasedAssetReader> {
+                Box::new(systems::asset_sources::space_reader(space_root.clone()))
+            }),
         );
     }
 
@@ -248,8 +358,9 @@ pub fn build_app(launch: Launch) -> App {
                 }),
                 ..default()
             })
-            // Absolute paths (imported meshes, user content) are refused under
-            // Bevy 0.19's default UnapprovedPathMode::Forbid.
+            // `permissive_asset_plugin` sets UnapprovedPathMode::Allow: Bevy
+            // refuses no absolute or escaping path here, so every path a Space
+            // names is contained by its builder (play-runtime `space_paths`).
             //
             // The root is `common/assets` beside the exe in an installed
             // Player, else the source tree. A relative root resolves against
@@ -360,19 +471,27 @@ pub fn build_app(launch: Launch) -> App {
         // Every frame until the avatar is placed, which waits for the local
         // Space's terrain (see `spawn_local_avatar`).
         .add_systems(Update, spawn_local_avatar.run_if(move || !network))
-        .add_systems(Update, handle_escape);
+        .add_systems(Update, handle_escape)
+        // A gallery's Play link opens this Player.
+        .add_systems(Startup, register_link_handler);
 
     if let Some(live) = live {
         app.insert_resource(live);
     }
     match launch {
-        Launch::Join { link, name } => {
-            // A signed-in player joins as its account (a ticket bound to
-            // `link.pin`), so the host knows whose purchases are whose.
-            let identity = systems::commerce::join_ticket(&link);
-            app.insert_resource(systems::net_play::JoinTarget { link, name, identity });
+        Launch::Join { link, name, mut extras } => {
+            // The identity the host is told: the ticket the gallery's Play
+            // page put in the link, else, for a signed-in player, one minted
+            // from this Player's sign-in and bound to `link.pin`, so the host
+            // knows whose purchases are whose.
+            app.insert_resource(systems::net_play::JoinTarget::new(
+                link,
+                name,
+                extras.ticket.take(),
+                systems::commerce::join_ticket,
+            ));
         }
-        Launch::Published { sim_id } => {
+        Launch::Published { sim_id, .. } => {
             app.insert_resource(PublishedTarget(sim_id));
             app.add_systems(Startup, request_published_world);
         }
@@ -390,22 +509,79 @@ fn main() {
         println!("eustress-client {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    // `--api-url`: before anything reads the API base, which is read once.
+    if let Some(url) = args.iter().position(|a| a == "--api-url").and_then(|i| args.get(i + 1)) {
+        std::env::set_var(eustress_common::api_base::API_URL_VAR, url);
+    }
     let launch = match Launch::from_args(&args) {
         Ok(launch) => launch,
         Err(e) => {
             eprintln!("eustress-client: {e}\n\n{USAGE}");
+            // A release Player has no console, so the reason would go nowhere:
+            // show it in plain words (C3).
+            if !cfg!(debug_assertions) {
+                show_message(
+                    "Eustress Player could not open this link",
+                    &format!("{e}\n\nCopy the link again from the page or the host that gave it to you, then open it."),
+                );
+            }
             std::process::exit(2);
         }
     };
-    build_app(launch).run();
+    // A link names the API it belongs to, and this Player opens only its
+    // own: a link for the other is refused here, before anything is fetched,
+    // minted or connected. A link never sets the API; only `--api-url` above
+    // does (docs/networking/PLAYER_JOIN_TICKET.md).
+    if let Err(why) = launch.check_api(eustress_common::api_base::api_base()) {
+        eprintln!("eustress-client: {why}");
+        if !cfg!(debug_assertions) {
+            show_message("Eustress Player could not open this link", &why);
+        }
+        std::process::exit(2);
+    }
+    // A panic is written to this run's log and shown once, instead of ending
+    // the window silently: a release Player has no console to show it.
+    eustress_play_runtime::crash_report::install(player_log_path, show_message);
+    let mut app = build_app(launch);
+    // The API was first read above, before this run's log existed, so the
+    // line `api_base` writes for an API other than production is lost; this
+    // one takes its place.
+    if !eustress_common::api_base::is_production() {
+        warn!("Eustress API: {}, NOT production", eustress_common::api_base::api_base());
+    }
+    app.run();
+}
+
+/// Register this exe for `eustress-player://` links, for the current user
+/// (`systems::link_handler`). Unchanged values are left alone.
+fn register_link_handler() {
+    use systems::link_handler;
+    if !link_handler::enabled(std::env::var(link_handler::REGISTER_VAR).ok().as_deref()) {
+        info!("eustress-player:// links: left as they are ({}=0)", link_handler::REGISTER_VAR);
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let base = eustress_common::api_base::api_base();
+        let api = (base != eustress_common::api_base::PRODUCTION_API).then_some(base);
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                warn!("eustress-player:// links: could not find this Player's path: {e}");
+                return;
+            }
+        };
+        match link_handler::register(&exe, api) {
+            Ok(0) => debug!("eustress-player:// links already open {}", exe.display()),
+            Ok(n) => info!("eustress-player:// links now open {} ({n} values written, this user only)", exe.display()),
+            Err(e) => warn!("eustress-player:// links: could not register this Player: {e}"),
+        }
+    }
 }
 
 /// `--sim <id>`: download the published world; it opens on arrival.
 fn request_published_world(target: Res<PublishedTarget>, mut fetch: MessageWriter<systems::space_fetch::FetchSpace>) {
-    let token = dirs::data_local_dir()
-        .and_then(|dir| std::fs::read_to_string(dir.join("EustressEngine/auth_token")).ok())
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
+    let token = systems::commerce::auth_token();
     fetch.write(systems::space_fetch::FetchSpace { simulation_id: target.0.clone(), token });
 }
 
@@ -449,8 +625,7 @@ fn spawn_local_avatar(
         }
     };
     *placed = true;
-    let token = dirs::data_local_dir()
-        .and_then(|dir| std::fs::read_to_string(dir.join("EustressEngine/auth_token")).ok());
+    let token = systems::commerce::auth_token();
     spawn.write(eustress_common::avatar::profile::SpawnSavedAvatar { token, at });
 }
 
@@ -524,4 +699,205 @@ fn setup_default_scene(
     }
     
     info!("✅ Default scene ready (Baseplate + Welcome Cube)!");
+}
+
+#[cfg(test)]
+mod launch_link_tests {
+    use super::*;
+
+    const SIM: &str = "07d084d8-9098-4192-bb48-84d2c428db36";
+    /// A ticket's shape (`A-Z a-z 0-9 . _ -`). No real ticket is ever written
+    /// into a test.
+    const TICKET: &str = "eit1.c2VjcmV0LXRpY2tldA.c2ln-_x";
+    const PRODUCTION: &str = "https://api.eustress.dev";
+    const STAGING: &str = "https://api-staging.eustress.dev";
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The launch for one argument, as Windows passes a clicked link.
+    fn from_link(arg: &str) -> Result<Launch, String> {
+        Launch::from_args(&args(&["eustress-client", arg]))
+    }
+
+    /// A gallery's join link as the Play page writes it: the Worker's link,
+    /// with its key and pin, then `extra` (`&ticket=..&api=..`).
+    fn gallery_join(extra: &str) -> String {
+        format!("eustress-player://join/203.0.113.7:7777?key=abcdef&pin={}{extra}", "ab".repeat(32))
+    }
+
+    /// The gallery's Play button hands the Player `eustress-player://play/<id>`
+    /// through the registered handler; that opens the published simulation.
+    #[test]
+    fn a_gallery_play_link_opens_the_published_simulation() {
+        let launch = Launch::from_args(&args(&["eustress-client", &format!("eustress-player://play/{SIM}")]))
+            .expect("the gallery's link parses");
+        match launch {
+            Launch::Published { sim_id, .. } => assert_eq!(sim_id, SIM),
+            other => panic!("expected a published simulation, got {other:?}"),
+        }
+    }
+
+    /// A link with a trailing slash opens the same simulation.
+    #[test]
+    fn a_trailing_slash_is_the_same_link() {
+        let launch = Launch::from_args(&args(&["eustress-client", &format!("eustress-player://play/{SIM}/")]))
+            .expect("the link parses");
+        assert!(matches!(launch, Launch::Published { sim_id, .. } if sim_id == SIM));
+    }
+
+    /// The command the link handler registers passes the API before the link,
+    /// and the link still opens the simulation.
+    #[test]
+    fn the_registered_command_keeps_the_api_and_opens_the_link() {
+        let launch = Launch::from_args(&args(&[
+            "eustress-client",
+            "--api-url",
+            "https://api-staging.eustress.dev",
+            &format!("eustress-player://play/{SIM}"),
+        ]))
+        .expect("the registered command parses");
+        assert!(matches!(launch, Launch::Published { sim_id, .. } if sim_id == SIM));
+    }
+
+    /// Something that is not a simulation id is refused, not launched.
+    #[test]
+    fn a_link_that_is_not_a_simulation_is_refused() {
+        assert!(Launch::from_args(&args(&["eustress-client", "eustress-player://play/not-an-id"])).is_err());
+        assert!(Launch::from_args(&args(&["eustress-client", "eustress-player://play/"])).is_err());
+    }
+
+    /// A gallery's join link: its ticket and API belong to the launch, apart
+    /// from the join link, which never holds the ticket.
+    #[test]
+    fn a_gallery_join_link_carries_its_ticket_and_api() {
+        let launch = from_link(&gallery_join(&format!("&ticket={TICKET}&api=staging"))).expect("the gallery's join link parses");
+        let Launch::Join { link, extras, .. } = &launch else { panic!("expected a join, got {launch:?}") };
+        assert!(extras.ticket.is_some(), "the link's ticket is the launch's");
+        assert_eq!(extras.api, Some(STAGING));
+        assert_eq!(
+            (link.host.as_str(), link.port, link.key.as_deref(), link.pin),
+            ("203.0.113.7", 7777, Some("abcdef"), Some([0xab; 32]))
+        );
+        assert!(!link.to_link().contains(TICKET), "the join link held the ticket");
+    }
+
+    /// A launch's `Debug` shows that it holds a ticket, never the ticket.
+    #[test]
+    fn a_launch_never_prints_its_ticket() {
+        let launch = from_link(&gallery_join(&format!("&ticket={TICKET}&api=staging"))).expect("parses");
+        let shown = format!("{launch:?}");
+        assert!(!shown.contains(TICKET), "the launch's Debug printed its ticket");
+        assert!(shown.contains("JoinTicket(..)"), "the launch holds no ticket");
+    }
+
+    /// A link for an API this Player does not know is refused, in words that
+    /// do not quote its ticket.
+    #[test]
+    fn a_link_for_an_unknown_api_is_refused() {
+        let e = from_link(&gallery_join(&format!("&ticket={TICKET}&api=nightly"))).expect_err("an unknown API refuses the link");
+        assert!(!e.contains(TICKET), "the refusal quoted the ticket");
+        assert!(from_link(&format!("eustress-player://play/{SIM}?api=nightly")).is_err());
+    }
+
+    /// `--connect` takes a link as typed, and reads no ticket or API from it.
+    #[test]
+    fn a_connect_argument_carries_no_ticket() {
+        let typed = gallery_join(&format!("&ticket={TICKET}&api=staging"));
+        let launch = Launch::from_args(&args(&["eustress-client", "--connect", &typed])).expect("--connect parses");
+        let Launch::Join { link, extras, .. } = &launch else { panic!("expected a join, got {launch:?}") };
+        assert_eq!(*extras, LinkExtras::default());
+        assert_eq!(link.pin, Some([0xab; 32]));
+        assert_eq!(launch.check_api(PRODUCTION), Ok(()), "a --connect link names no API");
+    }
+
+    /// A production Player refuses a staging link, and a staging Player takes
+    /// it, for a join link and a play link alike.
+    #[test]
+    fn a_link_for_the_other_server_is_refused() {
+        let join = from_link(&gallery_join(&format!("&ticket={TICKET}&api=staging"))).expect("parses");
+        let e = join.check_api(PRODUCTION).expect_err("a production Player refuses a staging link");
+        assert!(!e.contains(TICKET), "the refusal quoted the ticket");
+        assert_eq!(join.check_api(STAGING), Ok(()));
+        let solo = from_link(&format!("eustress-player://play/{SIM}?api=staging")).expect("parses");
+        assert!(solo.check_api(PRODUCTION).is_err(), "a play link is checked too");
+        assert_eq!(solo.check_api(STAGING), Ok(()));
+        let production = from_link(&format!("eustress-player://play/{SIM}?api=production")).expect("parses");
+        assert!(production.check_api(STAGING).is_err());
+        assert_eq!(production.check_api(PRODUCTION), Ok(()));
+    }
+
+    /// A link that cannot be opened is refused in words that never quote its
+    /// ticket: the ticket comes out before the link is read, and no launch
+    /// error quotes a whole argument.
+    #[test]
+    fn a_malformed_link_never_quotes_its_ticket() {
+        let pin = "ab".repeat(32);
+        for bad in [
+            // A pin that is not one.
+            format!("eustress-player://join/203.0.113.7:7777?key=abcdef&pin=zz&ticket={TICKET}"),
+            format!("eustress-player://join/203.0.113.7:99999?key=abcdef&pin={pin}&ticket={TICKET}"),
+            format!("eustress-player://join/203.0.113.7:7777?key=a&pin={pin}&ticket={TICKET}"),
+            format!("eustress-player://join/203.0.113.7:7777?pin={pin}&ticket={TICKET}&ticket={TICKET}"),
+            format!("eustress-player://play/not-an-id?ticket={TICKET}"),
+            // A ticket where no ticket goes: no `?`, so it stays in the address.
+            format!("eustress-player://join/203.0.113.7:7777&ticket={TICKET}"),
+            // A pin and a key where no `?` goes sit in the address the same way.
+            format!("eustress-player://join/203.0.113.7:7777&pin={pin}"),
+            format!("eustress-player://join/203.0.113.7:7777&key=abcdef"),
+        ] {
+            let e = from_link(&bad).expect_err("a malformed link is refused");
+            assert!([TICKET, pin.as_str(), "abcdef"].iter().all(|s| !e.contains(*s)), "a launch error quoted a secret: {e}");
+        }
+        // Not links, yet they carry one: a link typed after `--connect` or
+        // `--sim`, and an option written with `=`.
+        for argv in [
+            args(&["eustress-client", "--connect", &format!("eustress-player://join/203.0.113.7:7777&ticket={TICKET}")]),
+            args(&["eustress-client", "--sim", &format!("eustress-player://play/{SIM}?ticket={TICKET}")]),
+            args(&["eustress-client", &format!("--connect={}", gallery_join(&format!("&ticket={TICKET}")))]),
+        ] {
+            let e = Launch::from_args(&argv).expect_err("refused");
+            assert!(!e.contains(TICKET), "a launch error quoted the ticket");
+        }
+    }
+
+    /// A play link may end in `?api=<name>`; the id is read without it.
+    #[test]
+    fn a_play_link_names_its_api_after_the_id() {
+        let launch = from_link(&format!("eustress-player://play/{SIM}?api=staging")).expect("parses");
+        let Launch::Published { sim_id, extras } = &launch else { panic!("expected a published simulation, got {launch:?}") };
+        assert_eq!(sim_id, SIM);
+        assert_eq!(extras.api, Some(STAGING));
+        let slash = from_link(&format!("eustress-player://play/{SIM}/?api=production")).expect("parses");
+        assert!(matches!(&slash, Launch::Published { sim_id, .. } if sim_id == SIM));
+    }
+
+    /// A join link with neither: no ticket, and a Player on any API takes it.
+    #[test]
+    fn a_plain_join_link_has_no_extras() {
+        let launch = from_link(&gallery_join("")).expect("parses");
+        let Launch::Join { extras, .. } = &launch else { panic!("expected a join, got {launch:?}") };
+        assert_eq!(*extras, LinkExtras::default());
+        assert_eq!(launch.check_api(PRODUCTION), Ok(()));
+        assert_eq!(launch.check_api(STAGING), Ok(()));
+    }
+
+    /// An `https://` link carries no ticket or API the Player reads.
+    #[test]
+    fn an_https_link_carries_no_ticket() {
+        let launch = from_link(&format!("https://203.0.113.7:7777/join/abcdef?ticket={TICKET}&api=staging")).expect("parses");
+        assert!(matches!(&launch, Launch::Join { extras, .. } if *extras == LinkExtras::default()));
+    }
+
+    /// A link with its scheme in capitals, or with spaces around it, is still
+    /// a link: its ticket comes out, and it never becomes a scene file's path.
+    #[test]
+    fn a_link_in_capitals_is_still_a_link() {
+        for written in ["EUSTRESS-PLAYER://", "Eustress://"] {
+            let link = gallery_join(&format!("&ticket={TICKET}")).replacen("eustress-player://", written, 1);
+            let launch = from_link(&format!(" {link} ")).expect("parses");
+            assert!(matches!(&launch, Launch::Join { extras, .. } if extras.ticket.is_some()), "{written} was not read as a link");
+        }
+    }
 }

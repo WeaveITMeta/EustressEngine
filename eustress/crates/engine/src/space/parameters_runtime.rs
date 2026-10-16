@@ -690,7 +690,10 @@ impl Plugin for ParametersRuntimePlugin {
             Update,
             (
                 sync_selected_parameters,
-                save_parameter_changes,
+                // Outside Play only, like the Space's other saves: the drain
+                // refuses Parameter edits during Play, and this keeps any
+                // other Play-time change from being written.
+                save_parameter_changes.run_if(super::world_db_plugin::outside_play_session),
                 apply_parameter_reads,
                 schedule_parameter_reads.after(apply_parameter_reads),
             ),
@@ -859,5 +862,25 @@ mod tests {
         assert_eq!(read_field(&frame, &want("count", "String")), Ok(ParameterValue::String("5".into())));
         assert!(read_field(&frame, &want("state", "Float")).unwrap_err().contains("not a Float"));
         assert!(read_field(&frame, &want("pressure", "Float")).unwrap_err().contains("temp_c"));
+    }
+
+    /// During Play no Parameter is saved, so a Play-time change is never
+    /// written; while editing the same change is (its persisted signature
+    /// moves as the save starts).
+    #[test]
+    fn play_saves_no_parameter() {
+        use crate::play_mode::PlayModeState;
+        for (state, saved) in [(PlayModeState::Playing, false), (PlayModeState::Paused, false), (PlayModeState::Editing, true)] {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, ParametersRuntimePlugin));
+            app.insert_resource(State::new(state));
+            let mut params = InstanceParameters::new();
+            params.set(DEFAULT_PARAMETER_DOMAIN, "setpoint", ParameterValue::Float(21.0));
+            let signature = persisted_signature(&params);
+            let part = app.world_mut().spawn((params, ParametersSynced { persisted: 0 })).id();
+            app.update();
+            let persisted = app.world().get::<ParametersSynced>(part).unwrap().persisted;
+            assert_eq!(persisted == signature, saved, "{state:?}");
+        }
     }
 }

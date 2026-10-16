@@ -98,6 +98,8 @@ pub mod parameters;
 pub mod plugins;
 pub mod pointcloud;
 pub mod project_manifest;
+/// A listing's hashtags: the rule Studio, the MCP tool and the Worker share.
+pub mod listing_tags;
 /// What a part's DataMesh child (SpecialMesh, BlockMesh, CylinderMesh) draws,
 /// the same in Studio and the Player.
 pub mod data_mesh;
@@ -106,14 +108,32 @@ pub mod space_read;
 /// Reading a world's records (or a Space on disk) into that tree.
 pub mod tree_read;
 pub mod pose_migration;
+/// A Space's format version (`[space] format`), naming its one-time migrations.
+pub mod space_format;
+/// What a mesh part's `transform.scale` is: a length or a ratio (format 3).
+pub mod scale_kind;
+/// Secrets in the operating system's credential store.
+pub mod credentials;
+/// Paths a Space names, kept inside the Space (no drive, share, `..` or link out).
+pub mod space_path;
+pub mod space_trash;
+/// How much of an outside string is drawn at once (Studio's UI, labels).
+pub mod text_bound;
+/// Turning a Space's native wedges onto the Roblox-correct meshes (format 2),
+/// for Studio's move and the Player's read alike.
+pub mod wedge_migration;
 /// A Play session's tree, frame sets and draw markers, shared by both apps.
 pub mod play_session;
 /// What a drawn part carries: its mesh file and the part it stands for.
 pub mod part_draw;
+pub mod part_meshes;
 /// Whether a Space is still loading, for work that waits until it settles.
 pub mod space_load;
 /// Property changes as undoable commands, shared by the editor and Play.
 pub mod property_command;
+/// Class methods, declared once for every surface that calls them.
+pub mod class_methods;
+pub mod wire_guard;
 /// The editor's named actions, shared by the engine and the permission gate.
 pub mod editor_action;
 /// Running a replicated DataModel tree's LocalScripts on a Player.

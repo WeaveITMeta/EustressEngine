@@ -255,10 +255,13 @@ async fn call<T: DeserializeOwned>(
     }
     // The Worker explains a refusal in `error`; show that, not the JSON.
     let text = response.text().await.unwrap_or_default();
+    // An account that must verify its identity is told so in one sentence (and the ID conflict in another).
+    let identity_words = crate::api::kyc_sentence(status, &text);
     let message = serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
         .unwrap_or(text);
+    let message = identity_words.unwrap_or(message);
     match status {
         401 => Err(ApiError::Unauthorized),
         404 if message.is_empty() => Err(ApiError::NotFound),

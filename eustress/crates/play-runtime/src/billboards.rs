@@ -61,6 +61,12 @@ use tiny_skia::{
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
+/// Drawn lines of a label's text the rasterizer shapes (`text_bound`). A
+/// megabyte label took 1.6 s to draw and about eight times that to auto-fit
+/// (measured 2026-10-01); 200 lines is about 4,000 plain characters, a few
+/// milliseconds.
+const LABEL_LINES: usize = 200;
+
 const PIXELS_PER_METER: f32 = 50.0;
 
 /// World-space metres of camera-toward shift per `BillboardGui.ZIndex` unit.
@@ -1719,6 +1725,7 @@ fn update_and_render_billboards(
     >,
     mut removed_gui: RemovedComponents<GuiElementDisplay>,
     mut epoch: Local<u64>,
+    mut seen_images: Local<u64>,
     mut painted_at: Local<std::collections::HashMap<Entity, u64>>,
     mut stats: Local<BillboardPassStats>,
     throttle: Option<Res<GuiLoadThrottle>>,
@@ -1742,7 +1749,10 @@ fn update_and_render_billboards(
     // frame invalidates every painted billboard (they lazily re-collect as
     // they are visited in range). Steady state: both checks are empty and
     // every painted billboard skips at one HashMap lookup.
-    if !changed_gui.is_empty() || removed_gui.read().count() > 0 {
+    // A GUI image file that changed on disk is a GUI change too.
+    let images_now = gui_images.generation();
+    if !changed_gui.is_empty() || removed_gui.read().count() > 0 || images_now != *seen_images {
+        *seen_images = images_now;
         *epoch = epoch.wrapping_add(1);
         stats.epoch_bumps += 1;
     }
@@ -1845,7 +1855,8 @@ fn update_and_render_billboards(
         }
         flat.sort_by_key(|f| f.elem.z_order);
 
-        let hash = label_hash(&flat);
+        // The images a tile draws are part of what it shows.
+        let hash = label_hash(&flat) ^ images_now.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         // Tile verified current for this epoch — whether repainted below or
         // already matching by hash — so the epoch gate skips it until the
         // next GUI change.
@@ -2142,6 +2153,9 @@ fn render_text(
     // `TextScaled` is on, the largest size that fits inside the
     // element's rect via binary-search. The search shape-tests at each
     // candidate size over a band whose top scales with the rect.
+    // Every source of a label's text reaches here (a Space, a host's
+    // replication, a script), so this is where it is bounded.
+    let text = eustress_common::text_bound::bound_block_lines(&elem.text, LABEL_LINES);
     let font_size = if elem.text_scaled && !elem.text.is_empty()
         && elem.width > 0.0 && elem.height > 0.0
     {
@@ -2176,7 +2190,7 @@ fn render_text(
             buf.set_wrap(&mut text_state.font_system, cosmic_text::Wrap::Word);
             buf.set_text(
                 &mut text_state.font_system,
-                &elem.text,
+                &text,
                 attrs.clone(),
                 Shaping::Advanced,
             );
@@ -2242,7 +2256,7 @@ fn render_text(
             bevy::log::info!(
                 "🪧TEXT[{n}] text={:?} rect={:.1}x{:.1} font_size={:.1} font={:?} \
                  color={:?} bg={:?} abs=({:.0},{:.0}) clip={:?}",
-                elem.text, elem.width, elem.height, font_size, elem.font,
+                text, elem.width, elem.height, font_size, elem.font,
                 elem.text_color, elem.bg_color, abs_x, abs_y, clip_rect
             );
         }
@@ -2289,7 +2303,7 @@ fn render_text(
     let attrs = Attrs::new().family(fam).weight(weight);
     buffer.set_text(
         &mut text_state.font_system,
-        &elem.text,
+        &text,
         attrs,
         Shaping::Advanced,
     );
@@ -2627,6 +2641,8 @@ impl Plugin for BillboardDrawPlugin {
             .init_resource::<PendingAtlasTiles>()
             .init_resource::<GuiLoadThrottle>()
             .init_resource::<GuiImages>()
+            // A replaced or fixed GUI image file shows without a restart.
+            .add_systems(Update, crate::gui_images::refresh_gui_images)
             .configure_sets(Update, BillboardDrawSet::Prepare.before(BillboardDrawSet::Render))
             // Grid maintenance runs before anything queries it this frame.
             .add_systems(Update, maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots))

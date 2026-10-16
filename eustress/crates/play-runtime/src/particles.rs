@@ -163,14 +163,18 @@ fn sample<T: Copy>(keys: &[(f32, T)], t: f32, lerp: impl Fn(T, T, f32) -> T) -> 
 /// The emission axis in the emitter's local space, and two axes across it
 /// for `SpreadAngle`.
 fn emission_axes(direction: &str) -> (Vec3, Vec3, Vec3) {
-    match direction {
-        "Bottom" => (Vec3::NEG_Y, Vec3::X, Vec3::Z),
-        "Front" => (Vec3::NEG_Z, Vec3::X, Vec3::Y),
-        "Back" => (Vec3::Z, Vec3::X, Vec3::Y),
-        "Right" => (Vec3::X, Vec3::Y, Vec3::Z),
-        "Left" => (Vec3::NEG_X, Vec3::Y, Vec3::Z),
-        _ => (Vec3::Y, Vec3::X, Vec3::Z),
-    }
+    // The face's normal, as in Roblox (`NormalId`); Top when unnamed.
+    let normal = eustress_common::classes::NormalId::parse(direction)
+        .unwrap_or(eustress_common::classes::NormalId::Top)
+        .to_normal();
+    let (a, b) = if normal.x != 0.0 {
+        (Vec3::Y, Vec3::Z)
+    } else if normal.y != 0.0 {
+        (Vec3::X, Vec3::Z)
+    } else {
+        (Vec3::X, Vec3::Y)
+    };
+    (normal, a, b)
 }
 
 fn emit(fx: &mut PlayParticles, g: &DataModel, emitter: InstanceId, count: u32) {

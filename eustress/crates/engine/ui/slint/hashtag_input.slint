@@ -1,0 +1,157 @@
+// ============================================================================
+// Eustress Studio: Hashtag input
+//
+// A listing's tags as chips (docs/networking/LISTING_TAGS.md). Type a tag and
+// press Enter, comma or space to add it; the # is optional. Backspace in the
+// empty field removes the last chip. Rust normalizes each tag the way the
+// Worker stores it (eustress_common::listing_tags), so a chip shows exactly
+// what will be stored, and says why a tag is refused.
+//
+// The chips come in two rows of four from Rust (a listing holds at most 8).
+// ============================================================================
+
+import { Theme } from "theme.slint";
+
+component HashtagChip inherits Rectangle {
+    in property <string> tag;
+    callback remove();
+
+    height: 22px;
+    width: chip-row.preferred-width;
+    border-radius: 11px;
+    background: Theme.accent-cyan.with-alpha(0.12);
+    border-width: 1px;
+    border-color: Theme.accent-cyan.with-alpha(0.35);
+
+    chip-row := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 4px;
+        spacing: 4px;
+        Text {
+            text: "#" + root.tag;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 8px;
+            background: remove-ta.has-hover ? Theme.button-hover : transparent;
+            remove-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+            Text {
+                text: "×";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component HashtagInput inherits VerticalLayout {
+    // The tags, as stored, in two rows of up to four.
+    in property <[string]> row-0;
+    in property <[string]> row-1;
+    in property <int> count: 0;
+    in property <int> max-tags: 8;
+    // Why the last tag typed was refused; "" when it was not.
+    in property <string> error;
+    in-out property <string> text;
+    callback add-tag(string);
+    // Each edit of the field, so a comma or a space can end a tag.
+    callback typed(string);
+    // The tag's index in the whole list.
+    callback remove-tag(int);
+
+    spacing: 6px;
+
+    if root.count > 0: VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 4px;
+            for tag[i] in root.row-0: HashtagChip {
+                tag: tag;
+                remove => { root.remove-tag(i); }
+            }
+        }
+        if root.row-1.length > 0: HorizontalLayout {
+            alignment: start;
+            spacing: 4px;
+            for tag[i] in root.row-1: HashtagChip {
+                tag: tag;
+                remove => { root.remove-tag(i + 4); }
+            }
+        }
+    }
+
+    Rectangle {
+        height: 28px;
+        border-radius: Theme.radius-sm;
+        background: Theme.background-tertiary;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent-cyan : Theme.border-color;
+
+        keys := FocusScope {
+            // Backspace in the empty field takes the last chip back.
+            capture-key-pressed(event) => {
+                if event.text == Key.Backspace && root.text == "" && root.count > 0 {
+                    root.remove-tag(root.count - 1);
+                    return accept;
+                }
+                reject
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                input := TextInput {
+                    text <=> root.text;
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    single-line: true;
+                    enabled: root.count < root.max-tags;
+                    accepted => {
+                        if self.text != "" {
+                            root.add-tag(self.text);
+                        }
+                    }
+                    // Rust ends a tag at a comma or a space.
+                    edited => { root.typed(self.text); }
+                }
+            }
+        }
+
+        if root.text == "": Text {
+            x: 8px;
+            text: root.count >= root.max-tags ? "A listing holds 8 tags" : "Add a tag, then Enter";
+            color: Theme.text-disabled;
+            font-size: 12px;
+            vertical-alignment: center;
+            height: parent.height;
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.error != "" ? root.error : "Letters a to z, digits and single hyphens; the # is optional.";
+            color: root.error != "" ? Theme.text-warning : Theme.text-disabled;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.count + " of " + root.max-tags;
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+        }
+    }
+}

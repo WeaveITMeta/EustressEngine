@@ -148,6 +148,27 @@ MOD_REDUNDANT_BASE = {
 # Per-id base overrides — the handful of wired siblings that would otherwise
 # share one glyph inside a single section.
 ID_BASE = {
+    # ── Marketing send surface (2026-10-08): one distinct glyph per tool ──
+    "mktg:campaign_composer": "pen",
+    "mktg:template_library": "layers",
+    "mktg:approval_queue": "checklist",
+    "mktg:schedule_send": "calendar",
+    "mktg:cancel_scheduled": "clock",
+    "mktg:postal_compose": "envelope",
+    "mktg:postal_send": "stamp",
+    "mktg:audience_definition": "funnel",
+    "mktg:source_provenance": "fingerprint",
+    "mktg:discover_contacts": "radar",
+    "mktg:audience_build": "users",
+    "mktg:lookalike_finder": "search",
+    "mktg:verify_addresses": "certificate",
+    "mktg:consent_check": "handshake",
+    "mktg:sender_identity": "id-card",
+    "mktg:warmup_schedule": "thermometer",
+    "mktg:rate_limits": "gauge",
+    "mktg:suppression_list": "shield",
+    "mktg:unsubscribe_handling": "block",
+    "mktg:postal_address_footer": "building",
     "insert:localscript": "user",      # client-side script
     "insert:modulescript": "package",  # reusable module
 }

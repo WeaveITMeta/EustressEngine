@@ -120,14 +120,30 @@ fn stars(ray: vec3<f32>) -> vec3<f32> {
     return star * dome.stars.x * twinkle * smoothstep(0.0, 0.10, ray.y);
 }
 
+// How far the air lifts a body at elevation `elev` (radians), in radians:
+// Bennett's refraction, 34 arcminutes at the horizon, capped there. The sun's
+// disc is drawn this much higher, so it sets at the almanac's -0.83 degrees
+// (-0.27 for its radius, -0.57 for the air) instead of when its centre dips
+// below the true horizon. The formula is held above -1 degree, where it would
+// otherwise grow past the cap.
+fn refraction_lift(elev: f32) -> f32 {
+    let h = clamp(degrees(elev), -1.0, 90.0);
+    let arcmin = min(1.0 / tan(radians(h + 7.31 / (h + 4.4))), 34.0);
+    return radians(arcmin / 60.0);
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let ray = normalize(in.world_position.xyz - view.world_position);
     let sun_dir = dome.sun.xyz;
+    // The disc is drawn where the air shows it. The ground below still cuts
+    // it at the true horizon (`above`, below).
+    let sun_elev = asin(clamp(sun_dir.y, -1.0, 1.0));
+    let sun_shown = normalize(sun_dir + vec3<f32>(0.0, refraction_lift(sun_elev), 0.0));
 
     // Derivatives before anything that can discard: they need every pixel
     // of the quad.
-    let from_sun = acos(clamp(dot(ray, sun_dir), -1.0, 1.0));
+    let from_sun = acos(clamp(dot(ray, sun_shown), -1.0, 1.0));
     let edge = max(fwidth(from_sun), 0.000001);
 
 #ifdef DEPTH_PREPASS

@@ -31,6 +31,9 @@ fn main() {
         .expect("Slint compile thread panicked");
 
     println!("cargo:rerun-if-changed=ui/slint/");
+
+    // Which commit and day this build came from, for About.
+    emit_build_info();
     
     let svg_path = Path::new("assets/icon.svg");
     let ico_path = Path::new("assets/icon.ico");
@@ -155,4 +158,66 @@ fn main() {
             println!("cargo:warning=✅ Icon embedded in executable successfully");
         }
     }
+}
+
+/// The commit this build came from (`EUSTRESS_GIT_COMMIT`, a short hash) and
+/// the day it was built (`EUSTRESS_BUILD_DATE`, YYYY-MM-DD, UTC), for the
+/// About dialog. Both are empty when git is not there (a source archive);
+/// About then shows only the version.
+///
+/// The script runs again when HEAD moves (a new commit or branch), watching
+/// only the git files that exist: a watched path that is missing would make
+/// it run, and the Slint compile with it, on every build.
+fn emit_build_info() {
+    use std::process::Command;
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git").args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    let commit = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_default();
+    println!("cargo:rustc-env=EUSTRESS_GIT_COMMIT={commit}");
+
+    let mut watched = Vec::new();
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        watched.push(head);
+    }
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(r) = git(&["rev-parse", "--git-path", &branch]) {
+            watched.push(r);
+        }
+    }
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+        watched.push(packed);
+    }
+    for path in watched {
+        if std::path::Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days(days);
+    println!("cargo:rustc-env=EUSTRESS_BUILD_DATE={y:04}-{m:02}-{d:02}");
+}
+
+/// A day count since 1970-01-01 as (year, month, day) in the proleptic
+/// Gregorian calendar (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe as i64 + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d)
 }

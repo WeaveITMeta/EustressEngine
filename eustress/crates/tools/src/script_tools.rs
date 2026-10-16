@@ -36,6 +36,14 @@ fn slug_safe(raw: &str) -> String {
         .to_string()
 }
 
+/// The folder a script-created instance is written to under
+/// `Workspace/.generated`. The name comes from the script, so it becomes one
+/// safe folder name (spaces and '/' read as '_', as before) and is never
+/// taken as a path.
+fn generated_folder_name(name: &str) -> String {
+    eustress_common::instance_create::sanitize_entity_name(&name.replace(' ', "_").replace('/', "_"))
+}
+
 /// Build the `_instance.toml` + `<name>.md` + `<name>.{rune|luau}`
 /// folder under `SoulService/<name>/` for a hot-reload-ready script.
 /// Returns `(folder_path, source_path)` on success.
@@ -115,7 +123,9 @@ impl ToolHandler for ExecuteRuneTool {
                 "required": ["code"]
             }),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
-            requires_approval: false,
+            // Runs code. The Workshop's own session holds the full grant, and
+            // this card is the person's say in each run.
+            requires_approval: true,
             stream_topics: &["workshop.tool.execute_rune"],
         }
     }
@@ -179,7 +189,9 @@ impl ToolHandler for ExecuteLuauTool {
                 "required": ["code"]
             }),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
-            requires_approval: false,
+            // Runs code. The Workshop's own session holds the full grant, and
+            // this card is the person's say in each run.
+            requires_approval: true,
             stream_topics: &["workshop.tool.execute_luau"],
         }
     }
@@ -230,7 +242,7 @@ impl ToolHandler for ExecuteLuauTool {
 
             // Pass 1: BillboardGui
             for entity in result.created_entities.iter().filter(|e| e.class_name == "BillboardGui") {
-                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                let safe_name = generated_folder_name(&entity.name);
                 let entity_dir = generated_dir.join(&safe_name);
                 let _ = std::fs::create_dir_all(&entity_dir);
                 let instance_path = entity_dir.join("_instance.toml");
@@ -272,7 +284,7 @@ max_distance = {md}
 
             // Pass 2: TextLabel / TextButton
             for entity in result.created_entities.iter().filter(|e| matches!(e.class_name.as_str(), "TextLabel" | "TextButton")) {
-                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                let safe_name = generated_folder_name(&entity.name);
                 // If parented to a BillboardGui, nest inside its folder
                 let entity_dir = if let Some(pid) = entity.parent_entity_id {
                     if let Some(parent_name) = luau_id_to_name.get(&pid) {
@@ -327,7 +339,7 @@ text_y_alignment = "Center"
 
             // Pass 3: all other geometry (Parts etc.)
             for entity in result.created_entities.iter().filter(|e| !matches!(e.class_name.as_str(), "BillboardGui" | "TextLabel" | "TextButton")) {
-                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                let safe_name = generated_folder_name(&entity.name);
                 let entity_dir = generated_dir.join(&safe_name);
                 let _ = std::fs::create_dir_all(&entity_dir);
                 let instance_path = entity_dir.join("_instance.toml");
@@ -474,16 +486,16 @@ impl ToolHandler for ImageToCodeTool {
             };
         }
 
-        // Validate path is inside Universe
-        if image_path.contains("..") {
-            return ToolResult {
+        // The image is read and sent to a vision model, so it must be a file
+        // inside the Universe.
+        let full_path = match crate::sandbox::resolve(&ctx.universe_root, image_path) {
+            Ok(p) => p,
+            Err(why) => return ToolResult {
                 tool_name: "image_to_code".to_string(), tool_use_id: String::new(),
-                success: false, content: "Path traversal not allowed".into(),
+                success: false, content: format!("Path refused: {why}"),
                 structured_data: None, stream_topic: None,
-            };
-        }
-
-        let full_path = ctx.universe_root.join(image_path);
+            },
+        };
         if !full_path.exists() {
             return ToolResult {
                 tool_name: "image_to_code".to_string(), tool_use_id: String::new(),
@@ -584,15 +596,16 @@ impl ToolHandler for ImageToGeometryTool {
                 structured_data: None, stream_topic: None,
             };
         }
-        if image_path.contains("..") {
-            return ToolResult {
+        // The image is read and sent to a vision model, so it must be a file
+        // inside the Universe.
+        let full_path = match crate::sandbox::resolve(&ctx.universe_root, image_path) {
+            Ok(p) => p,
+            Err(why) => return ToolResult {
                 tool_name: "image_to_geometry".to_string(), tool_use_id: String::new(),
-                success: false, content: "Path traversal not allowed".into(),
+                success: false, content: format!("Path refused: {why}"),
                 structured_data: None, stream_topic: None,
-            };
-        }
-
-        let full_path = ctx.universe_root.join(image_path);
+            },
+        };
         if !full_path.exists() {
             return ToolResult {
                 tool_name: "image_to_geometry".to_string(), tool_use_id: String::new(),
@@ -684,15 +697,16 @@ impl ToolHandler for DocumentToCodeTool {
             };
         }
 
-        if doc_path.contains("..") {
-            return ToolResult {
+        // The document is read and sent to a model, so it must be a file
+        // inside the Universe.
+        let full_path = match crate::sandbox::resolve(&ctx.universe_root, doc_path) {
+            Ok(p) => p,
+            Err(why) => return ToolResult {
                 tool_name: "document_to_code".to_string(), tool_use_id: String::new(),
-                success: false, content: "Path traversal not allowed".into(),
+                success: false, content: format!("Path refused: {why}"),
                 structured_data: None, stream_topic: None,
-            };
-        }
-
-        let full_path = ctx.universe_root.join(doc_path);
+            },
+        };
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
             Err(e) => return ToolResult {
@@ -704,7 +718,7 @@ impl ToolHandler for DocumentToCodeTool {
 
         // Truncate large documents to fit Claude context
         let truncated = if content.len() > 15000 {
-            format!("{}...\n[document truncated — {} bytes total]", &content[..15000], content.len())
+            format!("{}...\n[document truncated, {} bytes total]", crate::file_tools::utf8_prefix(&content, 15000), content.len())
         } else {
             content
         };
@@ -740,7 +754,7 @@ impl ToolHandler for GenerateDocsTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "output_path": { "type": "string", "description": "Output path relative to Space root", "default": "README.md" }
+                    "output_path": { "type": "string", "description": "A Markdown (.md) file, relative to the Space root", "default": "README.md" }
                 }
             }),
             modes: &[WorkshopMode::General],
@@ -822,8 +836,24 @@ impl ToolHandler for GenerateDocsTool {
             doc.push_str("No scripts in SoulService.\n");
         }
 
-        // Write the file
-        let full_path = ctx.space_root.join(output_path);
+        // Write the file: a Markdown file inside the Space, so this never
+        // overwrites a script, an instance's record, or anything outside it.
+        let is_markdown = std::path::Path::new(output_path.trim())
+            .extension()
+            .map_or(false, |e| e.eq_ignore_ascii_case("md"));
+        let full_path = match crate::sandbox::resolve(&ctx.space_root, output_path) {
+            Ok(p) if is_markdown => p,
+            Ok(_) => return ToolResult {
+                tool_name: "generate_docs".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("output_path '{output_path}' must name a .md file"),
+                structured_data: None, stream_topic: None,
+            },
+            Err(why) => return ToolResult {
+                tool_name: "generate_docs".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Path refused: {why}"),
+                structured_data: None, stream_topic: None,
+            },
+        };
         match std::fs::write(&full_path, &doc) {
             Ok(_) => ToolResult {
                 tool_name: "generate_docs".to_string(), tool_use_id: String::new(),

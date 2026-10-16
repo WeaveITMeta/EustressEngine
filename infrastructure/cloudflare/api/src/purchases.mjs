@@ -21,7 +21,14 @@
 //
 // Receipts are private. The only read is the signed-in owner's own, and it
 // takes no account id, so there is nothing to point at someone else's.
+//
+// The page shows each simulation's thumbnail. An adult or unrated simulation's
+// thumbnail is served only at a signed URL (src/adult_content.mjs), so the read
+// adds a signed `thumbnail_url` for the ones the buyer may see; every other
+// thumbnail is public and the page builds its URL itself.
 // =============================================================================
+
+import { isAdultListing, mayView, signedThumbnailUrl, viewerFor } from './adult_content.mjs';
 
 export const PURCHASE_KEY_PREFIX = 'purchase:';
 
@@ -396,6 +403,38 @@ export function aggregate(items) {
   };
 }
 
+/// The most simulations one read signs a thumbnail for. Each costs a KV read,
+/// and an invocation may make 1,000 KV operations in all; the groups arrive
+/// largest spend first, so the cap drops the least of them.
+export const MAX_SIGNED_THUMBNAILS = 200;
+
+/// Signed thumbnail URLs, by simulation id, for the adult or unrated
+/// simulations in `groups` (by_simulation) that `viewer` may see.
+///
+/// Only a buyer who turned Adult content on, or the author of the simulation
+/// (the group's creator), can be allowed one, so every other group costs no
+/// read. The stored record decides: it must be adult and `mayView` must pass,
+/// which for an adult_21 simulation also needs the buyer's verified age of 21.
+export async function signedThumbnails(env, origin, viewer, groups, nowMs = Date.now()) {
+  const out = new Map();
+  const candidates = groups
+    .filter((g) => isSimulationId(g.simulation_id) && (viewer?.adult === true || (!!viewer?.accountId && g.creator_id === viewer.accountId)))
+    .slice(0, MAX_SIGNED_THUMBNAILS);
+  for (const g of candidates) {
+    let sim = null;
+    try {
+      const raw = await env.SOCIAL.get(`sim:${g.simulation_id}`);
+      sim = raw ? JSON.parse(raw) : null;
+    } catch {
+      sim = null;
+    }
+    if (!sim || !isAdultListing(sim) || !mayView(sim, viewer)) continue;
+    const url = await signedThumbnailUrl(env, origin, { ...sim, id: g.simulation_id }, nowMs);
+    if (url) out.set(g.simulation_id, url);
+  }
+  return out;
+}
+
 // -----------------------------------------------------------------------------
 // HTTP
 // -----------------------------------------------------------------------------
@@ -421,6 +460,12 @@ export async function handlePurchases(request, env, cors, deps, { summaryOnly = 
 
   if (summaryOnly) return json({ unit, totals: presentTotals, truncated }, 200, headers);
 
+  // The buyer is the signed-in account read above; its session is not read twice. viewerFor reads its setting and, with the
+  // setting on, its verified age, so an adult_21 thumbnail is signed only for a buyer of 21 or over.
+  const viewer = await viewerFor(env, userId);
+  const thumbs = await signedThumbnails(env, new URL(request.url).origin, viewer, by_simulation);
+  const thumbnail = (id) => (id && thumbs.get(id)) || undefined;
+
   return json({
     unit,
     totals: presentTotals,
@@ -437,6 +482,7 @@ export async function handlePurchases(request, env, cors, deps, { summaryOnly = 
       simulation_name: it.simulation_name,
       creator_id: it.creator_id,
       creator_name: it.creator_name,
+      thumbnail_url: thumbnail(it.simulation_id),
     })),
     by_creator: by_creator.map((c) => ({
       creator_id: c.creator_id,
@@ -452,6 +498,7 @@ export async function handlePurchases(request, env, cors, deps, { summaryOnly = 
       simulation_name: s.name,
       creator_id: s.creator_id,
       creator_name: s.creator_name,
+      thumbnail_url: thumbnail(s.simulation_id),
       tickets: s.tickets,
       bliss: bliss(s.bliss_minor),
       bliss_minor: s.bliss_minor,

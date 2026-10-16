@@ -45,7 +45,10 @@ fn sync_viewpoints_to_slint(
         return;
     }
     *pushed = Some(names.revision);
-    let model: Vec<slint::SharedString> = names.names.iter().map(|n| n.as_str().into()).collect();
+    // Shown, and sent back by the menu item as `viewpoint:<label>`, which
+    // `saved_viewpoints::viewpoint_index` resolves from the bounded form.
+    let model: Vec<slint::SharedString> =
+        names.names.iter().map(|n| super::display_text::shown_line(n)).collect();
     slint_context
         .window
         .set_viewpoint_names(slint::ModelRc::new(slint::VecModel::from(model)));

@@ -191,7 +191,7 @@ pub fn save_session_to_space(pipeline: &IdeationPipeline, space_root: Option<&st
     let instance_path = session_instance_path(space_root, &pipeline.session_id);
     if !instance_path.exists() {
         let display_name = if pipeline.product_name.is_empty() {
-            format!("Session {}", &pipeline.session_id[..8.min(pipeline.session_id.len())])
+            format!("Session {}", pipeline.session_id.chars().take(8).collect::<String>())
         } else {
             pipeline.product_name.clone()
         };
@@ -232,6 +232,73 @@ pub fn load_session_from_space(space_root: Option<&std::path::Path>, session_id:
     Ok(manifest)
 }
 
+
+/// A message cut for a list row: trimmed, and at most `max` CHARACTERS, with an
+/// ellipsis when it was cut. The cut is on a character boundary. It used to slice
+/// the byte string at 40 and 80, which panics whenever a multi-byte character
+/// (an accented letter, CJK, an emoji) straddles that byte, so listing past
+/// conversations took the engine down; counting bytes also shortened non-Latin
+/// text to a third of what was meant.
+fn preview(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    match trimmed.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+        None => trimmed.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::preview;
+
+    #[test]
+    fn thirty_nine_letters_then_an_accented_one_does_not_panic() {
+        // The reported case: a character that straddles byte 40.
+        let text = format!("{}\u{e9}", "a".repeat(39));
+        assert_eq!(preview(&text, 40), text, "40 characters fit whole");
+        assert_eq!(preview(&format!("{text}z"), 40), format!("{text}\u{2026}"), "41 characters are cut");
+    }
+
+    #[test]
+    fn emoji_and_cjk_are_cut_between_characters() {
+        let emoji = format!("{}{}", "a".repeat(38), "\u{1F642}".repeat(3));
+        assert_eq!(preview(&emoji, 40), format!("{}{}\u{2026}", "a".repeat(38), "\u{1F642}".repeat(2)));
+        // Thirty CJK characters are 90 bytes but only 30 characters: not cut at all.
+        let cjk = "\u{4e2d}".repeat(30);
+        assert_eq!(preview(&cjk, 40), cjk);
+        assert_eq!(preview(&"\u{4e2d}".repeat(100), 80).chars().count(), 81);
+    }
+
+    #[test]
+    fn the_limit_counts_characters_exactly() {
+        assert_eq!(preview(&"b".repeat(40), 40), "b".repeat(40));
+        assert_eq!(preview(&"b".repeat(41), 40), format!("{}\u{2026}", "b".repeat(40)));
+        assert_eq!(preview(&"b".repeat(80), 80), "b".repeat(80));
+        assert_eq!(preview(&"b".repeat(81), 80).chars().count(), 81);
+    }
+
+    #[test]
+    fn whitespace_is_trimmed_and_nothing_is_nothing() {
+        assert_eq!(preview("   hello \n", 40), "hello");
+        assert_eq!(preview("", 40), "");
+        assert_eq!(preview(" \t\n ", 80), "");
+    }
+
+    #[test]
+    fn no_position_of_a_multi_byte_character_can_panic() {
+        // A two-byte, three-byte and four-byte character placed at every offset around
+        // both cut points.
+        for wide in ["\u{e9}", "\u{4e2d}", "\u{1F642}"] {
+            for lead in 0..120 {
+                let text = format!("{}{}{}", "a".repeat(lead), wide, "tail".repeat(40));
+                for max in [40usize, 80] {
+                    let shown = preview(&text, max);
+                    assert!(shown.chars().count() <= max + 1, "{wide} at {lead}, max {max}");
+                }
+            }
+        }
+    }
+}
 
 /// List all past sessions from the Space's SoulService/Workshop/ directory (newest first)
 pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<SessionSummary> {
@@ -278,14 +345,7 @@ pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<Sessi
                         .or_else(|| {
                             manifest.entries.iter()
                                 .find(|e| e.source == "user")
-                                .map(|e| {
-                                    let trimmed = e.content.trim();
-                                    if trimmed.len() > 40 {
-                                        format!("{}…", &trimmed[..40])
-                                    } else {
-                                        trimmed.to_string()
-                                    }
-                                })
+                                .map(|e| preview(&e.content, 40))
                         })
                         .unwrap_or_else(|| {
                             // Last resort — short session id.
@@ -293,10 +353,7 @@ pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<Sessi
                         });
                     let first_message = manifest.entries.iter()
                         .find(|e| e.source == "user")
-                        .map(|e| {
-                            let t = e.content.trim();
-                            if t.len() > 80 { format!("{}…", &t[..80]) } else { t.to_string() }
-                        })
+                        .map(|e| preview(&e.content, 80))
                         .unwrap_or_default();
 
                     sessions.push(SessionSummary {

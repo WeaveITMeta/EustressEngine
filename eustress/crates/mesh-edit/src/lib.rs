@@ -33,6 +33,7 @@
 pub mod half_edge;
 pub mod ops;
 pub mod error;
+pub mod segment;
 
 pub use half_edge::{
     HalfEdgeMesh, VertexId, EdgeId, FaceId, HalfEdgeId,

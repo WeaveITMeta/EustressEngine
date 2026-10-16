@@ -45,7 +45,52 @@ jobs:
 
       - name: cargo check (engine)
         working-directory: eustress
-        run: cargo check --package eustress-engine
+        run: cargo check --locked --package eustress-engine
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+  test-workspace:
+    # The whole workspace, tests included. This job runs on manual dispatch only:
+    # it is far larger than the check above, and the branch push should not pay for it.
+    if: github.event_name == 'workflow_dispatch'
+    name: cargo test (workspace, linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev \
+            libvulkan-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libssl-dev pkg-config mold clang
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-workspace-test-${{ hashFiles('eustress/Cargo.lock') }}
+
+      - name: cargo test (workspace)
+        working-directory: eustress
+        # --locked: the build uses the committed lock exactly. --no-fail-fast: one
+        # run reports every failing test, not just the first crate's.
+        run: cargo test --workspace --locked --no-fail-fast
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          # Debug info is most of a test build's disk use, and a hosted runner
+          # has about 14 GB free. Line tables are enough for test failures.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"

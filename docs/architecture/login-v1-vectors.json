@@ -1,0 +1,36 @@
+{
+  "about": "Test vectors for the eustress-login-v1 message (docs/architecture/STUDIO_IDENTITY_SIGNIN.md). The key is the first test key of RFC 8032, public by design and no account's key. Studio's tests (common/src/api_base.rs, engine/src/auth.rs) and the Worker's tests read this one file.",
+  "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "secret_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "signatures": [
+    {
+      "origin": "https://api.eustress.dev",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-login-v1\nhttps://api.eustress.dev\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "200735488131f2f6127cccea6b7ac7a0b386713e2d2871f191f526aeb11b9cd66f3d521114a30f7e5c2d20802ed473bceb8f845698366b3cc7728d391fd98309"
+    },
+    {
+      "origin": "https://api-staging.eustress.dev",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-login-v1\nhttps://api-staging.eustress.dev\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "9c269b17d897255a88fdedfcd96664ceabfe9a5fff9240e587d3120680682c75cdd5335253cf9058f6a81e3afe6a41ff9109124c32054e09da6e450846486908"
+    },
+    {
+      "origin": "http://127.0.0.1:8787",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-login-v1\nhttp://127.0.0.1:8787\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "signature": "2fd97c68127677c069b4cb07128059d39952232df661e91cc2083165d61aa4b1eaa5ca182897d02c0a05265996b0fbd0bb45b43bd8e119986e8ccd228b600f0b"
+    }
+  ],
+  "origins": [
+    { "base": "https://api.eustress.dev", "origin": "https://api.eustress.dev" },
+    { "base": "https://api.eustress.dev/", "origin": "https://api.eustress.dev" },
+    { "base": "HTTPS://API.Eustress.DEV", "origin": "https://api.eustress.dev" },
+    { "base": "https://api.eustress.dev:443", "origin": "https://api.eustress.dev" },
+    { "base": "https://api-staging.eustress.dev:8443", "origin": "https://api-staging.eustress.dev:8443" },
+    { "base": "http://localhost:8787", "origin": "http://localhost:8787" },
+    { "base": "http://127.0.0.1:80", "origin": "http://127.0.0.1" },
+    { "base": "https://api.eustress.dev:0443", "origin": "https://api.eustress.dev" },
+    { "base": "http://LOCALHOST:08787", "origin": "http://localhost:8787" }
+  ]
+}

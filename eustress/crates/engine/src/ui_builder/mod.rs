@@ -373,6 +373,8 @@ fn apply_panel_messages(
     global_soul: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_soul: Option<Res<crate::soul::SoulServiceSettings>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    play: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     let key = effective_key(global_soul.as_deref(), space_soul.as_deref());
     let has_key = !key.is_empty();
@@ -395,11 +397,36 @@ fn apply_panel_messages(
         Ok(mut v) if !v.is_empty() => std::mem::take(&mut *v),
         _ => return,
     };
+    let play_state = play.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for msg in msgs {
         match msg {
-            PanelMsg::Action(id, arg) => on_action(&mut state, &id, &arg, &key, &root),
+            PanelMsg::Action(id, arg) => {
+                // During Play an insert or a trash waits for Stop: each writes
+                // the Space (`panel_space_write`). The panel's message is
+                // consumed here, so it never runs after Stop; the preview
+                // keeps its own Play gate.
+                if let Some(notice) = panel_space_write(&id).and_then(|what| crate::keybindings::play_refusal_to(play_state, what)) {
+                    state.toast(notice.clone(), "warn");
+                    commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+                    continue;
+                }
+                on_action(&mut state, &id, &arg, &key, &root)
+            }
             PanelMsg::Field(k, v) => on_field(&mut state, &k, &v),
         }
+    }
+}
+
+/// What a panel action writes to the Space, as the words its Play notice
+/// names: Insert writes the ScreenGuis and their scripts, Insert Scripts the
+/// scripts, and Trash moves a saved UI to the Space's trash. `None` for every
+/// action that only changes the panel or reads.
+fn panel_space_write(id: &str) -> Option<&'static str> {
+    match id {
+        "insert" => Some("insert the UI"),
+        "insert-scripts" => Some("insert the UI's scripts"),
+        "trash-saved" => Some("move a saved UI to the trash"),
+        _ => None,
     }
 }
 
@@ -1444,6 +1471,17 @@ fn s(text: impl AsRef<str>) -> SharedString {
     SharedString::from(text.as_ref())
 }
 
+/// [`s`] for a blueprint string that is shown and never edited: one bounded
+/// line (`crate::ui::display_text`).
+fn shown_text(text: impl AsRef<str>) -> SharedString {
+    crate::ui::display_text::shown_line(text.as_ref())
+}
+
+/// [`s`] for shown text that wraps: bounded lines.
+fn shown_wrapped(text: impl AsRef<str>) -> SharedString {
+    crate::ui::display_text::shown_block(text.as_ref())
+}
+
 fn color(c: [u8; 3]) -> slint::Color {
     slint::Color::from_rgb_u8(c[0], c[1], c[2])
 }
@@ -1556,10 +1594,10 @@ fn sync_brief(g: &UiBuilderUi, state: &UiBuilder) {
     push_rows(
         g.get_glance(),
         vec![
-            UbKV { key: s("Look"), value: s(format!("{} · {} kit", style.map(|x| x.label).unwrap_or("Custom"), kit.label)) },
-            UbKV { key: s("Palette"), value: s(&bp.palette.label) },
-            UbKV { key: s("Fonts"), value: s(format!("{} / {}", bp.heading_font, bp.body_font)) },
-            UbKV { key: s("Logo"), value: s(format!("{} · Stacked", bp.title.to_uppercase())) },
+            UbKV { key: s("Look"), value: shown_text(format!("{} · {} kit", style.map(|x| x.label).unwrap_or("Custom"), kit.label)) },
+            UbKV { key: s("Palette"), value: shown_text(&bp.palette.label) },
+            UbKV { key: s("Fonts"), value: shown_text(format!("{} / {}", bp.heading_font, bp.body_font)) },
+            UbKV { key: s("Logo"), value: shown_text(format!("{} · Stacked", bp.title.to_uppercase())) },
             UbKV { key: s("Frames"), value: s(format!("HUD + {} screens", bp.screens.len())) },
         ],
         |m| g.set_glance(m),
@@ -1596,8 +1634,8 @@ fn sync_result(g: &UiBuilderUi, state: &UiBuilder) {
             .enumerate()
             .map(|(i, (bp, at))| UbRecent {
                 id: s(i.to_string()),
-                title: s(&bp.title),
-                meta: s(format!("{} · {} screens · {}", bp.genre, bp.screens.len(), emit::ago(*at))),
+                title: shown_text(&bp.title),
+                meta: shown_text(format!("{} · {} screens · {}", bp.genre, bp.screens.len(), emit::ago(*at))),
                 icon: s(catalog::genre(&bp.genre).map(|g| g.icon).unwrap_or("sparkle")),
                 current: state.current.as_ref().is_some_and(|c| c.name == bp.name && c.seed == bp.seed && c.source == bp.source),
             })
@@ -1610,8 +1648,8 @@ fn sync_result(g: &UiBuilderUi, state: &UiBuilder) {
         return;
     };
     g.set_has_result(true);
-    g.set_result_title(s(&bp.title));
-    g.set_result_meta(s(format!(
+    g.set_result_title(shown_text(&bp.title));
+    g.set_result_meta(shown_text(format!(
         "{} · {} HUD elements · {} screens · seed {}",
         bp.genre,
         bp.hud.iter().filter(|e| e.visible).count(),
@@ -1759,14 +1797,14 @@ fn sync_structure(g: &UiBuilderUi, state: &UiBuilder, fields_changed: bool) {
         },
         None => (String::new(), Vec::new()),
     };
-    g.set_selected_title(s(title));
+    g.set_selected_title(shown_text(title));
     // Replaced, not diffed: this only runs when the selection or a choice
     // box changed, never while a field is being typed in.
     g.set_fields(ModelRc::new(VecModel::from(fields)));
 }
 
 fn field(key: &str, label: &str, value: impl Into<String>, hint: &str) -> UbField {
-    UbField { key: s(key), label: s(label), value: s(value.into()), hint: s(hint), options: strings(Vec::new()), multiline: false }
+    UbField { key: s(key), label: s(label), value: s(value.into()), hint: shown_wrapped(hint), options: strings(Vec::new()), multiline: false }
 }
 
 fn choice(key: &str, label: &str, value: impl Into<String>, hint: &str, options: Vec<String>) -> UbField {
@@ -1926,8 +1964,8 @@ fn sync_export(g: &UiBuilderUi, state: &UiBuilder, root: &Path) {
     match &state.inserted {
         Some(ins) if ins.name == name => {
             g.set_inserted(true);
-            g.set_inserted_title(s(format!("Inserted {} · {}", ins.name, emit::ago(ins.at))));
-            g.set_inserted_meta(s(format!(
+            g.set_inserted_title(shown_text(format!("Inserted {} · {}", ins.name, emit::ago(ins.at))));
+            g.set_inserted_meta(shown_wrapped(format!(
                 "{} ScreenGuis, {} instances in StarterGui. {}. Press Play (F5) to try it; Ctrl+Z takes it all out.",
                 ins.guis,
                 ins.nodes,
@@ -1945,7 +1983,7 @@ fn sync_export(g: &UiBuilderUi, state: &UiBuilder, root: &Path) {
         g.get_checklist(),
         checks
             .into_iter()
-            .map(|c| UbCheck { label: s(c.label), count: c.count as i32, level: s(c.level), detail: s(c.detail) })
+            .map(|c| UbCheck { label: s(c.label), count: c.count as i32, level: s(c.level), detail: shown_wrapped(c.detail) })
             .collect(),
         |m| g.set_checklist(m),
     );
@@ -1983,7 +2021,7 @@ fn sync_export(g: &UiBuilderUi, state: &UiBuilder, root: &Path) {
         .map(|e| e.id.as_str())
         .unwrap_or("hud_value");
     let first_screen = cur.screens.iter().find(|x| !x.kind.is_fullscreen()).map(|x| x.id.as_str()).unwrap_or("settings");
-    g.set_usage(s(format!(
+    g.set_usage(shown_wrapped(format!(
         "local UI = require(game.ReplicatedStorage:WaitForChild(\"{name}UI\"))\nUI.set(\"{first_value}\", 42)\nUI.open(\"{first_screen}\")\nUI.on(\"buy\", function(item) ... end)"
     )));
 }
@@ -1993,7 +2031,7 @@ fn saved_rows(state: &UiBuilder) -> Vec<UbRecent> {
     state
         .saved
         .iter()
-        .map(|r| UbRecent { id: s(&r.name), title: s(&r.title), meta: s(&r.meta), icon: s("document"), current: current.as_deref() == Some(r.name.as_str()) })
+        .map(|r| UbRecent { id: s(&r.name), title: shown_text(&r.title), meta: shown_text(&r.meta), icon: s("document"), current: current.as_deref() == Some(r.name.as_str()) })
         .collect()
 }
 
@@ -2054,5 +2092,54 @@ mod tests {
         let p = improve_offline("a spooky hotel");
         assert!(p.starts_with("a spooky hotel. HUD: "));
         assert!(p.contains("Screens: "));
+    }
+}
+
+/// During Play the panel's Insert, Insert Scripts and Trash are refused, the
+/// message consumed and the reason said, in the panel too.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// Click one panel button in `state`, and return the write it queued,
+    /// the panel's toast, and the toasts and Output lines left.
+    fn press(state: PlayModeState, id: &str) -> (Option<PendingWrite>, Option<String>, Vec<String>, Vec<String>) {
+        let mut app = App::new();
+        app.insert_resource(State::new(state));
+        app.init_resource::<UiBuilder>();
+        app.init_resource::<UiBuilderInbox>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        // An explicit root, so no fallback ever reads the settings file.
+        app.insert_resource(crate::space::SpaceRoot(std::env::temp_dir().join("eustress_play_gate_ui_builder")));
+        app.add_systems(Update, apply_panel_messages);
+        app.world().resource::<UiBuilderInbox>().0.lock().unwrap().push(PanelMsg::Action(id.to_string(), "Hud".to_string()));
+        app.update();
+        let world = app.world();
+        let builder = world.resource::<UiBuilder>();
+        (
+            builder.pending,
+            builder.toast.as_ref().map(|toast| toast.0.clone()),
+            world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect(),
+            world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn play_refuses_the_panel_writes() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for (id, what) in [
+                ("insert", "insert the UI"),
+                ("insert-scripts", "insert the UI's scripts"),
+                ("trash-saved", "move a saved UI to the trash"),
+            ] {
+                let notice = format!("Stop Play to {what}.");
+                assert_eq!(press(state, id), (None, Some(notice.clone()), vec![notice.clone()], vec![notice]), "{state:?} {id}");
+            }
+        }
+        // While editing Insert queues its write, with no notice.
+        assert_eq!(press(PlayModeState::Editing, "insert"), (Some(PendingWrite::Insert), None, Vec::new(), Vec::new()));
     }
 }

@@ -107,7 +107,16 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --package eustress-engine
+        shell: pwsh
+        # The same static-C-runtime build as the Player, so the Studio starts on a
+        # Windows install without the Visual C++ redistributable. --config, not a
+        # RUSTFLAGS variable, which would replace .cargo/config.toml's lld-link flags.
+        # The explicit --target keeps the flag off build scripts and proc macros,
+        # and moves the output to target\x86_64-pc-windows-msvc\release.
+        run: |
+          cargo build --release --locked --package eustress-engine `
+            --target x86_64-pc-windows-msvc `
+            --config "target.x86_64-pc-windows-msvc.rustflags=['-C','target-feature=+crt-static']"
 
       - name: Smoke test
         shell: pwsh
@@ -117,7 +126,7 @@ jobs:
           # rendering test: windows-latest has no real GPU, so a graceful exit
           # for lack of an adapter is not distinguished from success. A floor,
           # not a guarantee.
-          $exe = "eustress\target\release\eustress-engine.exe"
+          $exe = "eustress\target\x86_64-pc-windows-msvc\release\eustress-engine.exe"
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 8
           if ($p.HasExited) {
@@ -139,7 +148,7 @@ jobs:
           & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" sign `
             /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            eustress\target\release\eustress-engine.exe
+            eustress\target\x86_64-pc-windows-msvc\release\eustress-engine.exe
           Remove-Item $pfx -Force
 
       - name: Package
@@ -149,7 +158,7 @@ jobs:
         run: |
           # The layout the installer ships too. Staged outside dist/, which
           # is uploaded whole and then flattened by the publish job.
-          ./installer/windows/stage.ps1 -BinDir eustress/target/release -OutDir stage
+          ./installer/windows/stage.ps1 -BinDir eustress/target/x86_64-pc-windows-msvc/release -OutDir stage
           New-Item -ItemType Directory -Force dist | Out-Null
           Push-Location stage
           7z a "../dist/eustress-engine-v$env:VERSION-windows-x64.zip" *
@@ -188,7 +197,7 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --package eustress-engine --target aarch64-apple-darwin
+        run: cargo build --release --locked --package eustress-engine --target aarch64-apple-darwin
 
       - name: Smoke test
         run: |
@@ -207,7 +216,10 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          APP="Eustress Engine.app"
+          # hdiutil copies the contents of the folder it is given, so that
+          # folder (dmg) holds the app and the link to Applications; pointing
+          # it at the .app itself would put Contents/ at the image root.
+          APP="dmg/Eustress Engine.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
           cp eustress/target/aarch64-apple-darwin/release/eustress-engine "$APP/Contents/MacOS/"
           cp -r eustress/crates/engine/assets "$APP/Contents/Resources/assets"
@@ -223,24 +235,62 @@ jobs:
               done
           mkdir -p "$APP/Contents/Resources/docs"
           cp docs/documents/eustress_constitution.pdf "$APP/Contents/Resources/docs/"
-          cp eustress/crates/engine/assets/icon.png "$APP/Contents/Resources/AppIcon.png"
+          # The .icns the engine's build script renders from assets/icon.svg;
+          # CFBundleIconFile below names it.
+          cp eustress/crates/engine/assets/icon.icns "$APP/Contents/Resources/AppIcon.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>CFBundleName</key><string>Eustress Engine</string>
+            <key>CFBundleDisplayName</key><string>Eustress Engine</string>
             <key>CFBundleExecutable</key><string>eustress-engine</string>
             <key>CFBundleIdentifier</key><string>dev.eustress.engine</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>
           PLIST
-          hdiutil create -volname "Eustress Engine" -srcfolder "$APP" -ov -format UDZO \
+          plutil -lint "$APP/Contents/Info.plist"
+
+          # Drag-to-install: the image opens beside a link to Applications.
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Eustress Engine" -srcfolder dmg -ov -format UDZO \
             "dist/eustress-engine-v${VERSION}-macos-arm64.dmg"
+
+      # Opens the finished image the way a user does and checks what they see:
+      # the app, a link to Applications, an icon, and this release's version.
+      - name: Verify the DMG
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          DMG="dist/eustress-engine-v${VERSION}-macos-arm64.dmg"
+          [ -f "$DMG" ] || fail "$DMG was not built."
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          trap 'hdiutil detach "$MNT" -quiet -force || true' EXIT
+
+          APP="$MNT/Eustress Engine.app"
+          BIN="$APP/Contents/MacOS/eustress-engine"
+          [ -d "$APP" ] || fail "The image has no 'Eustress Engine.app' at its root; it holds: $(ls "$MNT")"
+          [ -x "$BIN" ] || fail "$BIN is missing or not executable."
+          [ "$(readlink "$MNT/Applications")" = "/Applications" ] \
+            || fail "The image has no link to /Applications beside the app."
+          [ -f "$APP/Contents/Resources/AppIcon.icns" ] || fail "AppIcon.icns is missing from the bundle."
+          [ -d "$APP/Contents/Resources/common/assets" ] || fail "The common assets did not reach the bundle."
+          plutil -lint "$APP/Contents/Info.plist"
+          GOT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          [ "$GOT" = "$VERSION" ] || fail "Info.plist says version '${GOT}', want '${VERSION}'."
+          ARCHS=$(lipo -archs "$BIN")
+          [ "$ARCHS" = "arm64" ] || fail "The executable is '${ARCHS}', want 'arm64'."
+          echo "OK: $(basename "$DMG") opens to the app and a link to Applications."
 
       - uses: actions/upload-artifact@v4
         with:
@@ -293,7 +343,7 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --package eustress-engine
+        run: cargo build --release --locked --package eustress-engine
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

@@ -2551,14 +2551,7 @@ fn surfacegui_from_properties(props: &HashMap<String, serde_json::Value>) -> Sur
         adornee: None, // Entity references need special handling
         face: props.get("face")
             .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "Top" => NormalId::Top,
-                "Bottom" => NormalId::Bottom,
-                "Left" => NormalId::Left,
-                "Right" => NormalId::Right,
-                "Back" => NormalId::Back,
-                _ => NormalId::Front,
-            })
+            .and_then(NormalId::parse)
             .unwrap_or(NormalId::Front),
         canvas_size: json_to_vec2(props.get("canvas_size")).unwrap_or([800.0, 600.0]),
         always_on_top: props.get("always_on_top").and_then(|v| v.as_bool()).unwrap_or(false),

@@ -56,12 +56,6 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-tools-${{ hashFiles('eustress/Cargo.toml') }}
 
-      - name: Generate lockfile
-        # eustress/Cargo.lock is not committed; resolve a fresh lockfile for
-        # the advisory scan.
-        run: cargo generate-lockfile
-
-      - name: Install cargo-deny
         run: cargo install cargo-deny
 
       - name: cargo-deny (advisories, bans, sources)
@@ -171,7 +165,7 @@ jobs:
           # inverted to "missing" and failed the job. A here-string has no
           # pipeline, so only grep's own status is observed.
           set +e
-          tree="$(cargo tree -p eustress-engine -e normal,build 2>tree-stderr.log)"
+          tree="$(cargo tree --locked -p eustress-engine -e normal,build 2>tree-stderr.log)"
           tree_exit=$?
           set -e
           if [ "$tree_exit" -ne 0 ]; then

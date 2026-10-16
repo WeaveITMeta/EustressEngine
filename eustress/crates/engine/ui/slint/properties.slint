@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView, CheckBox, Slider, ComboBox, SpinBox, GridBox } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, PopupBounds } from "theme.slint";
 import { TagsEditor, TagChip, TagSuggestion } from "tags_editor.slint";
 import { KitField } from "dialog_kit.slint";
 
@@ -144,7 +144,7 @@ export component HelpIcon inherits Rectangle {
     // Tooltip popup — uses PopupWindow so it renders above all panels
     help-popup := PopupWindow {
         x: 20px;
-        y: -6px;
+        y: PopupBounds.fit-y(parent.absolute-position.y, -6px, self.height);
         width: min(300px, max(120px, root.description.character-count * 6.5px + 20px));
         height: tip-text.preferred-height + 12px;
 
@@ -559,7 +559,7 @@ component MaterialDropdown inherits Rectangle {
     // Opens under the button, as wide as the button.
     dropdown-popup := PopupWindow {
         x: mat-btn.x;
-        y: parent.height;
+        y: PopupBounds.drop-y(parent.absolute-position.y, parent.height, self.height);
         width: mat-btn.width;
         height: min(320px, root.options.length * 23px + 8px);
 
@@ -733,7 +733,7 @@ component StateDot inherits Rectangle {
     // Below and to the left: the dot sits near the panel's right edge.
     tip := PopupWindow {
         x: -236px;
-        y: 16px;
+        y: PopupBounds.fit-y(parent.absolute-position.y, 16px, self.height);
         width: 248px;
         height: dot-tip-text.preferred-height + 12px;
         Rectangle {
@@ -792,7 +792,7 @@ component BoundValue inherits Rectangle {
 
     tip := PopupWindow {
         x: 0px;
-        y: root.height + 4px;
+        y: PopupBounds.drop-y(root.absolute-position.y, root.height + 4px, self.height);
         width: max(root.width, 220px);
         height: bound-tip-text.preferred-height + 12px;
         Rectangle {
@@ -926,8 +926,11 @@ component PropRow inherits Rectangle {
     // difference so tabbing through untouched rows sprays no no-op writes.
     changed has-focus => {
         root.focus-changed(self.has-focus);
-        if (!self.has-focus && input-edit.text != root.value) {
+        if (!self.has-focus && input-edit.text != (root.prop-type == "secret" ? "" : root.value)) {
             root.value-changed(input-edit.text);
+            if (root.prop-type == "secret") {
+                input-edit.text = "";
+            }
         }
     }
 
@@ -983,7 +986,11 @@ component PropRow inherits Rectangle {
                 visible: root.editable;
                 enabled: root.editable;
                 font-size: PropStyle.font;
-                text: root.value;
+                // A "secret" row starts empty with the mask as its
+                // placeholder: the key itself is never in the panel.
+                text: root.prop-type == "secret" ? "" : root.value;
+                placeholder-text: root.prop-type == "secret" ? root.value : "";
+                input-type: root.prop-type == "secret" ? InputType.password : InputType.text;
                 // Report focus only — do NOT commit per keystroke.
                 //
                 // Committing on every keystroke wrote the part's TOML and
@@ -1001,6 +1008,10 @@ component PropRow inherits Rectangle {
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
+                    // A secret row forgets the typed key once it is committed.
+                    if (root.prop-type == "secret") {
+                        self.text = "";
+                    }
                     // Drop the field's focused state so the row no
                     // longer shows the active-input highlight.
                     focus_sink.focus();
@@ -2137,7 +2148,7 @@ component ColorRow inherits Rectangle {
         // Under the swatch, shifted left when the panel is too narrow to
         // hold it there, so it stays inside the panel.
         x: Math.max(0px, Math.min(row-swatch.x, root.width - self.width - 4px));
-        y: parent.height;
+        y: PopupBounds.drop-y(parent.absolute-position.y, parent.height, self.height);
         width: 292px;
         // 12 pad + 22 header + 8 + 136 square + 8 + 16 hue strip + 8
         //   + 78 fields (3 x 22 + 2 x 6) + 8 + 1 rule + 8
@@ -2748,7 +2759,7 @@ component BrickColorRow inherits Rectangle {
         // Under the swatch, shifted left when the panel is too narrow to
         // hold it there.
         x: Math.max(0px, Math.min(bc-swatch.x, root.width - self.width - 4px));
-        y: parent.height;
+        y: PopupBounds.drop-y(parent.absolute-position.y, parent.height, self.height);
         // Wide enough for the 286px honeycomb plus the 12px padding either
         // side, with a little breathing room.
         width: 330px;

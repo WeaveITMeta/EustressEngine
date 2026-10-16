@@ -28,9 +28,9 @@
 //! | `SpecialMesh` FileMesh, `FileMesh`, with no mesh | nothing |
 //! | `SpecialMesh` FileMesh, `FileMesh`, with a mesh | not drawn here: the part keeps its mesh |
 //!
-//! The two cylinders' axes were read from Vehicle Simulator: a wheel's axle
-//! runs along its X with a `SpecialMesh` Cylinder thin along X; checkpoint
-//! pillars with a `CylinderMesh` are round in X and Z and tall in Y.
+//! The two cylinders' axes, as real Roblox places use them: a wheel's axle
+//! runs along its X with a `SpecialMesh` Cylinder thin along X; a pillar with
+//! a `CylinderMesh` is round in X and Z and tall in Y.
 //!
 //! **A Cylinder part's Roblox frame.** Eustress's cylinder stands on Y where
 //! Roblox's lies along X, so an imported Cylinder part is turned a quarter

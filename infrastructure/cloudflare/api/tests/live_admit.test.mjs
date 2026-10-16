@@ -29,8 +29,8 @@ function environment() {
 }
 
 async function seed(env, moderation = { status: 'approved', rating: 'all_ages' }) {
-  await env.USERS.put(`user:${AUTHOR}`, JSON.stringify({ id: AUTHOR, username: 'host' }));
-  await env.USERS.put(`user:${PLAYER}`, JSON.stringify({ id: PLAYER, username: 'ada' }));
+  await env.USERS.put(`user:${AUTHOR}`, JSON.stringify({ kyc_verified: true, id: AUTHOR, username: 'host' }));
+  await env.USERS.put(`user:${PLAYER}`, JSON.stringify({ kyc_verified: true, id: PLAYER, username: 'ada' }));
   await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify({ id: SIM, name: 'Pong', author_id: AUTHOR, is_public: true, moderation }));
   return env;
 }
@@ -234,6 +234,28 @@ test('a heartbeat may list the ticket ids still connected, and the list is check
 });
 
 // ── The link ─────────────────────────────────────────────────────────────────
+
+test('the listing\'s live read shows what the host claims up to the players the Worker admitted plus the host, never a bigger number', async () => {
+  const env = await seed(environment());
+  assert.equal((await beat(env, PIN, { players: 10_000, max_players: 10_000 })).status, 200);
+  const shown = async (token) => (await call(env, 'GET', live, { token })).body.players;
+  assert.equal(await shown(), 1, 'a claim of 10,000 with nobody admitted is the host alone, to an anonymous visitor');
+  assert.equal(await shown(player), 1, 'and to a signed-in account');
+  for (let i = 0; i < 3; i++) {
+    const { ticket } = await ticketFor(env, player);
+    assert.equal((await admit(env, ticket)).status, 200);
+  }
+  assert.equal(await shown(), 4, 'three admitted and the host: it follows the next admission at once');
+  assert.equal(await shown(player), 4);
+  assert.equal((await call(env, 'GET', live, { token: player })).body.max_players, 10_000, 'the other counts are what the host sent');
+  assert.equal((await beat(env, PIN, { players: 2, max_players: 10_000 })).status, 200);
+  assert.equal(await shown(), 2, 'a claim below the cap stands');
+  assert.equal((await beat(env, PIN, { players: 0, max_players: 10_000 })).status, 200);
+  assert.equal(await shown(), 0, 'a host that is not playing shows what it claims');
+  // A new hosting session starts with nobody admitted.
+  assert.equal((await beat(env, PIN2, { players: 50, max_players: 10_000 })).status, 200);
+  assert.equal(await shown(), 1);
+});
 
 test('the join link goes to a signed-in account, and an anonymous visitor sees only that the simulation is live', async () => {
   const env = await hosting(environment());

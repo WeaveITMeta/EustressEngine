@@ -16,6 +16,45 @@ tabs = ["home", "model", "cad", "terrain", "data", "mindspace", "test"]
 [layout]
 preset = "Wide Panels"
 
+# Authored panel layout. The preset above stays as the fallback; a discipline
+# table below replaces this one whole. Civil work is terrain-heavy, so the
+# Terrain panel joins the left dock behind the Explorer.
+[layout.zones]
+left = ["explorer", "terrain", "assets"]
+right = ["properties", "history"]
+bottom = ["output"]
+
+[layout.active]
+left = "explorer"
+
+[layout.sizes]
+bottom = 180
+
+# Water Resources: results (hydrographs, profiles) land in Output, so it gets
+# taller, and Terrain leads the left dock for grading and drainage work. The
+# Water Pipe Gen tool set is placed in `inner_left`, which the layout system
+# reports as not yet drawn until its dock host supports that zone.
+[[submode_layouts]]
+submode = "water-resources"
+
+[submode_layouts.zones]
+left = ["terrain", "explorer", "assets"]
+right = ["properties", "history"]
+bottom = ["output"]
+inner_left = ["toolset:water-pipe-gen"]
+
+[submode_layouts.active]
+left = "terrain"
+
+[submode_layouts.sizes]
+bottom = 240
+
+[[toolsets]]
+id = "water-pipe-gen"
+name = "Water Pipe Gen"
+zone = "inner_left"
+tools = ["cwtr:storm_network_designer", "cwtr:pipe_sizer", "cwtr:pump_station_designer"]
+
 [theme]
 accent = "#4ade80"
 

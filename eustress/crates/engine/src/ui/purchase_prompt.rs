@@ -132,9 +132,11 @@ fn sync_purchase_prompt(
         }
         return;
     };
-    ui.set_purchase_prompt_product(product.name.as_str().into());
+    // Catalog text is bounded: Slint's software renderer panics on a Text
+    // taller than 32,767 px.
+    ui.set_purchase_prompt_product(crate::ui::display_text::shown_line(&product.name));
     ui.set_purchase_prompt_kind(kind_text(product.kind).into());
-    ui.set_purchase_prompt_description(product.description.as_str().into());
+    ui.set_purchase_prompt_description(crate::ui::display_text::shown_block(&product.description));
     ui.set_purchase_prompt_price(price_text(product.price).into());
     ui.set_purchase_prompt_test_mode(true);
     ui.set_show_purchase_prompt(true);

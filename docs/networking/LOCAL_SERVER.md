@@ -92,7 +92,7 @@ server starts, so share the link from the current session.
 | `EUSTRESS_HOST_LAN` | off | `1` also accepts players on the local network. |
 | `EUSTRESS_HOST_MAX_PLAYERS` | 8 | Players besides the host. |
 | `EUSTRESS_HOST_ON_PLAY` | off | `1` hosts whenever Play starts. |
-| `EUSTRESS_HOST_PUBLIC` | unset | The address players reach this host at, for the gallery's live link (`host` or `host:port`, IPv6 in brackets): this computer's local network address when players come in through the tunnel's private route, a public name later. |
+| `EUSTRESS_HOST_PUBLIC` | unset | The address players reach this host at, for the gallery's live link (`host` or `host:port`, an IPv4 address or a name): this computer's local network address when players come in through the tunnel's private route, a public name later. A host listens on IPv4 only, so an IPv6 address keeps the session off the gallery, and the Output says why. |
 
 A published simulation hosted by its author, signed in, with
 `EUSTRESS_HOST_LAN=1` and `EUSTRESS_HOST_PUBLIC` set, shows as live in the

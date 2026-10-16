@@ -33,16 +33,15 @@ pub fn AboutPage() -> impl IntoView {
                     <div class="header-line"></div>
                 </div>
                 <h1 class="about-title">"What is Eustress?"</h1>
-                <p class="about-tagline">"The next generation of game creation and play"</p>
+                <p class="about-tagline">"Model the real world and drive it with real data"</p>
             </section>
             
             // Mission Statement
             <section class="mission-section">
                 <div class="mission-card">
                     <p class="mission-text">
-                        "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. 
-                        Built from the ground up in "<strong>"100% Rust"</strong>", we deliver unprecedented performance, 
-                        memory safety, and developer experience—all while remaining "<strong>"free forever"</strong>"."
+                        "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds.
+                        It offers performance, memory safety and developer experience, and it stays "<strong>"free forever"</strong>"."
                     </p>
                 </div>
             </section>
@@ -63,8 +62,8 @@ pub fn AboutPage() -> impl IntoView {
                         <h3>"Eustress Engine"</h3>
                         <p class="product-subtitle">"The Engine"</p>
                         <p class="product-desc">
-                            "A professional-grade game engine and creation suite. Build stunning 3D worlds, 
-                            script gameplay logic, design UI, and publish to multiple platforms—all from one tool."
+                            "A simulation and creation suite. Build 3D worlds, script behavior and gameplay logic, design UI,
+                            and publish to multiple platforms, all from one tool."
                         </p>
                         <ul class="product-features">
                             <li>"Visual editor with hot reload"</li>
@@ -83,7 +82,7 @@ pub fn AboutPage() -> impl IntoView {
                         <h3>"Eustress Player"</h3>
                         <p class="product-subtitle">"The Platform"</p>
                         <p class="product-desc">
-                            "Discover and play thousands of community-created experiences. Jump into games instantly, 
+                            "Discover and play thousands of community-created simulations. Jump into games instantly, 
                             connect with friends, and explore endless creativity."
                         </p>
                         <ul class="product-features">
@@ -209,7 +208,7 @@ pub fn AboutPage() -> impl IntoView {
             <section class="cta-section">
                 <div class="cta-card-about">
                     <h2>"Ready to Create?"</h2>
-                    <p>"Download Eustress Engine and start building your first experience in minutes"</p>
+                    <p>"Download Eustress Engine and start building your first simulation in minutes"</p>
                     <div class="cta-buttons">
                         <a href="/download" class="btn-cta primary">
                             <img src="/assets/icons/download.svg" alt="Download" />

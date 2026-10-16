@@ -3,7 +3,7 @@
 //! =============================================================================
 //! Table of Contents:
 //!   1. schema     — TOML identity file structure (versioned, fork-portable)
-//!   2. keypair    — Ed25519 key generation and challenge-response
+//!   2. keypair    — Ed25519 key generation and signing
 //!   3. issuer     — Server-side identity issuance
 //!   4. verifier   — Cross-server/fork signature verification
 //!   5. revocation — Append-only revocation list
@@ -21,6 +21,10 @@ pub mod revocation;
 pub mod succession;
 pub mod desktop;
 pub mod history;
+/// Files and folders only the signed-in user can open (secrets on disk).
+/// Unix and Windows only, so the crate still builds for wasm32.
+#[cfg(any(unix, windows))]
+pub mod private_file;
 #[cfg(feature = "witness")]
 pub mod witness;
 
@@ -85,7 +89,7 @@ pub fn from_toml_string(s: &str) -> Result<schema::IdentityFile, IdentityError> 
 mod tests {
     use super::*;
     use crate::issuer::IdentityIssuer;
-    use crate::keypair::{verify_challenge, UserKeypair};
+    use crate::keypair::{verify_signed_data, UserKeypair};
     use crate::revocation::RevocationList;
     use crate::verifier::IdentityVerifier;
     use ed25519_dalek::SigningKey;
@@ -175,28 +179,22 @@ mod tests {
         assert!(revocation.is_revoked(&user_id));
     }
 
+    /// A signature verifies for the exact bytes it signed, with its own key.
+    /// (A login signs the `eustress-login-v1` message, built in one place:
+    /// `eustress_common::api_base::login_message`.)
     #[test]
-    fn test_challenge_response() {
-        use crate::keypair::build_challenge_payload;
-
+    fn test_signed_data_roundtrip() {
         let server = make_test_server("server-a.test");
         let (identity, private_key_b64) = server.issue("frank".to_string()).unwrap();
-
-        let nonce = b"server-generated-nonce-12345";
-        let domain = "server-a.test";
-        let timestamp = chrono::Utc::now().timestamp();
-
-        // Build domain-bound challenge payload
-        let payload = build_challenge_payload(domain, timestamp, nonce);
+        let (other, _) = server.issue("grace".to_string()).unwrap();
 
         let keypair = UserKeypair::from_private_b64(&private_key_b64).unwrap();
-        let signature = keypair.sign_bytes(&payload);
+        let data = b"signed by frank";
+        let signature = keypair.sign_bytes(data);
 
-        assert!(verify_challenge(&identity.identity.public_key, &payload, &signature).is_ok());
-
-        // Verify that a different domain fails
-        let wrong_payload = build_challenge_payload("evil.test", timestamp, nonce);
-        assert!(verify_challenge(&identity.identity.public_key, &wrong_payload, &signature).is_err());
+        assert!(verify_signed_data(&identity.identity.public_key, data, &signature).is_ok());
+        assert!(verify_signed_data(&identity.identity.public_key, b"signed by someone", &signature).is_err());
+        assert!(verify_signed_data(&other.identity.public_key, data, &signature).is_err());
     }
 
     #[test]

@@ -393,12 +393,14 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
     // Cross-process pub/sub over TCP (port advertised via
     // `<universe>/.eustress/engine.stream.port`).
     //
-    // Opt-in via `--features stream-node`, NOT part of `core`. The node
-    // authenticates nobody: any peer that connects may publish into any topic
-    // ring and subscribe to any other — `scene_deltas` carries live scene
-    // contents and `agent_commands` is the inbound command path. A default
-    // build must not open that, so the socket only exists when someone asks
-    // for it, and binds loopback even then.
+    // Opt-in via `--features stream-node`, NOT part of `core`. Every
+    // connection logs in over TLS 1.3, and each party is held to its grants in
+    // `parties.toml`; `scene_deltas` carries live scene contents and
+    // `agent_commands` is the inbound command path, so publishing to either
+    // also needs `admin = true`. The plugin starts no node until a
+    // certificate, a key and a parties file are configured, so even a build
+    // with the feature opens no stream port by default, and it binds loopback
+    // when it does.
     #[cfg(feature = "stream-node")]
     app.add_plugins(crate::stream_node_plugin::StreamNodePlugin::default());
 }

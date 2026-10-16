@@ -164,7 +164,7 @@ pub fn track_remote_players(mut notices: MessageReader<NetNotice>, mut remote: R
                 let (Some(pin), Some(player)) = (remote.pin, remote.peers.get_mut(peer)) else { continue };
                 player.verifying = true;
                 let inbox = remote.inbox.clone();
-                let (peer, ticket, audience) = (*peer, ticket.clone(), hex32(&pin));
+                let (peer, ticket, audience) = (*peer, ticket.secret().to_string(), hex32(&pin));
                 let started = std::thread::Builder::new().name("eustress-identity".into()).spawn(move || {
                     let who = verify_ticket(&ticket, &audience);
                     inbox.lock().push((peer, who));
@@ -248,6 +248,7 @@ pub fn sync_remote_players(dm: Option<Res<PlayDataModel>>, mut remote: ResMut<Re
         let _ = g.set_prop(id, "DisplayName", DmValue::String(player.name.clone()));
         let _ = g.set_prop(id, "UserId", DmValue::Number(player.user_id));
         g.create_virtual("Backpack", "Backpack", Some(id));
+        eustress_common::play_session::fill_backpack(&mut g, id);
         g.create_virtual("PlayerScripts", "PlayerScripts", Some(id));
         let gui = g.create_virtual("PlayerGui", "PlayerGui", Some(id));
         fill_player_gui(&mut g, gui, true);
@@ -286,7 +287,7 @@ pub fn pull_remote_characters(
     )>,
     mut bound: Local<HashMap<PeerId, (Entity, InstanceId, InstanceId)>>,
     mut spawned_before: Local<HashSet<InstanceId>>,
-    mut session: Local<usize>,
+    mut session: Local<u64>,
 ) {
     let Some(dm) = dm else {
         bound.clear();
@@ -294,7 +295,7 @@ pub fn pull_remote_characters(
         return;
     };
     // As in `pull_character`: a new Play session is a new tree.
-    let tree = Arc::as_ptr(&dm.dm) as usize;
+    let tree = eustress_common::datamodel::session_of(&dm.dm);
     if *session != tree {
         *session = tree;
         bound.clear();

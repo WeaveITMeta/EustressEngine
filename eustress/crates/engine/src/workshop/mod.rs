@@ -33,7 +33,19 @@ pub mod mention_resolver;
 #[cfg(feature = "workshop-vortex-embeddings")]
 pub mod mention_searcher_vortex;
 pub mod claude_bridge;
+/// Runs tool calls on a worker thread, in order, and validates any image a
+/// tool returns before the model sees it.
+pub mod tool_dispatch;
+/// When Workshop must stop and show an approval card, whatever the Auto
+/// switch says.
+pub mod approval_policy;
+/// What an approval card shows for a call, and the check that what runs is
+/// what was shown.
+pub mod card_review;
 pub mod artifact_gen;
+/// Where a Workshop product's meshes live, and the one-time move of those
+/// written to the wrong folder by earlier builds.
+pub mod product_meshes;
 /// Splits a reply into prose and tables so the chat bubble can draw a grid
 /// instead of raw `|---|---|` rows.
 pub mod markdown;
@@ -49,7 +61,6 @@ pub mod watchman;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use crate::manufacturing::AllocationDecision;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -124,6 +135,19 @@ pub struct ChatMessage {
     /// that spawned an Mcp card, so history reconstruction groups them.
     #[serde(default)]
     pub is_assistant_turn: bool,
+    /// An image the tool returned (a camera capture), held in memory only.
+    ///
+    /// Session files do not store tool results, so nothing is lost on reload,
+    /// and keeping it out of the Space keeps captures out of its git history.
+    /// Only the newest few stay attached; see `tool_dispatch::KEEP_RECENT_IMAGES`.
+    #[serde(skip)]
+    pub tool_result_image: Option<tool_dispatch::ToolImage>,
+    /// A fingerprint of `tool_input`, taken when the approval card was made.
+    /// The approve handler refuses a call whose input no longer matches it, so
+    /// what runs is what the card showed (`card_review::approval_check`). In
+    /// memory only: a card restored from a session file is never waiting.
+    #[serde(skip)]
+    pub input_digest: Option<String>,
 }
 
 /// Who sent a message in the conversation
@@ -638,9 +662,11 @@ pub struct IdeationPipeline {
     /// Active domain modes inferred from conversation context. General is
     /// always implicit. Multiple modes stack additively.
     pub active_modes: modes::ActiveModes,
-    /// True while a Claude tool-use round-trip is waiting on user approval
-    /// for one or more MCP cards. Dispatch is suppressed until all
-    /// pending approvals resolve (approved → executed, or skipped).
+    /// True while a Claude tool-use round-trip has unresolved tool calls:
+    /// waiting on user approval for one or more MCP cards, or running on the
+    /// worker. Dispatch is suppressed until every card has a result (approved
+    /// and executed, ran on its own, or skipped), so the next model request
+    /// carries all of the turn's results together.
     pub awaiting_tool_approval: bool,
     /// Whether the pipeline has unsaved changes
     pub dirty: bool,
@@ -1333,7 +1359,10 @@ fn handle_send_message(
             .as_ref()
             .map(|g| g.effective_workshop_model())
             .unwrap_or_default();
-        let has_key = match model.provider() {
+        // A key still being looked up counts: the message waits in the queue
+        // until the store answers (see `dispatch_chat_request`).
+        let key_pending = global_settings.as_ref().is_some_and(|g| g.key_pending(model.provider()));
+        let has_key = key_pending || match model.provider() {
             crate::soul::Provider::Anthropic => match (&global_settings, &space_settings) {
                 (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
                 _ => false,
@@ -1365,18 +1394,66 @@ fn handle_send_message(
     }
 }
 
-/// In-flight tool dispatch — background thread result container.
-/// Mirrors the `AgenticInFlight` pattern from `claude_bridge.rs`.
-struct ToolDispatchInFlight {
-    message_id: u32,
-    tool_name: String,
-    result: Arc<Mutex<Option<tools::ToolResult>>>,
-}
-
-/// Resource holding all in-flight (background-threaded) tool dispatches.
+/// Resource holding all in-flight (background-threaded) tool dispatches: the
+/// calls the user approved and the ones that ran without asking. See
+/// `tool_dispatch` for how they are run and what each handle carries.
 #[derive(Resource, Default)]
 pub struct ToolDispatchTasks {
-    in_flight: Vec<ToolDispatchInFlight>,
+    in_flight: Vec<tool_dispatch::InFlight>,
+}
+
+impl ToolDispatchTasks {
+    /// Tell every in-flight call to stop and forget them. Used by Stop: a call
+    /// that has not started never starts, and a tool that polls sees its
+    /// `ToolContext::cancelled` flag and returns early. Returns how many there
+    /// were.
+    pub(crate) fn cancel_all(&mut self) -> usize {
+        for task in &self.in_flight {
+            task.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let count = self.in_flight.len();
+        self.in_flight.clear();
+        count
+    }
+}
+
+/// The tools that act on the running session rather than on the Space: the
+/// game's input, the simulation's values and breakpoints, and the run itself
+/// (run or resume, step, pause, stop, and `control_simulation`'s playback).
+/// Each is a Write tool, so without this list it would wait for Stop, and an
+/// agent could not even end a run. They stay live during Play.
+const PLAY_SESSION_TOOLS: [&str; 8] = [
+    "play_input",
+    "set_sim_value",
+    "sim_step",
+    "control_simulation",
+    "set_breakpoint",
+    "run_simulation",
+    "pause_simulation",
+    "stop_simulation",
+];
+
+/// Why a tool call waits for Stop, or `None` to run it. During Play only a
+/// read-only tool runs, and the tools that drive the running session
+/// ([`PLAY_SESSION_TOOLS`]); any other would change the Space while Stop
+/// puts the authored scene back. Asked where a call is dispatched: the
+/// Workshop's auto-run and approved cards, and the bridge's `tools.call`.
+pub(crate) fn tool_play_refusal(state: Option<&State<crate::play_mode::PlayModeState>>, tool_name: &str, class: Option<eustress_tools::Capability>) -> Option<String> {
+    let playing = state.is_some_and(|s| *s.get() != crate::play_mode::PlayModeState::Editing);
+    let live = class == Some(eustress_tools::Capability::Read) || PLAY_SESSION_TOOLS.contains(&tool_name);
+    (playing && !live).then(|| format!("Stop Play to run {tool_name}: it changes the Space, and Stop puts the scene back."))
+}
+
+/// Close a card the person clicked Run on but that must not run. It ends as an
+/// Error with the reason as its result, so the conversation is not left waiting
+/// for an answer that will never come, and a line in the chat tells the person why.
+fn refuse_approved_card(pipeline: &mut IdeationPipeline, message_id: u32, reason: &str) {
+    pipeline.update_mcp_status(message_id, McpCommandStatus::Error);
+    if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == message_id) {
+        msg.tool_result = Some(reason.to_string());
+    }
+    pipeline.add_notice_message(reason.to_string());
+    warn!("Workshop: refused to run approved card {message_id}: {reason}");
 }
 
 /// Process MCP command approvals — mark as Running and spawn the tool
@@ -1390,6 +1467,7 @@ fn handle_approve_mcp(
     auth: Option<Res<crate::auth::AuthState>>,
     display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
     mut tasks: ResMut<ToolDispatchTasks>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
     for event in events.read() {
         // An agentic tool_use card is dispatched right here, so it goes
@@ -1406,13 +1484,13 @@ fn handle_approve_mcp(
         info!("Workshop: MCP command {} approved → dispatching async", event.message_id);
 
         // Extract the tool-use metadata from the approved card.
-        let (tool_name, tool_use_id, tool_input) = {
+        let (tool_name, tool_use_id, tool_input, input_digest) = {
             let Some(msg) = pipeline.messages.iter().find(|m| m.id == event.message_id) else {
                 continue;
             };
             match (msg.mcp_endpoint.clone(), msg.tool_use_id.clone(), msg.tool_input.clone()) {
                 (Some(n), Some(id), Some(input)) if msg.mcp_method.as_deref() == Some("tool_use") => {
-                    (n, id, input)
+                    (n, id, input, msg.input_digest.clone())
                 }
                 _ => {
                     // Not an agentic tool_use card (e.g. legacy normalize/artifact
@@ -1422,6 +1500,24 @@ fn handle_approve_mcp(
                 }
             }
         };
+
+        // The rule the card applies to its Run button, applied again here: a click
+        // the card would have disabled, or on an input that is no longer the one
+        // that was shown, is refused. A call that runs code, deletes or goes online
+        // is shown whole or not run (`card_review`).
+        let class = eustress_tools::capability::capability_of_call(&tool_name, &tool_input);
+        if let Err(refusal) =
+            card_review::approval_check(&tool_input, class, input_digest.as_deref())
+        {
+            refuse_approved_card(&mut pipeline, event.message_id, refusal.message());
+            continue;
+        }
+        // Approved or not, during Play a tool that changes the Space waits
+        // for Stop (`tool_play_refusal`).
+        if let Some(reason) = tool_play_refusal(play_state.as_deref(), &tool_name, class) {
+            refuse_approved_card(&mut pipeline, event.message_id, &reason);
+            continue;
+        }
 
         // Build the ToolContext for dispatch.
         let ctx = match (&space_root, &auth) {
@@ -1456,8 +1552,8 @@ fn handle_approve_mcp(
             }
         };
 
-        // Verify the registry is loaded (sanity check). We build a fresh
-        // registry in the thread rather than cloning the Bevy Res.
+        // Sanity check only: the dispatch thread builds its own registry from
+        // `build_tool_registry()`, the same list the resource was built from.
         if tool_registry.is_none() {
             pipeline.add_error_message(
                 "Workshop: ToolRegistry missing — cannot dispatch approved tool.".to_string()
@@ -1465,68 +1561,29 @@ fn handle_approve_mcp(
             continue;
         }
 
-        let dispatch_name = tool_name.clone();
-        let dispatch_id = tool_use_id.clone();
-        let dispatch_input = tool_input.clone();
-        let dispatch_ctx = ctx;
-
-        let result_container: Arc<Mutex<Option<tools::ToolResult>>> =
-            Arc::new(Mutex::new(None));
-        let result_clone = result_container.clone();
-
-        // Spawn the tool dispatch on a background thread so long-running
-        // tools (run_bash with multi-minute curl) don't block the frame.
-        // We build a fresh ToolRegistry in the thread — ToolHandler impls
-        // are all Send+Sync unit structs so this is cheap.
-        std::thread::spawn(move || {
-            let mut thread_registry = tools::ToolRegistry::default();
-            tools::register_all_tools(&mut thread_registry);
-            // Mode-specific tools (mirrors the plugin's build_fn registration)
-            thread_registry.register(modes::manufacturing::NormalizeBriefTool);
-            thread_registry.register(modes::manufacturing::QueryManufacturersTool);
-            thread_registry.register(modes::manufacturing::QueryInvestorsTool);
-            thread_registry.register(modes::manufacturing::AllocateProductTool);
-            thread_registry.register(modes::simulation::ControlSimulationTool);
-            thread_registry.register(modes::simulation::SetBreakpointTool);
-            thread_registry.register(modes::simulation::ExportRecordingTool);
-            thread_registry.register(modes::supply_chain::RunScenarioTool);
-            thread_registry.register(modes::supply_chain::ForecastDemandTool);
-            thread_registry.register(modes::supply_chain::ScoreSupplierRiskTool);
-            thread_registry.register(modes::warehousing::InventoryCheckTool);
-            thread_registry.register(modes::warehousing::StorageOptimizeTool);
-            thread_registry.register(modes::finance::CalculateCostTool);
-            thread_registry.register(modes::finance::EstimateTaxTool);
-            thread_registry.register(modes::fabrication::SelectProcessTool);
-            thread_registry.register(modes::shopping::PriceProductTool);
-            thread_registry.register(modes::travel::EstimateShippingTool);
-
-            let result = thread_registry.dispatch(
-                &dispatch_name,
-                &dispatch_id,
-                dispatch_input,
-                &dispatch_ctx,
-            );
-
-            match result_clone.lock() {
-                Ok(mut lock) => *lock = Some(result),
-                Err(poisoned) => {
-                    tracing::error!("Workshop: tool dispatch mutex poisoned, recovering");
-                    *poisoned.into_inner() = Some(tools::ToolResult {
-                        tool_name: dispatch_name,
-                        tool_use_id: dispatch_id,
-                        success: false,
-                        content: "Internal error: thread lock poisoned".to_string(),
-                        structured_data: None,
-                        stream_topic: None,
-                    });
-                }
-            }
-        });
-
-        tasks.in_flight.push(ToolDispatchInFlight {
-            message_id: event.message_id,
+        // Run it on a worker so a long tool (run_bash with a multi-minute curl,
+        // a camera capture waiting for frames) does not block the frame. One
+        // call, so a batch of one; `tool_dispatch` has the guarantees.
+        let (call, in_flight) = tool_dispatch::PendingCall::new(
+            event.message_id,
             tool_name,
-            result: result_container,
+            tool_use_id,
+            tool_input,
+        );
+        tasks.in_flight.push(in_flight);
+        tool_dispatch::spawn_batch(vec![call], move || {
+            let registry = build_tool_registry();
+            move |pending: &tool_dispatch::PendingCall| {
+                // Each call carries its own cancel flag, so Stop reaches it.
+                let mut call_ctx = ctx.clone();
+                call_ctx.cancelled = Some(pending.cancel.clone());
+                registry.dispatch(
+                    &pending.tool_name,
+                    &pending.tool_use_id,
+                    pending.input.clone(),
+                    &call_ctx,
+                )
+            }
         });
     }
 }
@@ -1538,33 +1595,48 @@ fn poll_tool_dispatches(
     mut tasks: ResMut<ToolDispatchTasks>,
 ) {
     let mut completed_indices = Vec::new();
+    let mut image_arrived = false;
 
     for (i, task) in tasks.in_flight.iter().enumerate() {
-        let result = match task.result.lock() {
-            Ok(lock) => lock.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
+        let Some(outcome) = task.take_outcome() else { continue };
+        let success = outcome.result.success;
+        let has_image = outcome.image.is_some();
 
-        if let Some(result) = result {
-            let new_status = if result.success {
-                McpCommandStatus::Done
-            } else {
-                McpCommandStatus::Error
-            };
-            pipeline.update_mcp_status(task.message_id, new_status);
-            if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == task.message_id) {
-                msg.tool_result = Some(result.content.clone());
-            }
+        // A card that Stop or Skip already closed keeps what it was closed
+        // with: a late answer must not rewrite what the conversation has
+        // already said about it. (Only reaching `iter_mut` once a result has
+        // actually arrived keeps an idle frame from marking the pipeline
+        // changed.)
+        let applied = pipeline
+            .messages
+            .iter_mut()
+            .find(|m| m.id == task.message_id)
+            .is_some_and(|msg| tool_dispatch::apply_outcome(msg, outcome));
+
+        if applied {
+            pipeline.dirty = true;
+            image_arrived |= has_image;
             info!("Workshop: tool '{}' (msg {}) completed → success={}",
-                task.tool_name, task.message_id, result.success);
-
-            completed_indices.push(i);
+                task.tool_name, task.message_id, success);
+        } else {
+            info!("Workshop: tool '{}' (msg {}) finished after its card was closed; result discarded",
+                task.tool_name, task.message_id);
         }
+
+        completed_indices.push(i);
     }
 
     // Remove completed tasks (reverse order to preserve indices)
     for i in completed_indices.into_iter().rev() {
         tasks.in_flight.swap_remove(i);
+    }
+
+    // A new picture pushes the oldest out: they cost tokens on every turn.
+    if image_arrived {
+        tool_dispatch::evict_old_images(
+            &mut pipeline.messages,
+            tool_dispatch::KEEP_RECENT_IMAGES,
+        );
     }
 
     // Clear the approval gate if every agentic tool_use card now has a
@@ -1936,48 +2008,61 @@ fn install_vortex_searcher_on_universe_load(
 // 5. WorkshopPlugin
 // ============================================================================
 
+/// The one list of tools the Workshop offers: every tool shipped by
+/// `eustress-tools`, the mode-specific tools and the AI camera.
+///
+/// Everything that dispatches tools builds its registry here: the plugin's
+/// resource, the worker threads that run tool calls, and the capability test
+/// below. This used to be three hand-copied lists (the plugin, the approved-tool
+/// thread, the test), which is exactly how the shared crate's tools once went
+/// missing from the Workshop. A tool added here is offered, dispatched and
+/// checked for a capability classification everywhere at once.
+///
+/// Cheap enough to call per dispatch: every handler is a stateless unit struct.
+pub(crate) fn build_tool_registry() -> tools::ToolRegistry {
+    let mut registry = tools::ToolRegistry::default();
+    // The baseline (every tool shipped by `eustress-tools`). A manual
+    // enumeration drifted before: tools added to the shared crate never made
+    // it into the Workshop because the list was kept by hand in two places.
+    tools::register_all_tools(&mut registry);
+    // Manufacturing mode tools
+    registry.register(modes::manufacturing::NormalizeBriefTool);
+    registry.register(modes::manufacturing::QueryManufacturersTool);
+    registry.register(modes::manufacturing::QueryInvestorsTool);
+    registry.register(modes::manufacturing::AllocateProductTool);
+    // Simulation mode tools
+    registry.register(modes::simulation::ControlSimulationTool);
+    registry.register(modes::simulation::SetBreakpointTool);
+    registry.register(modes::simulation::ExportRecordingTool);
+    // Supply Chain mode tools
+    registry.register(modes::supply_chain::RunScenarioTool);
+    registry.register(modes::supply_chain::ForecastDemandTool);
+    registry.register(modes::supply_chain::ScoreSupplierRiskTool);
+    // Warehousing mode tools
+    registry.register(modes::warehousing::InventoryCheckTool);
+    registry.register(modes::warehousing::StorageOptimizeTool);
+    // Finance mode tools
+    registry.register(modes::finance::CalculateCostTool);
+    registry.register(modes::finance::EstimateTaxTool);
+    // Fabrication mode tools
+    registry.register(modes::fabrication::SelectProcessTool);
+    // Shopping mode tools
+    registry.register(modes::shopping::PriceProductTool);
+    // Travel mode tools
+    registry.register(modes::travel::EstimateShippingTool);
+    // The AI camera: move, aim, frame and capture with the camera the AI
+    // controls. Hosts opt in; the Workshop does, so it can see what it built.
+    eustress_tools::ai_camera_tools::register(&mut registry);
+    registry
+}
+
 /// Bevy plugin for the Workshop (System 0: Ideation) module
 pub struct WorkshopPlugin;
 
 impl Plugin for WorkshopPlugin {
     fn build(&self, app: &mut App) {
-        // Build the tool registry — General + domain-specific tools.
-        //
-        // Delegate the baseline (every tool shipped by `eustress-tools`)
-        // to `register_all_tools`. The previous manual enumeration
-        // drifted: tools added to the shared crate (list_directory,
-        // run_bash, the universe_tools family, etc.) never made it
-        // into Workshop because the list was hand-maintained in two
-        // places at once. The MCP server already used
-        // `register_all_tools`, so the drift was invisible until users
-        // tried to call a tool here that only existed over MCP.
-        let mut registry = tools::ToolRegistry::default();
-        tools::register_all_tools(&mut registry);
-        // Manufacturing mode tools
-        registry.register(modes::manufacturing::NormalizeBriefTool);
-        registry.register(modes::manufacturing::QueryManufacturersTool);
-        registry.register(modes::manufacturing::QueryInvestorsTool);
-        registry.register(modes::manufacturing::AllocateProductTool);
-        // Simulation mode tools
-        registry.register(modes::simulation::ControlSimulationTool);
-        registry.register(modes::simulation::SetBreakpointTool);
-        registry.register(modes::simulation::ExportRecordingTool);
-        // Supply Chain mode tools
-        registry.register(modes::supply_chain::RunScenarioTool);
-        registry.register(modes::supply_chain::ForecastDemandTool);
-        registry.register(modes::supply_chain::ScoreSupplierRiskTool);
-        // Warehousing mode tools
-        registry.register(modes::warehousing::InventoryCheckTool);
-        registry.register(modes::warehousing::StorageOptimizeTool);
-        // Finance mode tools
-        registry.register(modes::finance::CalculateCostTool);
-        registry.register(modes::finance::EstimateTaxTool);
-        // Fabrication mode tools
-        registry.register(modes::fabrication::SelectProcessTool);
-        // Shopping mode tools
-        registry.register(modes::shopping::PriceProductTool);
-        // Travel mode tools
-        registry.register(modes::travel::EstimateShippingTool);
+        // The tool registry: General + domain-specific tools.
+        let registry = build_tool_registry();
         tracing::info!("Workshop: registered {} MCP tools", registry.tool_count());
 
         app
@@ -2047,6 +2132,9 @@ impl Plugin for WorkshopPlugin {
                 artifact_gen::dispatch_artifact_requests,
                 artifact_gen::handle_artifact_completion,
             ).after(WorkshopCoreSystems))
+            // One-time per Space open: move product meshes that earlier builds wrote
+            // to <Universe>/.eustress/assets/meshes into <Universe>/assets/meshes.
+            .add_systems(Update, artifact_gen::migrate_product_meshes_on_space_open)
             // Autosave: check dirty flag each frame (cheap when not dirty)
             .add_systems(Update, autosave_conversation)
             // Watchman: proactive simulation monitor — injects alert
@@ -2139,25 +2227,9 @@ mod capability_guard_tests {
     /// the gap on the side that actually owns the registrations.
     #[test]
     fn every_engine_registered_tool_is_classified() {
-        let mut registry = tools::ToolRegistry::default();
-        tools::register_all_tools(&mut registry);
-        registry.register(modes::manufacturing::NormalizeBriefTool);
-        registry.register(modes::manufacturing::QueryManufacturersTool);
-        registry.register(modes::manufacturing::QueryInvestorsTool);
-        registry.register(modes::manufacturing::AllocateProductTool);
-        registry.register(modes::simulation::ControlSimulationTool);
-        registry.register(modes::simulation::SetBreakpointTool);
-        registry.register(modes::simulation::ExportRecordingTool);
-        registry.register(modes::supply_chain::RunScenarioTool);
-        registry.register(modes::supply_chain::ForecastDemandTool);
-        registry.register(modes::supply_chain::ScoreSupplierRiskTool);
-        registry.register(modes::warehousing::InventoryCheckTool);
-        registry.register(modes::warehousing::StorageOptimizeTool);
-        registry.register(modes::finance::CalculateCostTool);
-        registry.register(modes::finance::EstimateTaxTool);
-        registry.register(modes::fabrication::SelectProcessTool);
-        registry.register(modes::shopping::PriceProductTool);
-        registry.register(modes::travel::EstimateShippingTool);
+        // The same builder the plugin and the dispatch threads use, so this
+        // checks exactly the set that ships, not a copy of it.
+        let registry = build_tool_registry();
 
         let unclassified: Vec<&str> = registry
             .all_tools()
@@ -2172,5 +2244,145 @@ mod capability_guard_tests {
              classification, so every call is denied at dispatch: {unclassified:?}. \
              Add them to capability_of() in tools/src/capability.rs."
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_dispatch_wiring_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Stop must reach calls that are running or queued on the worker, not only
+    /// close their cards: a long-polling tool watches this flag.
+    #[test]
+    fn stop_tells_every_in_flight_call_and_forgets_them() {
+        let mut tasks = ToolDispatchTasks::default();
+        let mut flags = Vec::new();
+        for id in 1..=3u32 {
+            let (_call, in_flight) = tool_dispatch::PendingCall::new(
+                id,
+                "await_simulation".to_string(),
+                format!("toolu_{id}"),
+                serde_json::json!({}),
+            );
+            flags.push(in_flight.cancel.clone());
+            tasks.in_flight.push(in_flight);
+        }
+
+        assert_eq!(tasks.cancel_all(), 3);
+        assert!(flags.iter().all(|f| f.load(Ordering::Relaxed)), "every call must be told to stop");
+        assert!(tasks.in_flight.is_empty(), "stopped calls are forgotten, so a late answer is never applied");
+        assert_eq!(tasks.cancel_all(), 0, "a second Stop finds nothing left to cancel");
+    }
+
+    /// A card the person approved but that must not run closes with the reason,
+    /// so the conversation is not left waiting on a result that never comes.
+    #[test]
+    fn a_refused_approval_closes_the_card_with_the_reason() {
+        let mut pipeline = IdeationPipeline::default();
+        let id = pipeline.add_mcp_command(
+            "run_bash({})".to_string(),
+            "run_bash".to_string(),
+            "tool_use".to_string(),
+            0.0,
+        );
+        pipeline.awaiting_tool_approval = true;
+
+        let reason = card_review::Refusal::TooLong.message();
+        refuse_approved_card(&mut pipeline, id, reason);
+
+        let card = pipeline.messages.iter().find(|m| m.id == id).expect("the card stays");
+        assert_eq!(card.mcp_status, Some(McpCommandStatus::Error));
+        assert_eq!(card.tool_result.as_deref(), Some(reason), "the model reads this as the tool's result");
+        assert!(
+            pipeline.messages.iter().any(|m| m.role == MessageRole::Notice && m.content == reason),
+            "the person is told why"
+        );
+    }
+}
+
+/// During Play a Workshop or bridge tool call that changes the Space waits
+/// for Stop; a read-only tool and the tools that drive the running session
+/// still run.
+#[cfg(test)]
+mod play_gate_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// The tools that drive the running session, named here rather than read
+    /// from [`PLAY_SESSION_TOOLS`], so a tool dropped from the list fails.
+    const SESSION_TOOLS: [&str; 8] = [
+        "play_input",
+        "set_sim_value",
+        "sim_step",
+        "control_simulation",
+        "set_breakpoint",
+        "run_simulation",
+        "pause_simulation",
+        "stop_simulation",
+    ];
+
+    #[test]
+    fn play_lets_only_reads_and_session_tools_run() {
+        use eustress_tools::Capability;
+        assert_eq!(PLAY_SESSION_TOOLS.as_slice(), SESSION_TOOLS.as_slice());
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let state = State::new(state);
+            let refusal = tool_play_refusal(Some(&state), "create_entity", Some(Capability::Write));
+            assert_eq!(refusal.as_deref(), Some("Stop Play to run create_entity: it changes the Space, and Stop puts the scene back."));
+            assert!(tool_play_refusal(Some(&state), "run_experiment", Some(Capability::Write)).is_some());
+            assert!(tool_play_refusal(Some(&state), "delete_entity", Some(Capability::Destructive)).is_some());
+            assert!(tool_play_refusal(Some(&state), "list_directory", Some(Capability::Read)).is_none());
+            for tool in SESSION_TOOLS {
+                assert!(tool_play_refusal(Some(&state), tool, Some(Capability::Write)).is_none(), "{tool}");
+            }
+        }
+        let editing = State::new(PlayModeState::Editing);
+        assert!(tool_play_refusal(Some(&editing), "create_entity", Some(Capability::Write)).is_none());
+        assert!(tool_play_refusal(None, "create_entity", Some(Capability::Write)).is_none());
+    }
+
+    /// Approve a card for `tool` in `state` and run the Workshop's approval
+    /// handler once, with no Space open: a call the Play gate lets through
+    /// stops at "no Space is loaded", and a refused one closes with its
+    /// reason. Returns the card's result and whether the handler got as far
+    /// as the Space.
+    fn approve(state: PlayModeState, tool: &str) -> (Option<String>, bool) {
+        let mut app = App::new();
+        app.add_message::<WorkshopApproveMcpEvent>();
+        app.insert_resource(State::new(state));
+        app.init_resource::<ToolDispatchTasks>();
+        let mut pipeline = IdeationPipeline::default();
+        let id = pipeline.add_mcp_command(format!("{tool}({{}})"), tool.to_string(), "tool_use".to_string(), 0.0);
+        let card = pipeline.messages.iter_mut().find(|m| m.id == id).expect("the card");
+        card.tool_use_id = Some(format!("toolu_{tool}"));
+        card.tool_input = Some(serde_json::json!({}));
+        app.insert_resource(pipeline);
+        app.add_systems(Update, handle_approve_mcp);
+        app.world_mut().write_message(WorkshopApproveMcpEvent { message_id: id });
+        app.update();
+        let pipeline = app.world().resource::<IdeationPipeline>();
+        let result = pipeline.messages.iter().find(|m| m.id == id).and_then(|m| m.tool_result.clone());
+        let no_space = "Workshop: tool approval received but no Space is loaded.";
+        (result, pipeline.messages.iter().any(|m| m.role == MessageRole::Error && m.content == no_space))
+    }
+
+    /// Through an approved card each tool that drives the running session
+    /// passes the Play gate, though each is a Write tool; a Write tool that
+    /// is not one of them is refused with its reason, and while editing the
+    /// same tool passes.
+    #[test]
+    fn the_session_tools_run_in_play_through_an_approved_card() {
+        use eustress_tools::Capability;
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for tool in SESSION_TOOLS {
+                let class = eustress_tools::capability::capability_of_call(tool, &serde_json::json!({}));
+                assert_eq!(class, Some(Capability::Write), "{tool}");
+                assert_eq!(approve(state, tool), (None, true), "{state:?} {tool}");
+            }
+            let reason = "Stop Play to run run_experiment: it changes the Space, and Stop puts the scene back.".to_string();
+            assert_eq!(approve(state, "run_experiment"), (Some(reason), false), "{state:?}");
+        }
+        assert_eq!(approve(PlayModeState::Editing, "run_experiment"), (None, true));
     }
 }

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Domain: the named set of values a Parameter may take -->
+  <rect x="2.2" y="2.5" width="11.6" height="11" rx="2" stroke="#38bdf8" stroke-width="1" stroke-dasharray="2 1.4"/>
+  <circle cx="5.6" cy="6.4" r="1.6" fill="#38bdf8" opacity="0.45" stroke="#38bdf8" stroke-width="0.9"/>
+  <path d="M7.4 6.4 H12.2 M10.2 6.4 V7.9" stroke="#38bdf8" stroke-width="1" stroke-linecap="round"/>
+  <path d="M5 10.6 H11" stroke="#38bdf8" stroke-width="0.7" opacity="0.6"/>
+</svg>

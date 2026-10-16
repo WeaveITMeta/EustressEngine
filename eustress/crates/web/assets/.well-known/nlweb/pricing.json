@@ -70,7 +70,7 @@
     },
     {
       "@type": "Offer",
-      "name": "Creator Pro",
+      "name": "Creator",
       "description": "For Creators - Enhanced creation tools and revenue",
       "priceMonthly": 9.99,
       "priceYearly": 99.99,
@@ -89,15 +89,28 @@
     },
     {
       "@type": "Offer",
+      "name": "Professional",
+      "description": "For professional work - a large monthly allowance of Delta",
+      "priceMonthly": 129,
+      "priceYearly": 1290,
+      "savingsPercent": 17,
+      "priceCurrency": "USD",
+      "features": [
+        "16,000 Delta monthly (192,000 with yearly billing)",
+        "Bliss cash-out (needs identity verification)"
+      ]
+    },
+    {
+      "@type": "Offer",
       "name": "Bundle",
-      "description": "Player Plus + Creator Pro combined at a discount",
+      "description": "Player Plus + Creator combined at a discount",
       "priceMonthly": 12.99,
       "priceYearly": 129.99,
       "savingsPercent": 17,
       "priceCurrency": "USD",
       "features": [
         "All Player Plus perks",
-        "All Creator Pro perks",
+        "All Creator perks",
         "1,000 Bliss monthly (combined)",
         "10 GB cloud saves",
         "Unlimited asset storage",

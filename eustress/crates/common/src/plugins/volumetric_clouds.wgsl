@@ -234,8 +234,14 @@ fn scene_distance(frag_coord: vec4<f32>) -> f32 {
 #endif
 }
 
+struct CloudOutput {
+    @location(0) color: vec4<f32>,
+    // The cloud's depth, so the volumetric fog stops at it.
+    @builtin(frag_depth) depth: f32,
+}
+
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: VertexOutput) -> CloudOutput {
     let ray = normalize(in.world_position.xyz - view.world_position);
     let altitude = view.world_position.y;
     let mu = ray.y;
@@ -356,5 +362,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef TONEMAP_IN_SHADER
     color = tone_mapping(color, view.color_grading);
 #endif
-    return color;
+    // The depth of the cloud at its weighted distance along the ray. The
+    // volumetric fog (the sun's god rays) is composited after the transparent
+    // pass and stops at this depth, so the haze behind a cloud is hidden.
+    let cloud_point = view.world_position + ray * mean_distance;
+    let clip = view.clip_from_world * vec4<f32>(cloud_point, 1.0);
+    return CloudOutput(color, clip.z / clip.w);
 }

@@ -2,7 +2,6 @@
 
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
-use std::process::Command;
 
 /// Walk upward from `start` looking for a `.git` directory, returning
 /// the first ancestor that contains one. Universe folders are usually
@@ -30,11 +29,13 @@ fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// `ctx.universe_root` — an upward walk from the Universe root can never
 /// reach a repo nested under it (Gap 9). Falls back to `ctx.space_root` if
 /// no repo is found so the error clearly says "not a git repository".
+///
+/// Hooks are off ([`crate::sandbox::git_command`]): a hook is a program the
+/// repository names, and a tool never runs one for its caller.
 fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
     let cwd = find_git_root(&ctx.space_root).unwrap_or_else(|| ctx.space_root.clone());
-    let output = Command::new("git")
+    let output = crate::sandbox::git_command(&cwd)
         .args(args)
-        .current_dir(&cwd)
         .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
 
@@ -44,6 +45,26 @@ fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("git {} failed (cwd={}): {}", args.join(" "), cwd.display(), stderr))
     }
+}
+
+/// [`git`] for a command that changes the repository or its working tree
+/// (add, commit, a branch made, switched, deleted or merged): only in a
+/// repository whose root is the Universe or inside it. The upward walk can
+/// find a repository above the Universe, one that may hold the engine's own
+/// sources or the person's other projects, where a switch or merge rewrites
+/// the whole working tree; there tools read (status, log, diff) and leave
+/// the changes to the person.
+fn git_write(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+    let root = find_git_root(&ctx.space_root)
+        .ok_or_else(|| format!("{} is not inside a git repository", ctx.space_root.display()))?;
+    if !crate::sandbox::is_within(&root, &ctx.universe_root) {
+        return Err(format!(
+            "the repository at {} holds the Universe rather than sitting inside it; tools only read it \
+             (status, log, diff), and commits, branches and merges there are the person's to make",
+            root.display()
+        ));
+    }
+    git(ctx, args)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,14 +155,14 @@ impl ToolHandler for GitCommitTool {
         let stage_result = if let Some(file_list) = files {
             let paths: Vec<&str> = file_list.iter().filter_map(|v| v.as_str()).collect();
             if paths.is_empty() {
-                git(ctx, &["add", "-A"])
+                git_write(ctx, &["add", "-A"])
             } else {
                 let mut args = vec!["add", "--"];
                 args.extend(paths);
-                git(ctx, &args)
+                git_write(ctx, &args)
             }
         } else {
-            git(ctx, &["add", "-A"])
+            git_write(ctx, &["add", "-A"])
         };
 
         if let Err(e) = stage_result {
@@ -156,7 +177,7 @@ impl ToolHandler for GitCommitTool {
         }
 
         // Commit
-        match git(ctx, &["commit", "-m", message]) {
+        match git_write(ctx, &["commit", "-m", message]) {
             Ok(output) => ToolResult {
                 tool_name: "git_commit".to_string(),
                 tool_use_id: String::new(),
@@ -270,7 +291,7 @@ impl ToolHandler for GitDiffTool {
         match git(ctx, &args) {
             Ok(output) => {
                 let truncated = if output.len() > 8000 {
-                    format!("{}...\n[diff truncated — {} bytes total]", &output[..8000], output.len())
+                    format!("{}...\n[diff truncated — {} bytes total]", crate::file_tools::utf8_prefix(&output, 8000), output.len())
                 } else {
                     output
                 };
@@ -322,6 +343,19 @@ impl ToolHandler for GitBranchTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("list");
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        // The name reaches git as an argument, so it must be a branch name and
+        // never an option such as `--orphan`.
+        let name = if name.is_empty() || action == "list" {
+            name
+        } else {
+            match crate::sandbox::git_branch_name(name) {
+                Ok(n) => n,
+                Err(e) => return ToolResult {
+                    tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                    success: false, content: e, structured_data: None, stream_topic: None,
+                },
+            }
+        };
 
         match action {
             "list" => {
@@ -359,7 +393,7 @@ impl ToolHandler for GitBranchTool {
                         structured_data: None, stream_topic: None,
                     };
                 }
-                match git(ctx, &["checkout", "-b", name]) {
+                match git_write(ctx, &["checkout", "-b", name]) {
                     Ok(output) => ToolResult {
                         tool_name: "git_branch".to_string(), tool_use_id: String::new(),
                         success: true,
@@ -381,7 +415,8 @@ impl ToolHandler for GitBranchTool {
                         structured_data: None, stream_topic: None,
                     };
                 }
-                match git(ctx, &["checkout", name]) {
+                // `--`: the name is a branch, never a file to restore.
+                match git_write(ctx, &["checkout", name, "--"]) {
                     Ok(output) => ToolResult {
                         tool_name: "git_branch".to_string(), tool_use_id: String::new(),
                         success: true,
@@ -403,7 +438,7 @@ impl ToolHandler for GitBranchTool {
                         structured_data: None, stream_topic: None,
                     };
                 }
-                match git(ctx, &["branch", "-d", name]) {
+                match git_write(ctx, &["branch", "-d", name]) {
                     Ok(output) => ToolResult {
                         tool_name: "git_branch".to_string(), tool_use_id: String::new(),
                         success: true,
@@ -426,7 +461,7 @@ impl ToolHandler for GitBranchTool {
                     };
                 }
                 let msg = format!("Merge experiment branch '{}'", name);
-                match git(ctx, &["merge", "--no-ff", name, "-m", &msg]) {
+                match git_write(ctx, &["merge", "--no-ff", name, "-m", &msg]) {
                     Ok(output) => ToolResult {
                         tool_name: "git_branch".to_string(), tool_use_id: String::new(),
                         success: true,
@@ -485,6 +520,19 @@ impl ToolHandler for FeedbackDiffTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let base = input.get("base").and_then(|v| v.as_str()).unwrap_or("HEAD~1");
         let compare = input.get("compare").and_then(|v| v.as_str()).unwrap_or("HEAD");
+        // Each ref reaches git inside one argument, so neither may be read as
+        // an option: `--output=<file>` would write a file.
+        let (base, compare) = match (crate::sandbox::git_revision(base), crate::sandbox::git_revision(compare)) {
+            (Ok(b), Ok(c)) => (b, c),
+            (Err(e), _) | (_, Err(e)) => return ToolResult {
+                tool_name: "feedback_diff".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: e,
+                structured_data: None,
+                stream_topic: None,
+            },
+        };
         let path = input.get("path").and_then(|v| v.as_str());
         let stat_only = input.get("stat_only").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -502,7 +550,7 @@ impl ToolHandler for FeedbackDiffTool {
         match git(ctx, &args) {
             Ok(output) => {
                 let truncated = if output.len() > 12000 {
-                    format!("{}...\n[diff truncated — {} bytes total]", &output[..12000], output.len())
+                    format!("{}...\n[diff truncated — {} bytes total]", crate::file_tools::utf8_prefix(&output, 12000), output.len())
                 } else {
                     output.clone()
                 };

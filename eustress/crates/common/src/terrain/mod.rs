@@ -146,6 +146,30 @@ pub mod height_query;
 /// matching the `worldgen`/`voxel_extract` convention for newer, domain-
 /// specific modules, avoiding name collisions with the editor/brush modules.
 pub mod road;
+/// Road design to a class standard (docs/design/ROAD_SYSTEM.md): class
+/// standards, the horizontal alignment of tangents, clothoid spirals and
+/// arcs through PIs, the auto-graded vertical profile with vertical curves,
+/// the cross-section formation and its daylight slopes, and the audit of a
+/// design against its standard. Pure `f64` math with no engine types.
+/// Referenced via the explicit `road_design::` path.
+pub mod road_design;
+/// What a designed road becomes: surface meshes with metre UVs (carriageway,
+/// shoulders, kerbs, sidewalks), painted markings that follow the passing
+/// sight distance, and the corridor sampler the terrain bake shapes the
+/// ground with. Pure math over a `road_design` design. Referenced via the
+/// explicit `road_mesh::` path.
+pub mod road_mesh;
+/// At-grade junctions: kerb returns sized for the design vehicle, setbacks,
+/// traffic control from the classes that meet, crosswalks and stop bars, and
+/// the lane paths through the box for the road graph. Pure math over
+/// `road_design` standards. Referenced via the explicit `road_junction::`
+/// path.
+pub mod road_junction;
+/// Road furniture: signals and stop signs from each junction's control, and
+/// staggered streetlights with lamps along kerbed roads, merged into one
+/// mesh per finish. Pure math over `road_junction` and `road_mesh`.
+/// Referenced via the explicit `road_furniture::` path.
+pub mod road_furniture;
 /// The ribbon mesh and collider laid along every Road-mode `TerrainSpline`,
 /// built from the stations its corridor was baked along. Added by
 /// `TerrainLayersPlugin`; referenced via the explicit `road_surface::` path.
@@ -271,7 +295,8 @@ pub use texture_arrays::{
     TerrainTextureLayer, TerrainTextureResolution, TerrainTextureSettings, TerrainTextureStatus,
 };
 pub use surface_material::{
-    settle_terrain_surface_bindings, swap_terrain_chunk_materials, sync_terrain_height_textures, sync_terrain_surfaces,
+    settle_terrain_surface_bindings, swap_terrain_chunk_materials, swap_terrain_draped_materials,
+    sync_terrain_height_textures, sync_terrain_surfaces, TerrainDraped,
     TerrainHeightTexture, TerrainHeightTextureRequest, TerrainSlotRecord, TerrainSurface, TerrainSurfaceBindings,
     TerrainSurfaceExtension, TerrainSurfaceMaterial, TerrainSurfaceParams, TerrainSurfacePlugin,
 };

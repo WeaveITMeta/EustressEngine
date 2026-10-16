@@ -388,6 +388,8 @@ fn paint_hud(
             label_hash(&local).hash(&mut h);
             px.hash(&mut h);
             scale.to_bits().hash(&mut h);
+            // A GUI image file that changed on disk repaints its panel.
+            gui_images.generation().hash(&mut h);
             h.finish()
         };
 

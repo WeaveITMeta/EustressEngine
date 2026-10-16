@@ -1408,7 +1408,16 @@ async fn cmd_server(action: ServerCommands) -> Result<()> {
 // cmd_publish
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The code below the bail is kept for reference and never runs.
+#[allow(unreachable_code, unused_variables)]
 async fn cmd_publish(args: PublishArgs) -> Result<()> {
+    // This path once called wrangler directly and wrote to the bucket,
+    // bypassing the export preflight (the key screen and the SoulService
+    // strip), moderation, and the approval binding. A future CLI publish must
+    // go through the same export as Studio, with Destination::Publish (the
+    // leaves-the-machine screen), and through the Worker's publish endpoint,
+    // never a direct bucket write.
+    anyhow::bail!("Publishing from the CLI is not available; publish from Studio.");
     let space_path = args.space_path
         .canonicalize()
         .with_context(|| format!("Space path not found: {}", args.space_path.display()))?;

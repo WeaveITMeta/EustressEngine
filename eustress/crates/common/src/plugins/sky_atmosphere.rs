@@ -114,6 +114,8 @@ impl Plugin for SkyAtmospherePlugin {
             .register_type::<EustressAtmosphere>()
             .register_type::<AtmosphereRenderingMode>()
             .add_systems(Startup, build_star_field)
+            .add_systems(Update, log_settled_exposure.after(SkyLightSet))
+            .add_systems(Update, warn_refused_skybox)
             .add_systems(
                 Update,
                 (
@@ -281,10 +283,45 @@ pub fn sky_mode_override() -> Option<SkyMode> {
 /// read `Sky.skybox_textures` never, which is precisely the failure mode this
 /// module was written to remove.
 fn has_authored_skybox(sky: &Sky) -> bool {
+    skybox_url(sky).is_some()
+}
+
+/// Whether the Sky names all six faces.
+fn names_every_face(sky: &Sky) -> bool {
     let t = &sky.skybox_textures;
     ![&t.right, &t.left, &t.up, &t.down, &t.front, &t.back]
         .iter()
         .any(|s| s.trim().is_empty())
+}
+
+/// The asset URL of the Sky's cubemap: `None` unless it names all six faces
+/// and the path the loader reads lies inside the Space.
+///
+/// The path is a string from the Space, and a Space can come from anyone, so
+/// it goes through [`crate::space_path::contained_url`] before the asset
+/// server sees it: `../x.png` and `C:/x.png` would read outside the Space,
+/// and a network share would open over SMB and send the user's credentials to
+/// its host. `space://`, `bundled://` and `embedded://` with safe relative
+/// paths pass; a bare path is the Space's own file. Only the face the loader
+/// reads (`right`) is opened, so only it is checked.
+pub fn skybox_url(sky: &Sky) -> Option<String> {
+    if !names_every_face(sky) {
+        return None;
+    }
+    crate::space_path::contained_url(&sky.skybox_textures.right, std::path::Path::new(""))
+}
+
+/// Say, once per edit, that a Sky names all six faces but its cubemap is
+/// outside the Space, which leaves the sky on the atmosphere.
+fn warn_refused_skybox(skies: Query<&Sky, Changed<Sky>>) {
+    for sky in &skies {
+        if names_every_face(sky) && skybox_url(sky).is_none() {
+            warn!(
+                "🌅 Sky.skybox_textures: {:?} is outside the Space (or names another source); not loaded, the sky stays on the atmosphere",
+                sky.skybox_textures.right
+            );
+        }
+    }
 }
 
 /// Choose the sky path, and re-apply it to every camera at once if it changed.
@@ -989,14 +1026,13 @@ fn apply_custom_skybox(
         return;
     }
 
-    let authored = all_skies.iter().find(|s| has_authored_skybox(s));
+    let authored = all_skies.iter().find_map(skybox_url);
 
-    let image = if let Some(sky) = authored {
+    let image = if let Some(url) = &authored {
         // Bevy wants the six faces as one array texture; an author-supplied
         // strip is loaded as-is and reinterpreted as a cube.
-        let path = sky.skybox_textures.right.clone();
-        warn_once_on_multiface(&path);
-        asset_server.load(path)
+        warn_once_on_multiface(url);
+        asset_server.load(url.clone())
     } else {
         create_gradient_skybox(&mut images, &scene.atmosphere)
     };
@@ -1107,6 +1143,23 @@ pub fn disc_visibility(sin_elevation: f32, angular_radius: f32) -> f32 {
     (0.5 + 0.5 * elevation / angular_radius.max(1e-4)).clamp(0.0, 1.0)
 }
 
+/// The lift the air gives a body at `elevation` (radians), in radians: Bennett's
+/// refraction, 34 arcminutes at the horizon, capped there. The sky dome lifts
+/// the sun's disc by the same amount (`refraction_lift` in `sky_dome.wgsl`).
+pub fn refraction_lift(elevation: f32) -> f32 {
+    let h = elevation.to_degrees().clamp(-1.0, 90.0);
+    let arcmin = (1.0 / (h + 7.31 / (h + 4.4)).to_radians().tan()).min(34.0);
+    (arcmin / 60.0).to_radians()
+}
+
+/// The sine of the elevation the sun's disc is drawn at: its centre lifted by
+/// [`refraction_lift`] and renormalised, exactly as the sky dome lifts it.
+pub fn drawn_sin_elevation(sin_elevation: f32) -> f32 {
+    let s = sin_elevation.clamp(-1.0, 1.0);
+    let lift = refraction_lift(s.asin());
+    (s + lift) / (1.0 + 2.0 * lift * s + lift * lift).sqrt()
+}
+
 /// The authored atmosphere's scattering medium, on the CPU.
 ///
 /// The same [`ScatteringMedium`] [`build_scattering_medium`] hands the GPU,
@@ -1209,6 +1262,10 @@ pub struct SkyLight {
     pub moon_light: Vec3,
     /// Sunlight reaching the ground, on a surface facing the sun.
     pub sun_ground: Vec3,
+    /// The sun's disc as drawn: its light through the air at the elevation the
+    /// disc is seen at (lifted by refraction), at the disc's own size. See
+    /// [`drawn_sin_elevation`].
+    pub sun_disc_light: Vec3,
     /// Moonlight reaching the ground, on a surface facing the moon.
     pub moon_ground: Vec3,
     /// Diffuse light from the sky dome on a level surface, lux.
@@ -1229,6 +1286,7 @@ impl Default for SkyLight {
             sun_light: sun,
             moon_light: Vec3::ZERO,
             sun_ground: sun,
+            sun_disc_light: sun,
             moon_ground: Vec3::ZERO,
             sky_lux: clear_sky_lux(90.0),
             night: 0.0,
@@ -1319,6 +1377,10 @@ fn update_sky_light(
     let sun_ground = sun_light
         * medium.transmittance(0.0, sun_direction.y)
         * disc_visibility(sun_direction.y, (SUN_LIGHT_ANGULAR_SIZE * 0.5).to_radians());
+    // The disc is drawn where the air shows it, at its own size. The horizon
+    // cuts the disc itself (`above` in sky_dome.wgsl), so no visibility ramp
+    // applies here: the ramp is for the ground's light.
+    let sun_disc_light = sun_light * medium.transmittance(0.0, drawn_sin_elevation(sun_direction.y));
 
     // No Moon in the Space, no moonlight.
     let authored_moon = moon.iter().next();
@@ -1350,6 +1412,7 @@ fn update_sky_light(
         sun_light,
         moon_light,
         sun_ground,
+        sun_disc_light,
         moon_ground,
         sky_lux,
         night,
@@ -1387,6 +1450,67 @@ impl SkyExposure {
 pub fn adapted_ev100(base_ev100: f32, key_lux: f32) -> f32 {
     let stops = (key_lux.max(1e-6) / KEY_LUX_AT_BASE).log2() * ADAPTATION;
     base_ev100 + stops.clamp(-MAX_NIGHT_ADAPTATION_EV, 0.0)
+}
+
+/// How long the Time of Day must stay still before its settled exposure is
+/// reported, seconds.
+const SETTLE_REPORT_SECONDS: f32 = 2.0;
+
+/// Notices when the clock stops moving.
+#[derive(Default)]
+struct SettleWatch {
+    clock: Option<f32>,
+    moved_at: Option<f32>,
+}
+
+impl SettleWatch {
+    /// Feed it the clock and the time. True exactly once, `SETTLE_REPORT_SECONDS`
+    /// after the clock last moved. The first reading is a baseline, never a move.
+    fn step(&mut self, clock: f32, now: f32) -> bool {
+        let Some(last) = self.clock.replace(clock) else { return false };
+        if (clock - last).abs() > 1e-6 {
+            self.moved_at = Some(now);
+            return false;
+        }
+        match self.moved_at {
+            Some(at) if now - at >= SETTLE_REPORT_SECONDS => {
+                self.moved_at = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Two seconds after a Time of Day change ends, say where the exposure
+/// settled: one line, so a report of an over-bright night can be told
+/// from the transient of a drag (the exposure follows the light in about
+/// a third of a second) without a capture.
+fn log_settled_exposure(
+    time: Res<Time>,
+    lighting: Res<LightingService>,
+    active: Res<ActiveSkyMode>,
+    exposure: Res<SkyExposure>,
+    sky_light: Res<SkyLight>,
+    mut watch: Local<SettleWatch>,
+) {
+    if !watch.step(lighting.time_of_day, time.elapsed_secs()) {
+        return;
+    }
+    info!(
+        "🌙 Time of Day settled at {} on the {:?} sky path: camera EV100 {:.2} (adapted {:.2}, compensation {:+.2}), \
+         key light {:.4} lux, sky {:.4} lux, sun on the ground {:.1} lux, moon {:.4} lux, night {:.2}",
+        lighting.clock_time,
+        active.0,
+        exposure.camera_ev100,
+        exposure.adapted_ev100,
+        lighting.exposure_compensation,
+        sky_light.key_lux,
+        sky_light.sky_lux,
+        luminance(sky_light.sun_ground),
+        luminance(sky_light.moon_ground),
+        sky_light.night,
+    );
 }
 
 /// Move the exposure toward what this frame's light calls for.
@@ -2463,6 +2587,87 @@ mod tests {
             "ev100 {} is near bevy's Blender default and will blow the sky out",
             e.ev100
         );
+    }
+
+    /// A Sky naming `face` for all six cubemap faces.
+    fn sky_naming(face: &str) -> Sky {
+        let faces = || face.to_string();
+        Sky {
+            skybox_textures: crate::classes::SkyboxTextures {
+                front: faces(),
+                back: faces(),
+                left: faces(),
+                right: faces(),
+                up: faces(),
+                down: faces(),
+            },
+            ..Sky::default()
+        }
+    }
+
+    #[test]
+    fn a_skybox_outside_the_space_is_not_authored() {
+        for bad in [
+            "../x.png",
+            "Sky/../../x.png",
+            "C:/x.png",
+            r"C:\Windows\win.ini",
+            "space://../x.png",
+            "bundled://../../x",
+            "file:///x.png",
+            "https://example.com/x.png",
+            "x.png:stream",
+        ] {
+            let sky = sky_naming(bad);
+            assert_eq!(skybox_url(&sky), None, "{bad:?}");
+            assert!(!has_authored_skybox(&sky), "{bad:?} must not select the cubemap path");
+        }
+    }
+
+    #[test]
+    fn a_skybox_inside_the_space_loads_from_it() {
+        assert_eq!(skybox_url(&sky_naming("Sky/right.png")).as_deref(), Some("space://Sky/right.png"));
+        assert_eq!(skybox_url(&sky_naming("bundled://sky/day.ktx2")).as_deref(), Some("bundled://sky/day.ktx2"));
+        assert!(has_authored_skybox(&sky_naming("Sky/right.png")));
+        // A share path is kept inside the Space's own folder, never opened as a share.
+        for share in ["//host/share/sky.png", r"\\host\share\sky.png"] {
+            assert_eq!(skybox_url(&sky_naming(share)).as_deref(), Some("space://host/share/sky.png"), "{share:?}");
+        }
+    }
+
+    #[test]
+    fn a_sky_without_all_six_faces_has_no_skybox() {
+        assert_eq!(skybox_url(&Sky::default()), None, "the default is empty");
+        assert!(!has_authored_skybox(&Sky::default()));
+        let mut sky = sky_naming("Sky/right.png");
+        sky.skybox_textures.up.clear();
+        assert_eq!(skybox_url(&sky), None, "five faces are not a sky");
+    }
+
+    #[test]
+    fn a_clock_that_stops_is_reported_once_after_two_seconds() {
+        let mut w = SettleWatch::default();
+        assert!(!w.step(0.5, 0.0), "the first reading is a baseline");
+        assert!(!w.step(0.5, 10.0), "a clock that never moved reports nothing");
+        // A drag.
+        assert!(!w.step(0.6, 11.0));
+        assert!(!w.step(0.7, 11.5));
+        // Let go.
+        assert!(!w.step(0.7, 12.0));
+        assert!(!w.step(0.7, 13.4), "1.9 s is not enough");
+        assert!(w.step(0.7, 13.6), "2.1 s after the last move");
+        assert!(!w.step(0.7, 20.0), "once");
+        // The next drag reports again.
+        assert!(!w.step(0.8, 21.0));
+        assert!(w.step(0.8, 23.0));
+    }
+
+    #[test]
+    fn a_running_day_cycle_never_reports() {
+        let mut w = SettleWatch::default();
+        for i in 0..1000 {
+            assert!(!w.step(i as f32 * 0.001, i as f32 * 0.1));
+        }
     }
 
     #[test]

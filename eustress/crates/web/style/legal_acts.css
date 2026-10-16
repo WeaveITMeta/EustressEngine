@@ -1,0 +1,104 @@
+/* The legal act pages (/legal/:act) and the Legal index (/acts), in the Gallery's look (gallery.css tokens and g-* parts).
+   One layout for every act: a lead, five numbered sections, and a side panel with the contact, the first response time and the other acts. */
+
+.lg-wrap { padding-bottom: 64px; }
+
+/* ---- Lead ---- */
+.lg-head { padding: 6px 0 26px; border-bottom: 1px solid var(--g-line); margin-bottom: 8px; }
+.lg-title { margin: 0 0 12px; font-size: clamp(30px, 4vw, 50px); line-height: 1.08; letter-spacing: -0.025em; font-weight: 700; overflow-wrap: anywhere; }
+.lg-lede { margin: 0 0 18px; max-width: 64ch; color: var(--g-text-2); font-size: 17px; }
+
+/* ---- Body and side panel ---- */
+.lg-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 40px; align-items: start; }
+.lg-body { min-width: 0; }
+.lg-body p { max-width: 70ch; color: var(--g-text-2); margin: 0 0 14px; }
+
+/* main.css pads every bare `section` on a phone; these sit in the page's own column. */
+.lg-page .lg-sec { padding: 34px 0 0; scroll-margin-top: 90px; }
+.lg-sec-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.lg-sec-head h2 { margin: 0; font-size: 21px; letter-spacing: -0.01em; font-weight: 650; }
+.lg-num { color: var(--g-accent-bright); font-size: 13px; letter-spacing: 0.08em; padding: 2px 8px; border: 1px solid rgba(60, 186, 84, 0.4); border-radius: 6px; background: var(--g-accent-soft); }
+
+/* What we hold: two columns (the kind, then what it contains with how long we keep it under it);
+   three columns once the body is wide enough, one on a phone. */
+.lg-table { display: grid; margin: 8px 0 16px; padding: 4px 0; overflow: hidden; }
+.lg-tr { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 4px 16px; padding: 14px 20px; border-top: 1px solid var(--g-line); font-size: 14px; color: var(--g-text-2); }
+.lg-tr:first-child { border-top: 0; }
+.lg-th { padding-top: 10px; padding-bottom: 10px; color: var(--g-muted); font: 600 11px var(--g-mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.lg-th span:last-child { display: none; }
+.lg-tk { color: var(--g-text); font-weight: 600; }
+.lg-kept { grid-column: 2; color: var(--g-text); }
+.lg-kept::before { content: "Kept: "; color: var(--g-muted); }
+@media (min-width: 1200px) {
+    .lg-tr { grid-template-columns: 160px minmax(0, 1fr) 190px; gap: 16px; }
+    .lg-th span:last-child { display: inline; }
+    .lg-kept { grid-column: auto; }
+    .lg-kept::before { content: none; }
+}
+
+/* Rights: one glass card each, with how it can be used today. */
+.lg-rights { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.lg-right { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 18px 20px; }
+.lg-right h3 { margin: 4px 0 0; font-size: 16.5px; }
+.lg-right .lg-what { margin: 0; color: var(--g-text); font-size: 14.5px; }
+.lg-right .lg-how { margin: 0; color: var(--g-text-2); font-size: 14px; flex: 1; }
+.lg-link { margin-top: 4px; color: var(--g-accent-bright) !important; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.lg-link:hover { text-decoration: underline; }
+
+/* How to file: numbered steps in the mono face. */
+.lg-steps { list-style: none; counter-reset: lg-step; margin: 0 0 18px; padding: 0; display: grid; gap: 10px; max-width: 70ch; }
+.lg-steps li { counter-increment: lg-step; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; color: var(--g-text-2); }
+.lg-steps li::before { content: counter(lg-step, decimal-leading-zero); font: 600 13px/1.9 var(--g-mono); color: var(--g-accent-bright); }
+
+.lg-kv { max-width: 70ch; }
+.lg-kv dd { font-family: var(--g-sans); }
+
+.lg-note { margin-top: 34px !important; padding-top: 18px; border-top: 1px solid var(--g-line); color: var(--g-muted) !important; font-size: 13.5px; }
+
+/* Side panel */
+.lg-aside { position: sticky; top: 92px; display: grid; gap: 14px; }
+.lg-aside h2 { margin: 0 0 12px; font: 600 11px var(--g-mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--g-text-2); }
+.lg-glance { padding: 18px 20px; }
+.lg-glance-kv { margin: 0; display: grid; gap: 4px; }
+.lg-glance-kv dt { color: var(--g-muted); font: 600 11px var(--g-mono); letter-spacing: 0.1em; text-transform: uppercase; margin-top: 10px; }
+.lg-glance-kv dt:first-child { margin-top: 0; }
+.lg-glance-kv dd { margin: 0; color: var(--g-text); font-size: 14px; overflow-wrap: anywhere; }
+.lg-glance-kv .lg-link { margin: 0; }
+.lg-acts { padding: 16px 12px; display: grid; gap: 2px; }
+.lg-acts h2 { padding: 0 8px; }
+.lg-acts a { display: grid; gap: 1px; padding: 8px; border-radius: 10px; border: 1px solid transparent; }
+.lg-acts a .g-mono { font-size: 12.5px; font-weight: 600; color: var(--g-text); }
+.lg-acts a .lg-acts-name { font-size: 12.5px; color: var(--g-muted); }
+.lg-acts a:hover { background: rgba(143, 160, 182, 0.08); }
+.lg-acts a.on { border-color: rgba(60, 186, 84, 0.45); background: var(--g-accent-soft); }
+.lg-acts a.on .g-mono { color: var(--g-accent-bright); }
+
+/* ---- The Legal index (/acts) ---- */
+.lg-index-head { padding: 10px 0 30px; }
+.lg-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.lg-card { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 22px; min-height: 190px; transition: border-color 0.18s ease, transform 0.18s ease; }
+.lg-card:hover { border-color: var(--g-line-strong); transform: translateY(-2px); }
+.lg-card-code { font: 700 22px var(--g-mono); letter-spacing: -0.01em; color: var(--g-text); }
+.lg-card-name { color: var(--g-accent-bright); font-size: 13.5px; font-weight: 600; }
+.lg-card p { margin: 0; color: var(--g-text-2); font-size: 14.5px; flex: 1; }
+.lg-card-go { color: var(--g-muted); font-size: 13.5px; font-weight: 600; }
+.lg-card:hover .lg-card-go { color: var(--g-text); }
+.lg-contacts { max-width: 720px; }
+
+/* ---- Narrow screens ---- */
+@media (max-width: 960px) {
+    .lg-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .lg-aside { position: static; grid-row: 1; grid-template-columns: minmax(0, 1fr); }
+    .lg-acts { display: none; }
+}
+@media (max-width: 600px) {
+    .lg-page .g-wrap { width: calc(100% - 32px); }
+    .lg-tr { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 12px 16px; }
+    .lg-tr .lg-kept { grid-column: 1; color: var(--g-muted); }
+    .lg-th { display: none; }
+    .lg-sec-head h2 { font-size: 18.5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lg-card, .lg-card:hover { transition: none; transform: none; }
+}

@@ -36,9 +36,9 @@
 //!   purchased only once the Worker shows it, never on the player's word.
 //! - A consumable `ProcessReceipt` granted is marked fulfilled, live.
 //!
-//! Commerce needs the Universe published (products belong to its listing,
-//! whose id is `remote.experience_id` in `<Universe>/.eustress/sync.toml`)
-//! and a signed-in creator. Without either, scripts see the service as
+//! Commerce needs the Universe published (products belong to its listing on
+//! the API in use, `RemoteState::listing_id` in
+//! `<Universe>/.eustress/sync.toml`) and a signed-in creator. Without either, scripts see the service as
 //! unavailable and every prompt closes unpurchased.
 //!
 //! Requests run on short-lived threads and report back through an inbox the
@@ -816,38 +816,118 @@ fn local_user_id(g: &DataModel) -> Option<f64> {
 // The host's own identity
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// When this host starts listening, fetch its identity ticket (audience: its
-/// certificate pin) and give it to the session, so every Welcome carries it.
-/// Joining players check it before they buy. Runs every frame, Play or not.
+/// How often a hosting session mints its identity ticket again: half the
+/// 600 s a ticket lives (the Worker's `identity.mjs`), so every Welcome
+/// carries one with time left. A joining player checks it once, as it joins.
+const HOST_TICKET_REFRESH: Duration = Duration::from_secs(300);
+/// How soon a failed mint is tried again.
+const HOST_TICKET_RETRY: Duration = Duration::from_secs(30);
+/// How long a ticket lives. Past this a Welcome carries no ticket rather
+/// than a dead one.
+const HOST_TICKET_LIFETIME: Duration = Duration::from_secs(600);
+
+/// The hosting session's identity ticket, kept current.
+#[derive(Default)]
+pub struct HostTicket {
+    /// Its audience, the certificate pin as hex; `None` while not hosting.
+    audience: Option<String>,
+    /// When the request for the ticket the session carries went out: the
+    /// Worker's 600 s start no later than this.
+    minted_at: Option<Instant>,
+    /// When the last mint failed, while failures go on.
+    failed_at: Option<Instant>,
+    /// The mint in flight: when it went out, and its answer once it comes.
+    pending: Option<(Instant, Arc<Mutex<Option<Result<String, String>>>>)>,
+}
+
+/// Whether to mint the host's identity ticket now: never while a mint is in
+/// flight; [`HOST_TICKET_RETRY`] after a failure; at once when the session has
+/// none; else [`HOST_TICKET_REFRESH`] after the last.
+fn should_mint(minted_at: Option<Instant>, failed_at: Option<Instant>, in_flight: bool, now: Instant) -> bool {
+    if in_flight {
+        return false;
+    }
+    if let Some(failed) = failed_at {
+        return now.saturating_duration_since(failed) >= HOST_TICKET_RETRY;
+    }
+    minted_at.map_or(true, |at| now.saturating_duration_since(at) >= HOST_TICKET_REFRESH)
+}
+
+/// While this Studio hosts, keep its identity ticket (audience: its
+/// certificate pin) current in the session, so every Welcome carries one a
+/// joining player can check before it buys: minted when the host starts
+/// listening, again every [`HOST_TICKET_REFRESH`], with the sign-in as it is
+/// at each mint. Real time, so a paused Play keeps it current. Runs every
+/// frame, Play or not.
 pub fn announce_host_identity(
     mut notices: MessageReader<NetNotice>,
     auth: Option<Res<crate::auth::AuthState>>,
     host: Option<ResMut<HostSession>>,
-    mut pending: Local<Option<Arc<Mutex<Option<String>>>>>,
+    mut ticket: Local<HostTicket>,
 ) {
     for notice in notices.read() {
-        let NetNotice::Hosting { pin, .. } = notice else { continue };
-        let Some(token) = auth.as_ref().and_then(|a| a.token.clone()).filter(|t| !t.trim().is_empty()) else {
-            continue;
-        };
-        let slot = Arc::new(Mutex::new(None));
-        let out = slot.clone();
-        let audience = hex32(pin);
-        let started = std::thread::Builder::new().name("eustress-host-identity".into()).spawn(move || {
-            match fetch_identity_ticket(&token, &audience) {
-                Ok(ticket) => *out.lock() = Some(ticket),
-                Err(e) => warn!("multiplayer: no host identity ticket ({e}); players cannot buy in this session"),
-            }
-        });
-        if started.is_ok() {
-            *pending = Some(slot);
+        match notice {
+            // A new hosting session mints for its own pin.
+            NetNotice::Hosting { pin, .. } => *ticket = HostTicket { audience: Some(hex32(pin)), ..Default::default() },
+            NetNotice::HostEnded { .. } => *ticket = HostTicket::default(),
+            _ => {}
         }
     }
-    let ready = pending.as_ref().and_then(|slot| slot.lock().take());
-    if let Some(ticket) = ready {
-        *pending = None;
-        if let Some(mut host) = host {
-            host.set_identity(Some(ticket));
+    let Some(mut host) = host else {
+        *ticket = HostTicket::default();
+        return;
+    };
+    let now = Instant::now();
+    let answer = ticket.pending.as_ref().and_then(|(sent, slot)| Some((*sent, slot.lock().take()?)));
+    if let Some((sent, answer)) = answer {
+        ticket.pending = None;
+        match answer {
+            Ok(fresh) => {
+                host.set_identity(Some(fresh));
+                // From when it was asked for: the Worker's clock started no
+                // later, so the session never carries it past its life.
+                ticket.minted_at = Some(sent);
+                if ticket.failed_at.take().is_some() {
+                    info!("multiplayer: the host identity ticket is current again; players who join can buy");
+                }
+            }
+            Err(e) => {
+                // Once per run of failures, not every retry.
+                if ticket.failed_at.is_none() {
+                    warn!(
+                        "multiplayer: no host identity ticket ({e}); players who join now cannot buy until one is \
+                         fetched (trying again every {} s)",
+                        HOST_TICKET_RETRY.as_secs()
+                    );
+                }
+                ticket.failed_at = Some(now);
+            }
+        }
+    }
+    // A ticket past its life: Welcomes carry none rather than a dead one.
+    if ticket.minted_at.is_some_and(|at| now.saturating_duration_since(at) >= HOST_TICKET_LIFETIME) {
+        host.set_identity(None);
+        ticket.minted_at = None;
+    }
+    let Some(audience) = ticket.audience.clone() else { return };
+    if !should_mint(ticket.minted_at, ticket.failed_at, ticket.pending.is_some(), now) {
+        return;
+    }
+    let Some(token) = auth.as_ref().and_then(|a| a.token.clone()).filter(|t| !t.trim().is_empty()) else {
+        return;
+    };
+    let slot = Arc::new(Mutex::new(None));
+    let out = slot.clone();
+    let started = std::thread::Builder::new()
+        .name("eustress-host-identity".into())
+        .spawn(move || *out.lock() = Some(fetch_identity_ticket(&token, &audience)));
+    match started {
+        Ok(_) => ticket.pending = Some((now, slot)),
+        Err(e) => {
+            if ticket.failed_at.is_none() {
+                warn!("multiplayer: could not start the host identity request ({e})");
+            }
+            ticket.failed_at = Some(now);
         }
     }
 }
@@ -884,11 +964,12 @@ fn session_api(space_root: Option<&crate::space::SpaceRoot>, auth: Option<&crate
     })
 }
 
-/// The Universe's listing id, if it has been published.
+/// The Universe's listing id on the API in use, if it has been published
+/// there.
 fn published_id(universe: &Path) -> Option<String> {
     let path = universe.join(".eustress").join("sync.toml");
     let sync = eustress_common::load_toml_file::<eustress_common::SyncManifest>(&path).ok()?;
-    let id = sync.remote.experience_id?.trim().to_string();
+    let id = sync.remote.listing_id()?.to_string();
     let valid = (8..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
     valid.then_some(id)
 }
@@ -1195,5 +1276,23 @@ mod tests {
         .unwrap();
         assert_eq!((r.purchase_id.as_str(), r.product, r.price, r.user_id), ("pur_x", 3, 50, 7.0));
         assert_eq!(r.space.as_deref(), Some("Lobby"));
+    }
+
+    /// A hosting session mints its identity ticket at once, again before the
+    /// one it carries expires, 30 s after a failure, and never two at a time,
+    /// so a player who joins at minute 11 or 21 can still buy.
+    #[test]
+    fn the_host_ticket_is_minted_again_before_it_expires() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert!(should_mint(None, None, false, t0), "a new session mints at once");
+        assert!(!should_mint(None, None, true, t0), "never two at a time");
+        assert!(!should_mint(Some(t0), None, false, at(299)));
+        assert!(should_mint(Some(t0), None, false, at(300)), "again at half the ticket's life");
+        assert!(!should_mint(Some(t0), None, true, at(300)), "not while one is in flight");
+        assert!(!should_mint(Some(t0), Some(at(300)), false, at(329)), "a failure waits 30 s");
+        assert!(should_mint(Some(t0), Some(at(300)), false, at(330)));
+        assert!(should_mint(None, Some(at(600)), false, at(630)), "an expired ticket keeps retrying");
+        assert!(HOST_TICKET_REFRESH * 2 <= HOST_TICKET_LIFETIME, "a fresh ticket lands before the old one dies");
     }
 }

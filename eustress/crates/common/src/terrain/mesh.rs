@@ -15,6 +15,7 @@ use bevy::asset::RenderAssetUsages;
 use noise::{NoiseFn, Perlin, Fbm, MultiFractal};
 use super::{TerrainConfig, TerrainData};
 use super::height_query::material_weights_at_uv;
+use super::volume::{lattice_cell_size, TerrainVolume};
 use super::material::{height_to_color, HeightBlendParams, TerrainMaterial};
 use super::material_slots::TerrainSlotPalette;
 
@@ -76,6 +77,16 @@ fn baked_shade(ao: f32, normal: Vec3, world_x: f32, world_z: f32, seed: u32) -> 
     let variation =
         1.0 + MACRO_VARIATION * hash_noise(world_x * MACRO_FREQ, world_z * MACRO_FREQ, seed ^ 0x9E37);
     (ao * slope_shade * variation).clamp(0.35, 1.2)
+}
+
+/// Vertex colour of a mesh draped on the terrain (a road's earth wedges),
+/// drawn in the terrain's surface material: white under the shade the
+/// heightfield bakes for its slope and place (see [`baked_shade`]; there is
+/// no height raster under it to take curvature AO from), the shade in alpha
+/// as the surface material reads it.
+pub fn draped_vertex_color(normal: Vec3, world_x: f32, world_z: f32, seed: u32) -> [f32; 4] {
+    let shade = baked_shade(1.0, normal, world_x, world_z, seed);
+    [shade, shade, shade, shade]
 }
 
 /// What the baked heightfield vertex colour reads, set up once per mesh.
@@ -443,6 +454,22 @@ pub fn generate_chunk_mesh(
     data: &TerrainData,
     meshes: &mut Assets<Mesh>,
 ) -> Handle<Mesh> {
+    generate_chunk_mesh_over(chunk_pos, lod, config, data, TerrainVolume::empty(), meshes)
+}
+
+/// [`generate_chunk_mesh`] over the terrain's `volume`: no skirt segment
+/// hangs where it would pass through a volumetric edit (see
+/// [`skirt_segments_clear_of_edits`]), as a marching-cubes chunk hangs none
+/// there either. A chunk holding edits is drawn this way at LOD 1 and
+/// coarser, where a skirt would otherwise hang through a tunnel's bore.
+pub fn generate_chunk_mesh_over(
+    chunk_pos: IVec2,
+    lod: u32,
+    config: &TerrainConfig,
+    data: &TerrainData,
+    volume: &TerrainVolume,
+    meshes: &mut Assets<Mesh>,
+) -> Handle<Mesh> {
     let resolution = config.resolution_for_lod(lod);
     let size = config.chunk_size;
     let height_scale = config.height_scale;
@@ -551,6 +578,7 @@ pub fn generate_chunk_mesh(
     }
 
     // Add skirts for LOD seam hiding
+    let clear = skirt_segments_clear_of_edits(chunk_pos, resolution, config, volume, &positions);
     add_skirts(
         &mut positions,
         &mut normals,
@@ -561,6 +589,7 @@ pub fn generate_chunk_mesh(
         size,
         height_scale,
         ground.as_deref(),
+        clear.as_ref(),
     );
     
     // Build mesh
@@ -678,6 +707,56 @@ fn calculate_normals(normals: &mut Vec<[f32; 3]>, positions: &[[f32; 3]], resolu
     }
 }
 
+/// Per side of a chunk's heightfield mesh, in the order `add_skirts` builds
+/// them (-Z, +Z, -X, +X), whether each border segment may hang a skirt.
+type SkirtSegments = [Vec<bool>; 4];
+
+/// Which border segments of `chunk_pos`'s heightfield mesh at `resolution`
+/// (its vertices' `positions`, border first as `generate_chunk_mesh_over`
+/// lays them out) may hang a skirt: those whose every LOD-0 lattice column,
+/// from the segment's higher end down past its skirt's foot, holds no
+/// volumetric edit. A skirt never hangs through a tunnel or a cave that
+/// reaches the chunk's border, the rule a marching-cubes chunk's skirts keep
+/// (see `marching`). `None` for a terrain without edits: every segment hangs.
+fn skirt_segments_clear_of_edits(
+    chunk_pos: IVec2,
+    resolution: u32,
+    config: &TerrainConfig,
+    volume: &TerrainVolume,
+    positions: &[[f32; 3]],
+) -> Option<SkirtSegments> {
+    if volume.is_empty() {
+        return None;
+    }
+    let cells = config.resolution_for_lod(0).max(1) as i64;
+    let cell = lattice_cell_size(config);
+    let depth = skirt_depth(config.chunk_size);
+    let stride = resolution + 1;
+    let (x0, z0) = (chunk_pos.x as i64 * cells, chunk_pos.y as i64 * cells);
+    // The LOD-0 lattice column under border vertex `k` of `resolution`.
+    let column = |k: u32| (k as i64 * cells + resolution as i64 / 2) / resolution as i64;
+    // One side: its border vertices' indices and its lattice columns.
+    let side = |vertex: &dyn Fn(u32) -> u32, lattice: &dyn Fn(i64) -> (i64, i64)| -> Vec<bool> {
+        (0..resolution)
+            .map(|k| {
+                let (ha, hb) = (positions[vertex(k) as usize][1], positions[vertex(k + 1) as usize][1]);
+                let top = (ha.max(hb) / cell).ceil() as i64;
+                let foot = ((ha.min(hb) + depth) / cell).floor() as i64;
+                (column(k)..=column(k + 1)).all(|c| {
+                    let (nx, nz) = lattice(c);
+                    (foot..=top).all(|ny| !volume.cell_at_lattice(IVec3::new(nx as i32, ny as i32, nz as i32)).is_edited())
+                })
+            })
+            .collect()
+    };
+    Some([
+        side(&|k| k, &|c| (x0 + c, z0)),
+        side(&|k| resolution * stride + k, &|c| (x0 + c, z0 + cells)),
+        side(&|k| k * stride, &|c| (x0, z0 + c)),
+        side(&|k| k * stride + resolution, &|c| (x0 + cells, z0 + c)),
+    ])
+}
+
 /// Add skirts to hide LOD seams between chunks at different LOD levels
 ///
 /// Skirts are vertical strips extending downward from chunk edges that
@@ -689,9 +768,10 @@ fn calculate_normals(normals: &mut Vec<[f32; 3]>, positions: &[[f32; 3]], resolu
 /// one of the segment's two top vertices belongs to no kept quad of the chunk:
 /// a hole on either top vertex drops every quad around that vertex, and a
 /// hole on either inner corner drops both border quads around the top vertex
-/// beside it. So no skirt hangs from ground the chunk does not draw. Every
-/// skirt vertex is still added, so the vertex count does not depend on the
-/// holes.
+/// beside it. So no skirt hangs from ground the chunk does not draw, and
+/// none where `clear` (see [`skirt_segments_clear_of_edits`]) says it would
+/// pass through a volumetric edit. Every skirt vertex is still added, so the
+/// vertex count does not depend on the holes or the edits.
 #[allow(clippy::too_many_arguments)]
 fn add_skirts(
     positions: &mut Vec<[f32; 3]>,
@@ -703,12 +783,16 @@ fn add_skirts(
     size: f32,
     _height_scale: f32,
     ground: Option<&[bool]>,
+    clear: Option<&SkirtSegments>,
 ) {
     let skirt_depth = skirt_depth(size);
     let stride = resolution + 1;
     let base_vertex_count = positions.len() as u32;
-    // Whether the segment below the border edge of quad `(x, z)` hangs.
-    let hangs = |x: u32, z: u32| ground.map_or(true, |quads| quads[(z * resolution + x) as usize]);
+    // Whether the segment below the border edge of quad `(x, z)`, segment
+    // `k` of side `side`, hangs.
+    let hangs = |x: u32, z: u32, side: usize, k: u32| {
+        ground.map_or(true, |quads| quads[(z * resolution + x) as usize]) && clear.map_or(true, |sides| sides[side][k as usize])
+    };
     
     // Add skirt vertices for each edge
     // Bottom edge (z = 0)
@@ -757,7 +841,7 @@ fn add_skirts(
     // Bottom edge triangles (face -Z direction)
     let bottom_skirt_start = base_vertex_count;
     for x in 0..resolution {
-        if !hangs(x, 0) {
+        if !hangs(x, 0, 0, x) {
             continue;
         }
         let top_left = x;
@@ -778,7 +862,7 @@ fn add_skirts(
     // Top edge triangles (face +Z direction)
     let top_skirt_start = bottom_skirt_start + stride;
     for x in 0..resolution {
-        if !hangs(x, resolution - 1) {
+        if !hangs(x, resolution - 1, 1, x) {
             continue;
         }
         let top_left = resolution * stride + x;
@@ -799,7 +883,7 @@ fn add_skirts(
     // Left edge triangles (face -X direction)
     let left_skirt_start = top_skirt_start + stride;
     for z in 0..resolution {
-        if !hangs(0, z) {
+        if !hangs(0, z, 2, z) {
             continue;
         }
         let top_top = z * stride;
@@ -820,7 +904,7 @@ fn add_skirts(
     // Right edge triangles (face +X direction)
     let right_skirt_start = left_skirt_start + stride;
     for z in 0..resolution {
-        if !hangs(resolution - 1, z) {
+        if !hangs(resolution - 1, z, 3, z) {
             continue;
         }
         let top_top = z * stride + resolution;

@@ -56,7 +56,8 @@ pub use ownership::{NetworkOwner, OwnershipRequest, OwnershipTransfer};
 pub use protocol::{EustressChannel, EustressMessage, EustressProtocol};
 pub use replication::{Replicated, ReplicationFilter, ReplicationGroup};
 pub use session::{
-    begin_host, begin_join, AppVersion, ClosePurchase, EndSession, FireRemote, HostConfig, HostSession, LocalWorldReady,
+    begin_host, begin_join, AdmissionVerdict, Admitted, AppVersion, ClosePurchase, EndSession, FireRemote, HostConfig,
+    HostSession, LocalWorldReady,
     MotionArrived, NetLink, NetNotice, NetPlugin, NetReplica, PlayerSession, PromptPurchase, RemoteArrived,
     RemoteReplied, SendChat, SendMotion, SendReceipts, SendRemoteReply, SendTracks, SendWorld, TracksArrived,
     WorldArrived, WorldDownloaded,

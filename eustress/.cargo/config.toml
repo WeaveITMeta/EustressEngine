@@ -71,3 +71,9 @@ opt-level = 3
 # no frame budget can hide; optimised it costs about 5. The crate is small and
 # compiles optimised in well under a minute.
 opt-level = 3
+
+[profile.dev.package.eustress-ocean]
+# The ocean runs four 2D FFTs per wave tile every frame. Like the particle
+# solver it is hot numeric code that dev builds must compile optimised; the
+# crate is small, so this costs seconds of compile time.
+opt-level = 3

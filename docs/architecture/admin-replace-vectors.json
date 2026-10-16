@@ -1,0 +1,49 @@
+{
+  "about": "Vectors for the two messages of an administrator's key replacement (docs/architecture/IDENTITY_KEY_ROTATION_AND_RECOVERY.md): eustress-admin-replace-v1, signed by the administrator's own identity key, and eustress-admin-replace-key-v1, signed by the new key. The keys are the first two test keys of RFC 8032, public by design and no account's keys. The Worker's tests (infrastructure/cloudflare/api/tests/admin_key_replacement.test.mjs), the support script (scripts/admin-replace-key.mjs) and the website (web/src/api/account_email.rs) read this one file.",
+  "admin_key": {
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "secret_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  },
+  "new_key": {
+    "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "secret_key": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+  },
+  "cases": [
+    {
+      "origin": "https://api.eustress.dev",
+      "admin_id": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "username": "owner",
+      "case_ref": "SUP-1042",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_message": "eustress-admin-replace-v1\nhttps://api.eustress.dev\n9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\nSUP-1042\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_signature": "bf5c39be94a7a43e4a11a8885e07177c79be24468b6aa4415fc3ad301589abcca351bc5ae3369b2c8e03ab388fc051dffc6ef0dbfa338d8b03f86ff23ef91c06",
+      "key_message": "eustress-admin-replace-key-v1\nhttps://api.eustress.dev\nowner\nSUP-1042\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "key_signature": "b00449e3ccda57cdced16237784b14a8f580502322b55a1d23817450fcbbb6575fd2f02faf1493ede5f3dbf6fd90347135c2a426f5a715c51b6da8a747bf8009"
+    },
+    {
+      "origin": "https://api-staging.eustress.dev",
+      "admin_id": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "username": "owner",
+      "case_ref": "SUP-1042",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_message": "eustress-admin-replace-v1\nhttps://api-staging.eustress.dev\n9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\nSUP-1042\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_signature": "f187d41b99a220a6df48a924779ccb067051969c305f61fdff59d26bbb01a32bbba5bc3aff2b18f9a9d3a94351030c5af593b92a01032ec7a8779d248e55600c",
+      "key_message": "eustress-admin-replace-key-v1\nhttps://api-staging.eustress.dev\nowner\nSUP-1042\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "key_signature": "6fb6dd29ce5cb4a2f0aedac5e46c2ae85cfaf1b7c5ed3f1373820afd4b3f83306dc1f8df2315a44f3f4ecee80b3a03e27ba39665c093884ca18a3726a01dd00b"
+    },
+    {
+      "origin": "https://api.eustress.dev",
+      "admin_id": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "username": "Some_User-9",
+      "case_ref": "case:2026.10.01-7",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_message": "eustress-admin-replace-v1\nhttps://api.eustress.dev\n9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\ncase:2026.10.01-7\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "admin_signature": "fa47012fa92a181568e9672cd8004bff041749764c10b3cd66ff49968e89b26937ddac36e47768a7ff40cfe0346b9c85283cfbcbb40a43d91959b6c335a5f703",
+      "key_message": "eustress-admin-replace-key-v1\nhttps://api.eustress.dev\nSome_User-9\ncase:2026.10.01-7\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "key_signature": "fddadba461ba951b40062d3c488e8bd46edf557c02658f943bd74f6889d07d87ee0fb1d0e7ff4a232a51bfbd3a57c3fbf30987eaefcd04c62ffce060f29b7e07"
+    }
+  ]
+}

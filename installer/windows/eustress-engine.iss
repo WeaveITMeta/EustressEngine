@@ -42,8 +42,12 @@ OutputBaseFilename=EustressEngine-Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-; Require admin for Program Files
-PrivilegesRequired=admin
+ChangesAssociations=yes
+; Per-user install. The updater replaces this folder's files from inside the
+; app, and a standard account can only do that in a folder it owns. Under
+; lowest privileges {autopf} resolves to the user's Programs folder, so no
+; administrator prompt appears.
+PrivilegesRequired=lowest
 ; Minimum Windows version (Windows 10)
 MinVersion=10.0
 ; Architecture
@@ -77,14 +81,17 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Registry]
+; Associations go under HKA: the per-user classes key for this install, or the
+; machine-wide one for an administrator install. HKCR itself needs administrator
+; rights to write, which a per-user install does not have.
 ; File association for .eustress files
-Root: HKCR; Subkey: ".eustress"; ValueType: string; ValueName: ""; ValueData: "EustressProject"; Flags: uninsdeletevalue
-Root: HKCR; Subkey: "EustressProject"; ValueType: string; ValueName: ""; ValueData: "Eustress Project"; Flags: uninsdeletekey
-Root: HKCR; Subkey: "EustressProject\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKCR; Subkey: "EustressProject\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.eustress"; ValueType: string; ValueName: ""; ValueData: "EustressProject"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\EustressProject"; ValueType: string; ValueName: ""; ValueData: "Eustress Project"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\EustressProject\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKA; Subkey: "Software\Classes\EustressProject\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 ; URL protocol handler for eustress://
-Root: HKCR; Subkey: "eustress"; ValueType: string; ValueName: ""; ValueData: "URL:Eustress Protocol"; Flags: uninsdeletekey
-Root: HKCR; Subkey: "eustress"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCR; Subkey: "eustress\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKCR; Subkey: "eustress\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\eustress"; ValueType: string; ValueName: ""; ValueData: "URL:Eustress Protocol"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\eustress"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\eustress\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKA; Subkey: "Software\Classes\eustress\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""

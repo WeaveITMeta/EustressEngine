@@ -42,9 +42,14 @@ use crate::services::lighting::{LightingService, Moon as MoonMarker, Sun as SunM
 /// Asset path of the embedded `moon_disc.wgsl`.
 pub const MOON_DISC_SHADER_PATH: &str = "embedded://eustress_common/plugins/moon_disc.wgsl";
 
-/// Distance the disc is drawn at, metres, capped at half the camera's far
-/// plane. Only its direction matters; it just has to sit behind the scene.
+/// Distance the disc is drawn at, metres, where there is no perspective far
+/// plane to measure from. Only its direction matters.
 const MOON_DISTANCE: f32 = 5_000.0;
+
+/// The perspective disc is drawn this fraction of the camera's far plane away:
+/// behind every surface the camera can see, so terrain and buildings hide it.
+/// The quad's corners stay within the far plane.
+const MOON_FAR_FRACTION: f32 = 0.99;
 
 /// The quad's half-width in disc radii. The halo reaches this far.
 const HALO_EXTENT: f32 = 3.2;
@@ -156,6 +161,24 @@ fn disc_north(toward_moon: Vec3, latitude: f32) -> Vec3 {
         .unwrap_or_else(|| toward_moon.any_orthonormal_vector())
 }
 
+/// How far the air lifts a body at `elevation` (radians), in radians: Bennett's
+/// refraction, 34 arcminutes at the horizon, capped there. The same formula as
+/// `refraction_lift` in `sky_dome.wgsl`, which lifts the sun's disc, so the sun
+/// and the moon set by one rule.
+fn refraction_lift(elevation: f32) -> f32 {
+    let h = elevation.to_degrees().clamp(-1.0, 90.0);
+    let arcmin = (1.0 / (h + 7.31 / (h + 4.4)).to_radians().tan()).min(34.0);
+    (arcmin / 60.0).to_radians()
+}
+
+/// A direction as the air shows it: raised by the refraction at its elevation.
+/// The disc is drawn there, and the light it is lit from is raised the same
+/// way, so the sun and the moon keep the separation the viewer sees.
+fn lifted(direction: Vec3) -> Vec3 {
+    let elevation = direction.y.clamp(-1.0, 1.0).asin();
+    (direction + Vec3::Y * refraction_lift(elevation)).normalize()
+}
+
 /// The disc's parameters for this frame.
 pub fn moon_disc_params(
     moon: &MoonClass,
@@ -178,12 +201,15 @@ pub fn moon_disc_params(
     // moonrise comes from the same medium that draws the sky.
     let air = medium.transmittance(0.0, toward_moon.y.max(0.0));
     let radiance = Vec3::new(tint.red, tint.green, tint.blue) * air * peak;
+    // The disc is drawn where the air shows it, and lit from where the air
+    // shows the light.
+    let drawn = lifted(toward_moon);
     MoonDiscParams {
-        moon: toward_moon.extend(radius.sin()),
+        moon: drawn.extend(radius.sin()),
         // What shades the disc: the sun, or for a moon placed opposite the
         // sun the light that shows its Phase (`Moon::lit_from`).
-        sun: sky_light.moon_lit_from.extend(earthshine),
-        north: disc_north(toward_moon, sun.latitude).extend(night),
+        sun: lifted(sky_light.moon_lit_from).extend(earthshine),
+        north: disc_north(drawn, sun.latitude).extend(night),
         radiance: radiance.extend(moon.glow_intensity.max(0.0) * HALO_GAIN * night),
     }
 }
@@ -234,8 +260,9 @@ fn sync_moon_disc(
     };
     let shown = skies.iter().next().map_or(true, |s| s.celestial_bodies_shown);
     let toward_moon = sky_light.moon_direction;
+    let drawn = lifted(toward_moon);
     let (distance, perspective) = match projection {
-        Some(Projection::Perspective(p)) => (MOON_DISTANCE.min(p.far * 0.5), true),
+        Some(Projection::Perspective(p)) => (p.far * MOON_FAR_FRACTION, true),
         Some(Projection::Orthographic(_)) => (MOON_DISTANCE, false),
         _ => (MOON_DISTANCE, true),
     };
@@ -247,10 +274,10 @@ fn sync_moon_disc(
 
     let radius = (moon.angular_size.clamp(0.05, 20.0) * 0.5).to_radians();
     let side = 2.0 * distance * radius.tan() * HALO_EXTENT;
-    let position = view.translation() + toward_moon * distance;
-    let up = if toward_moon.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let position = view.translation() + drawn * distance;
+    let up = if drawn.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
     let placed = Transform::from_translation(position)
-        .looking_to(toward_moon, up)
+        .looking_to(drawn, up)
         .with_scale(if visible { Vec3::new(side, side, 1.0) } else { Vec3::ZERO });
 
     let params = moon_disc_params(moon, sun, &sky_light, &medium);
@@ -354,5 +381,50 @@ mod tests {
         let low = at(0.03);
         assert!(low.x / low.z > high.x / high.z * 1.5, "high {high:?} low {low:?}");
         assert!(low.y < high.y, "the air dims a low moon");
+    }
+
+    /// The unit direction at `altitude` degrees, on the meridian to the south.
+    fn at_altitude(altitude: f32) -> Vec3 {
+        let a = altitude.to_radians();
+        Vec3::new(0.0, a.sin(), -a.cos())
+    }
+
+    fn altitude_of(v: Vec3) -> f32 {
+        v.normalize().y.asin().to_degrees()
+    }
+
+    #[test]
+    fn the_air_lifts_a_body_34_arcminutes_at_the_horizon_and_nothing_overhead() {
+        let at_horizon = altitude_of(lifted(at_altitude(0.0)));
+        assert!((at_horizon - 34.0 / 60.0).abs() < 0.01, "lift at the horizon: {at_horizon}");
+        let overhead = altitude_of(lifted(Vec3::Y));
+        assert!((overhead - 90.0).abs() < 1e-3, "lift overhead: {overhead}");
+    }
+
+    #[test]
+    fn a_body_sets_when_its_lifted_limb_meets_the_horizon() {
+        // The sun's centre sets at -0.83 true; lifted, it sits one radius
+        // (0.27 degrees) below the horizon, so its limb is on the horizon.
+        let drawn = altitude_of(lifted(at_altitude(-0.833)));
+        assert!((drawn + 0.2666).abs() < 0.01, "drawn centre at {drawn}");
+    }
+
+    #[test]
+    fn the_moon_disc_is_drawn_lifted_and_its_north_stays_perpendicular() {
+        let moon = MoonClass::default();
+        let sun = SunClass::default();
+        let medium = SkyMedium::default();
+        let sky = SkyLight {
+            moon_direction: at_altitude(-1.0),
+            moon_lit_from: at_altitude(-0.5),
+            night: 1.0,
+            ..default()
+        };
+        let params = moon_disc_params(&moon, &sun, &sky, &medium);
+        let drawn = altitude_of(params.moon.xyz());
+        assert!((drawn - altitude_of(lifted(at_altitude(-1.0)))).abs() < 1e-3, "drawn at {drawn}");
+        assert!(params.north.xyz().dot(params.moon.xyz()).abs() < 1e-5, "north is not perpendicular");
+        let lit = altitude_of(params.sun.xyz());
+        assert!((lit - altitude_of(lifted(at_altitude(-0.5)))).abs() < 1e-3, "lit from {lit}");
     }
 }

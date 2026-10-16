@@ -61,6 +61,61 @@ pub fn space_character_auto_loads(space_root: &std::path::Path) -> bool {
     section("properties").or_else(|| pick(&doc)).or_else(|| section("service")).unwrap_or(true)
 }
 
+/// A Space's MaxPlayers when its Players service sets none.
+pub const DEFAULT_MAX_PLAYERS: u16 = 10;
+/// The largest MaxPlayers the gallery carries: its live heartbeat refuses a
+/// session size above it. The only upper bound; the field says so.
+pub const MAX_PLAYERS_LIMIT: u16 = 10_000;
+/// Sessions larger than this have not been load-tested yet; the Publish
+/// dialog says so, and never refuses or lowers the number for it.
+pub const LOAD_TESTED_PLAYERS: u16 = 4;
+
+/// A Space's `Players.MaxPlayers`: the most players one of its sessions
+/// holds, everyone counted, the host's own character included when the
+/// host plays (`docs/networking/MAX_PLAYERS.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceMaxPlayers {
+    /// What the Space sets, when it sets a whole number of at least 1.
+    pub authored: Option<u32>,
+    /// What a session holds: the authored value (at most
+    /// [`MAX_PLAYERS_LIMIT`], the gallery's own bound), or
+    /// [`DEFAULT_MAX_PLAYERS`] when it sets none.
+    pub players: u16,
+}
+
+impl SpaceMaxPlayers {
+    /// From the property's value as read (a number, or none). A fraction,
+    /// zero, a negative or a non-finite number counts as unset.
+    pub fn from_value(value: Option<f64>) -> Self {
+        let authored = value
+            .filter(|v| v.is_finite() && v.fract() == 0.0 && *v >= 1.0)
+            .map(|v| v.min(u32::MAX as f64) as u32);
+        let players = authored.map_or(DEFAULT_MAX_PLAYERS, |n| n.min(MAX_PLAYERS_LIMIT as u32) as u16);
+        Self { authored, players }
+    }
+
+    /// Larger than any session load-tested so far: worth a note, never a
+    /// refusal.
+    pub fn untested(&self) -> bool {
+        self.players > LOAD_TESTED_PLAYERS
+    }
+}
+
+/// The Space's `Players.MaxPlayers`, from `Players/_service.toml`
+/// (`max_players` or `MaxPlayers`, in `[properties]`, at the top level, or
+/// in `[service]`, the first of those winning). The one place every reader
+/// takes it from: the host's session, the Publish dialog and the publish.
+pub fn space_max_players(space_root: &std::path::Path) -> SpaceMaxPlayers {
+    let doc = std::fs::read_to_string(space_root.join("Players").join("_service.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let Some(doc) = doc else { return SpaceMaxPlayers::from_value(None) };
+    let number = |v: &toml::Value| v.as_integer().map(|i| i as f64).or_else(|| v.as_float());
+    let pick = |t: &toml::Table| t.get("max_players").or_else(|| t.get("MaxPlayers")).and_then(number);
+    let section = |name: &str| doc.get(name).and_then(toml::Value::as_table).and_then(|t| pick(t));
+    SpaceMaxPlayers::from_value(section("properties").or_else(|| pick(&doc)).or_else(|| section("service")))
+}
+
 /// The gravity a Space runs at, m/s², from `Workspace/_service.toml`
 /// (`gravity` in `[properties]`, or at the top level), by the rule Studio
 /// applies ([`crate::services::workspace::authored_gravity`]). A stud-era
@@ -204,7 +259,23 @@ pub fn begin_session(dm: &mut DataModel, local_player: InstanceId, start: &Sessi
         let _ = dm.set_prop(workspace, "Gravity", DmValue::Number(workspace_gravity(start.gravity)));
         camera = Some(cam);
     }
+    fill_backpack(dm, local_player);
     SessionIds { local_player, camera }
+}
+
+/// Roblox's StarterPack: a copy of each child of the Space's StarterPack goes
+/// into the player's Backpack when the player spawns. The originals stay in
+/// the StarterPack. Called once per session, at spawn; `find_service` never
+/// creates the StarterPack, so a Space without one leaves the Backpack empty.
+pub fn fill_backpack(dm: &mut DataModel, player: InstanceId) {
+    let (Some(pack), Some(backpack)) = (dm.find_service("StarterPack"), dm.find_first_child(player, "Backpack", false)) else {
+        return;
+    };
+    for tool in dm.children(pack).to_vec() {
+        if let Some(copy) = dm.clone_instance(tool) {
+            let _ = dm.set_parent(copy, Some(backpack));
+        }
+    }
 }
 
 /// Marker component to track parts that had their physics activated during play mode
@@ -269,6 +340,37 @@ mod tests {
         assert!((import.y + 196.2 * 0.3048).abs() < 1e-3, "a Roblox import's studs are its feet, got {import}");
     }
 
+    /// A Space's StarterPack tools reach the player's Backpack when the session
+    /// begins, as copies: the originals stay in the StarterPack.
+    #[test]
+    fn a_player_starts_with_a_copy_of_each_starter_pack_tool() {
+        let mut dm = DataModel::new();
+        let pack = dm.get_service("StarterPack").expect("StarterPack");
+        let sword = dm.create_virtual("Tool", "Sword", Some(pack));
+        let bat = dm.create_virtual("Tool", "Bat", Some(pack));
+        let players = dm.get_service("Players").expect("Players");
+        let me = dm.create_virtual("Player", "Tester", Some(players));
+        dm.create_virtual("Backpack", "Backpack", Some(me));
+        let start = SessionStart {
+            camera: SessionCamera::Fresh,
+            gravity: crate::services::workspace::DEFAULT_GRAVITY,
+            character_auto_loads: true,
+        };
+        begin_session(&mut dm, me, &start);
+
+        let backpack = dm.find_first_child(me, "Backpack", false).expect("Backpack");
+        let mut names: Vec<String> = dm
+            .children(backpack)
+            .iter()
+            .filter_map(|c| dm.get(*c).map(|i| i.name.clone()))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Bat", "Sword"], "each StarterPack tool is copied into the Backpack");
+        let copies_of: Vec<Option<InstanceId>> = dm.children(backpack).iter().map(|c| dm.get(*c).and_then(|i| i.clone_of)).collect();
+        assert!(copies_of.iter().all(|c| c.is_some()), "the Backpack holds copies, not the originals: {copies_of:?}");
+        assert_eq!(dm.children(pack), &[sword, bat], "the originals stay in the StarterPack");
+    }
+
     fn number(dm: &DataModel, id: InstanceId, name: &str) -> Option<f64> {
         dm.get_prop(id, name).and_then(|v| v.as_number())
     }
@@ -297,6 +399,40 @@ mod tests {
                 SessionCamera::Fresh => assert_ne!(current, Some(saved), "Studio's Play leaves the editor's camera alone"),
                 SessionCamera::SpaceOrFresh => assert_eq!(current, Some(saved), "a Player shows the Space's own camera"),
             }
+        }
+    }
+
+    /// A Space's MaxPlayers is read from its Players service as file key or
+    /// Roblox name and taken as authored, with no cap but the gallery's own
+    /// bound; a Space that sets none, or something that is not a whole
+    /// number of at least 1, holds the default.
+    #[test]
+    fn a_space_says_how_many_players_a_session_holds() {
+        let space = |tag: &str, text: Option<&str>| {
+            let root = std::env::temp_dir().join(format!("eustress-max-players-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("Players")).unwrap();
+            if let Some(text) = text {
+                std::fs::write(root.join("Players").join("_service.toml"), text).unwrap();
+            }
+            let read = space_max_players(&root);
+            let _ = std::fs::remove_dir_all(&root);
+            read
+        };
+        let four = space("four", Some("[properties]\ncharacter_auto_loads = true\nmax_players = 4\n"));
+        assert_eq!(four, SpaceMaxPlayers { authored: Some(4), players: 4 });
+        assert!(!four.untested());
+        assert_eq!(space("roblox", Some("[properties]\nMaxPlayers = 2\n")).players, 2);
+        let template = space("template", Some("[properties]\nmax_players = 12\n"));
+        assert_eq!(template, SpaceMaxPlayers { authored: Some(12), players: 12 }, "taken as authored");
+        assert!(template.untested(), "a note, not a cap");
+        let huge = space("huge", Some("[properties]\nmax_players = 50000\n"));
+        assert_eq!((huge.authored, huge.players), (Some(50_000), MAX_PLAYERS_LIMIT), "the gallery's bound");
+        assert_eq!(space("none", None), SpaceMaxPlayers { authored: None, players: DEFAULT_MAX_PLAYERS });
+        for odd in ["0", "-3", "2.5", "\"four\"", "nan"] {
+            let read = space("odd", Some(&format!("[properties]\nmax_players = {odd}\n")));
+            assert_eq!(read.authored, None, "{odd}");
+            assert_eq!(read.players, DEFAULT_MAX_PLAYERS, "{odd}");
         }
     }
 }

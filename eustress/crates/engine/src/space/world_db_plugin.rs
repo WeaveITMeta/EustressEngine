@@ -622,11 +622,14 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     //      and script sources, the same set the pass above brings in. Binary
     //      caches, asset bytes, voxel chunks and instance cores are not
     //      disk-backed this way and are never touched.
-    //   2. A key is pruned only when its PARENT DIRECTORY EXISTS and the file
-    //      within it does not. If the whole directory is gone the subtree is
-    //      left alone, so an unmounted drive, a half-finished sync or a Space
-    //      opened from the wrong root cannot wipe the tree. That case is
-    //      counted and reported instead of acted on.
+    //   2. A key is pruned only when its SERVICE FOLDER (its first segment,
+    //      such as `Workspace`) and the Space folder both exist, and the file
+    //      within them does not (`prune_applies`). A folder deleted on disk
+    //      leaves its service behind, so its records are pruned. If the service
+    //      or the Space folder is gone, the subtree is left alone, so an
+    //      unmounted drive, a half-finished sync or a Space opened from the
+    //      wrong root cannot wipe the tree. That case is counted and reported
+    //      instead of acted on.
     //   3. The #bin sibling goes with its .toml, the same pairing the write
     //      path above maintains.
     let mut pruned = 0usize;
@@ -641,24 +644,21 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
             if disk.exists() {
                 continue;
             }
-            match disk.parent() {
-                Some(dir) if !dir.exists() => {
-                    skipped_missing_dir += 1;
-                }
-                _ => {
-                    if db.delete_file(&rel).is_ok() {
-                        let _ = db.delete_file(&format!("{rel}#bin"));
-                        pruned += 1;
-                        removed_paths.push(rel);
-                    }
-                }
+            // A key whose own folder was deleted on disk is pruned while its
+            // service folder stands (`prune_applies`).
+            if !prune_applies(space_root, &rel) {
+                skipped_missing_dir += 1;
+            } else if db.delete_file(&rel).is_ok() {
+                let _ = db.delete_file(&format!("{rel}#bin"));
+                pruned += 1;
+                removed_paths.push(rel);
             }
         }
     }
     if pruned > 0 || skipped_missing_dir > 0 {
         info!(
             target: "eustress_engine::world_db",
-            "disk to tree reconcile pruned {} entries whose file was deleted on disk; left {} alone because the parent directory is missing entirely",
+            "disk to tree reconcile pruned {} entries whose file was deleted on disk; left {} alone because their service folder is missing",
             pruned, skipped_missing_dir
         );
     }
@@ -672,6 +672,28 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
         put: put_paths,
         removed: removed_paths,
     }
+}
+
+/// Whether a tree key whose file is gone may be pruned at the reconcile. Its
+/// service folder (the key's first segment: `Workspace` for
+/// `Workspace/Crate/_instance.toml`) must still be on disk, and so must the
+/// Space folder. A folder removed on disk takes its own directory with it
+/// while its service stays, so its records are pruned here. A Space folder
+/// that is missing (an unmounted drive, a Space opened from the wrong root),
+/// or a service folder that is gone, keeps every record it names.
+pub(crate) fn prune_applies(space_root: &std::path::Path, rel: &str) -> bool {
+    if !space_root.is_dir() {
+        return false;
+    }
+    let mut segments = rel.split('/').filter(|s| !s.is_empty());
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if segments.next().is_none() {
+        // A key directly in the Space folder, such as `space.toml`.
+        return true;
+    }
+    space_root.join(first).is_dir()
 }
 
 /// Open / re-open the WorldDb whenever `SpaceRoot` changes (on
@@ -984,11 +1006,18 @@ pub fn open_world_db_on_space_change(
                     .name("eustress-space-open".into())
                     .spawn(move || {
                         let db = db_for_worker.as_ref();
+                        // A Space older than this build's format moves to it
+                        // before anything reads its tree (`format_migration`:
+                        // native wedges turned to fit the Roblox-correct
+                        // meshes, every custom mesh's scale kind stated), its
+                        // baked cores too, and space.toml names the format
+                        // last. First, so the pose-rule move below reads
+                        // every custom mesh's scale as what it is.
+                        super::format_migration::migrate_logged(&root, Some(db));
                         // A Space written under the legacy pose rule moves to
-                        // ParentPose before anything reads its tree
-                        // (`rule_migration`): each rewritten file goes to disk
-                        // and into the tree together, and space.toml names the
-                        // rule last.
+                        // ParentPose the same way (`rule_migration`): each
+                        // rewritten file goes to disk and into the tree
+                        // together, and space.toml names the rule last.
                         super::rule_migration::migrate_logged(&root, Some(db));
                         let reconcile = || {
                             // Guarded separately from `space-open` so the
@@ -1293,8 +1322,28 @@ fn sync_toml_edits_to_fjall(
     mut reader: MessageReader<eustress_common::file_events::FileChanged>,
 ) {
     use eustress_common::file_events::FileChangeKind;
+    let mut gone: Vec<std::path::PathBuf> = Vec::new();
     for change in reader.read() {
         match change.kind {
+            // A folder that arrived whole (moved or restored into the Space,
+            // reported as one event): its files reach the tree here, each
+            // instance with its identity.
+            FileChangeKind::Created | FileChangeKind::Modified if change.path.is_dir() => {
+                let seeded = super::active_db::seed_subtree(&change.path);
+                if seeded > 0 {
+                    debug!(
+                        target: "eustress_engine::world_db",
+                        path = %change.path.display(),
+                        seeded,
+                        "folder seeded into Fjall"
+                    );
+                }
+            }
+            // A folder that left: its records go by path alone (the watcher
+            // cannot tell a move from a delete, and a move keeps its cores).
+            FileChangeKind::Removed if folder_left(&change.path) => {
+                super::active_db::drop_subtree_paths(&change.path);
+            }
             FileChangeKind::Created | FileChangeKind::Modified => {
                 // read error = transient / mid-write; the watcher's own
                 // reload retries, so skip silently here.
@@ -1310,9 +1359,30 @@ fn sync_toml_edits_to_fjall(
             }
             FileChangeKind::Removed => {
                 super::active_db::delete_tree_file(&change.path);
+                gone.push(change.path.clone());
             }
         }
     }
+    // A file removed on disk takes its `#bin` twin with it once the batch is
+    // through, when the path is still absent: a save that replaces a file
+    // (remove, then create) leaves the file there, so its twin stays. A twin
+    // left behind would load the deleted entity again on the next open.
+    for path in &gone {
+        if !path.exists() {
+            super::active_db::delete_tree_twin(path);
+        }
+    }
+}
+
+/// Whether a removed path was a folder: it is no longer a tree key itself,
+/// it has no extension (a file's name has one), and the folder it sat in is
+/// still there (a missing parent is a drive or Space going away, which never
+/// drops anything; the reconcile's rule).
+fn folder_left(path: &std::path::Path) -> bool {
+    !path.exists()
+        && path.extension().is_none()
+        && path.parent().is_some_and(|parent| parent.is_dir())
+        && !super::active_db::has_tree_key(path)
 }
 
 impl Plugin for WorldDbPlugin {
@@ -1337,6 +1407,7 @@ impl Plugin for WorldDbPlugin {
             // now runs in Update, gated on `world_db_open_settled`, so no
             // Startup ordering against it is needed (or possible).
             .add_systems(Startup, open_world_db_on_space_change)
+            .add_systems(Startup, super::format_migration::announce_refused_launch)
             // Update copy handles runtime Space switches (latched per
             // path); `mirror_transform_changes` persists live edits, never
             // what a Play session moves.
@@ -1363,5 +1434,39 @@ impl Plugin for WorldDbPlugin {
         // (world-db is implied — we're inside WorldDbPlugin).
         #[cfg(feature = "data")]
         app.add_plugins(super::data_recorder::DataRecorderPlugin);
+    }
+}
+
+#[cfg(test)]
+mod prune_applies_tests {
+    use super::prune_applies;
+    use std::path::PathBuf;
+
+    fn space(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("eustress_prune_{tag}_{}_{nanos}", std::process::id()))
+    }
+
+    /// A folder deleted on disk: its own directory is gone, its service stands,
+    /// so its records are pruned and stop coming back on the next open.
+    #[test]
+    fn a_deleted_folders_records_are_pruned() {
+        let root = space("gone");
+        std::fs::create_dir_all(root.join("Workspace")).unwrap();
+        assert!(prune_applies(&root, "Workspace/Crate/_instance.toml"));
+        assert!(prune_applies(&root, "Workspace/Crate/Part/_instance.toml"));
+        assert!(prune_applies(&root, "space.toml"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A missing Space folder or a missing service keeps every record it names.
+    #[test]
+    fn a_missing_root_or_service_keeps_its_records() {
+        let root = space("missing");
+        assert!(!prune_applies(&root, "Workspace/Crate/_instance.toml"), "no Space folder");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!prune_applies(&root, "Workspace/Crate/_instance.toml"), "no Workspace folder");
+        assert!(!prune_applies(&root, ""), "no key");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

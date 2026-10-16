@@ -148,11 +148,68 @@ local function finished(owner, ok)
 	host.lifecycle(what .. summary, nameOf[owner], owner)
 end
 
+-- Profiling, armed by the host when the VM is made (host.profArmed). A resume
+-- is timed and reports its own time: what it ran, less the resumes it made in
+-- turn. Each resume returns when its thread yields or ends, so resumes nest in
+-- order even when the code inside them yields.
+local profOn = host.profArmed == true
+local profStep, profOwner = nil, nil
+local profStack = {}
+local profDepth = 0
+
+-- Times one resume: body(...) runs, and its time less that of the resumes it
+-- made is recorded under owner and step. An error from body is passed on after
+-- the stack is restored, so a caught error leaves no frame behind.
+local function profiled(owner, step, body, ...)
+	local frame = { child = 0 }
+	local depth = profDepth + 1
+	profDepth = depth
+	profStack[depth] = frame
+	local started = clock()
+	local ok, err = pcall(body, ...)
+	local elapsed = clock() - started
+	profStack[depth] = nil
+	profDepth = depth - 1
+	if depth > 1 then
+		local parent = profStack[depth - 1]
+		parent.child = parent.child + elapsed
+	end
+	local own = elapsed - frame.child
+	host.profRecord(owner and nameOf[owner], step, if own > 0 then own else 0)
+	if not ok then
+		error(err, 0)
+	end
+end
+
+-- Names each signal in a table for the profile: prefix .. its key.
+local function nameSignals(tbl, prefix)
+	if profOn then
+		for key, sig in pairs(tbl) do
+			sig._name = prefix .. key
+		end
+	end
+end
+
+-- Names one signal for the profile, and returns it.
+local function named(sig, name)
+	if profOn then
+		sig._name = name
+	end
+	return sig
+end
+
 local function safe_resume(co, ...)
 	if co == nil or status(co) == "dead" then
 		return
 	end
-	local ok, err = resumeThread(co, ...)
+	local ok, err
+	if profOn then
+		profiled(ownerOf[co], "Resume", function(...)
+			ok, err = resumeThread(co, ...)
+		end, ...)
+	else
+		ok, err = resumeThread(co, ...)
+	end
 	if not ok then
 		report(err, co)
 	end
@@ -181,7 +238,7 @@ local function runnerLoop(...)
 		acquireAndCall(yield())
 	end
 end
-local function callHandler(fn, ...)
+local function resumeHandler(fn, ...)
 	if freeRunner == nil then
 		freeRunner = create(runnerLoop)
 		local ok, err = resumeThread(freeRunner, fn, ...)
@@ -200,6 +257,16 @@ local function callHandler(fn, ...)
 		end
 	end
 end
+-- One handler resume, timed when profiling is armed: the step and owner the
+-- caller set just before the call name it for the record.
+local function profiledCallHandler(fn, ...)
+	local step, owner = profStep or "Signal", profOwner
+	profStep, profOwner = nil, nil
+	profiled(owner, step, resumeHandler, fn, ...)
+end
+-- Chosen once at load: unarmed, a handler dispatch makes the same calls it
+-- always did, with no extra frame.
+local callHandler = profOn and profiledCallHandler or resumeHandler
 Host.callHandler = callHandler
 
 -- Which script each thread and connection belongs to, so destroying a script
@@ -313,6 +380,13 @@ Host.ownedCoroutine = setmetatable({
 			parked[co] = nil
 			rawYields[co] = nil
 		end
+		if profOn then
+			local r
+			profiled(ownerOf[co], "Resume", function(...)
+				r = pack(resume(co, ...))
+			end, ...)
+			return unpack(r, 1, r.n)
+		end
 		return resume(co, ...)
 	end,
 	create = function(fn)
@@ -324,7 +398,14 @@ Host.ownedCoroutine = setmetatable({
 		local co = create(fn)
 		claim(co, currentOwner())
 		return function(...)
-			local r = pack(resume(co, ...))
+			local r
+			if profOn then
+				profiled(ownerOf[co], "Resume", function(...)
+					r = pack(resume(co, ...))
+				end, ...)
+			else
+				r = pack(resume(co, ...))
+			end
 			if not r[1] then
 				error(r[2], 0)
 			end
@@ -518,6 +599,9 @@ function Signal:Fire(...)
 		-- Snapshot: a handler may disconnect or connect while we iterate.
 		local snapshot = table.clone(handlers)
 		for _, c in ipairs(snapshot) do
+			if profOn and c.Connected then
+				profStep, profOwner = self._name, c._owner
+			end
 			if c.Connected then
 				if c._owner ~= nil then
 					if self._speed and studsOwners[c._owner] then
@@ -571,6 +655,9 @@ function Host.getSignal(id, name)
 		sig = newSignal()
 		-- A Humanoid's Running and Climbing hand their handlers a speed.
 		sig._speed = name == "Running" or name == "Climbing"
+			if profOn then
+				sig._name = name
+			end
 		byName[name] = sig
 		host.listen(id, name)
 	end
@@ -620,6 +707,9 @@ function Host.getPropertySignal(id, prop)
 	if sig == nil then
 		sig = newSignal()
 		byProp[prop] = sig
+			if profOn then
+				sig._name = "GetPropertyChangedSignal:" .. prop
+			end
 		host.watch(id)
 	end
 	return sig
@@ -647,7 +737,10 @@ function Host.getAttributeSignal(id, name)
 	if sig == nil then
 		sig = newSignal()
 		byName[name] = sig
-		host.listen(id, "AttributeChanged")
+		if profOn then
+				sig._name = "AttributeChanged:" .. name
+			end
+			host.listen(id, "AttributeChanged")
 	end
 	return sig
 end
@@ -926,7 +1019,7 @@ Host.TweenService = {
 			Instance = instance,
 			TweenInfo = info,
 			PlaybackState = "Begin",
-			Completed = newSignal(),
+			Completed = named(newSignal(), "Tween.Completed"),
 			_goals = goals,
 			_elapsed = 0,
 			-- The units of the script that made it, for every step.
@@ -1202,7 +1295,7 @@ local tagSignals = {}
 function Host.getTagSignal(tag, kind)
 	local t = tagSignals[tag]
 	if t == nil then
-		t = { added = newSignal(), removed = newSignal() }
+		t = { added = named(newSignal(), "Tag.Added"), removed = named(newSignal(), "Tag.Removed") }
 		tagSignals[tag] = t
 	end
 	return t[kind]
@@ -1228,10 +1321,18 @@ local function inputMatches(bound, inputObject)
 end
 Host.ContextActionService = {
 	BindAction = function(_, name, fn, _createButton, ...)
-		actions[name] = { fn = fn, inputs = { ... }, priority = 0 }
+		local binding = { fn = fn, inputs = { ... }, priority = 0 }
+			if profOn then
+				binding.owner = currentOwner()
+			end
+			actions[name] = binding
 	end,
 	BindActionAtPriority = function(_, name, fn, _createButton, priority, ...)
-		actions[name] = { fn = fn, inputs = { ... }, priority = priority or 0 }
+		local binding = { fn = fn, inputs = { ... }, priority = priority or 0 }
+			if profOn then
+				binding.owner = currentOwner()
+			end
+			actions[name] = binding
 	end,
 	UnbindAction = function(_, name)
 		actions[name] = nil
@@ -1251,6 +1352,9 @@ Host.ContextActionService = {
 function Host.dispatchActions(state, inputObject)
 	for name, a in pairs(actions) do
 		if inputMatches(a.inputs, inputObject) then
+			if profOn then
+				profStep, profOwner = "Action:" .. tostring(name), a.owner
+			end
 			callHandler(a.fn, name, state, inputObject)
 		end
 	end
@@ -1297,6 +1401,7 @@ local function passesReady(user)
 	end
 end
 
+nameSignals(marketplaceSignals, "MarketplaceService.")
 Host.MarketplaceService = {
 	PromptProductPurchase = function(_, player, productId)
 		host.commercePrompt(player, productId, "consumable")
@@ -1376,6 +1481,7 @@ local mouseSignals = {
 	WheelBackward = newSignal(),
 	Idle = newSignal(),
 }
+nameSignals(mouseSignals, "Mouse.")
 Host.mouseSignals = mouseSignals
 Host.mouse = setmetatable({}, {
 	__type = "Instance",
@@ -1406,11 +1512,17 @@ local RunServiceSignals = {
 	PostSimulation = newSignal(),
 	PreRender = newSignal(),
 }
+nameSignals(RunServiceSignals, "")
 Host.RunServiceSignals = RunServiceSignals
 
 local renderBindings = {}
 function Host.bindToRenderStep(name, priority, fn)
-	renderBindings[name] = { priority = priority or 0, fn = fn }
+	local binding = { priority = priority or 0, fn = fn }
+	if profOn then
+		binding.name = name
+		binding.owner = currentOwner()
+	end
+	renderBindings[name] = binding
 end
 function Host.unbindFromRenderStep(name)
 	renderBindings[name] = nil
@@ -1441,6 +1553,14 @@ local function reportStuck()
 end
 
 function Host.frame(now, dt)
+	if profOn then
+		-- No resume is in progress between frames, so anything still on the
+		-- stack was left by a call that an interrupt cut short.
+		for i = profDepth, 1, -1 do
+			profStack[i] = nil
+		end
+		profDepth = 0
+	end
 	local sorted = nil
 	for name, b in pairs(renderBindings) do
 		sorted = sorted or {}
@@ -1451,6 +1571,9 @@ function Host.frame(now, dt)
 			return a.priority < b.priority
 		end)
 		for _, b in ipairs(sorted) do
+			if profOn then
+				profStep, profOwner = "BindToRenderStep:" .. b.name, b.owner
+			end
 			callHandler(b.fn, dt)
 		end
 	end

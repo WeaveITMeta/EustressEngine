@@ -29,12 +29,15 @@ pub struct LockToolPlugin;
 
 impl Plugin for LockToolPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (
-            unlock_all_on_entry,
-            lock_tool_toggle_click,
-            lock_tool_hover_highlight,
-            cancel_on_escape,
-        ).chain());
+        // Editor input: during Play the clicks and keys belong to the game,
+        // so no part is locked, anchored or unlocked; the drain refuses the
+        // ribbon's Lock, Anchor and Unlock All.
+        app.add_systems(
+            Update,
+            (unlock_all_on_entry, lock_tool_toggle_click, lock_tool_hover_highlight, cancel_on_escape)
+                .chain()
+                .run_if(crate::play_mode::editor_input_enabled),
+        );
     }
 }
 
@@ -336,5 +339,49 @@ fn cancel_on_escape(
     let Some(mut studio_state) = studio_state else { return };
     if matches!(studio_state.current_tool, Tool::Lock | Tool::Unlock | Tool::Anchor) {
         studio_state.current_tool = Tool::Select;
+    }
+}
+
+/// During Play the lock tools act on nothing: Unlock All unlocks no part.
+#[cfg(test)]
+mod play_input_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    fn locked_wall(app: &mut App) -> Entity {
+        app.world_mut().spawn((BasePart { locked: true, ..Default::default() }, Name::new("Wall"))).id()
+    }
+
+    fn unlock_tool() -> StudioState {
+        let mut studio = StudioState::default();
+        studio.current_tool = Tool::Unlock;
+        studio
+    }
+
+    #[test]
+    fn play_unlocks_nothing() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut app = App::new();
+            app.add_plugins(LockToolPlugin);
+            app.insert_resource(State::new(state));
+            app.init_resource::<crate::undo::UndoStack>();
+            app.insert_resource(unlock_tool());
+            let wall = locked_wall(&mut app);
+            app.update();
+            assert!(app.world().get::<BasePart>(wall).unwrap().locked, "{state:?}: Unlock All ran during Play");
+        }
+    }
+
+    /// The same Unlock All unlocks the part while editing, so the test above
+    /// is not passing on a system that does nothing.
+    #[test]
+    fn editing_unlocks_every_part() {
+        let mut app = App::new();
+        app.init_resource::<crate::undo::UndoStack>();
+        app.insert_resource(unlock_tool());
+        let wall = locked_wall(&mut app);
+        app.add_systems(Update, unlock_all_on_entry);
+        app.update();
+        assert!(!app.world().get::<BasePart>(wall).unwrap().locked);
     }
 }

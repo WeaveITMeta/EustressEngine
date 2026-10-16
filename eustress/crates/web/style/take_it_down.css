@@ -1,0 +1,438 @@
+/* =============================================================================
+   TAKE IT DOWN: /take-it-down, /cases/:reference and /account/cases
+   -----------------------------------------------------------------------------
+   The pages sit in the legal page shell (.page-legal, .legal-container, .legal-section in main.css). Everything here is
+   prefixed tid-. Colours come from the :root tokens in main.css.
+   ============================================================================= */
+
+.page-takedown .tid-container {
+    max-width: 800px;
+}
+
+/* Visible to screen readers only. */
+.tid-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.tid-req {
+    color: var(--color-danger);
+    font-weight: 700;
+}
+
+/* The form ------------------------------------------------------------------ */
+
+.tid-request {
+    margin-top: var(--space-xl);
+}
+
+.tid-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+    padding: var(--space-xl);
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: var(--radius-lg);
+}
+
+.tid-form h2 {
+    margin: 0;
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text-primary);
+}
+
+.tid-legend {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+}
+
+.tid-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.tid-field label,
+.tid-fieldset legend {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.tid-field input[type="text"],
+.tid-field input[type="email"],
+.tid-field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: var(--text-base);
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+}
+
+.tid-field textarea {
+    resize: vertical;
+    min-height: 96px;
+}
+
+.tid-field input[aria-invalid="true"],
+.tid-field textarea[aria-invalid="true"] {
+    border-color: var(--color-danger);
+}
+
+.tid-field input:focus-visible,
+.tid-field textarea:focus-visible,
+.tid-choice input:focus-visible,
+.tid-btn:focus-visible,
+.tid-case-row:focus-visible,
+.tid-ref-input:focus-visible,
+.tid-result h2:focus-visible,
+.tid-form a:focus-visible,
+.tid-result a:focus-visible {
+    outline: 2px solid #58a6ff;
+    outline-offset: 2px;
+}
+
+.tid-hint {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+}
+
+.tid-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: #ff7b72;
+}
+
+.tid-alert {
+    padding: var(--space-md);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: #ffb4ae;
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.5);
+    border-radius: var(--radius-md);
+}
+
+.tid-fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.tid-fieldset legend {
+    padding: 0;
+    margin-bottom: var(--space-xs);
+}
+
+.tid-choice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    font-size: var(--text-base);
+    font-weight: 400;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    cursor: pointer;
+}
+
+.tid-choice input {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin-top: 2px;
+    accent-color: var(--color-accent);
+}
+
+/* Buttons and links that look like them ------------------------------------- */
+
+.tid-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    min-height: 44px;
+    padding: 10px 20px;
+    font: inherit;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary);
+    text-decoration: none;
+    background: var(--color-bg-tertiary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+}
+
+.tid-btn:hover:not(:disabled) {
+    background: var(--color-bg-hover);
+}
+
+.tid-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.tid-btn-primary {
+    color: #04110a;
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+}
+
+.tid-btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-hover);
+}
+
+/* The reference and its Copy button ----------------------------------------- */
+
+.tid-ref {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin: var(--space-sm) 0 var(--space-md);
+}
+
+.tid-ref-input {
+    flex: 1 1 18em;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: var(--text-lg);
+    letter-spacing: 0.04em;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+}
+
+.tid-copy-note {
+    flex-basis: 100%;
+    min-height: 1.4em;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+}
+
+.tid-label {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+}
+
+/* The result view and the case pages ---------------------------------------- */
+
+.tid-result {
+    padding: var(--space-xl);
+    color: var(--color-text-secondary);
+    background: rgba(60, 186, 84, 0.08);
+    border: 1px solid rgba(60, 186, 84, 0.45);
+    border-radius: var(--radius-lg);
+}
+
+.tid-result h2 {
+    margin: 0 0 var(--space-md);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text-primary);
+}
+
+.tid-result h3,
+.tid-detail h3 {
+    margin: var(--space-lg) 0 var(--space-sm);
+    font-size: var(--text-base);
+    color: var(--color-text-primary);
+}
+
+.tid-locations {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.tid-locations li {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: var(--space-sm) 0;
+    border-bottom: 1px solid rgba(128, 144, 160, 0.18);
+}
+
+.tid-loc {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--color-text-primary);
+}
+
+.tid-loc-result {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.tid-status {
+    margin: var(--space-md) 0 var(--space-xs);
+    font-size: var(--text-2xl);
+    color: var(--color-text-primary);
+}
+
+.tid-dates {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-xs) var(--space-lg);
+    margin: var(--space-md) 0;
+}
+
+.tid-dates dt {
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.tid-dates dd {
+    margin: 0;
+}
+
+.tid-lookup {
+    margin-top: var(--space-lg);
+}
+
+/* The account's list of cases ----------------------------------------------- */
+
+.tid-count {
+    margin: 0 0 var(--space-md);
+    font-size: var(--text-sm);
+}
+
+.tid-cases {
+    margin: 0 0 var(--space-lg);
+    padding: 0;
+    list-style: none;
+}
+
+.tid-cases li {
+    margin: 0 0 var(--space-sm);
+}
+
+.tid-case-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    width: 100%;
+    padding: var(--space-md);
+    font: inherit;
+    text-align: left;
+    color: var(--color-text-primary);
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+}
+
+.tid-case-row:hover {
+    background: rgba(25, 28, 35, 0.9);
+    border-color: rgba(128, 144, 160, 0.4);
+}
+
+.tid-case-head {
+    font-weight: 600;
+}
+
+.tid-case-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm) var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+}
+
+.tid-case-ref {
+    font-family: var(--font-mono);
+}
+
+.tid-badge {
+    padding: 0 8px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+}
+
+.tid-detail > .tid-btn {
+    margin-bottom: var(--space-lg);
+}
+
+.tid-reasons {
+    margin: 0 0 var(--space-md);
+    padding-left: var(--space-lg);
+}
+
+.tid-reasons li {
+    margin-bottom: var(--space-md);
+}
+
+.tid-review {
+    margin-top: var(--space-xl);
+}
+
+.tid-ok {
+    padding: var(--space-md);
+    font-weight: 600;
+    color: var(--color-text-primary);
+    background: rgba(60, 186, 84, 0.1);
+    border: 1px solid rgba(60, 186, 84, 0.45);
+    border-radius: var(--radius-md);
+}
+
+/* The link on the profile page ------------------------------------------------ */
+
+.tid-profile-link {
+    display: inline-block;
+    margin: var(--space-md) 0;
+    font-weight: 600;
+    color: var(--color-accent);
+}
+
+@media (max-width: 600px) {
+    .tid-form,
+    .tid-result {
+        padding: var(--space-md);
+    }
+
+    .tid-ref-input {
+        flex-basis: 100%;
+        font-size: var(--text-base);
+    }
+
+    .tid-btn {
+        align-self: stretch;
+    }
+
+    .tid-dates {
+        grid-template-columns: 1fr;
+    }
+}

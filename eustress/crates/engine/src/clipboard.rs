@@ -680,6 +680,9 @@ pub struct PasteEvent {
     /// Paste Into: the copies become children of this entity (on disk, in
     /// its folder) instead of siblings of the source.
     pub target_parent: Option<Entity>,
+    /// Paste Into a service selected in the Explorer (DataService, say): the
+    /// copies are written into that service's folder.
+    pub target_folder: Option<PathBuf>,
 }
 
 /// Event to trigger duplicate operation
@@ -970,18 +973,35 @@ pub fn handle_paste_event(
     // system is already at 16 params, and a 17th is a hard compile error.
     // It is `Option` because headless/tool binaries boot `ClipboardPlugin`
     // without `UndoPlugin`; in the editor it is always present.
+    // The Play state rides here too (`.3`): a paste waits for Stop.
     mut cut_bundle: (
         Query<&crate::space::instance_loader::InstanceFile>,
         Query<&crate::space::file_loader::LoadedFromFile>,
         Option<ResMut<crate::undo::UndoStack>>,
+        Option<Res<State<crate::play_mode::PlayModeState>>>,
     ),
     mut paste_queue: ResMut<crate::space::file_loader::PasteSpawnQueue>,
 ) {
+    let play_state = cut_bundle.3.as_ref().map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     // Field-wise borrows: `.0`/`.1` are read all the way through the cut
     // loop while `.2` is written at the end, and the borrow checker
     // splits disjoint tuple fields of a local without complaint.
     let (instance_file_query, loaded_from_file_query) = (&cut_bundle.0, &cut_bundle.1);
     for event in events.read() {
+        // During Play a paste waits for Stop: it writes the Space, and the
+        // scene is the running game. Every paste arrives here (Ctrl+V, Paste
+        // Into, the viewport's Paste Here, Duplicate, the cross-scene
+        // re-paste), and it is refused where it is read, so the request is
+        // consumed and never runs after Stop.
+        let action = if event.mode == PasteMode::DuplicateInPlace {
+            crate::keybindings::Action::Duplicate
+        } else {
+            crate::keybindings::Action::Paste
+        };
+        if let Some(notice) = crate::keybindings::play_refusal(play_state, action) {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         if clipboard.is_empty() {
             notifications.warning("Clipboard is empty");
             continue;
@@ -1020,7 +1040,9 @@ pub fn handle_paste_event(
         // Paste Into: write the copies inside the target's own folder so they
         // load as its children. A target with no folder of its own (a flat
         // legacy file) falls back to the Workspace root.
-        let dest_dir: PathBuf = event
+        let dest_dir: PathBuf = if let Some(folder) = event.target_folder.clone() {
+            folder
+        } else { event
             .target_parent
             .and_then(|parent| {
                 instance_file_query
@@ -1046,7 +1068,8 @@ pub fn handle_paste_event(
                             .map(|l| l.path.clone())
                     })
             })
-            .unwrap_or_else(|| workspace_dir.clone());
+            .unwrap_or_else(|| workspace_dir.clone())
+        };
 
         // ── IDENTITY.md §8.3 — cross-space MOVE conflict check ───────
         // For a MOVE (is_cut=true), refuse the paste up-front when any
@@ -1139,6 +1162,13 @@ pub fn handle_paste_event(
                 }
                 _ => None,
             }
+            .or_else(|| {
+                data_service_home(
+                    event.target_parent.is_some() || event.target_folder.is_some(),
+                    entity_data.source_folder_path.as_deref(),
+                    space_root.as_ref().map(|sr| sr.0.as_path()),
+                )
+            })
             .unwrap_or_else(|| dest_dir.clone());
             let spawned = spawn_pasted_entity(
                 &mut commands,
@@ -1230,34 +1260,31 @@ pub fn handle_paste_event(
                                 toml_path.clone()
                             };
                             if source.exists() {
-                                let trash_dir = source.parent()
-                                    .unwrap_or(std::path::Path::new("."))
-                                    .join(".eustress").join("trash");
-                                let _ = std::fs::create_dir_all(&trash_dir);
-                                let stem = source.file_name().and_then(|n| n.to_str()).unwrap_or("entity");
-                                let trash_path = {
-                                    let base = trash_dir.join(stem);
-                                    if base.exists() {
-                                        let ts = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis()).unwrap_or(0);
-                                        trash_dir.join(format!("{}-{:x}", stem, ts))
-                                    } else { base }
-                                };
-                                if let Some(ref mut reg) = file_registry {
-                                    reg.rename_in_progress.insert(toml_path.clone());
-                                    reg.rename_in_progress.insert(source.clone());
-                                }
+                                // At the Space root, never beside the item (Delete's rule).
+                                let trash_path = crate::space::trash::trash_destination(&source);
                                 // Record only moves that actually landed:
                                 // `TrashEntities` undo renames the pair
                                 // back, and a pair that was never created
-                                // would fail that rename every time.
-                                match std::fs::rename(&source, &trash_path) {
-                                    Ok(()) => cut_moves.push((source.clone(), trash_path)),
-                                    Err(e) => warn!(
-                                        "📋 cut: failed to trash source {:?}: {e}",
-                                        source
-                                    ),
+                                // would fail that rename every time. A source
+                                // that could not move keeps its entity, so
+                                // Explorer matches the disk and the cut can
+                                // be retried (Delete does the same).
+                                let request = crate::space::trash::TrashRequest {
+                                    entity,
+                                    source: &source,
+                                    record: &toml_path,
+                                    destination: &trash_path,
+                                };
+                                match crate::space::trash::trash_instance(&request, &mut commands, file_registry.as_deref_mut()) {
+                                    Ok(_) => cut_moves.push((source.clone(), trash_path)),
+                                    Err(e) => {
+                                        warn!("📋 cut: failed to trash source {:?}: {}", source, e);
+                                        notifications.warning(format!(
+                                            "Cut: could not move '{}' to the trash, so it was left in place.",
+                                            source.file_name().and_then(|n| n.to_str()).unwrap_or("an object")
+                                        ));
+                                        continue;
+                                    }
                                 }
                             } else {
                                 cut_unbacked += 1;
@@ -1270,29 +1297,24 @@ pub fn handle_paste_event(
                         else if let Ok(loaded) = loaded_from_file_query.get(entity) {
                             let source = loaded.path.clone();
                             if source.exists() {
-                                let trash_dir = source.parent()
-                                    .unwrap_or(std::path::Path::new("."))
-                                    .join(".eustress").join("trash");
-                                let _ = std::fs::create_dir_all(&trash_dir);
-                                let stem = source.file_name().and_then(|n| n.to_str()).unwrap_or("entity");
-                                let trash_path = {
-                                    let base = trash_dir.join(stem);
-                                    if base.exists() {
-                                        let ts = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis()).unwrap_or(0);
-                                        trash_dir.join(format!("{}-{:x}", stem, ts))
-                                    } else { base }
+                                // At the Space root, never beside the item (Delete's rule).
+                                let trash_path = crate::space::trash::trash_destination(&source);
+                                let request = crate::space::trash::TrashRequest {
+                                    entity,
+                                    source: &source,
+                                    record: &source,
+                                    destination: &trash_path,
                                 };
-                                if let Some(ref mut reg) = file_registry {
-                                    reg.rename_in_progress.insert(source.clone());
-                                }
-                                match std::fs::rename(&source, &trash_path) {
-                                    Ok(()) => cut_moves.push((source.clone(), trash_path)),
-                                    Err(e) => warn!(
-                                        "📋 cut: failed to trash source {:?}: {e}",
-                                        source
-                                    ),
+                                match crate::space::trash::trash_instance(&request, &mut commands, file_registry.as_deref_mut()) {
+                                    Ok(_) => cut_moves.push((source.clone(), trash_path)),
+                                    Err(e) => {
+                                        warn!("📋 cut: failed to trash source {:?}: {}", source, e);
+                                        notifications.warning(format!(
+                                            "Cut: could not move '{}' to the trash, so it was left in place.",
+                                            source.file_name().and_then(|n| n.to_str()).unwrap_or("an object")
+                                        ));
+                                        continue;
+                                    }
                                 }
                             } else {
                                 cut_unbacked += 1;
@@ -1403,14 +1425,24 @@ pub fn handle_duplicate_event(
     mut copy_events: MessageWriter<CopyEvent>,
     mut paste_events: MessageWriter<PasteEvent>,
     _clipboard: Res<EditorClipboard>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for _event in events.read() {
+        // During Play a duplicate waits for Stop, refused here before its
+        // copy replaces the clipboard; the request is consumed.
+        if let Some(notice) = crate::keybindings::play_refusal(play_state, crate::keybindings::Action::Duplicate) {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         // Copy then paste in exact same position (duplicate = clone in place)
         copy_events.write(CopyEvent { is_cut: false });
         paste_events.write(PasteEvent {
             mode: PasteMode::DuplicateInPlace,
             target_position: None,
             target_parent: None,
+            target_folder: None,
         });
     }
 }
@@ -1847,6 +1879,7 @@ fn spawn_pasted_entity(
                 asset: Some(crate::space::instance_loader::AssetReference {
                     mesh: mesh_path.to_string(),
                     scene: "Scene0".to_string(),
+                    scale_kind: None,
                 }),
                 transform: crate::space::instance_loader::TransformData {
                     position: [pos.x, pos.y, pos.z],
@@ -2073,7 +2106,42 @@ pub fn render_cross_scene_modal(
             mode: PasteMode::NewIds,
             target_position: None,
             target_parent: None,
+            target_folder: None,
         });
+    }
+}
+
+/// Where a plain paste of a copied DataService instance (Connector, Dataset,
+/// Domain, ExportTarget) goes: back into the Space's DataService folder, the
+/// way a Part goes back beside its source. `None` for a paste with a target,
+/// and for anything copied from outside DataService.
+pub fn data_service_home(
+    has_target: bool,
+    source: Option<&str>,
+    space: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    if has_target {
+        return None;
+    }
+    let data = space?.join("DataService");
+    std::path::Path::new(source?).starts_with(&data).then_some(data)
+}
+
+#[cfg(test)]
+mod data_service_home_tests {
+    use super::data_service_home;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn copied_data_instances_go_back_to_data_service() {
+        let space = Path::new("/spaces/Plant");
+        let svc: PathBuf = space.join("DataService");
+        assert_eq!(data_service_home(false, Some("/spaces/Plant/DataService/REST Source"), Some(space)), Some(svc));
+        assert_eq!(data_service_home(true, Some("/spaces/Plant/DataService/REST Source"), Some(space)), None);
+        assert_eq!(data_service_home(false, Some("/spaces/Plant/Workspace/Box"), Some(space)), None);
+        assert_eq!(data_service_home(false, Some("/spaces/Plant/DataServiceOld/x"), Some(space)), None);
+        assert_eq!(data_service_home(false, None, Some(space)), None);
+        assert_eq!(data_service_home(false, Some("/spaces/Plant/DataService/x"), None), None);
     }
 }
 
@@ -2083,6 +2151,7 @@ pub fn render_cross_scene_modal(
 pub fn consume_pending_paste(
     mut studio_state: ResMut<crate::ui::StudioState>,
     explorer_state: Option<Res<crate::ui::slint_ui::UnifiedExplorerState>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
     mut paste_events: MessageWriter<PasteEvent>,
 ) {
     let into = studio_state.pending_paste_into;
@@ -2103,10 +2172,24 @@ pub fn consume_pending_paste(
         None
     };
 
+    // Paste Into a service node (DataService, say) writes into that service's
+    // folder, which has no entity to name when its marker is not on disk.
+    let target_folder = if into {
+        explorer_state.as_ref().and_then(|es| match &es.selected {
+            crate::ui::slint_ui::SelectedItem::Service(name) => {
+                space_root.as_ref().map(|sr| sr.0.join(name))
+            }
+            _ => None,
+        })
+    } else {
+        None
+    };
+
     paste_events.write(PasteEvent {
         mode: PasteMode::Normal,
         target_position: None,
         target_parent,
+        target_folder,
     });
 }
 
@@ -2442,5 +2525,112 @@ mod uuid_tests {
         assert!(!some.is_empty());
         let none = EditorClipboard::target_space_id_for(None);
         assert!(none.is_empty());
+    }
+}
+
+/// During Play a paste or a duplicate is refused where it is read, so the
+/// request is consumed: it neither runs during Play nor after Stop.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    fn clip_app(state: PlayModeState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.add_message::<CopyEvent>()
+            .add_message::<PasteEvent>()
+            .add_message::<DuplicateEvent>()
+            .add_message::<PasteCompletedEvent>();
+        app.insert_resource(State::new(state));
+        app.insert_resource(EditorClipboard::default());
+        app.init_resource::<crate::space::file_loader::PasteSpawnQueue>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.add_systems(Update, (handle_duplicate_event, handle_paste_event.after(handle_duplicate_event)));
+        app
+    }
+
+    fn paste() -> PasteEvent {
+        PasteEvent {
+            mode: PasteMode::Normal,
+            target_position: None,
+            target_parent: None,
+            target_folder: None,
+        }
+    }
+
+    fn warnings(app: &App) -> Vec<String> {
+        app.world()
+            .resource::<crate::notifications::NotificationManager>()
+            .notifications
+            .iter()
+            .map(|n| n.message.clone())
+            .collect()
+    }
+
+    /// Every line in the Output panel.
+    fn output(app: &App) -> Vec<String> {
+        app.world().resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect()
+    }
+
+    #[test]
+    fn play_refuses_a_paste_and_editing_runs_it() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut app = clip_app(state);
+            app.world_mut().write_message(paste());
+            app.update();
+            assert_eq!(warnings(&app), ["Stop Play to paste."], "{state:?}");
+            assert_eq!(output(&app), ["Stop Play to paste."], "{state:?}");
+        }
+        // While editing the paste runs, and with an empty clipboard says so.
+        let mut app = clip_app(PlayModeState::Editing);
+        app.world_mut().write_message(paste());
+        app.update();
+        assert_eq!(warnings(&app), ["Clipboard is empty"]);
+    }
+
+    /// A duplicate is refused before its copy replaces the clipboard: what
+    /// was copied before Play is still there. While editing the same
+    /// duplicate copies, so the check can see a copy happen.
+    #[test]
+    fn play_refuses_a_duplicate_before_it_copies() {
+        let run = |state: PlayModeState| {
+            let mut app = clip_app(state);
+            app.insert_resource(Clipboard::default());
+            app.add_systems(Update, handle_copy_event.after(handle_duplicate_event).before(handle_paste_event));
+            let selection = BevySelectionManager(std::sync::Arc::new(parking_lot::RwLock::new(crate::commands::SelectionManager::default())));
+            selection.0.read().select("1v1".to_string());
+            app.insert_resource(selection);
+            app.world_mut().resource_mut::<EditorClipboard>().copied_entity_ids = vec!["copied before Play".to_string()];
+            app.world_mut().write_message(DuplicateEvent);
+            app.update();
+            let copied = app.world().resource::<EditorClipboard>().copied_entity_ids.clone();
+            (copied, warnings(&app), output(&app))
+        };
+        let (copied, toasts, output) = run(PlayModeState::Playing);
+        assert_eq!(copied, ["copied before Play"], "the refused duplicate replaced the clipboard");
+        assert_eq!(toasts, ["Stop Play to duplicate."]);
+        assert_eq!(output, ["Stop Play to duplicate."]);
+        let (copied, _, _) = run(PlayModeState::Editing);
+        assert_ne!(copied, ["copied before Play"], "the duplicate did not copy while editing");
+    }
+
+    /// Refused during Play and consumed: the same paste does not run once
+    /// Play stops.
+    #[test]
+    fn a_refused_paste_does_not_run_after_stop() {
+        let mut app = clip_app(PlayModeState::Playing);
+        app.world_mut().write_message(paste());
+        // Update alone, without the frame's message bookkeeping, so the
+        // request is still there when Play stops.
+        app.world_mut().run_schedule(Update);
+        assert_eq!(warnings(&app), ["Stop Play to paste."]);
+        app.insert_resource(State::new(PlayModeState::Editing));
+        app.world_mut().run_schedule(Update);
+        assert_eq!(warnings(&app), ["Stop Play to paste."], "the refused paste ran after Stop");
     }
 }

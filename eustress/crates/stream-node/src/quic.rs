@@ -1,14 +1,27 @@
 //! QUIC transport for EustressStream nodes.
 //!
-//! Uses Quinn (Rust QUIC / RFC 9000) with a self-signed TLS certificate for
-//! loopback and LAN operation. Suitable for Forge cluster mesh.
+//! Uses Quinn (Rust QUIC / RFC 9000) with the node's operator-supplied
+//! certificate: TLS 1.3, and no early data in either direction. Suitable for
+//! the Forge cluster mesh.
+//!
+//! Every connection logs in. The node opens one bidirectional stream, sends
+//! `Challenge` on it, and the client answers `Hello`, signed over the QUIC
+//! transcript (label `eustress-stream-login-quic-v1`, bound to this
+//! connection's exporter). After `Welcome` the same stream carries frames
+//! under the party's grants, through the dispatcher TCP uses. A client cannot
+//! open streams of its own.
 //!
 //! ## Why QUIC over TCP?
 //!
-//! - **0-RTT reconnection** — clients resume without a handshake round-trip
 //! - **Stream multiplexing** — no head-of-line blocking: pub and sub streams are independent
 //! - **UDP-native** — lower kernel overhead on loopback; avoids Nagle's algorithm
 //! - **Built-in TLS 1.3** — Forge cluster mesh encryption out of the box
+//!
+//! 0-RTT is off: the node accepts no early data and clients send none.
+//!
+//! The node answers every address it has not validated with a Retry. Only a
+//! validated address, one whose Initial carries the Retry token, takes a
+//! pre-login slot, so a spoofed source address can hold none.
 //!
 //! ## Feature gate
 //!
@@ -22,15 +35,19 @@
 //!
 //! ```rust,no_run,ignore
 //! use eustress_stream_node::quic::{QuicNode, QuicNodeClient};
-//! use eustress_stream_node::NodeConfig;
+//! use eustress_stream_node::{ClientAuth, NodeConfig};
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let node = QuicNode::start(NodeConfig::default()).await.unwrap();
-//!     println!("QUIC node on {}", node.listen_addr());
+//!     let config = NodeConfig::default()
+//!         .with_tls("node.crt", "private/node.key")
+//!         .with_parties("private/parties.toml");
+//!     let node = QuicNode::start(config).await.unwrap();
+//!     println!("QUIC node on {} (pin {})", node.listen_addr(), node.spki_pin());
 //!
-//!     let client = QuicNodeClient::connect(node.listen_addr(), node.cert_der()).await.unwrap();
-//!     let offset = client.publish("scene_deltas", bytes::Bytes::from_static(b"hello")).await.unwrap();
+//!     let auth: ClientAuth = todo!("party id, the party's keypair, and the node's pin");
+//!     let client = QuicNodeClient::connect(node.listen_addr(), &auth).await.unwrap();
+//!     let offset = client.publish("log/output", bytes::Bytes::from_static(b"hello")).await.unwrap();
 //! }
 //! ```
 
@@ -38,85 +55,28 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use quinn::{
-    ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
+    Endpoint, RecvStream, SendStream,
 };
-use rcgen::generate_simple_self_signed;
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use eustress_stream::EustressStream;
 
+use crate::auth::{self, Channel, HelloOutcome, NodeAuth, Party, PreLoginPermit, SessionGuard};
+use crate::client::{
+    client_login, close_conn, send_frame, spawn_writer, with_retry, ClientAuth, Conn, Outgoing, Pending, RetryPolicy,
+};
 use crate::config::NodeConfig;
 use crate::error::NodeError;
-use crate::protocol::{ClientFrame, ServerFrame, TopicStats};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TLS helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Install the rustls ring crypto provider once per process.
-/// Idempotent — safe to call multiple times.
-pub fn install_crypto_provider() {
-    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok(); // ignore if already installed
-    });
-}
-
-/// Generate a self-signed certificate for the given server name.
-pub fn generate_self_signed(server_name: &str) -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
-    install_crypto_provider();
-    let cert = generate_simple_self_signed(vec![server_name.to_string()])
-        .expect("self-signed cert generation");
-    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-    (cert_der, key_der)
-}
-
-fn server_config(cert: CertificateDer<'static>, key: PrivatePkcs8KeyDer<'static>) -> ServerConfig {
-    let mut tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key.into())
-        .expect("TLS server config");
-    tls.alpn_protocols = vec![b"eustress/1".to_vec()];
-
-    let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
-    transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
-
-    let mut cfg = ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(tls).expect("QUIC server config"),
-    ));
-    cfg.transport_config(Arc::new(transport));
-    cfg
-}
-
-fn client_config_from_cert(cert: &CertificateDer<'static>) -> ClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert.clone()).expect("add server cert");
-
-    let mut tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"eustress/1".to_vec()];
-
-    let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
-
-    let mut cfg = ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC client config"),
-    ));
-    cfg.transport_config(Arc::new(transport));
-    cfg
-}
+use crate::handler::{serve_party, ConnectionContext};
+use crate::protocol::{read_client_frame, write_server_frame, ClientFrame, ServerFrame};
+use crate::transport::{self, SpkiPin};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // QuicNode — server side
@@ -124,20 +84,34 @@ fn client_config_from_cert(cert: &CertificateDer<'static>) -> ClientConfig {
 
 /// A QUIC-transport EustressStream node.
 ///
-/// Each QUIC connection opens two unidirectional streams:
-/// - stream 0: client → server (ClientFrames)
-/// - stream 1: server → client (ServerFrames)
+/// Each connection carries one bidirectional stream, opened by the node: the
+/// login first, then client frames one way and server frames the other.
 pub struct QuicNode {
     pub stream: EustressStream,
     pub listen_addr: SocketAddr,
     cert_der: CertificateDer<'static>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    spki_pin: SpkiPin,
+    auth: Arc<NodeAuth>,
 }
 
 impl QuicNode {
+    /// Run the startup checks (see [`NodeAuth::from_config`]), then listen.
+    /// The node uses the configured certificate; it never generates one.
     pub async fn start(config: NodeConfig) -> Result<Arc<Self>, NodeError> {
-        let (cert_der, key_der) = generate_self_signed("eustress-node");
-        let server_cfg = server_config(cert_der.clone(), key_der);
+        let auth = NodeAuth::from_config(&config)?;
+        let stream = EustressStream::new(config.stream_config.clone());
+        Self::start_with(stream, config, auth).await
+    }
+
+    /// Listen with a given stream and authentication state that already
+    /// passed the startup checks.
+    pub async fn start_with(
+        stream: EustressStream,
+        config: NodeConfig,
+        auth: Arc<NodeAuth>,
+    ) -> Result<Arc<Self>, NodeError> {
+        let server_cfg = auth.tls().quic_server_config()?;
 
         let addr = SocketAddr::new(config.bind_addr, config.port);
         let endpoint = Endpoint::server(server_cfg, addr)
@@ -146,30 +120,49 @@ impl QuicNode {
             .map_err(NodeError::Io)?;
 
         info!("EustressStream QUIC node listening on {listen_addr}");
+        info!("TLS 1.3, no early data. Clients pin SPKI SHA-256 {}", auth.tls().spki_pin());
 
         let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-        let stream = EustressStream::new(config.stream_config.clone());
+        let ctx = ConnectionContext::new(
+            stream.clone(),
+            Arc::clone(&auth),
+            config.frame_max_bytes,
+            config.connection_channel_capacity,
+        );
 
         let node = Arc::new(QuicNode {
             stream: stream.clone(),
             listen_addr,
-            cert_der,
+            cert_der: auth.tls().certificate().clone(),
             shutdown_tx: shutdown_tx.clone(),
+            spki_pin: auth.tls().spki_pin(),
+            auth: Arc::clone(&auth),
         });
 
+        auth.spawn_revocation_task(Some(shutdown_tx.subscribe()));
+
         let node_ref = Arc::clone(&node);
-        let cap = config.connection_channel_capacity;
-        let max_frame = config.frame_max_bytes;
         tokio::spawn(async move {
-            node_ref.accept_loop(endpoint, cap, max_frame).await;
+            node_ref.accept_loop(endpoint, ctx).await;
         });
 
         Ok(node)
     }
 
-    /// DER-encoded server certificate — pass this to `QuicNodeClient::connect`.
+    /// The DER certificate this node presents.
     pub fn cert_der(&self) -> &CertificateDer<'static> {
         &self.cert_der
+    }
+
+    /// The pin a client passes to [`QuicNodeClient::connect`] through
+    /// [`ClientAuth`]: SHA-256 of this node's certificate SPKI.
+    pub fn spki_pin(&self) -> SpkiPin {
+        self.spki_pin
+    }
+
+    /// The node's authentication and authorization state.
+    pub fn auth(&self) -> &Arc<NodeAuth> {
+        &self.auth
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
@@ -180,18 +173,41 @@ impl QuicNode {
         let _ = self.shutdown_tx.send(());
     }
 
-    async fn accept_loop(&self, endpoint: Endpoint, cap: usize, max_frame: usize) {
+    async fn accept_loop(&self, endpoint: Endpoint, ctx: Arc<ConnectionContext>) {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
             tokio::select! {
-                Some(conn) = endpoint.accept() => {
-                    let stream = self.stream.clone();
-                    tokio::spawn(async move {
-                        match conn.await {
-                            Ok(c) => handle_quic_connection(c, stream, cap, max_frame).await,
-                            Err(e) => warn!("QUIC connection error: {e}"),
+                Some(incoming) = endpoint.accept() => {
+                    let peer = incoming.remote_address();
+                    // VERIFY: quinn 0.11 Incoming::remote_address_validated(&self) -> bool,
+                    // Incoming::retry(self) -> Result<(), RetryError> and
+                    // RetryError::into_incoming(self) -> Incoming, copied from
+                    // quinn-0.11.11/src/incoming.rs.
+                    if !incoming.remote_address_validated() {
+                        // An address the node has not validated gets a Retry and
+                        // takes no pre-login slot. Its next Initial carries the
+                        // token, which proves the address; only that one takes a
+                        // slot. An unvalidated Initial can always be retried, so
+                        // the refusal below is a guard, not a path.
+                        if let Err(refused) = incoming.retry() {
+                            refused.into_incoming().refuse();
                         }
-                    });
+                    } else {
+                        // Take a pre-login slot, or refuse the connection at accept.
+                        let accepted_at = Instant::now();
+                        match ctx.auth.pre_login.try_acquire(peer.ip()) {
+                            Some(permit) => {
+                                let ctx = Arc::clone(&ctx);
+                                tokio::spawn(async move {
+                                    handle_quic_connection(incoming, peer, permit, ctx, accepted_at).await;
+                                });
+                            }
+                            None => {
+                                ctx.auth.log_refused_at_accept(peer.ip(), Channel::Quic);
+                                incoming.refuse();
+                            }
+                        }
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     endpoint.close(0u32.into(), b"shutdown");
@@ -202,136 +218,138 @@ impl QuicNode {
     }
 }
 
+/// Log in within 5 seconds of accept (the QUIC handshake counts), then serve
+/// frames under the party's grants until the peer closes or the party is
+/// revoked.
 async fn handle_quic_connection(
-    conn: quinn::Connection,
-    stream: EustressStream,
-    cap: usize,
-    max_frame: usize,
+    incoming: quinn::Incoming,
+    peer: SocketAddr,
+    permit: PreLoginPermit,
+    ctx: Arc<ConnectionContext>,
+    accepted_at: Instant,
 ) {
-    // Each QUIC connection uses a single bidirectional stream for frames.
-    match conn.accept_bi().await {
-        Ok((send, recv)) => {
-            quic_connection_loop(send, recv, stream, cap, max_frame).await;
+    let deadline = accepted_at + auth::LOGIN_DEADLINE;
+    let login = tokio::time::timeout_at(deadline, login_quic(incoming, peer, &ctx, deadline)).await;
+    drop(permit);
+    let (conn, send, recv, party, session) = match login {
+        Ok(Some(done)) => done,
+        Ok(None) => return,
+        Err(_) => {
+            ctx.auth.log_login_failure(
+                peer.ip(),
+                Channel::Quic,
+                None,
+                auth::REASON_AUTH_FAILED,
+                "no Welcome within 5 seconds of accept",
+            );
+            return;
         }
+    };
+
+    info!(party = %party.id, source = %peer, channel = "quic", "login succeeded");
+    serve_party(recv, send, peer, party, session, &ctx).await;
+    conn.close(0u32.into(), b"closed");
+}
+
+/// The QUIC handshake, then `Challenge` on a stream the node opens, `Hello`,
+/// and `Welcome` or `AuthFailed`. The party's session is registered before
+/// `Welcome` goes out.
+async fn login_quic(
+    incoming: quinn::Incoming,
+    peer: SocketAddr,
+    ctx: &ConnectionContext,
+    deadline: Instant,
+) -> Option<(quinn::Connection, SendStream, RecvStream, Arc<Party>, SessionGuard)> {
+    let auth = &ctx.auth;
+    let conn = match incoming.await {
+        Ok(conn) => conn,
         Err(e) => {
-            debug!("QUIC bi-stream accept error: {e}");
+            debug!(source = %peer, "QUIC handshake failed: {e}");
+            auth.log_login_failure(peer.ip(), Channel::Quic, None, auth::REASON_AUTH_FAILED, "QUIC handshake failed");
+            return None;
         }
+    };
+    let exporter = match transport::quic_exporter(&conn) {
+        Ok(exporter) => exporter,
+        Err(e) => {
+            warn!(source = %peer, "cannot derive the QUIC login binding: {e}");
+            return None;
+        }
+    };
+    let (mut send, mut recv) = match conn.open_bi().await {
+        Ok(streams) => streams,
+        Err(e) => {
+            debug!(source = %peer, "cannot open the login stream: {e}");
+            return None;
+        }
+    };
+
+    let nonce = auth::fresh_nonce();
+    let challenge = ServerFrame::Challenge { node_id: auth.node_id().to_string(), nonce };
+    if write_server_frame(&mut send, &challenge).await.is_err() {
+        return None;
     }
-}
 
-async fn quic_connection_loop(
-    send: SendStream,
-    mut recv: RecvStream,
-    stream: EustressStream,
-    cap: usize,
-    max_frame: usize,
-) {
-    let send = Arc::new(Mutex::new(send));
+    let first = match read_client_frame(&mut recv, auth::PRE_LOGIN_MAX_FRAME).await {
+        Ok(frame) => frame,
+        Err(e) => {
+            let cause = match e {
+                NodeError::FrameTooLarge(_) => "pre-login frame over 64 KB",
+                NodeError::Decode(_) => "first frame does not decode",
+                _ => "closed before Hello",
+            };
+            auth.log_login_failure(peer.ip(), Channel::Quic, None, auth::REASON_AUTH_FAILED, cause);
+            return None;
+        }
+    };
+    let ClientFrame::Hello { protocol_version, party_id, signature } = first else {
+        auth.log_login_failure(peer.ip(), Channel::Quic, None, auth::REASON_AUTH_FAILED, "first frame was not Hello");
+        conn.close(0u32.into(), b"protocol");
+        return None;
+    };
 
-    loop {
-        let frame = match read_quic_frame(&mut recv, max_frame).await {
-            Ok(f) => f,
-            Err(NodeError::ConnectionClosed) => break,
-            Err(e) => { warn!("QUIC recv error: {e}"); break; }
-        };
-
-        let reply = dispatch_quic_frame(frame, &stream, cap, Arc::clone(&send)).await;
-        if let Some(reply) = reply {
-            let mut guard = send.lock().await;
-            if write_quic_frame(&mut *guard, &reply).await.is_err() {
-                break;
+    match auth.check_hello(Channel::Quic, &nonce, &exporter, protocol_version, &party_id, &signature) {
+        HelloOutcome::Welcome(party) => {
+            // The session is registered before `Welcome` goes out, and the
+            // party is checked again right after, so a revocation that lands
+            // during the login is never missed.
+            let Some(session) = auth.register_session(&party) else {
+                auth.log_login_failure(
+                    peer.ip(),
+                    Channel::Quic,
+                    Some(&party.id),
+                    auth::REASON_AUTH_FAILED,
+                    "party revoked during the login",
+                );
+                let reason = auth::REASON_AUTH_FAILED.to_string();
+                let _ = write_server_frame(&mut send, &ServerFrame::AuthFailed { reason }).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout_at(deadline, conn.closed()).await;
+                conn.close(0u32.into(), b"auth_failed");
+                return None;
+            };
+            let welcome = ServerFrame::Welcome { party_id: party.id.clone() };
+            if write_server_frame(&mut send, &welcome).await.is_err() {
+                return None;
             }
+            Some((conn, send, recv, party, session))
         }
-    }
-}
-
-async fn dispatch_quic_frame(
-    frame: ClientFrame,
-    stream: &EustressStream,
-    cap: usize,
-    send: Arc<Mutex<SendStream>>,
-) -> Option<ServerFrame> {
-    match frame {
-        ClientFrame::Publish { topic, payload } => {
-            let offset = stream.producer(&topic).send_bytes(Bytes::from(payload));
-            Some(ServerFrame::Ack { offset })
-        }
-        ClientFrame::PublishBatch { messages } => {
-            let offsets: Vec<u64> = messages.into_iter()
-                .map(|(t, p)| stream.producer(&t).send_bytes(Bytes::from(p)))
-                .collect();
-            Some(ServerFrame::BatchAck { offsets })
-        }
-        ClientFrame::Subscribe { topic, from_offset } => {
-            let (tx, mut rx) = mpsc::channel(cap);
-            let _ = stream.subscribe_owned(&topic, move |msg| {
-                let _ = tx.try_send(msg);
-            });
-
-            if let Some(off) = from_offset {
-                let send_ref = Arc::clone(&send);
-                stream.replay_ring(&topic, off, |view| {
-                    let f = ServerFrame::Message {
-                        topic: view.topic.to_string(),
-                        offset: view.offset,
-                        timestamp: view.timestamp,
-                        payload: view.data.to_vec(),
-                    };
-                    let s = Arc::clone(&send_ref);
-                    tokio::spawn(async move {
-                        let mut g = s.lock().await;
-                        let _ = write_quic_frame(&mut *g, &f).await;
-                    });
-                });
-            }
-
-            tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    let f = ServerFrame::Message {
-                        topic: msg.topic.clone(),
-                        offset: msg.offset,
-                        timestamp: msg.timestamp,
-                        payload: msg.data.to_vec(),
-                    };
-                    let mut g = send.lock().await;
-                    if write_quic_frame(&mut *g, &f).await.is_err() {
-                        break;
-                    }
-                }
-            });
+        HelloOutcome::Refused(refusal) => {
+            auth.log_login_failure(
+                peer.ip(),
+                Channel::Quic,
+                refusal.enrolled_party.as_deref(),
+                refusal.reason,
+                refusal.cause,
+            );
+            let _ = write_server_frame(&mut send, &ServerFrame::AuthFailed { reason: refusal.reason.to_string() }).await;
+            let _ = send.finish();
+            // The client closes once it reads the refusal; the deadline bounds
+            // the wait for a client that does not.
+            let _ = tokio::time::timeout_at(deadline, conn.closed()).await;
+            conn.close(0u32.into(), b"auth_failed");
             None
         }
-        ClientFrame::ListTopics => {
-            let stats: Vec<TopicStats> = stream.topics().into_iter().map(|name| {
-                let head = stream.head(&name);
-                let subscriber_count = stream.subscriber_count(&name);
-                TopicStats { name, head, subscriber_count }
-            }).collect();
-            Some(ServerFrame::TopicList(stats))
-        }
-        ClientFrame::PublishBatchTopic { topic, payloads } => {
-            let count = payloads.len() as u32;
-            let producer = stream.producer(&topic);
-            let mut first_offset = 0u64;
-            for (i, payload) in payloads.into_iter().enumerate() {
-                let offset = producer.send_bytes(Bytes::from(payload));
-                if i == 0 { first_offset = offset; }
-            }
-            Some(ServerFrame::BatchAckCompact { first_offset, count })
-        }
-        ClientFrame::PublishNoAck { topic, payload } => {
-            stream.producer(&topic).send_bytes(Bytes::from(payload));
-            None
-        }
-        ClientFrame::PublishBatchNoAck { topic, payloads } => {
-            let producer = stream.producer(&topic);
-            for payload in payloads {
-                producer.send_bytes(Bytes::from(payload));
-            }
-            None
-        }
-        ClientFrame::Ping => Some(ServerFrame::Pong),
-        ClientFrame::Unsubscribe { .. } => None,
     }
 }
 
@@ -340,133 +358,159 @@ async fn dispatch_quic_frame(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// QUIC client — connects to a `QuicNode`.
+///
+/// It pins the node's certificate (SPKI SHA-256) and logs in before its
+/// first frame.
 #[derive(Clone)]
 pub struct QuicNodeClient {
     inner: Arc<QuicClientInner>,
 }
 
 struct QuicClientInner {
-    send: Mutex<SendStream>,
-    ack_queue: Mutex<std::collections::VecDeque<oneshot::Sender<u64>>>,
-    batch_ack_queue: Mutex<std::collections::VecDeque<oneshot::Sender<Vec<u64>>>>,
-    topic_list_waiter: Mutex<Option<oneshot::Sender<Vec<TopicStats>>>>,
-    sub_channels: dashmap::DashMap<String, mpsc::Sender<(u64, u64, Vec<u8>)>>,
+    // The writer task's channel: every frame goes out through it, and the
+    // task queues each request's waiter before it writes the frame.
+    outgoing: mpsc::Sender<Outgoing>,
 }
 
 impl QuicNodeClient {
+    /// Connect over QUIC pinned to `auth.pin`, then log in as `auth.party_id`
+    /// before the first frame. A connection the node refuses or closes before
+    /// `Challenge` (a pre-login limit) is retried under
+    /// [`RetryPolicy::default`]: at most three attempts in all.
     pub async fn connect(
         addr: SocketAddr,
-        server_cert: &CertificateDer<'static>,
+        auth: &ClientAuth,
     ) -> Result<Self, NodeError> {
+        Self::connect_with_policy(addr, auth, &RetryPolicy::default()).await
+    }
+
+    /// The same with a retry policy of the caller's choosing.
+    pub async fn connect_with_policy(addr: SocketAddr, auth: &ClientAuth, policy: &RetryPolicy) -> Result<Self, NodeError> {
+        with_retry(policy, || Self::connect_once(addr, auth)).await
+    }
+
+    async fn connect_once(addr: SocketAddr, auth: &ClientAuth) -> Result<Self, NodeError> {
         let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let mut endpoint = Endpoint::client(bind)
             .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
-        endpoint.set_default_client_config(client_config_from_cert(server_cert));
+        endpoint.set_default_client_config(transport::quic_client_config(auth.pin)?);
 
         let conn = endpoint.connect(addr, "eustress-node")
             .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?
             .await
-            .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(handshake_error)?;
 
-        let (send, recv) = conn.open_bi().await
-            .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
+        // The node opens the one stream and sends `Challenge` on it.
+        let exporter = transport::quic_exporter(&conn)?;
+        let (mut send, mut recv) = conn.accept_bi().await
+            .map_err(closed_before_challenge)?;
+        client_login(&mut recv, &mut send, auth, Channel::Quic, &exporter).await?;
 
-        let inner = Arc::new(QuicClientInner {
-            send: Mutex::new(send),
-            ack_queue: Mutex::new(std::collections::VecDeque::new()),
-            batch_ack_queue: Mutex::new(std::collections::VecDeque::new()),
-            topic_list_waiter: Mutex::new(None),
-            sub_channels: dashmap::DashMap::new(),
-        });
-
-        let inner_ref = Arc::clone(&inner);
+        let conn = Conn::new(send);
+        let outgoing = spawn_writer(Arc::clone(&conn));
         tokio::spawn(async move {
-            quic_client_reader(recv, inner_ref).await;
+            quic_client_reader(recv, conn).await;
         });
 
-        Ok(QuicNodeClient { inner })
+        Ok(QuicNodeClient { inner: Arc::new(QuicClientInner { outgoing }) })
     }
 
     pub async fn publish(&self, topic: &str, payload: Bytes) -> Result<u64, NodeError> {
-        let (tx, rx) = oneshot::channel::<u64>();
-        self.inner.ack_queue.lock().await.push_back(tx);
-        let mut send = self.inner.send.lock().await;
-        write_quic_frame(&mut *send, &ClientFrame::Publish {
+        let (tx, rx) = oneshot::channel::<Result<u64, NodeError>>();
+        self.request(ClientFrame::Publish {
             topic: topic.to_string(),
             payload: payload.to_vec(),
-        }).await?;
-        drop(send);
-        rx.await.map_err(|_| NodeError::ConnectionClosed)
+        }, Pending::Ack(tx)).await?;
+        rx.await.map_err(|_| NodeError::ConnectionClosed)?
     }
 
     pub async fn publish_batch(&self, messages: Vec<(String, Bytes)>) -> Result<Vec<u64>, NodeError> {
-        let (tx, rx) = oneshot::channel::<Vec<u64>>();
-        self.inner.batch_ack_queue.lock().await.push_back(tx);
-        let mut send = self.inner.send.lock().await;
-        write_quic_frame(&mut *send, &ClientFrame::PublishBatch {
+        let (tx, rx) = oneshot::channel::<Result<Vec<u64>, NodeError>>();
+        self.request(ClientFrame::PublishBatch {
             messages: messages.into_iter().map(|(t, p)| (t, p.to_vec())).collect(),
-        }).await?;
-        drop(send);
-        rx.await.map_err(|_| NodeError::ConnectionClosed)
+        }, Pending::BatchAck(tx)).await?;
+        rx.await.map_err(|_| NodeError::ConnectionClosed)?
     }
 
+    /// Ping the node and wait for its `Pong`.
     pub async fn ping(&self) -> Result<(), NodeError> {
-        let mut send = self.inner.send.lock().await;
-        write_quic_frame(&mut *send, &ClientFrame::Ping).await
+        let (tx, rx) = oneshot::channel::<Result<(), NodeError>>();
+        self.request(ClientFrame::Ping, Pending::Pong(tx)).await?;
+        rx.await.map_err(|_| NodeError::ConnectionClosed)?
+    }
+
+    /// Hand a request to the writer task, which queues `pending` and then
+    /// writes the frame, with nothing in between.
+    async fn request(&self, frame: ClientFrame, pending: Pending) -> Result<(), NodeError> {
+        send_frame(&self.inner.outgoing, frame, Some(pending)).await
     }
 }
 
-async fn quic_client_reader(mut recv: RecvStream, inner: Arc<QuicClientInner>) {
+async fn quic_client_reader(mut recv: RecvStream, conn: Arc<Conn<SendStream>>) {
     loop {
         match read_quic_frame(&mut recv, 16 * 1024 * 1024).await {
-            Ok(ServerFrame::Ack { offset }) => {
-                if let Some(tx) = inner.ack_queue.lock().await.pop_front() {
-                    let _ = tx.send(offset);
-                }
-            }
-            Ok(ServerFrame::BatchAck { offsets }) => {
-                if let Some(tx) = inner.batch_ack_queue.lock().await.pop_front() {
-                    let _ = tx.send(offsets);
-                }
-            }
-            Ok(ServerFrame::TopicList(list)) => {
-                if let Some(tx) = inner.topic_list_waiter.lock().await.take() {
-                    let _ = tx.send(list);
-                }
-            }
             Ok(ServerFrame::Message { topic, offset, timestamp, payload }) => {
-                if let Some(ch) = inner.sub_channels.get(&topic) {
+                if let Some(ch) = conn.sub_channels.get(&topic) {
                     let _ = ch.try_send((offset, timestamp, payload));
                 }
             }
-            Ok(ServerFrame::BatchAckCompact { .. }) => {
-                // QUIC QuicNodeClient doesn't yet expose publish_batch_topic —
-                // ignore compact acks until the QUIC client is extended.
-            }
-            Ok(ServerFrame::Pong) => {}
-            Ok(ServerFrame::Error { code, message }) => {
-                warn!("QUIC server error {code}: {message}");
+            // Every other frame is the reply to the front request.
+            Ok(reply) => {
+                if let Err(e) = conn.pending.lock().await.answer(reply, &conn.sub_channels) {
+                    warn!("QUIC: {e}; closing the connection");
+                    break;
+                }
             }
             Err(NodeError::ConnectionClosed) => break,
             Err(e) => { warn!("QUIC client read error: {e}"); break; }
         }
+    }
+
+    // The connection is gone, or the node broke the reply order: every
+    // request still waiting fails, none is queued after this, and the send
+    // side finishes.
+    close_conn(&conn).await;
+}
+
+/// A failed QUIC handshake. A node that refuses the connection at accept (a
+/// pre-login limit) closes it with CONNECTION_REFUSED; that, a reset, and a
+/// close by the node are refusals the retry rule covers. Anything else, a
+/// TLS failure such as a pin mismatch among them, is not retried.
+fn handshake_error(error: quinn::ConnectionError) -> NodeError {
+    match &error {
+        // VERIFY: quinn 0.11 reports Incoming::refuse() to the client as
+        // ConnectionError::ConnectionClosed with error_code
+        // TransportErrorCode::CONNECTION_REFUSED (quinn-proto-0.11.15
+        // src/endpoint.rs, Endpoint::refuse).
+        quinn::ConnectionError::ConnectionClosed(close)
+            if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+        {
+            NodeError::Refused { reason: format!("the node refused the QUIC connection ({error})"), retry_after: None }
+        }
+        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::Reset => {
+            NodeError::Refused { reason: format!("the node closed the QUIC connection ({error})"), retry_after: None }
+        }
+        _ => NodeError::Tls(format!("QUIC handshake with the node failed: {error}")),
+    }
+}
+
+/// The node's login stream never arrived: the connection ended before
+/// `Challenge`, which the retry rule covers. A timeout is not retried.
+fn closed_before_challenge(error: quinn::ConnectionError) -> NodeError {
+    match &error {
+        quinn::ConnectionError::ConnectionClosed(_)
+        | quinn::ConnectionError::ApplicationClosed(_)
+        | quinn::ConnectionError::Reset => NodeError::Refused {
+            reason: format!("the node closed the QUIC connection before Challenge ({error})"),
+            retry_after: None,
+        },
+        _ => NodeError::Io(std::io::Error::other(error.to_string())),
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Frame codec over QUIC streams
 // ─────────────────────────────────────────────────────────────────────────────
-
-async fn write_quic_frame(send: &mut SendStream, frame: &impl serde::Serialize) -> Result<(), NodeError> {
-    let payload = bincode::serialize(frame)
-        .map_err(|e| NodeError::Encode(e.to_string()))?;
-    let len = payload.len() as u64;
-    send.write_all(&len.to_le_bytes()).await
-        .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
-    send.write_all(&payload).await
-        .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
-    Ok(())
-}
 
 async fn read_quic_frame<T: serde::de::DeserializeOwned>(
     recv: &mut RecvStream,

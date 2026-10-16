@@ -517,6 +517,14 @@ impl ToolHandler for WebsiteRemoveReferenceTool {
         if key.is_empty() {
             return err("website_remove_reference", "key is required");
         }
+        // The key names a folder that is removed, so it follows the rule
+        // website_add_reference gave it: letters, digits and underscores.
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return err(
+                "website_remove_reference",
+                format!("key '{key}' must be letters, digits and underscores, as website_add_reference made it."),
+            );
+        }
         let dir = service_dir(ctx).join(key);
         if !dir.join("_instance.toml").exists() {
             return err(

@@ -153,7 +153,7 @@ fn scan_rules_dir(dir: &std::path::Path, scope: &str, rules: &mut Vec<serde_json
                 let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let preview = if content.len() > 200 {
-                    format!("{}...", &content[..200])
+                    format!("{}...", crate::file_tools::utf8_prefix(&content, 200))
                 } else {
                     content.clone()
                 };

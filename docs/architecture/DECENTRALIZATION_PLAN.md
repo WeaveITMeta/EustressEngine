@@ -151,17 +151,45 @@ overturn records.
 
 ### Constitution status
 
-**v1.2 is authored and stored**: `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md` (filename
-kept stable; internal `Version:` field is the source of truth). v1.0 harm lane authored by
-Grok 4.5 under founder direction (2026-07-12); v1.1 quality lane and v1.2 spatial-intelligence
-review requirement added same day per the founder's decisions below.
-**Policy hash:** `sha256:0710516f8c16aa1145b97ed695959e208bd6c1b3b2b1e42f4180984435ef13bb`
-(computed over the stored file; recorded here because a self-referential hash inside the
-file would change the hash). Covers: eight harm-based prohibited categories, lean-toward-publish
-+ flag-on-true-ambiguity guidance, the satanic/occult/horror/religious-criticism clarification
-(theme alone never rejects; the "about vs. manual" test), the spatial intelligence review
-requirement (below), the quality gate (below), strict JSON verdict output with mandatory
-spatial evidence, and the appeals/false-positive/versioning loop.
+**v2.3 is authored and stored**: `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md`, the Eustress
+Guardian Code v2.3 (filename kept stable; internal `Version:` field is the source of truth). v1.0
+harm lane authored by Grok 4.5 under founder direction (2026-07-12); v1.1 quality lane and v1.2
+spatial-intelligence review requirement added same day per the founder's decisions below; v1.3
+(2026-10-08) three tests and a person for every game. v2.0 (2026-10-08, founder direction):
+Eustress lists simulation, digital twin and STEM work that affects real life or advances the
+future; Part I names what is prohibited in two groups (A, law and real harm, which carries the
+v1.0 harm lane; B, what Eustress does not carry, horror and tragedy among it, as bright lines);
+four scored tests (build quality, objective, lesson, real-world effect) replace the three; every
+listing carries a Qualification Statement; adult content is shown only to accounts that turn it
+on; and the verdict rules are applied by the system in a fixed order, each verdict citing the
+article or test that decided it. v2.1 (2026-10-08, founder direction): Claude (Haiku 5.5) judges,
+Grok (4.7) researches public facts only, Jev classifies, and a person in the Review Workspace
+decides what the rules send to a person; Group A adds A12 (war and military targeting), A13
+(crime rehearsal) and A14 (stalking), with a property-ownership attestation for an author's own
+property; B6 becomes the fair-economy article with sub-items (a) to (h); fiction is listed when
+labelled, under T4 for Fiction; ratings come from an author questionnaire in Eustress's own age
+bands (`all_ages`, `ages_10`, `teen_13`, `mature_17`, `adult_18`) with content descriptors; an
+uncertain Group A citation is held, not rejected; and every listing records `review_schema: 1`.
+v2.2 (2026-10-08, founder direction): B11, no hard drugs ever (opioids outside medical care,
+cocaine or crack, methamphetamine, cannabis), with teaching that saves lives kept at `mature_17`;
+a top band `adult_21` for alcohol, tobacco and showing psychedelic use, shown only to an account
+with Adult content on and a verified age of 21 or over; the questionnaire asks about alcohol and
+tobacco, and about drugs, as two questions; and every listing records `review_schema: 2`.
+v2.3 (2026-10-08, founder direction): tags are a listing's only categories and the genre field
+is gone; an author may leave the tags empty, and the judge then chooses up to 5 that describe the
+Space honestly (`suggested_tags`), with `fiction` and a genre tag for fiction; tags that
+misdescribe the Space, or carry a slur, an insult or personal information, are a B9 wording fault.
+**Policy hash:** `sha256:99ced3f2e27e715a52483581375cb9eda9401944ca8f4412483da2f27e5f39b0`
+(computed over the stored file with its line endings normalized to LF, as the Worker ships it;
+recorded here because a self-referential hash inside the file would change the hash). Covers:
+Part 0 (purpose, principles and who reviews), the spatial intelligence review requirement
+(below), Part I articles A1 to A14 and B1 to B11 with the property-ownership attestation, Part
+II's four tests and T4 for Fiction, Part III's Qualification Statement, tags (the judge's when
+the author gives none), fiction tags, Product
+category and rating questionnaire, Part IV's ordered verdict rules, Part V ratings, content
+descriptors and the Adult content setting, Part VI games, Part VII's strict JSON answer with
+mandatory spatial evidence, per-article and per-test evidence and `suggested_tags`, and Part VIII's appeals, audit,
+versioning and review-schema loop.
 
 ### Quality Gate — RESOLVED: Option 1, hard gate
 
@@ -213,12 +241,14 @@ review decisions): `verdict_id`, `entity_id`, `content_root` (the Space's **BLAK
 root** — content identifiers use `blake3:` prefixes; plain document hashes like the policy file
 use `sha256:`), `published_at`, `judge { type: "grok-4.5" | "moderator-node-quorum-v1",
 model_identifier, policy_version, policy_hash }`, `verdict: publish | reject |
-flag_for_human_review`, `quality: featured | listed | rejected_low_effort`,
-`spatial_evidence: [String]` (required, non-empty), `rationale`, `confidence`,
-`appeal_status: none | pending | overturned | upheld`, and an **Ed25519** signature over all
-fields (bliss-crypto's native scheme). Public listing requires `verdict == publish AND
-quality != rejected_low_effort`. Swapping the judge implementation never breaks historical
-records.
+flag_for_human_review`, `articles: [{ id, confidence, evidence }]`, `tests: { build_quality,
+objective, lesson, real_world }` (each a score from 0 to 3 or null, with evidence),
+`statement_check`, `rating_floor`, `spatial_evidence: [String]` (required, non-empty),
+`rationale`, `confidence`, the outcome the Guardian Code's verdict rules computed from them
+(`approved | changes_requested | rejected | held | quarantined`, with the rule and the article or
+test that decided it), `appeal_status: none | pending | overturned | upheld`, and an **Ed25519**
+signature over all fields (bliss-crypto's native scheme). Public listing requires the computed
+outcome `approved`. Swapping the judge implementation never breaks historical records.
 
 ---
 

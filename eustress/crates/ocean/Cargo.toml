@@ -1,0 +1,8 @@
+[package]
+name = "eustress-ocean"
+version = "0.1.0"
+edition = "2021"
+description = "The ocean surface behind the Terrain object's sea: a JONSWAP spectrum with directional spreading and depth-dependent dispersion, synthesised by inverse FFT (Tessendorf) over three cascades, with CPU sampling of height, vertical velocity, normals and foam, a shore fade shared by drawing and physics, and buoyancy forces for any physics engine; deterministic, parallel with rayon"
+
+[dependencies]
+rayon = "1.10"

@@ -14,6 +14,11 @@ export component LoginDialog inherits Rectangle {
     in property <string> error-message: "";
     in property <string> status-message: "";
     in property <string> identity-path: "";
+    // Which server it signs in to, when that is not production (Studio sets
+    // it from the API in use; empty on production).
+    in property <string> server-note: "";
+    // What an identity file is and where to get one for this server.
+    in property <string> identity-hint: "Your eustress-username.toml holds your Ed25519 keypair. Get one at eustress.dev/login. Never share your private key.";
 
     // Callbacks
     callback on-login();
@@ -63,6 +68,11 @@ export component LoginDialog inherits Rectangle {
                         padding-bottom: 16px;
                         spacing: 8px;
                         alignment: start;
+
+                        if root.server-note != "": KitNotice {
+                            kind: "info";
+                            text: root.server-note;
+                        }
 
                         Text {
                             text: "Identity file";
@@ -126,7 +136,7 @@ export component LoginDialog inherits Rectangle {
 
                         KitNotice {
                             kind: "info";
-                            text: "Your eustress-username.toml holds your Ed25519 keypair. Get one at eustress.dev/login. Never share your private key.";
+                            text: root.identity-hint;
                         }
 
                         if root.status-message != "": KitNotice {

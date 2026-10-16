@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use super::{ApiClient, ApiError};
+use crate::tags::tag_query;
 
 // -----------------------------------------------------------------------------
 // 1. Types
@@ -45,9 +46,10 @@ pub struct GalleryExperience {
     #[serde(default)]
     pub rating: Option<String>,
     #[serde(default)]
-    pub genre: String,
-    #[serde(default)]
     pub tags: Vec<String>,
+    /// Who chose the tags: `"author"` or `"judge"`. Absent means the author.
+    #[serde(default)]
+    pub tags_source: Option<String>,
     #[serde(alias = "published_at", default)]
     pub created_at: String,
 }
@@ -58,7 +60,8 @@ pub struct GalleryQuery {
     pub q: Option<String>,
     pub category: Option<String>,
     pub sort: Option<String>,
-    pub genre: Option<String>,
+    /// Every one of these tags (a listing needs all of them). Sent as repeated `tag=`.
+    pub tags: Vec<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
     pub limit: Option<u32>,
@@ -86,11 +89,8 @@ pub struct FeaturedResponse {
 // 3. Gallery API Functions
 // -----------------------------------------------------------------------------
 
-/// Get gallery experiences (paginated).
-pub async fn get_gallery(
-    client: &ApiClient,
-    query: &GalleryQuery,
-) -> Result<GalleryResponse, ApiError> {
+/// The path that asks the Worker for these gallery experiences: each tag as its own `tag=`.
+pub fn gallery_endpoint(query: &GalleryQuery) -> String {
     let mut endpoint = "/api/gallery?".to_string();
     if let Some(q) = &query.q {
         endpoint.push_str(&format!("q={}&", q));
@@ -101,8 +101,9 @@ pub async fn get_gallery(
     if let Some(s) = &query.sort {
         endpoint.push_str(&format!("sort={}&", s));
     }
-    if let Some(g) = &query.genre {
-        endpoint.push_str(&format!("genre={}&", g));
+    if !query.tags.is_empty() {
+        endpoint.push_str(&tag_query(&query.tags));
+        endpoint.push('&');
     }
     if let Some(p) = query.page {
         endpoint.push_str(&format!("page={}&", p));
@@ -110,7 +111,15 @@ pub async fn get_gallery(
     if let Some(l) = query.limit {
         endpoint.push_str(&format!("limit={}&", l));
     }
-    client.get(&endpoint).await
+    endpoint
+}
+
+/// Get gallery experiences (paginated).
+pub async fn get_gallery(
+    client: &ApiClient,
+    query: &GalleryQuery,
+) -> Result<GalleryResponse, ApiError> {
+    client.get(&gallery_endpoint(query)).await
 }
 
 /// Get featured experiences.
@@ -125,4 +134,30 @@ pub async fn get_experience_details(
 ) -> Result<GalleryExperience, ApiError> {
     let endpoint = format!("/api/gallery/{}", experience_id);
     client.get(&endpoint).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gallery_path_sends_one_tag_per_tag_and_never_the_old_category_filter() {
+        let mut q = GalleryQuery::default();
+        assert_eq!(gallery_endpoint(&q), "/api/gallery?");
+        q.tags = vec!["horror".to_string()];
+        assert_eq!(gallery_endpoint(&q), "/api/gallery?tag=horror&");
+        q.tags = vec!["horror".to_string(), "co-op".to_string()];
+        q.sort = Some("new".to_string());
+        q.limit = Some(20);
+        assert_eq!(gallery_endpoint(&q), "/api/gallery?sort=new&tag=horror&tag=co-op&limit=20&");
+        assert!(!gallery_endpoint(&q).contains("genre="));
+    }
+
+    #[test]
+    fn an_answer_reads_with_tags_and_their_source_and_without_a_genre() {
+        let one: GalleryExperience = serde_json::from_str("{\"id\":\"a\",\"name\":\"A\",\"tags\":[\"racing\"],\"tags_source\":\"judge\"}").unwrap();
+        assert_eq!((one.tags, one.tags_source.as_deref()), (vec!["racing".to_string()], Some("judge")));
+        let old: GalleryExperience = serde_json::from_str("{\"id\":\"a\",\"name\":\"A\",\"genre\":\"Horror\"}").unwrap();
+        assert!(old.tags.is_empty() && old.tags_source.is_none(), "an older answer: the genre is ignored");
+    }
 }

@@ -35,7 +35,9 @@
 //!     identity) and gives it its attributes and tags, a Model's stored
 //!     pivot, and `Disabled` when it switches a script off. GUI, media, sky
 //!     and lighting, and lights keep the folder's name and their parent's
-//!     pose, and take the file's attributes and tags.
+//!     pose, and take the file's attributes and tags. A Sound and a Point,
+//!     Spot or Surface light also carry their component's properties, built
+//!     by the builder Studio's loader uses ([`record_component_props`]).
 //! * A child composes onto its parent's pose, never its size, when the
 //!   Space's `space.toml` names `[space] transform_rule = "parent_pose"`; a
 //!   Space written before the rule composes onto the parent's whole
@@ -57,6 +59,16 @@
 //! Last, the Workspace gets the `Terrain` handle scripts reach as
 //! `workspace.Terrain`, as Studio's Play session makes it, unless the world
 //! already has a Terrain.
+//!
+//! ## A Space from an older format
+//!
+//! Studio moves a Space to the current format
+//! ([`crate::space_format::CURRENT`]) when it opens it, rewriting its files. A
+//! Space nobody has opened since is read as that move leaves it, in memory
+//! ([`crate::space_format::migrated_records`], each step the Space has not
+//! had, in order): its native wedges turned to fit the Roblox-correct meshes
+//! with what is placed on them kept where it was, and its custom meshes'
+//! scale named a length or a multiplier. The records are never written.
 //!
 //! ## Record keys
 //!
@@ -83,7 +95,7 @@ use crate::datamodel::record::{
     is_known_class, luau_script_class, model_pivot_prop, raw_class_name, reads_own_properties, record_animation_id,
     warn_unknown_class,
     record_attachment, data_mesh_props, data_mesh_section, starter_player_props,
-    record_class_props,
+    record_class_props, record_component_props,
     record_attribute_values, record_model_pivot, record_name, record_pose, record_props, record_tags,
     script_starts_disabled, strip_script_suffix, tree_class, InstanceRecord, RecordForm, RecordInstance,
     TransformRule,
@@ -132,9 +144,17 @@ impl TreeReadReport {
 
 /// Build the tree of one Space from its records: every path relative to the
 /// Space's folder, with `/` separators. Only `.toml` files and script sources
-/// are read; any other record may carry no bytes.
+/// are read; any other record may carry no bytes. A Space from an older format
+/// reads as Studio's move to the current one leaves it.
 pub fn read_space_records(records: &[(String, Vec<u8>)]) -> SceneTree {
-    read(records, None, false).0
+    match crate::space_format::migrated_records(records) {
+        Some((migrated, problems)) => {
+            let mut tree = read(&migrated, None, false).0;
+            tree.report.problems.extend(problems);
+            tree
+        }
+        None => read(records, None, false).0,
+    }
 }
 
 /// Build the tree of the Space in `space_root`, read from disk. The same
@@ -292,7 +312,7 @@ impl<'a> Index<'a> {
         let mut dirs: HashMap<String, DirEntry> = HashMap::new();
         dirs.entry(String::new()).or_default();
         for (i, (raw, _)) in records.iter().enumerate() {
-            let path = normalize(raw);
+            let path = normalize_key(raw);
             if path.is_empty() {
                 continue;
             }
@@ -333,9 +353,9 @@ impl<'a> Index<'a> {
     }
 }
 
-/// A record path in the one form the index keys on: forward slashes, no
-/// leading `./` or `/`.
-fn normalize(path: &str) -> String {
+/// A record path in the one form the index keys on, and [`PosedRecord::key`]
+/// is given in: forward slashes, no leading `./` or `/`.
+pub fn normalize_key(path: &str) -> String {
     let mut p = path.replace('\\', "/");
     while let Some(rest) = p.strip_prefix("./") {
         p = rest.to_string();
@@ -609,6 +629,7 @@ impl Reader<'_, '_> {
                 props.extend(record_animation_id(doc).map(|id| ("AnimationId".to_string(), DmValue::String(id))));
             }
             props.extend(record_class_props(&class_name, doc));
+            props.extend(record_component_props(&class_name, doc));
             if class_name == "Attachment" {
                 props.extend(component_props(&record_attachment(doc, &display)));
             }

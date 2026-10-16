@@ -20,9 +20,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use eustress_common::classes::Terrain;
 use eustress_common::terrain::{
-    spawn_terrain, surface_data, Chunk, TerrainBaked, TerrainBrush, TerrainBrushHover, TerrainConfig,
-    TerrainData, TerrainDirtyChunks, TerrainEditRecorder, TerrainMode, TerrainPaintGate, TerrainRoot,
-    TerrainStroke, TerrainTool, TerrainVolume, PaintMode,
+    spawn_terrain, Chunk, TerrainBrush, TerrainBrushHover, TerrainConfig, TerrainData, TerrainDirtyChunks,
+    TerrainEditRecorder, TerrainMode, TerrainPaintGate, TerrainRoot, TerrainStroke, TerrainTool, TerrainVolume,
 };
 
 use crate::keybindings::Action;
@@ -209,6 +208,7 @@ fn sync_terrain_class_to_system(
     disk_latch: Option<Res<crate::terrain_disk_load::TerrainDiskLoadLatch>>,
     #[cfg(feature = "world-db")] voxel_latch: Option<Res<crate::terrain_voxel_load::VoxelTerrainLoadLatch>>,
     #[cfg(feature = "world-db")] voxel_build: Option<Res<crate::terrain_voxel_load::VoxelTerrainBuild>>,
+    generation: Option<Res<crate::space::file_loader::SpaceLoadGeneration>>,
 ) {
     let Some(terrain_class) = query.iter().next() else {
         return;
@@ -217,9 +217,12 @@ fn sync_terrain_class_to_system(
         return;
     };
     let loading = load_in_progress.as_deref().is_some_and(|load| load.active);
+    // Decided for THIS open: right after a reopen of the same path the
+    // latches still name the previous open, and the loaders have not run.
+    let this_open = (space_root.0.clone(), generation.as_deref().map_or(0, |g| g.0));
     let disk_decided = disk_latch
         .as_deref()
-        .is_some_and(|latch| latch.0.as_deref() == Some(space_root.0.as_path()));
+        .is_some_and(|latch| latch.0.as_ref() == Some(&this_open));
     if loading || !disk_decided || !existing_terrain.is_empty() {
         return;
     }
@@ -228,7 +231,7 @@ fn sync_terrain_class_to_system(
     {
         let voxel_decided = voxel_latch
             .as_deref()
-            .is_some_and(|latch| latch.0.as_deref() == Some(space_root.0.as_path()));
+            .is_some_and(|latch| latch.0.as_ref() == Some(&this_open));
         let building = voxel_build
             .as_deref()
             .is_some_and(crate::terrain_voxel_load::VoxelTerrainBuild::is_running);
@@ -308,7 +311,6 @@ fn handle_terrain_actions(
     mut menu: MessageReader<crate::ui::MenuActionEvent>,
     mut brush: ResMut<TerrainBrush>,
     hover: Res<TerrainBrushHover>,
-    terrain: Query<(&TerrainConfig, &TerrainData, Option<&TerrainBaked>), With<TerrainRoot>>,
     mut tool_events: MessageWriter<SetTerrainBrushEvent>,
     mut toggle_events: MessageWriter<ToggleTerrainEditEvent>,
     mut last_plane: Local<Option<f32>>,
@@ -402,19 +404,8 @@ fn handle_terrain_actions(
                     }
                 }
             }
-            Action::TerrainSampleMaterial => {
-                let (Some(hit), Ok((config, data, baked))) = (hover.surface, terrain.single()) else { continue };
-                let Some(sample) =
-                    eustress_common::terrain::material_at_world(config, surface_data(data, baked), hit.x, hit.z)
-                else {
-                    continue;
-                };
-                if brush.tool == TerrainTool::Paint && brush.paint_mode == PaintMode::Replace {
-                    brush.source_material = sample.primary;
-                } else {
-                    brush.paint_material = sample.primary;
-                }
-            }
+            // `TerrainSampleMaterial` (I) is the look picker's (look_picker.rs):
+            // it samples a part as well as the terrain, in any tool.
             _ => {}
         }
     }

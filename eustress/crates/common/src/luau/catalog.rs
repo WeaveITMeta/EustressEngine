@@ -481,19 +481,49 @@ fn type_of(class: &str, name: &str, v: &DmValue) -> String {
     }
 }
 
-/// Properties the running session sets beyond the class defaults: on
-/// services, and a Sound's playback state (read-only, from its player).
+/// Properties the running session sets on services, beyond their defaults.
 const SESSION_PROPERTIES: &[(&str, &str, &str)] = &[
     ("Workspace", "CurrentCamera", "Camera"),
     ("Workspace", "Gravity", "number"),
     ("Players", "LocalPlayer", "Player"),
     ("Players", "RespawnTime", "number"),
     ("Players", "CharacterAutoLoads", "boolean"),
-    ("Sound", "IsPlaying", "boolean"),
-    ("Sound", "IsPaused", "boolean"),
-    ("Sound", "IsLoaded", "boolean"),
-    ("Sound", "TimeLength", "number"),
 ];
+
+/// Properties a script reads that the tree does not store: the VM computes
+/// them or the engine reports them. A part's `Mass` is its density times its
+/// collider's volume and its `AssemblyMass` the body's, and a Sound's
+/// `IsPlaying`, `IsPaused`, `IsLoaded` and `TimeLength` are what its player
+/// says. A part's `DrawnCFrame` is the pose its body is drawn at this frame,
+/// as the engine reports it before scripts run; where no report stands for
+/// the part's current CFrame (none yet, or a script moved the part since), it
+/// reads as the CFrame. All are read-only. A test reads each one in the VM,
+/// so this list never names one the VM does not answer.
+const COMPUTED: &[(&str, &str)] = &[
+    ("Mass", "number"),
+    ("AssemblyMass", "number"),
+    ("DrawnCFrame", "CFrame"),
+    ("IsPlaying", "boolean"),
+    ("IsPaused", "boolean"),
+    ("IsLoaded", "boolean"),
+    ("TimeLength", "number"),
+];
+
+/// The type of `class`'s computed property `name`, or `None` when it is not
+/// one (see [`COMPUTED`]).
+pub fn computed_type(class: &str, name: &str) -> Option<&'static str> {
+    let ty = COMPUTED.iter().find(|(n, _)| *n == name)?.1;
+    let applies = match name {
+        "Mass" | "AssemblyMass" | "DrawnCFrame" => is_base_part(class),
+        _ => class == "Sound",
+    };
+    applies.then_some(ty)
+}
+
+/// Whether `class.name` is computed or reported rather than stored.
+pub fn is_computed(class: &str, name: &str) -> bool {
+    computed_type(class, name).is_some()
+}
 
 /// Children the session puts under an instance, by name.
 pub const SESSION_CHILDREN: &[(&str, &str, &str)] = &[
@@ -525,8 +555,6 @@ pub fn properties_of(class: &str) -> Vec<Property> {
         add("Rotation", "Vector3".into());
         add("Velocity", "Vector3".into());
         add("RotVelocity", "Vector3".into());
-        add("Mass", "number".into());
-        add("AssemblyMass", "number".into());
     }
     if class == "Attachment" {
         for name in ["Axis", "SecondaryAxis", "WorldAxis", "WorldSecondaryAxis", "WorldOrientation"] {
@@ -540,6 +568,11 @@ pub fn properties_of(class: &str) -> Vec<Property> {
     for (c, name, ty) in SESSION_PROPERTIES {
         if *c == class {
             add(name, (*ty).into());
+        }
+    }
+    for (name, _) in COMPUTED {
+        if let Some(ty) = computed_type(class, name) {
+            add(name, ty.into());
         }
     }
     out
@@ -1303,6 +1336,10 @@ mod tests {
         for class in CREATABLE {
             let id = g.create(class);
             for p in properties_of(class) {
+                // Computed or reported, never stored: the next test reads each one.
+                if is_computed(class, p.name) {
+                    continue;
+                }
                 assert!(g.get_prop(id, p.name).is_some(), "{class}.{} is listed but the tree has none", p.name);
             }
         }
@@ -1311,6 +1348,39 @@ mod tests {
         assert!(part.iter().any(|p| p.name == "Material" && p.ty == "Enum.Material"));
         assert!(part.iter().any(|p| p.name == "Position" && p.ty == "Vector3"));
         assert!(properties_of("Model").iter().any(|p| p.name == "PrimaryPart" && p.ty == "BasePart?"));
+    }
+
+    #[test]
+    fn computed_properties_are_listed_and_the_vm_answers_them() {
+        // Listed so scripts and the editor find them, stored nowhere: each
+        // one the catalog lists must read as its listed type on a fresh
+        // instance.
+        let mut probes = String::new();
+        let mut seen: Vec<String> = Vec::new();
+        for class in CREATABLE {
+            for p in properties_of(class) {
+                if !is_computed(class, p.name) {
+                    continue;
+                }
+                seen.push(format!("{class}.{}", p.name));
+                probes.push_str(&format!(
+                    "do local v = ({})[{}] if typeof(v) ~= {} then print({} .. typeof(v)) end end\n",
+                    live(class),
+                    quote(p.name),
+                    quote(&p.ty),
+                    quote(&format!("{class}.{} reads as ", p.name)),
+                ));
+            }
+        }
+        // The probes must have reached what they are meant to check.
+        for want in ["Part.Mass", "Part.AssemblyMass", "Part.DrawnCFrame", "Sound.IsPlaying", "Sound.IsPaused", "Sound.IsLoaded", "Sound.TimeLength"] {
+            assert!(seen.iter().any(|s| s == want), "{want} is not among the probed properties: {seen:?}");
+        }
+        let (out, dm) = run(&probes);
+        let errors: Vec<_> =
+            dm.lock().output.iter().filter(|l| l.level == OutputLevel::Error).map(|l| l.text.clone()).collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(out.is_empty(), "computed properties the VM does not answer as listed:\n{}", out.join("\n"));
     }
 
     #[test]

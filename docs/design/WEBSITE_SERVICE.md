@@ -416,8 +416,8 @@ and the site shows last month's numbers with no error anyone sees.
 
 **Force refresh** is a consequence of the hash, not a separate mechanism.
 Publishing changes `publish_hash`, so the next conditional request returns 200
-rather than 304. A consumer that needs determinism pins `?v={hash}` and gets an
-immutable response it can cache for a year.
+rather than 304. A consumer that needs determinism pins `?v={hash}` and gets a
+stable response it can cache for an hour.
 
 ---
 
@@ -493,7 +493,7 @@ Counting is a lower bound rather than a ledger. A response served from a browser
 or edge cache never reaches the Worker, so cached traffic is invisible to both
 the counter and the revocation check. State the consequence plainly rather than
 glossing it: **revoking a key takes effect within one `max-age` window, not
-instantly**, and a pinned `?v=` response, immutable for a year, is effectively
+instantly**, and a pinned `?v=` response, cached for an hour, is effectively
 unattributed after its first fetch.
 
 ### 6.3 Rotating it

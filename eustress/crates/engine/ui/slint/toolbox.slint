@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, GridBox } from "std-widgets.slint";
-import { Theme, PanelHeader, IconButton } from "theme.slint";
+import { Theme, PopupBounds, PanelHeader, IconButton } from "theme.slint";
 
 // Tool category
 export struct ToolCategory {
@@ -75,7 +75,7 @@ component ToolButton inherits Rectangle {
     // Tooltip popup — uses PopupWindow for correct z-ordering above all panels
     tb-popup := PopupWindow {
         x: 0px;
-        y: root.height + 2px;
+        y: PopupBounds.drop-y(root.absolute-position.y, root.height + 2px, self.height);
         
         Rectangle {
             background: Theme.dialog-background;

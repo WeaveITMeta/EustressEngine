@@ -561,6 +561,17 @@ character's `HumanoidRootPart` is bound to that avatar. Whoever builds it calls
 Each frame the builder reports the Humanoid's state from the avatar's movement
 (see Humanoid state).
 
+### Sitting
+
+A character in a seat (`Humanoid.SeatPart` set) plays the idle: `Animate` zeroes
+its speed and gait weights while `SeatPart` is set, and the air takes no jump
+clip. Its arms reach for the seat's grips, the attachments named
+`LeftHandGrip` and `RightHandGrip` in the seat's model. `animation::seat_hands`
+solves each arm as a two-bone chain to its grip, after the foot IK, and eases in
+over about a quarter of a second. A model with one grip reaches with that arm
+alone, and a seat with none leaves both arms to the animation. The legs keep the
+idle until a sitting clip ships.
+
 Scripts that arrive with a character start with it: on the host every `Script`
 in any player's character, and on each machine the `LocalScript`s in its own
 player's character only. A character is the nearest Model above a script that is
@@ -654,7 +665,9 @@ RunService.Heartbeat:Connect(function()
 		if runSpeed then runSpeed * stride else (humanoid:GetAttribute("RunSpeed") or walkAt * 2),
 		walkAt + 0.05
 	)
-	local s = if climbing then 0 else speed
+	-- A seated character holds the seat's idle: its legs take no gait.
+	local seated = humanoid.SeatPart ~= nil
+	local s = if climbing or seated then 0 else speed
 
 	local wi, ww, wr = 1, 0, 0
 	if s >= 0.08 and s <= walkAt then
@@ -664,8 +677,9 @@ RunService.Heartbeat:Connect(function()
 		wr = math.clamp((s - walkAt) / (runAt - walkAt), 0, 1)
 		wi, ww = 0, 1 - wr
 	end
-	-- Climbing holds idle under the limb solve; the air takes the jump clip.
-	local ground = if airborne and not climbing then 0 else 1
+	-- Climbing and sitting hold idle under the limb solve; the air takes the
+	-- jump clip.
+	local ground = if airborne and not (climbing or seated) then 0 else 1
 
 	weight(idle, "idle", wi * ground)
 	weight(walk, "walk", ww * ground)

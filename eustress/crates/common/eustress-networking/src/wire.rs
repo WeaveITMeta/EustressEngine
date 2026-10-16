@@ -51,8 +51,9 @@ use crate::repl::{InputFrame, MotionFrame, RemoteCall, RemoteReply, TrackWire, W
 /// refuses a player whose version differs, with a reason a person can act on.
 /// The wire tags each message variant carries are pinned by the test
 /// `wire_tags_never_move`. Version 4: Sound state travels as ordinary
-/// properties, so the `ReplOp` for sounds is gone.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// properties, so the `ReplOp` for sounds is gone. Version 5: the host
+/// corrects a player whose movement it refused ([`ToPlayer::Correct`]).
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Largest reliable frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -79,8 +80,8 @@ pub type PeerId = u32;
 /// The host's own peer id.
 pub const HOST_PEER: PeerId = 0;
 
-/// The player's first message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The player's first message. Its `Debug` never prints the identity ticket.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol: u16,
     pub name: String,
@@ -91,6 +92,17 @@ pub struct Hello {
     /// to the host's certificate pin. The host verifies it with the API and
     /// never trusts it as sent.
     pub identity: Option<String>,
+}
+
+impl std::fmt::Debug for Hello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hello")
+            .field("protocol", &self.protocol)
+            .field("name", &self.name)
+            .field("engine_version", &self.engine_version)
+            .field("identity", &format_args!("{}", if self.identity.is_some() { "<set>" } else { "<none>" }))
+            .finish()
+    }
 }
 
 /// The host's answer to an accepted [`Hello`].
@@ -179,6 +191,10 @@ pub enum ToPlayer {
     Motion(MotionFrame),
     /// The answer to an `InvokeServer`.
     RemoteReply(RemoteReply),
+    /// The host refused this player's movement: its avatar is here on the
+    /// host (the capsule centre, as [`AvatarFrame::position`]), and the
+    /// player moves it back.
+    Correct { position: [f32; 3] },
 }
 
 /// Everything that rides a datagram, either way. Each kind also has a
@@ -458,8 +474,9 @@ mod tests {
             ToPlayer::World(WorldFrame { tick: 0, ops: vec![] }),
             ToPlayer::Motion(MotionFrame { tick: 0, bodies: vec![] }),
             ToPlayer::RemoteReply(RemoteReply { call: 0, result: Ok(vec![]) }),
+            ToPlayer::Correct { position: [0.0; 3] },
         ];
-        assert_eq!(tags(&to_player), (1..14).collect::<Vec<u32>>(), "ToPlayer");
+        assert_eq!(tags(&to_player), (1..15).collect::<Vec<u32>>(), "ToPlayer");
 
         let datagrams = [
             Datagram::Avatar(frame()),

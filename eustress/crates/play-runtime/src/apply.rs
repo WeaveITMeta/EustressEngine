@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use avian3d::prelude::{
     AngularVelocity, Collider, CollisionEventsEnabled, ColliderDisabled, ComputedMass, Friction, LinearVelocity,
-    Restitution, RigidBody, Sensor,
+    NoRotationEasing, NoTranslationEasing, Position, Restitution, RigidBody, Rotation, Sensor, TranslationInterpolation,
 };
 
 use eustress_common::avatar::abilities::AvatarAbilities;
@@ -310,6 +310,8 @@ pub fn apply_frame(world: &mut World) {
             PhysicsCommand::ApplyAngularImpulse { part, impulse } => (part, impulse, true),
         };
         let Some(e) = dm.lock().entity_of(part).map(Entity::from_bits) else { continue };
+        // A part merged into its weld group pushes the group's body.
+        let e = crate::assemblies::assembly_body(world, e);
         let inv_mass = world.get::<ComputedMass>(e).map(|m| m.inverse()).unwrap_or(1.0 / 50.0);
         let dv = impulse.to_vec3() * inv_mass;
         if angular {
@@ -436,18 +438,18 @@ fn play_asset_root(world: &World) -> std::path::PathBuf {
 }
 
 /// `MeshId` as an asset URL: Space-relative paths go through `space://`,
-/// a missing `#Mesh…` label gets the first primitive.
-pub fn mesh_url(mesh_id: &str, space_root: &std::path::Path) -> String {
-    let mut path = mesh_id.trim().replace('\\', "/");
-    let label = if path.contains('#') { String::new() } else { "#Mesh0/Primitive0".to_string() };
-    if !path.contains("://") && !path.starts_with("parts/") {
-        let root_s = space_root.to_string_lossy().replace('\\', "/");
-        if let Some(rel) = path.strip_prefix(&format!("{}/", root_s.trim_end_matches('/'))) {
-            path = rel.to_string();
-        }
-        path = format!("space://{}", path.trim_start_matches('/'));
+/// a missing `#Mesh…` label gets the first primitive. `None` for a path that
+/// leaves the Space or the bundled library ([`crate::space_paths`]).
+pub fn mesh_url(mesh_id: &str, space_root: &std::path::Path) -> Option<String> {
+    let path = mesh_id.trim().replace('\\', "/");
+    let label = if path.contains('#') { "" } else { "#Mesh0/Primitive0" };
+    if path.starts_with("parts/") {
+        // The engine's primitives, on the default source.
+        let (file, sub) = path.split_at(path.find('#').unwrap_or(path.len()));
+        let file = eustress_common::animation::content::safe_relative(file)?;
+        return Some(format!("{file}{sub}{label}"));
     }
-    format!("{}{}", path, label)
+    crate::space_paths::contained_url(&path, space_root).map(|url| format!("{url}{label}"))
 }
 
 /// The engine's unit primitives (`parts/block.glb` ...). Their
@@ -558,8 +560,12 @@ fn spawn_instance(
             let (mesh, source) = match (src_mesh, src_source) {
                 (Some(m), Some(s)) if mesh_id.is_empty() || s.path == mesh_id => (m, s),
                 _ => {
-                    if !mesh_id.is_empty() {
-                        (Mesh3d(asset_server.load(mesh_url(&mesh_id, &play_asset_root(world)))), eustress_common::part_draw::MeshSource::new(mesh_id.clone()))
+                    let url = (!mesh_id.is_empty()).then(|| mesh_url(&mesh_id, &play_asset_root(world))).flatten();
+                    if !mesh_id.is_empty() && url.is_none() {
+                        warn!("MeshId '{mesh_id}' is outside the Space; drawing the part's shape instead");
+                    }
+                    if let Some(url) = url {
+                        (Mesh3d(asset_server.load(url)), eustress_common::part_draw::MeshSource::new(mesh_id.clone()))
                     } else {
                         let glb = eustress_common::part_draw::part_type_to_glb_path(&shape);
                         (Mesh3d(asset_server.load(format!("{}#Mesh0/Primitive0", glb))), eustress_common::part_draw::MeshSource::new(glb))
@@ -582,9 +588,8 @@ fn spawn_instance(
                 // A custom mesh with no template to copy from: a box of the
                 // part's size (its scale stays 1 below).
                 _ if !primitive => Collider::cuboid(size.x, size.y, size.z),
-                PartType::Ball => Collider::sphere(0.5),
-                PartType::Cylinder | PartType::Cone => Collider::cylinder(0.5, 1.0),
-                _ => Collider::cuboid(1.0, 1.0, 1.0),
+                // A primitive is a unit shape that `scale = size` stretches.
+                _ => eustress_common::part_draw::shape_collider(shape, Vec3::ONE, size),
             });
             (mesh, mat, collider, source)
         };
@@ -1302,11 +1307,31 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
     match name {
         "CFrame" => {
             let Some(cf) = v.as_cframe() else { return true };
+            // A part merged into its weld group moves the whole group, as a
+            // Roblox assembly does: the group's body goes where this puts the part.
+            if world.get::<crate::assemblies::AssemblyMember>(e).is_some() {
+                let at = sane(cf.to_transform());
+                crate::assemblies::move_group(world, e, bevy::math::Isometry3d::new(at.translation, at.rotation));
+                return true;
+            }
             let scale = world.get::<Transform>(e).map(|t| t.scale).unwrap_or(Vec3::ONE);
             let t = sane(local_transform(world, parent, &cf, scale));
             if let Some(mut tf) = world.get_mut::<Transform>(e) {
                 tf.translation = t.translation;
                 tf.rotation = t.rotation;
+            }
+            // A body is where the script put it now, not at the next physics
+            // step: a joint built this frame reads its `Position`, and an eased
+            // body (`body_easing`) is not carried back toward where it was.
+            let at = sane(cf.to_transform());
+            if let Some(mut p) = world.get_mut::<Position>(e) {
+                p.0 = at.translation;
+            }
+            if let Some(mut r) = world.get_mut::<Rotation>(e) {
+                r.0 = at.rotation;
+            }
+            if world.get::<TranslationInterpolation>(e).is_some() {
+                world.entity_mut(e).insert((crate::body_easing::MovedByScript, NoTranslationEasing, NoRotationEasing));
             }
             // `BasePart.cframe` is left alone: writing BasePart every frame a
             // script moves a part would wake every Changed<BasePart> consumer
@@ -1415,13 +1440,15 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
             true
         }
         "AssemblyLinearVelocity" => {
-            if let (Some(vel), Some(mut lv)) = (v.as_vector3(), world.get_mut::<LinearVelocity>(e)) {
+            let body = crate::assemblies::assembly_body(world, e);
+            if let (Some(vel), Some(mut lv)) = (v.as_vector3(), world.get_mut::<LinearVelocity>(body)) {
                 lv.0 = vel.to_vec3();
             }
             true
         }
         "AssemblyAngularVelocity" => {
-            if let (Some(vel), Some(mut av)) = (v.as_vector3(), world.get_mut::<AngularVelocity>(e)) {
+            let body = crate::assemblies::assembly_body(world, e);
+            if let (Some(vel), Some(mut av)) = (v.as_vector3(), world.get_mut::<AngularVelocity>(body)) {
                 av.0 = vel.to_vec3();
             }
             true
@@ -1442,7 +1469,10 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
             if id.is_empty() {
                 return true;
             }
-            let url = mesh_url(&id, &play_asset_root(world));
+            let Some(url) = mesh_url(&id, &play_asset_root(world)) else {
+                warn!("MeshId '{id}' is outside the Space; the part keeps its mesh");
+                return true;
+            };
             let handle: Handle<Mesh> = world.resource::<AssetServer>().load(url);
             let mut ec = world.entity_mut(e);
             ec.insert((Mesh3d(handle), eustress_common::part_draw::MeshSource::new(id)));
@@ -1452,11 +1482,8 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
             let Some(s) = v.as_enum_name().and_then(PartType::from_str) else { return true };
             let glb = eustress_common::part_draw::part_type_to_glb_path(&s);
             let handle: Handle<Mesh> = world.resource::<AssetServer>().load(format!("{}#Mesh0/Primitive0", glb));
-            let collider = match s {
-                PartType::Ball => Collider::sphere(0.5),
-                PartType::Cylinder | PartType::Cone => Collider::cylinder(0.5, 1.0),
-                _ => Collider::cuboid(1.0, 1.0, 1.0),
-            };
+            let scale = world.get::<Transform>(e).map_or(Vec3::ONE, |t| t.scale);
+            let collider = eustress_common::part_draw::shape_collider(s, Vec3::ONE, scale);
             if let Some(mut p) = world.get_mut::<Part>(e) {
                 p.shape = s;
             }
@@ -1702,6 +1729,19 @@ fn dm_to_property(v: &DmValue) -> Option<PropertyValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MeshId names a file in the Space, the bundled library or the
+    /// engine's primitives, and nowhere else.
+    #[test]
+    fn a_mesh_id_stays_inside_the_space() {
+        let root = std::path::Path::new("/spaces/Car");
+        assert_eq!(mesh_url("Meshes/body.glb", root).as_deref(), Some("space://Meshes/body.glb#Mesh0/Primitive0"));
+        assert_eq!(mesh_url("/spaces/Car/Meshes/body.glb#Mesh1/Primitive0", root).as_deref(), Some("space://Meshes/body.glb#Mesh1/Primitive0"));
+        assert_eq!(mesh_url("parts/wedge.glb", root).as_deref(), Some("parts/wedge.glb#Mesh0/Primitive0"));
+        for bad in ["../../x.glb", "parts/../../../x.glb", "C:/x.glb", "space://../x.glb", "file:///x.glb"] {
+            assert_eq!(mesh_url(bad, root), None, "{bad:?}");
+        }
+    }
     use eustress_common::datamodel::DataModel;
     use eustress_common::luau::play::terrain::ensure_terrain_instance;
 

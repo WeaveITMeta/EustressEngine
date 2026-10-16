@@ -126,7 +126,9 @@ impl StagedChanges {
         for entry in &mut self.entries {
             if entry.status != DiffStatus::Accepted { continue; }
 
-            let path = universe_root.join(&entry.path);
+            // Checked again here: an entry can reach the queue by any route,
+            // and only a path inside the Universe is applied.
+            let Ok(path) = crate::sandbox::resolve(universe_root, &entry.path) else { continue };
             let success = match entry.change_type {
                 DiffChangeType::Create | DiffChangeType::Modify => {
                     if let Some(ref content) = entry.new_content {
@@ -199,14 +201,6 @@ impl ToolHandler for StageFileChangeTool {
             _ => DiffChangeType::Create,
         };
 
-        // Read original content for modify operations
-        let original = if change_type == DiffChangeType::Modify {
-            let full_path = ctx.universe_root.join(path);
-            std::fs::read_to_string(&full_path).ok()
-        } else {
-            None
-        };
-
         if path.is_empty() {
             return ToolResult {
                 tool_name: "stage_file_change".to_string(),
@@ -217,6 +211,28 @@ impl ToolHandler for StageFileChangeTool {
                 stream_topic: None,
             };
         }
+        // The change can only be applied inside the Universe, so the path is
+        // checked now, before the original is read for the review.
+        let full_path = match crate::sandbox::resolve(&ctx.universe_root, path) {
+            Ok(p) => p,
+            Err(why) => {
+                return ToolResult {
+                    tool_name: "stage_file_change".to_string(),
+                    tool_use_id: String::new(),
+                    success: false,
+                    content: format!("Path refused: {why}"),
+                    structured_data: None,
+                    stream_topic: None,
+                };
+            }
+        };
+
+        // Read original content for modify operations
+        let original = if change_type == DiffChangeType::Modify {
+            std::fs::read_to_string(&full_path).ok()
+        } else {
+            None
+        };
 
         ToolResult {
             tool_name: "stage_file_change".to_string(),

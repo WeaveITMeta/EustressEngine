@@ -96,6 +96,8 @@ pub static UNITS: &[(&str, &str, Unit)] = &[
     ("BasePart", "BottomParamA", Unitless),
     ("BasePart", "BottomParamB", Unitless),
     ("BasePart", "CFrame", Frame),
+    // Eustress's own, not Roblox's: the pose the part is drawn at this frame.
+    ("BasePart", "DrawnCFrame", Frame),
     ("BasePart", "CenterOfMass", Length),
     ("BasePart", "CollisionGroupId", Unitless),
     ("BasePart", "Elasticity", Unitless),
@@ -263,6 +265,17 @@ pub fn read_in_studs(dm: &DataModel, id: InstanceId, class: &str, key: &str) -> 
     Some(scale_value(&dm.get_prop(id, key)?, unit, 1.0 / stud_metres()))
 }
 
+/// What a script written in studs reads for `class.key` when the value is
+/// `v`: `v` in studs when the property converts, else `v` as it is. For a
+/// property whose value is not the one stored under its name (a part's
+/// `DrawnCFrame`).
+pub fn read_value_in_studs(class: &str, key: &str, v: &DmValue) -> DmValue {
+    match unit_of(class, key).filter(|u| u.converts()) {
+        Some(unit) => scale_value(v, unit, 1.0 / stud_metres()),
+        None => v.clone(),
+    }
+}
+
 /// Whether the code running now belongs to a script written in studs: asks
 /// the prelude, which knows the running thread's owner.
 pub fn running_in_studs(host: &Table) -> LuaResult<bool> {
@@ -371,6 +384,20 @@ mod tests {
         assert_eq!(unit_of("Workspace", "WorldPivot"), Some(Frame), "the Workspace is a Model");
         assert_eq!(unit_of("Part", "Orientation"), Some(Unitless));
         assert_eq!(unit_of("Part", "Nonsense"), None);
+    }
+
+    #[test]
+    fn a_value_read_in_studs_converts_as_its_property_does() {
+        // One metre along x, turned: the translation reads as 1 / stud_metres()
+        // studs, and the rotation as it is.
+        let cf = CFrame::new(1.0, 0.0, 0.0) * CFrame::from_euler_angles_xyz(0.0, 0.4, 0.0);
+        let DmValue::CFrame(out) = read_value_in_studs("Part", "DrawnCFrame", &DmValue::CFrame(cf)) else {
+            panic!("a CFrame reads as a CFrame");
+        };
+        assert!((out.position.x - 1.0 / stud_metres()).abs() < 1e-12, "one metre in studs: {:?}", out.position);
+        assert_eq!(out.look_vector(), cf.look_vector(), "the rotation does not convert");
+        let n = DmValue::Number(0.5);
+        assert_eq!(read_value_in_studs("Part", "Transparency", &n), n, "a unitless property reads as it is");
     }
 
     #[test]

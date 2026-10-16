@@ -44,6 +44,10 @@ eustress-echk = { path = "../../echk" }
 # this crate does not pull `streaming` (tokio fs + multi-thread) into a browser
 # build; the Studio and Player shells enable their own feature sets.
 eustress-common = { path = "..", default-features = false, features = ["physics"] }
+# The host looks under each joined player's replica for what carries it (a
+# moving platform, a lift) through Avian's spatial queries; common's `physics`
+# feature already links it, so this compiles nothing new.
+avian3d = { workspace = true }
 
 # ── Native transport ────────────────────────────────────────────────────────
 # Same quinn 0.11 / rustls 0.23 on ring / rcgen 0.13 stack the engine already

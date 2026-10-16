@@ -6,23 +6,30 @@
 //! because the network fetchers depend on the importer crate — a bin
 //! inside the importer could not use them without a dependency cycle.
 //!
-//! Reads every place from `C:\Users\miksu\Documents\Roblox Import`, runs
-//! it through `parse` → `import_into_space` with a
+//! Reads every place in its batch table (`rbx_import_places.toml`, see
+//! [`read_batch`]), runs it through `parse` → `import_into_space` with a
 //! `CachingFetcher(LocalFolder? → Network)` chain (byte + negative cache
-//! shared at `C:\Users\miksu\Documents\Eustress\.rbx_cache`), and lands
-//! each place as a Space under its domain Universe. Per place it writes
+//! shared at `<Eustress>/.rbx_cache`), and lands each place as a Space
+//! under its Universe. Per place it writes
 //! `<space>/.eustress/import_report.json` (the full `ImportReport`) and,
 //! at the end, an aggregate `import_batch_report.json` under the Eustress
 //! root — the coverage-audit input (unmapped classes, asset-failure
 //! reasons) for closing importer gaps systematically.
 //!
 //! Usage:
-//!   cargo run -p eustress-roblox-assets --bin rbx_import                  # all 47 (skips existing Spaces)
+//!   cargo run -p eustress-roblox-assets --bin rbx_import                  # the whole table (skips existing Spaces)
 //!   cargo run -p eustress-roblox-assets --bin rbx_import -- "Mobility"    # one universe
 //!   cargo run -p eustress-roblox-assets --bin rbx_import -- --clean       # re-import: trash-move existing Spaces first
-//!   rbx_import --place "Vehicle Simulator" --space "Vehicle Simulator Drive Test"
+//!   rbx_import --place "<place file stem>" --space "<Space name>"
 //!                                          # one place into a named Space (universe from its row,
 //!                                          # or --universe <name>); leaves import_batch_report.json alone
+//!
+//! Folders:
+//!   --places <file>   the batch table (default <Eustress>/rbx_import_places.toml);
+//!                     a one-place run with --universe needs none
+//!   --eustress <dir>  the Eustress root (default <Documents>/Eustress)
+//!   --source <dir>    the .rbxl folder (default the table's source_dir,
+//!                     else <Documents>/Roblox Import)
 //!
 //! Env knobs (same as the engine's File→Import path):
 //!   EUSTRESS_ROBLOX_ASSET_DIR    local asset mirror tried before the network
@@ -39,78 +46,55 @@ use std::sync::Arc;
 use eustress_roblox_assets::{CachingFetcher, ChainFetcher, LocalFolderFetcher, NetworkFetcher};
 use eustress_roblox_import::{import_into_space, parse, AssetFetcher, ImportOptions};
 
-/// `(rbxl file stem, Universe, Space name)`. The file stem is the on-disk
-/// name (some carry export dates / typos); the Space name is the clean
-/// display name.
-const PLACES: &[(&str, &str, &str)] = &[
-    // ── Studio Tooling (15) ──
-    ("Application Development", "Studio Tooling", "Application Development"),
-    ("Plugin Development", "Studio Tooling", "Plugin Development"),
-    ("Studio Logger", "Studio Tooling", "Studio Logger"),
-    ("Studio Stamper", "Studio Tooling", "Studio Stamper"),
-    ("MindSpace Plugins", "Studio Tooling", "MindSpace Plugins"),
-    ("Visual Command Suite", "Studio Tooling", "Visual Command Suite"),
-    ("Radial Context", "Studio Tooling", "Radial Context"),
-    ("Linker", "Studio Tooling", "Linker"),
-    ("Bind UI", "Studio Tooling", "Bind UI"),
-    ("View", "Studio Tooling", "View"),
-    ("Vocal Instancing", "Studio Tooling", "Vocal Instancing"),
-    ("Beams", "Studio Tooling", "Beams"),
-    ("Flux Matrix", "Studio Tooling", "Flux Matrix"),
-    ("Heuristics & Schemeas", "Studio Tooling", "Heuristics & Schemes"),
-    ("Telenodes", "Studio Tooling", "Telenodes"),
-    // ── Business & Ops (11) ──
-    ("Finance+", "Business & Ops", "Finance+"),
-    ("TaxAGI", "Business & Ops", "TaxAGI"),
-    ("Weave SaaS", "Business & Ops", "Weave SaaS"),
-    ("Podcast Formula", "Business & Ops", "Podcast Formula"),
-    ("ServerManagement", "Business & Ops", "ServerManagement"),
-    ("Auto Team 01-08-2025", "Business & Ops", "Auto Team"),
-    ("AutoTeam", "Business & Ops", "AutoTeam"),
-    ("Mountain Ascension", "Business & Ops", "Mountain Ascension"),
-    ("Place 36", "Business & Ops", "Place 36"),
-    ("Super Station", "Business & Ops", "Super Station"),
-    ("MindSpace Superstation", "Business & Ops", "MindSpace Superstation"),
-    // ── Life & Wellness (10) ──
-    ("Life Simulator 12-14-2024", "Life & Wellness", "Life Simulator"),
-    ("Calorie Burner", "Life & Wellness", "Calorie Burner"),
-    ("Nutrition", "Life & Wellness", "Nutrition"),
-    ("Gym", "Life & Wellness", "Gym"),
-    ("Pet Care", "Life & Wellness", "Pet Care"),
-    ("Day Care", "Life & Wellness", "Day Care"),
-    ("Hospital", "Life & Wellness", "Hospital"),
-    ("School", "Life & Wellness", "School"),
-    ("Restuarant", "Life & Wellness", "Restuarant"),
-    ("Saloon Spa", "Life & Wellness", "Saloon Spa"),
-    // ── Digital Twin & Data (5) ──
-    ("DigitalTwin", "Digital Twin & Data", "DigitalTwin"),
-    ("Data Visualizer", "Digital Twin & Data", "Data Visualizer"),
-    ("Seed Simulator", "Digital Twin & Data", "Seed Simulator"),
-    ("Cybernetics", "Digital Twin & Data", "Cybernetics"),
-    ("Rick Engineering", "Digital Twin & Data", "Rick Engineering"),
-    // ── Mobility (3) ──
-    ("Vehicles Center", "Mobility", "Vehicles Center"),
-    ("BikeChain", "Mobility", "BikeChain"),
-    ("RideShare", "Mobility", "RideShare"),
-    // ── Social & Civic (3) ──
-    ("Dating", "Social & Civic", "Dating"),
-    ("Relationship Dynamics", "Social & Civic", "Relationship Dynamics"),
-    ("Mikhail J Olson Voting Record", "Social & Civic", "Mikhail J Olson Voting Record"),
-    // ── Benchmark (1) ──
-    // Vehicle Simulator is the importer's 1:1-fidelity reference (~161k
-    // instances, 60 MB, terrain + MeshPart cars + legacy welds). It lands as
-    // a NEW space beside the original June import so the two can be compared
-    // side by side; the original is never touched.
-    ("Vehicle Simulator", "Summit Studios", "Vehicle Simulator 2"),
-];
+/// The batch: the folder the `.rbxl` places are in, and the Universe and
+/// Space each one lands in. Read from a TOML table (`--places <file>`, by
+/// default `<Eustress>/rbx_import_places.toml`):
+///
+/// ```toml
+/// source_dir = 'C:\Users\me\Documents\Roblox Import'   # optional
+///
+/// [[place]]
+/// file = "Life Simulator 12-14-2024"   # the .rbxl's stem on disk
+/// universe = "Life & Wellness"
+/// space = "Life Simulator"             # optional; the stem when absent
+/// ```
+struct Batch {
+    source_dir: Option<PathBuf>,
+    /// `(rbxl file stem, Universe, Space name)`.
+    places: Vec<(String, String, String)>,
+}
 
-const SRC_DIR: &str = r"C:\Users\miksu\Documents\Roblox Import";
-const EUSTRESS_DIR: &str = r"C:\Users\miksu\Documents\Eustress";
+fn read_batch(path: &Path) -> Result<Batch, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let doc: toml::Table = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+    let source_dir = doc.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from);
+    let mut places = Vec::new();
+    let rows = doc.get("place").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or_default();
+    for (i, row) in rows.iter().enumerate() {
+        let field = |key: &str| row.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let (Some(file), Some(universe)) = (field("file"), field("universe")) else {
+            return Err(format!("{}: [[place]] {} needs `file` and `universe`", path.display(), i + 1));
+        };
+        let space = field("space").unwrap_or_else(|| file.clone());
+        places.push((file, universe, space));
+    }
+    Ok(Batch { source_dir, places })
+}
+
+/// The user's Documents folder (`%USERPROFILE%\Documents`, `$HOME/Documents`).
+fn documents_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join("Documents")
+}
 
 fn main() {
     let mut clean = false;
     let mut filter: Option<String> = None;
     let (mut place, mut space_name, mut universe_name) = (None, None, None);
+    let (mut places_file, mut eustress_dir, mut source_dir) = (None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -118,9 +102,27 @@ fn main() {
             "--place" => place = args.next(),
             "--space" => space_name = args.next(),
             "--universe" => universe_name = args.next(),
+            "--places" => places_file = args.next().map(PathBuf::from),
+            "--eustress" => eustress_dir = args.next().map(PathBuf::from),
+            "--source" => source_dir = args.next().map(PathBuf::from),
             _ => filter = Some(arg),
         }
     }
+    let eustress = eustress_dir.unwrap_or_else(|| documents_dir().join("Eustress"));
+    // The batch table. A one-place run that names its Universe needs none.
+    let batch_path = places_file.unwrap_or_else(|| eustress.join("rbx_import_places.toml"));
+    let batch = if !batch_path.exists() && place.is_some() && universe_name.is_some() {
+        Batch { source_dir: None, places: Vec::new() }
+    } else {
+        read_batch(&batch_path).unwrap_or_else(|e| {
+            eprintln!("{e}\n(the batch table: --places <file>, by default <Eustress>/rbx_import_places.toml)");
+            std::process::exit(2);
+        })
+    };
+    let src = source_dir
+        .or_else(|| batch.source_dir.clone())
+        .unwrap_or_else(|| documents_dir().join("Roblox Import"));
+
     // One place into a named Space (`--place <stem> --space <name>`), or the
     // whole table.
     let one_place = place.is_some();
@@ -131,18 +133,16 @@ fn main() {
                 std::process::exit(2);
             };
             let universe = universe_name
-                .or_else(|| PLACES.iter().find(|(s, _, _)| *s == stem).map(|(_, u, _)| u.to_string()));
+                .or_else(|| batch.places.iter().find(|(s, _, _)| *s == stem).map(|(_, u, _)| u.clone()));
             let Some(universe) = universe else {
                 eprintln!("--place {stem:?} is not in the table: give --universe <name>");
                 std::process::exit(2);
             };
             vec![(stem, universe, space)]
         }
-        None => PLACES.iter().map(|(s, u, n)| (s.to_string(), u.to_string(), n.to_string())).collect(),
+        None => batch.places,
     };
 
-    let src = PathBuf::from(SRC_DIR);
-    let eustress = PathBuf::from(EUSTRESS_DIR);
     let fetcher = build_fetcher(&eustress);
 
     if let Some(f) = &filter {
@@ -180,16 +180,10 @@ fn main() {
             skipped += 1;
             continue;
         }
-        // The trashed copy, when --clean moved one: a rebuild's own work
-        // comes back from it after the import.
-        let mut trashed: Option<PathBuf> = None;
         if space_root.exists() {
             if clean {
                 match trash_move(&eustress.join(universe).join("Spaces"), space, &space_root) {
-                    Ok(to) => {
-                        println!("  (moved old Space to {})", to.display());
-                        trashed = Some(to);
-                    }
+                    Ok(to) => println!("  (moved old Space to {})", to.display()),
                     Err(e) => {
                         println!("FAIL (trash-move: {e})");
                         fail += 1;
@@ -273,22 +267,6 @@ fn main() {
                     "OK  ({} nodes, {} glb + {} tex + {} snd fetched, {} asset-warn)",
                     r.total_nodes_imported, meshes, textures, sounds, warn
                 );
-                // A rebuild's own work: its `Rebuild` folders and its patches
-                // to imported instances (`eustress_roblox_import::carry_over`).
-                if let Some(old) = &trashed {
-                    match eustress_roblox_import::carry_over::carry_over(old, &space_root) {
-                        Ok(c) if c.folders.is_empty()
-                            && c.patches_applied + c.patches_orphaned + c.patches_invalid == 0 => {}
-                        Ok(c) => println!(
-                            "  carried over: {} Rebuild folder(s), {} patch(es) applied, {} orphaned, {} invalid",
-                            c.folders.len(),
-                            c.patches_applied,
-                            c.patches_orphaned,
-                            c.patches_invalid
-                        ),
-                        Err(e) => println!("  CARRY-OVER FAILED: {e} (the old Space is intact in .trash)"),
-                    }
-                }
                 place_rows.push(serde_json::json!({
                     "universe": universe, "space": space, "ok": true,
                     "nodes": r.total_nodes_imported, "events": r.events_imported,
@@ -441,22 +419,35 @@ fn strip_digits(reason: &str) -> String {
     out
 }
 
-/// Minimal `space.toml` so the universe registry lists the Space in the
-/// browser. Mirrors the engine's own format; the engine overwrites
+/// The Space's `space.toml` metadata, so the universe registry lists it in
+/// the browser, merged into what the import already wrote there (its
+/// `transform_rule` and `format`), which it keeps. The engine overwrites
 /// `last_modified` and creates the binary DB on first open.
 fn write_space_toml(space_root: &Path, name: &str) {
-    let toml = format!(
-        "# EEP Space metadata\n\
-         [space]\n\
-         name = \"{name}\"\n\
-         author = \"Simbuilder\"\n\
-         version = \"0.1.0\"\n\
-         created_with = \"Eustress Engine (Roblox batch import)\"\n\
-         transform_rule = \"parent_pose\"\n\
-         \n\
-         [metadata]\n\
-         created = \"2026-07-09T00:00:00.000000000+00:00\"\n\
-         last_modified = \"2026-07-09T00:00:00.000000000+00:00\"\n"
-    );
-    let _ = std::fs::write(space_root.join("space.toml"), toml);
+    let path = space_root.join("space.toml");
+    let mut doc: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_default();
+    let table = |doc: &mut toml::Table, key: &str| -> toml::Table {
+        match doc.remove(key) {
+            Some(toml::Value::Table(t)) => t,
+            _ => toml::Table::new(),
+        }
+    };
+    let text = |s: &str| toml::Value::String(s.to_string());
+    let mut space = table(&mut doc, "space");
+    space.insert("name".into(), text(name));
+    space.entry("author").or_insert_with(|| text("Simbuilder"));
+    space.entry("version").or_insert_with(|| text("0.1.0"));
+    space.insert("created_with".into(), text("Eustress Engine (Roblox batch import)"));
+    space.entry("transform_rule").or_insert_with(|| text("parent_pose"));
+    let mut metadata = table(&mut doc, "metadata");
+    metadata.entry("created").or_insert_with(|| text("2026-07-09T00:00:00.000000000+00:00"));
+    metadata.entry("last_modified").or_insert_with(|| text("2026-07-09T00:00:00.000000000+00:00"));
+    doc.insert("space".into(), toml::Value::Table(space));
+    doc.insert("metadata".into(), toml::Value::Table(metadata));
+    if let Ok(body) = toml::to_string_pretty(&doc) {
+        let _ = std::fs::write(&path, format!("# EEP Space metadata\n{body}"));
+    }
 }

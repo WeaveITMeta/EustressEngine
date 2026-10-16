@@ -34,6 +34,8 @@
 //! ```
 
 pub mod client;
+/// What a Forge URL must be before a key goes to it; no redirects.
+pub mod connect_policy;
 pub mod deployment;
 pub mod error;
 pub mod metrics;

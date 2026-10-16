@@ -39,11 +39,12 @@ use crate::space::file_loader::LoadInProgress;
 use crate::space::space_ops::space_is_migrated;
 use crate::space::SpaceRoot;
 
-/// Latch: the Space path the disk-terrain load already ran for. A genuine
-/// Space switch (path change) re-arms it, so the load runs exactly once per
-/// Space — mirrors `VoxelTerrainLoadLatch`.
+/// Latch: the Space open the disk-terrain load already ran for, as its path
+/// and `SpaceLoadGeneration`. Every open re-arms it, a reopen of the same
+/// path included, so the load runs exactly once per open — mirrors
+/// `VoxelTerrainLoadLatch`.
 #[derive(Resource, Default)]
-pub struct TerrainDiskLoadLatch(pub Option<std::path::PathBuf>);
+pub struct TerrainDiskLoadLatch(pub Option<(std::path::PathBuf, u64)>);
 
 /// Marker on a `TerrainRoot` hydrated from a Space's `Workspace/Terrain`,
 /// by this loader, the Terrain class sync or a panel import.
@@ -57,13 +58,15 @@ fn load_disk_terrain_on_space_open(
     space_root: Res<SpaceRoot>,
     load_in_progress: Res<LoadInProgress>,
     mut latch: ResMut<TerrainDiskLoadLatch>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
     existing: Query<Entity, With<TerrainRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Run once per Space path. Latch BEFORE any early-return-after-decision
-    // so a Space without terrain doesn't re-scan the disk every frame.
-    if latch.0.as_deref() == Some(space_root.0.as_path()) {
+    // Run once per open. Latch BEFORE any early-return-after-decision so a
+    // Space without terrain doesn't re-scan the disk every frame.
+    let this_open = (space_root.0.clone(), generation.0);
+    if latch.0.as_ref() == Some(&this_open) {
         return;
     }
     // Wait until the file loader's pass finishes — a Terrain-class TOML in
@@ -74,7 +77,7 @@ fn load_disk_terrain_on_space_open(
     }
 
     // Commit the decision for this Space — from here this is a one-shot.
-    latch.0 = Some(space_root.0.clone());
+    latch.0 = Some(this_open);
 
     // GATE 1: migrated `.eustress` Spaces are owned by the Fjall voxel
     // loader (terrain_voxel_load) — stand down entirely.
@@ -131,10 +134,12 @@ fn reset_latch_on_space_switch(
     mut commands: Commands,
     space_root: Res<SpaceRoot>,
     mut latch: ResMut<TerrainDiskLoadLatch>,
+    generation: Res<crate::space::file_loader::SpaceLoadGeneration>,
     all_terrain: Query<(Entity, Ref<TerrainRoot>)>,
     studio: Option<ResMut<crate::ui::StudioState>>,
 ) {
-    if space_root.is_changed() && latch.0.as_deref() != Some(space_root.0.as_path()) {
+    let this_open = (space_root.0.clone(), generation.0);
+    if (space_root.is_changed() || generation.is_changed()) && latch.0.as_ref() != Some(&this_open) {
         // A different Space is now active: re-arm, and clear the stale
         // terrain. A root added since this system last ran already belongs
         // to the new Space (its class sync can land in the switch frame).

@@ -199,6 +199,7 @@ impl Plugin for PlayDataModelPlugin {
                 (
                     pull::pull_frame_state,
                     pull::pull_poses,
+                    pull::pull_drawn_poses,
                     pull::pull_collisions,
                     pull::pull_character,
                     remote_players::pull_remote_characters,
@@ -276,7 +277,7 @@ pub(crate) fn drive_luau(
         With<TerrainRoot>,
     >,
     slots: Option<Res<TerrainMaterialSlots>>,
-    mut seen_shape: Local<(usize, u64)>,
+    mut seen_shape: Local<(u64, u64)>,
 ) {
     let Some(mut host) = host else { return };
     let raycaster = |q: &eustress_common::luau::play::RayQuery| pull::cast_ray(&spatial, &colliders, q);
@@ -316,7 +317,7 @@ pub(crate) fn drive_luau(
     let shape = {
         let dm = host.vm.datamodel().clone();
         let version = dm.lock().structure_version;
-        (std::sync::Arc::as_ptr(&dm) as usize, version)
+        (eustress_common::datamodel::session_of(&dm), version)
     };
     if shape != *seen_shape {
         *seen_shape = shape;

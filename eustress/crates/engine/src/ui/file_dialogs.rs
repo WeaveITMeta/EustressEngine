@@ -98,6 +98,18 @@ pub struct PublishRequest {
     /// If true, only publish the current Space (incremental update).
     /// If false, publish the entire Universe.
     pub space_only: bool,
+    /// The start Space's Players.MaxPlayers to write before publishing
+    /// (1 to 10,000); `None` leaves the Space's value as it is.
+    pub max_players: Option<u16>,
+    /// The listing's cover (`publish_cover`): kept, set or removed. Never
+    /// touched by a Space-only publish.
+    pub cover: eustress_common::project_manifest::CoverChoice,
+    /// Where it goes: this Universe's own listing (the default), a new
+    /// listing, or another of the author's (Publish As...).
+    pub target: eustress_common::project_manifest::PublishTarget,
+    /// The listing's hashtags to send (normalized, at most 8), or `None` to
+    /// leave them as they are. Never set for a Space-only publish.
+    pub tags: Option<Vec<String>>,
 }
 
 impl Default for PublishRequest {
@@ -110,6 +122,10 @@ impl Default for PublishRequest {
             open_source: false,
             studio_editable: false,
             space_only: false,
+            max_players: None,
+            cover: eustress_common::project_manifest::CoverChoice::Keep,
+            target: eustress_common::project_manifest::PublishTarget::default(),
+            tags: None,
         }
     }
 }

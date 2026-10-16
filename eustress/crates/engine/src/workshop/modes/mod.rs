@@ -28,6 +28,21 @@ pub mod fabrication;
 pub mod shopping;
 pub mod travel;
 
+/// A tool context for the mode tools' tests: no Space on disk, every capability.
+#[cfg(test)]
+pub(crate) fn test_context() -> crate::workshop::tools::ToolContext {
+    crate::workshop::tools::ToolContext {
+        space_root: std::path::PathBuf::new(),
+        universe_root: std::path::PathBuf::new(),
+        user_id: None,
+        username: None,
+        luau_executor: None,
+        display_unit: None,
+        cancelled: None,
+        permissions: eustress_tools::capability::Permissions::full(),
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 // Canonical `WorkshopMode` — defined in `eustress-tools` so the MCP

@@ -237,17 +237,10 @@ fn quiet_for(duration: std::time::Duration) {
 
 // ── Git ────────────────────────────────────────────────────────────────────
 
+/// git in the Space, with hooks off and no console window.
 #[cfg(feature = "world-db")]
 fn git(space_root: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(space_root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd
+    eustress_tools::sandbox::git_command(space_root)
 }
 
 #[cfg(feature = "world-db")]

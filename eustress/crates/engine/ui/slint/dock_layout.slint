@@ -313,6 +313,7 @@ export component LayoutDropdownMenu inherits Rectangle {
     callback preset-selected(int, LayoutPreset);
     callback load-layout-from-file();
     callback save-layout-to-file();
+    callback reset-mode-layout();
     callback close();
 
     width: 220px;
@@ -428,6 +429,17 @@ export component LayoutDropdownMenu inherits Rectangle {
             text: "Import layout...";
             clicked => {
                 root.load-layout-from-file();
+                root.close();
+            }
+        }
+
+        // The mode's own layout (its table), forgetting the changes made
+        // while in this mode and discipline.
+        DockMenuAction {
+            icon: @image-url("../../assets/icons/ui/reset.svg");
+            text: "Reset to mode layout";
+            clicked => {
+                root.reset-mode-layout();
                 root.close();
             }
         }

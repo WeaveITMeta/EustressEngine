@@ -115,7 +115,7 @@ pub fn BlissKpiModal() -> impl IntoView {
         {move || {
             if is_open.get() {
                 view! {
-                    <div class="bliss-kpi-overlay" on:click=move |_| is_open.set(false)>
+                    <div class="bliss-kpi-overlay" on:click=move |_| crate::utils::after_event(move || is_open.set(false))>
                         <div class="bliss-kpi-modal" on:click=|e| e.stop_propagation()>
                             // Header
                             <div class="kpi-modal-header">
@@ -123,7 +123,7 @@ pub fn BlissKpiModal() -> impl IntoView {
                                     <img src="/assets/icons/bliss.svg" alt="BLS" />
                                     <h3>"Bliss Dashboard"</h3>
                                 </div>
-                                <button class="kpi-modal-close" on:click=move |_| is_open.set(false)>
+                                <button class="kpi-modal-close" on:click=move |_| crate::utils::after_event(move || is_open.set(false))>
                                     "X"
                                 </button>
                             </div>

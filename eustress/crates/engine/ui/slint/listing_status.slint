@@ -77,12 +77,19 @@ export component ListingStatusRow inherits VerticalLayout {
     in property <bool> can-appeal;
     in property <bool> appeal-busy;
     in property <string> appeal-error;
+    // A review stuck in review can be asked for again (Rust decides when:
+    // in review, and older than the server's wait). It is a nudge, not an
+    // appeal: no text and no error colour; the note is shown verbatim.
+    in property <bool> can-rerequest;
+    in property <bool> rerequest-busy;
+    in property <string> rerequest-note;
     // Compact: the chip and the headline only (History).
     in property <bool> compact: false;
 
     // 10 to 2000 characters; the Rust side POSTs it.
     callback appeal(string);
     callback open-review();
+    callback rerequest();
 
     property <bool> appealing: false;
     property <string> appeal-text: "";
@@ -175,6 +182,12 @@ export component ListingStatusRow inherits VerticalLayout {
     if !root.compact && root.status != "": HorizontalLayout {
         spacing: 6px;
         alignment: start;
+        if root.can-rerequest: KitButton {
+            height: 24px;
+            text: root.rerequest-busy ? "Requesting..." : "Request review again";
+            enabled: !root.rerequest-busy;
+            clicked => { root.rerequest(); }
+        }
         if root.can-appeal && !root.appealing: KitButton {
             height: 24px;
             text: "Appeal";
@@ -188,6 +201,13 @@ export component ListingStatusRow inherits VerticalLayout {
             icon: @image-url("../../assets/icons/ui/globe.svg");
             clicked => { root.open-review(); }
         }
+    }
+
+    if !root.compact && root.rerequest-note != "": Text {
+        text: root.rerequest-note;
+        color: Theme.text-secondary;
+        font-size: 10px;
+        wrap: word-wrap;
     }
 
     if !root.compact && root.appealing && root.can-appeal: VerticalLayout {

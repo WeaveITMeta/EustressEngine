@@ -30,16 +30,20 @@
 //!
 //! # Layering
 //!
-//! Every module except [`poll`] and [`layout`] is pure: no Bevy, no clock, no
-//! filesystem, no network. That is what lets the decision path be tested
+//! The decision modules ([`model`], [`sources`], [`screen`], [`score`],
+//! [`requirements`], [`compliance`], [`outline`]) are pure: no Bevy, no clock,
+//! no filesystem, no network. That is what lets the decision path be tested
 //! offline with no account and no API key, which matters because these
-//! decisions cost a firm a week of unpaid labour each.
+//! decisions cost a firm a week of unpaid labour each. The disk lives in
+//! [`audit`], [`store`], [`credentials`] and [`layout`]; the network lives in
+//! [`transport`], driven by [`poll`].
 
 use bevy::prelude::*;
 
 pub mod audit;
 pub mod compliance;
 pub mod credentials;
+pub mod key_tasks;
 pub mod layout;
 pub mod model;
 pub mod outline;
@@ -50,6 +54,7 @@ pub mod score;
 pub mod screen;
 pub mod sources;
 pub mod store;
+pub mod transport;
 
 pub use model::{CapabilityStatement, NoticeSource, Opportunity, PastPerformance, SetAside};
 
@@ -77,6 +82,11 @@ pub enum CaptureError {
     Io(String),
     /// The Connector is not one of the capture profiles.
     NotACaptureConnector,
+    /// A Connector asked for something it may not have: an endpoint off the
+    /// source's own host, or a credential that is not a SAM.gov key. A
+    /// Connector is a file any MCP agent can write, so this is refused before
+    /// any secret is read or any request is built.
+    Untrusted(String),
 }
 
 impl std::fmt::Display for CaptureError {
@@ -95,6 +105,7 @@ impl std::fmt::Display for CaptureError {
             Self::NotACaptureConnector => {
                 write!(f, "this Connector is not a SAM.gov or Grants.gov source")
             }
+            Self::Untrusted(m) => write!(f, "refused: {m}"),
         }
     }
 }
@@ -237,6 +248,9 @@ pub struct CapturePlugin;
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(poll::ConnectorPollPlugin);
+        // Credential work for the UI, off the frame thread.
+        app.init_resource::<key_tasks::KeyTasks>()
+            .init_resource::<key_tasks::ForgeRememberedKey>();
     }
 }
 

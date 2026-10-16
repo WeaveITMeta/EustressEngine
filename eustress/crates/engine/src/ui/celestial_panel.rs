@@ -146,6 +146,27 @@ fn fmt_f32(v: f32) -> String {
     if s.is_empty() || s == "-" { "0".to_string() } else { s.to_string() }
 }
 
+/// A length shown in the display unit, to six significant figures.
+///
+/// The panel keeps metres and converts for display, and an `f32` holds about
+/// seven significant figures, so a length typed in feet comes back a hair off
+/// (304.8 m is 999.99994 ft). Printed with [`fmt_f32`]'s four decimals that
+/// read 999.9999; six figures read 1000, as typed.
+fn fmt_display_length(v: f32) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return fmt_f32(v);
+    }
+    let magnitude = v.abs().log10().floor() as i32;
+    let decimals = (5 - magnitude).clamp(0, 6) as usize;
+    let s = format!("{:.*}", decimals, v);
+    if s.contains('.') {
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s.is_empty() || s == "-" { "0".to_string() } else { s.to_string() }
+    } else {
+        s
+    }
+}
+
 /// `r, g, b` in 0-255.
 fn color_text(c: [f32; 4]) -> String {
     let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -658,7 +679,7 @@ fn rows_of<T: CelestialFields>(body: &T, unit: Unit) -> Vec<(&'static str, &'sta
             let mut text = body.get_text(name)?;
             if T::LENGTHS.contains(name) && unit != ENGINE_NATIVE_UNIT {
                 if let Ok(metres) = text.parse::<f32>() {
-                    text = fmt_f32(convert_f32(metres, ENGINE_NATIVE_UNIT, unit));
+                    text = fmt_display_length(convert_f32(metres, ENGINE_NATIVE_UNIT, unit));
                 }
             }
             Some((*category, *name, text, *kind))
@@ -807,7 +828,7 @@ fn apply<T: CelestialFields>(
     let mut shown = body.get_text(key).unwrap_or_default();
     if T::LENGTHS.contains(&key) && unit != ENGINE_NATIVE_UNIT {
         if let Ok(metres) = shown.parse::<f32>() {
-            shown = format!("{} {}", fmt_f32(convert_f32(metres, ENGINE_NATIVE_UNIT, unit)), unit.symbol());
+            shown = format!("{} {}", fmt_display_length(convert_f32(metres, ENGINE_NATIVE_UNIT, unit)), unit.symbol());
         }
     }
     Some(Ok(EditOutcome { message: format!("{key} = {shown}"), undo }))
@@ -941,11 +962,35 @@ mod tests {
     }
 
     #[test]
+    fn a_length_typed_in_a_display_unit_shows_back_as_typed() {
+        // The case from batch E: 1000 ft is stored as 304.8 m, and 304.8 m
+        // converts back to 999.99994 ft.
+        assert_eq!(fmt_display_length(999.99994), "1000");
+        assert_eq!(fmt_display_length(304.8), "304.8");
+        assert_eq!(fmt_display_length(0.0), "0");
+        assert_eq!(fmt_display_length(6_371_000.0), "6371000", "whole numbers keep their zeros");
+        assert_eq!(fmt_display_length(100_000.0), "100000");
+        assert_eq!(fmt_display_length(1500.25), "1500.25");
+        assert_eq!(fmt_display_length(-2.5), "-2.5");
+        assert_eq!(fmt_display_length(0.0123), "0.0123");
+        // Typed in each unit, stored as metres to four decimals, and shown
+        // back: the same text.
+        for unit in ["ft", "in", "cm", "mm", "stud"] {
+            let unit = Unit::from_any(unit).expect("a unit");
+            for typed in [1.0f32, 7.0, 50.0, 100.0, 333.0, 1000.0, 1234.5, 5280.0, 25000.0] {
+                let stored: f32 = fmt_f32(convert_f32(typed, unit, ENGINE_NATIVE_UNIT)).parse().unwrap();
+                let shown = fmt_display_length(convert_f32(stored, ENGINE_NATIVE_UNIT, unit));
+                assert_eq!(shown, fmt_display_length(typed), "{typed} {}", unit.symbol());
+            }
+        }
+    }
+
+    #[test]
     fn the_moons_placement_and_the_atmospheres_switch_are_rows() {
         let mut moon = MoonClass::default();
-        assert_eq!(moon.get_text("MoonPlacement").as_deref(), Some("OppositeSun"));
-        moon.set_text("MoonPlacement", "realistic").unwrap();
         assert_eq!(moon.get_text("MoonPlacement").as_deref(), Some("Realistic"));
+        moon.set_text("MoonPlacement", "oppositesun").unwrap();
+        assert_eq!(moon.get_text("MoonPlacement").as_deref(), Some("OppositeSun"));
         assert!(moon.set_text("MoonPlacement", "sideways").is_err());
         let mut atmosphere = EustressAtmosphere::default();
         atmosphere.set_text("Enabled", "false").unwrap();

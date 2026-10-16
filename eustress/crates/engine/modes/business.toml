@@ -452,6 +452,49 @@ color = "#818cf8"
   tools = ["mktg:media_mix_model", "mktg:kpi_dashboard_builder"]
 
 [[submode_tabs]]
+submode = "marketing"
+id = "marketing-send"
+name = "Campaigns"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Compose"
+  tools = ["mktg:campaign_composer", "mktg:template_library"]
+  [[submode_tabs.sections]]
+  name = "Approve and Schedule"
+  tools = ["mktg:approval_queue", "mktg:schedule_send", "mktg:cancel_scheduled"]
+  [[submode_tabs.sections]]
+  name = "Postal"
+  tools = ["mktg:postal_compose", "mktg:postal_send"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "marketing-discovery"
+name = "Discovery"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Define"
+  tools = ["mktg:audience_definition", "mktg:source_provenance"]
+  [[submode_tabs.sections]]
+  name = "Find"
+  tools = ["mktg:discover_contacts", "mktg:audience_build", "mktg:lookalike_finder"]
+  [[submode_tabs.sections]]
+  name = "Qualify"
+  tools = ["mktg:verify_addresses", "mktg:consent_check"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "marketing-email"
+name = "Email"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Sending"
+  tools = ["mktg:sender_identity", "mktg:warmup_schedule", "mktg:rate_limits"]
+  [[submode_tabs.sections]]
+  name = "Compliance"
+  tools = ["mktg:suppression_list", "mktg:unsubscribe_handling", "mktg:postal_address_footer"]
+
+
+[[submode_tabs]]
 submode = "entrepreneurship"
 id = "product"
 name = "Product"

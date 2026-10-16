@@ -26,6 +26,9 @@ pub struct DataRecording {
 }
 
 pub mod active_db;
+/// Moving an instance to the Space trash: the one way Delete, Cut and the
+/// CSG booleans do it.
+pub mod trash;
 /// Snapshots of a Space's database, and the revert that puts one back.
 pub mod checkpoint;
 /// Restore points: snapshots of the Space and reverting to one.
@@ -35,6 +38,7 @@ pub mod launch;
 pub mod file_loader;
 pub mod pose_anchor;
 pub mod rule_migration;
+pub mod format_migration;
 /// Lightweight, always-compiled load-phase instrumentation (env-gated on
 /// `EUSTRESS_PROFILE`). Records wall-clock at each open→interactive
 /// milestone so the ~50s a huge import spends loading can be attributed.

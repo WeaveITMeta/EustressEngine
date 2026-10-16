@@ -13,6 +13,7 @@
 //! 7. Publish journal manifest
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -102,14 +103,103 @@ pub struct SyncState {
     pub offline_changes: u64,
 }
 
+/// Which listing a publish goes to (`docs/architecture/PUBLISH_AS.md`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PublishTarget {
+    /// This Universe's own listing on the API in use
+    /// ([`RemoteState::listing_id`]), or a new one the first time.
+    #[default]
+    Remembered,
+    /// A new listing, whatever this Universe had (Publish As, New listing).
+    New,
+    /// One of the author's own listings on the API in use (Publish As): the
+    /// publish replaces its published version, and it becomes this
+    /// Universe's listing there once the API accepts the upload.
+    Existing(String),
+}
+
+/// What a publish does to the listing's cover, the box art a Gallery card
+/// shows (`docs/networking/LISTING_COVER.md`).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum CoverChoice {
+    /// Leave the cover as it is.
+    #[default]
+    Keep,
+    /// Upload these image bytes, already checked by the Publish dialog (PNG,
+    /// JPEG or WebP, at most 2 MB, short side at least 320 px, ratio 1:2 to
+    /// 2:1), as the cover.
+    Set(Vec<u8>),
+    /// Remove the cover.
+    Remove,
+}
+
+/// The size of a cover, never its bytes: a publish request that is logged
+/// must not carry up to 2 MB of image into the log.
+impl std::fmt::Debug for CoverChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => f.write_str("Keep"),
+            Self::Set(bytes) => write!(f, "Set({} bytes)", bytes.len()),
+            Self::Remove => f.write_str("Remove"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteState {
     pub provider: String,
     pub project_id: Option<String>,
+    /// This Universe's listing on the production API. Read and keep listings
+    /// through [`RemoteState::listing_id`] and [`RemoteState::set_listing_id`],
+    /// which keep every other API's listing in `listings`.
     pub experience_id: Option<String>,
     pub bucket: Option<String>,
     pub editable: bool,
     pub open_source: bool,
+    /// This Universe's listings on APIs other than production, by the API's
+    /// origin (`api_base::origin_of`): a staging listing is kept apart from
+    /// production's, so publishing to one never lands in, or fails on, the
+    /// other's id. Last, since TOML writes it as a table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub listings: BTreeMap<String, String>,
+}
+
+impl RemoteState {
+    /// This Universe's listing on the API in use (`EUSTRESS_API_URL`).
+    pub fn listing_id(&self) -> Option<&str> {
+        self.listing_id_for(&crate::api_base::api_origin())
+    }
+
+    /// This Universe's listing on the API at `origin`.
+    pub fn listing_id_for(&self, origin: &str) -> Option<&str> {
+        let id = if origin == production_origin() {
+            self.experience_id.as_deref()
+        } else {
+            self.listings.get(origin).map(String::as_str)
+        };
+        id.map(str::trim).filter(|id| !id.is_empty())
+    }
+
+    /// Keep this Universe's listing on the API in use, or forget it (`None`).
+    pub fn set_listing_id(&mut self, id: Option<String>) {
+        self.set_listing_id_for(&crate::api_base::api_origin(), id);
+    }
+
+    /// Keep or forget this Universe's listing on the API at `origin`.
+    pub fn set_listing_id_for(&mut self, origin: &str, id: Option<String>) {
+        let id = id.map(|id| id.trim().to_string()).filter(|id| !id.is_empty());
+        if origin == production_origin() {
+            self.experience_id = id;
+        } else if let Some(id) = id {
+            self.listings.insert(origin.to_string(), id);
+        } else {
+            self.listings.remove(origin);
+        }
+    }
+}
+
+fn production_origin() -> String {
+    crate::api_base::origin_of(crate::api_base::PRODUCTION_API)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -376,6 +466,7 @@ impl Default for SyncManifest {
                 bucket: None,
                 editable: false,
                 open_source: false,
+                listings: BTreeMap::new(),
             },
         }
     }
@@ -455,4 +546,44 @@ where
     let content = fs::read_to_string(path)?;
     toml::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A staging listing is kept apart from production's, both survive a
+    /// save, and a sync.toml written before `listings` existed reads the same.
+    #[test]
+    fn each_api_keeps_its_own_listing() {
+        let production = crate::api_base::origin_of(crate::api_base::PRODUCTION_API);
+        let staging = "https://api-staging.eustress.dev";
+        let older = "[sync]\nmode = \"local_first\"\nauto_sync = false\npending_uploads = 0\npending_downloads = 0\noffline_changes = 0\n\n[remote]\nprovider = \"cloudflare_r2\"\nexperience_id = \"prod-1\"\neditable = false\nopen_source = false\n";
+        let mut sync: SyncManifest = toml::from_str(older).unwrap();
+        assert_eq!(sync.remote.listing_id_for(&production), Some("prod-1"), "an older file means production");
+        assert_eq!(sync.remote.listing_id_for(staging), None, "production's listing is not staging's");
+
+        sync.remote.set_listing_id_for(staging, Some(" stage-1 ".into()));
+        let saved: SyncManifest = toml::from_str(&toml::to_string(&sync).unwrap()).unwrap();
+        assert_eq!(saved.remote.listing_id_for(staging), Some("stage-1"));
+        assert_eq!(saved.remote.listing_id_for(&production), Some("prod-1"), "publishing to staging leaves production's");
+
+        let mut saved = saved;
+        saved.remote.set_listing_id_for(staging, None);
+        saved.remote.set_listing_id_for(&production, Some(String::new()));
+        assert_eq!(saved.remote.listing_id_for(staging), None);
+        assert_eq!(saved.remote.experience_id, None, "an empty id is no listing");
+        assert!(!toml::to_string(&saved).unwrap().contains("listings"), "no listings, no table");
+    }
+
+    /// A cover prints its size, never its bytes, so a logged publish request
+    /// stays short.
+    #[test]
+    fn a_cover_prints_its_size_not_its_bytes() {
+        let shown = format!("{:?}", CoverChoice::Set(vec![7; 2048]));
+        assert_eq!(shown, "Set(2048 bytes)");
+        assert!(shown.len() < 40);
+        assert_eq!(format!("{:?}", CoverChoice::Keep), "Keep");
+        assert_eq!(format!("{:?}", CoverChoice::Remove), "Remove");
+    }
 }

@@ -358,6 +358,25 @@ fn mirror_physics_clock(physics: Option<Res<Time<Physics>>>, mut control: ResMut
     }
 }
 
+/// The Terrain's sea follows the same world clock: its surface moves on real
+/// time while editing, on the physics clock in Play (so buoyancy replays
+/// exactly), and holds still while paused. Set before the fixed ticks run.
+fn mirror_ocean_clock(
+    state: Option<Res<State<PlayModeState>>>,
+    clock: Option<ResMut<eustress_common::realism::ocean::OceanClock>>,
+) {
+    use eustress_common::realism::ocean::OceanClock;
+    let Some(mut clock) = clock else { return };
+    let next = match state.map(|s| *s.get()) {
+        Some(PlayModeState::Playing) => OceanClock::Physics,
+        Some(PlayModeState::Paused) => OceanClock::Frozen,
+        _ => OceanClock::View,
+    };
+    if *clock != next {
+        *clock = next;
+    }
+}
+
 /// True while a Play session is running or paused: edits then apply live
 /// but are not written to the Space (Stop restores the authored values).
 pub fn is_playing(state: Option<&State<PlayModeState>>) -> bool {
@@ -491,6 +510,7 @@ impl Plugin for ParticleSimBridgePlugin {
             .init_resource::<ParticlePlaySnapshot>()
             .init_resource::<ParticleSimValueLedger>()
             .add_systems(Update, (adopt_species_by_folder, sync_particle_sim_values))
+            .add_systems(PreUpdate, mirror_ocean_clock)
             .add_systems(
                 FixedUpdate,
                 (

@@ -138,14 +138,21 @@ theme until each of its languages has a service.
   tab opened by path. For a script folder it is the source file inside it;
   the canonical `<folder>.rune` is used only to create one for a folder that
   has none.
-- The write keeps the file's line endings, is flushed to disk, and puts the
-  same bytes in the Space's Fjall `tree`, so a save is durable even in the
-  watcher's start-up grace period.
-- Save goes through the file watcher as an ordinary edit. It does not use the
-  `RecentlyWrittenFiles` self-write mark: a marked path makes the watcher skip
-  both the `SoulScriptData` refresh (so Play would run the old code) and the
-  disk to Fjall `tree` mirror. Nothing writes script source back from the
-  ECS, so there is no loop for the mark to prevent.
+- The write keeps the file's line endings and is atomic
+  (`center_tabs::write_file_atomic`): the bytes go to a synced sibling temp
+  file (`.<name>.tmp`, a type the watcher ignores), which replaces the target
+  in one rename. A crash, a hang or a locked target leaves the old file as it
+  was, never an empty or half written script. The same bytes then go into the
+  Space's Fjall `tree`, so a save is durable even in the watcher's start-up
+  grace period.
+- Save gives the entity's `SoulScriptData` the text it wrote
+  (`refresh_saved_script`) and marks it dirty, so Rune hot-recompiles and the
+  next Play compiles the saved source. It does not depend on the file
+  watcher for that: an atomic replace can be reported against the temp file's
+  name. Save does not use the `RecentlyWrittenFiles` self-write mark, so the
+  watcher may still mirror the file into the tree and reload it; both are
+  idempotent. Nothing writes script source back from the ECS, so there is no
+  loop for the mark to prevent.
 - Ctrl+S while the editor has focus, and the Save button, save the active
   tab's code, from either view of a script tab. A Summary saves itself as it
   is edited, and so does a Markdown document.
@@ -163,7 +170,9 @@ theme until each of its languages has a service.
 - A Space switch saves dirty code tabs before snapshotting the outgoing
   tabs, since a snapshot is out of reach of the close and exit prompts.
 - A Summary (`.md`) edit updates only the summary. The watcher's
-  folder-script fallback applies to the script's source file alone.
+  folder-script fallback applies to the script's source file alone. The
+  Summary and Markdown views save as typed through the same atomic replace,
+  without the flush, which would stall typing; a failed write is logged.
 
 ## Focus
 

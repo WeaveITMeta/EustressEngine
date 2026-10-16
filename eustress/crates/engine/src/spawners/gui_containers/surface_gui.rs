@@ -271,14 +271,7 @@ impl ClassSpawner for SurfaceGuiSpawner {
 const SCHEMA_TAG: u8 = 0xC3;
 
 fn normal_id_from_str(s: &str) -> NormalId {
-    match s {
-        "Back" => NormalId::Back,
-        "Top" => NormalId::Top,
-        "Bottom" => NormalId::Bottom,
-        "Left" => NormalId::Left,
-        "Right" => NormalId::Right,
-        _ => NormalId::Front,
-    }
+    NormalId::parse(s).unwrap_or_default()
 }
 
 fn horizontal_from_str(s: &str) -> HorizontalAlignment {

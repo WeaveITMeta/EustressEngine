@@ -25,7 +25,7 @@
 //
 // Selection, the armed state and focus are `accent-cyan` throughout.
 
-import { Theme } from "theme.slint";
+import { Theme, PopupBounds } from "theme.slint";
 import { LineEdit, ScrollView } from "std-widgets.slint";
 import { NumericField } from "numeric_field.slint";
 
@@ -468,7 +468,7 @@ component MiniDropdown inherits Rectangle {
 
     list := PopupWindow {
         x: 0;
-        y: root.height + 3px;
+        y: PopupBounds.drop-y(root.absolute-position.y, root.height + 3px, self.height);
         width: max(root.width, 96px);
 
         Rectangle {
@@ -699,7 +699,7 @@ component MaterialSwatchButton inherits Rectangle {
 
     picker := PopupWindow {
         x: 0;
-        y: root.height + 4px;
+        y: PopupBounds.drop-y(root.absolute-position.y, root.height + 4px, self.height);
         // Grid, a lane for the scroll bar, and the padding either side.
         width: root.grid-w + 12px + 20px;
         // Typing in the search field and scrolling happen inside; only a

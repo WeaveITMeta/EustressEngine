@@ -25,7 +25,7 @@ use eustress_engine::plugins::lighting_plugin::LightingPlugin;
 #[allow(unused_imports)]
 use eustress_engine::{
     accessibility, adornment_renderer, ai_camera, align_distribute, array_tools, cad_assembly,
-    cad_mate_tool, cad_plugin, csg,
+    cad_mate_tool, cad_plugin, csg, mesh_split,
     attachment_editor_tool, attribute_tag_migration, auth, bliss_tracker, camera,
     camera_controller, class_registry, classes, clipboard, commands, commit_flash,
     constraint_editor_tool, cursor_badge, decal_place_tool, default_scene, duplicate_place_tool,
@@ -261,9 +261,31 @@ fn main() {
     // remember. It becomes `SpaceRoot` before any plugin is built, so the
     // streaming tier and the plugins that load Space files in `build`
     // (purchase orders, manufacturing) read the Space that is actually open.
-    let space_root = args.launch_space_root().unwrap_or_else(space::default_space_root);
+    let space_root = space::format_migration::launch_space_or_scratch(
+        args.launch_space_root().unwrap_or_else(space::default_space_root),
+    );
     app.insert_resource(space::SpaceRoot(space_root.clone()));
     eustress_engine::app_core::register_asset_sources(&mut app, &space_root);
+
+    // Hardware ray tracing (Auto by default; see `raytracing::policy`). With
+    // Off, or a build without the `raytracing` feature, this returns the
+    // `RenderCreation::Automatic` (0.19: it takes Box<WgpuSettings>) the engine
+    // always used, with these same settings. With Auto or On the renderer is
+    // created here, so the GPU gate reads the device Bevy renders with, and a
+    // launch Space recorded as over Solari's texture limit opens in raster.
+    // See `raytracing::render_creation`.
+    let (render_creation, raytracing_launch) =
+        eustress_engine::raytracing::render_creation(bevy::render::settings::WgpuSettings {
+            // Request discrete GPU (NVIDIA/AMD) over integrated
+            power_preference: bevy::render::settings::PowerPreference::HighPerformance,
+            // Use all available backends (Vulkan/DX12/Metal)
+            backends: Some(bevy::render::settings::Backends::all()),
+            ..default()
+        }, &space_root);
+    // DLSS (the `dlss` feature): Bevy's DlssInitPlugin, inside DefaultPlugins,
+    // reads the project id while it builds, so it must be in the App first.
+    // Does nothing in a build without DLSS.
+    eustress_engine::raytracing::insert_dlss_project_id(&mut app);
 
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
@@ -283,15 +305,8 @@ fn main() {
                 ..default()
             })
             .set(RenderPlugin {
-                render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
-                    bevy::render::settings::WgpuSettings {
-                        // Request discrete GPU (NVIDIA/AMD) over integrated
-                        power_preference: bevy::render::settings::PowerPreference::HighPerformance,
-                        // Use all available backends (Vulkan/DX12/Metal)
-                        backends: Some(bevy::render::settings::Backends::all()),
-                        ..default()
-                    }
-                )), // 0.19: RenderCreation::Automatic now takes Box<WgpuSettings>
+                // Made above by `raytracing::render_creation`.
+                render_creation,
                 // Compile all shader pipelines synchronously to prevent mid-session
                 // GPU pipeline stall stutters (750ms spikes visible in frame diagnostics)
                 synchronous_pipeline_compilation: true,
@@ -360,6 +375,11 @@ fn main() {
             wait_duration: std::time::Duration::from_secs(2),
             ..default()
         });
+
+    // The GPU's capabilities, logged once; the guards and Bevy Solari when
+    // ray tracing is on; the AI camera's sky either way. After
+    // DefaultPlugins, because Solari builds on RenderPlugin and PbrPlugin.
+    app.add_plugins(eustress_engine::raytracing::RaytracingPlugin::new(raytracing_launch));
 
     // ── Core simulation tier ────────────────────────────────────────────
     // Everything headless-safe — space loading, WorldDb, Avian + the
@@ -622,6 +642,7 @@ fn main() {
         // Drafting Boolean (Union / Subtract / Intersect / Separate) —
         // real truck CSG via eustress-cad, Model-group fallback.
         .add_plugins(csg::CsgPlugin)
+        .add_plugins(mesh_split::MeshSplitPlugin)
         // Parametric CadPart (feature-tree → mesh). Drafting tab
         // Plate / Box / Cylinder inserts + variable regen.
         .add_plugins(cad_plugin::CadPlugin)
@@ -796,6 +817,14 @@ fn main() {
     match run_result {
         Ok(()) => {
             println!("✅ Eustress Engine closed gracefully");
+            // A normal close: the ray-tracing crash guard takes its launch
+            // marker down, unless a render error ended the session (Bevy's
+            // error handler closes the app through this same path).
+            eustress_engine::raytracing::policy::note_clean_exit();
+            // Release the world before anything replaces the files or starts the
+            // next build. Then apply an update the user asked for, if one is pending.
+            drop(app);
+            updater::finish_pending_update();
         }
         Err(payload) => {
             let msg = panic_payload_str(&*payload);

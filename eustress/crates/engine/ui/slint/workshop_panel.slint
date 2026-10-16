@@ -83,6 +83,11 @@ export struct ChatMessage {
     tool-summary: string,
     tool-input: string,
     tool-result: string,
+    // A tool waiting for a click: plain-language lines to show under its
+    // arguments (invisible or non-ASCII characters shown as text, a call too
+    // long to review), and whether Run is disabled.
+    review-note: string,
+    run-blocked: bool,
     // Assistant rows: which model answered, e.g. "Sonnet 5".
     model-label: string,
 }
@@ -259,14 +264,18 @@ component PillButton inherits Rectangle {
     in property <brush> tint-hover: Theme.button-hover;
     in property <brush> label-color: Theme.text-primary;
     in property <length> label-size: 10.5px;
+    // A disabled button is dimmed and ignores clicks.
+    in property <bool> enabled: true;
     callback clicked();
 
     width: pill-label.preferred-width + 20px;
     height: 22px;
     border-radius: 5px;
-    background: pill-touch.has-hover ? root.tint-hover : root.tint;
+    background: pill-touch.has-hover && root.enabled ? root.tint-hover : root.tint;
+    opacity: root.enabled ? 1.0 : 0.4;
 
     pill-touch := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
@@ -346,6 +355,8 @@ component ChatBubble inherits VerticalLayout {
     in property <string> tool-summary: "";
     in property <string> tool-input: "";
     in property <string> tool-result: "";
+    in property <string> review-note: "";
+    in property <bool> run-blocked: false;
     in property <string> model-label: "";
 
     // Flipped by the panel twice a second while Workshop is working, so a
@@ -663,11 +674,21 @@ component ChatBubble inherits VerticalLayout {
             if root.tool-input != "": Rectangle {
                 background: Theme.background-secondary;
                 border-radius: 5px;
+                clip: true;
+                // The whole call is in this box, so a long one scrolls inside it
+                // instead of growing the card without limit.
+                height: min(260px, input-view.preferred-height + 16px);
 
-                VerticalLayout {
-                    padding: 8px;
+                ScrollView {
+                    x: 8px;
+                    y: 8px;
+                    width: parent.width - 16px;
+                    height: parent.height - 16px;
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, input-view.preferred-height);
 
-                    TextInput {
+                    input-view := TextInput {
+                        width: parent.width;
                         text: root.tool-input;
                         color: Theme.text-primary;
                         font-family: "Consolas";
@@ -681,6 +702,13 @@ component ChatBubble inherits VerticalLayout {
                 }
             }
 
+            if root.review-note != "": Text {
+                text: root.review-note;
+                color: root.run-blocked ? Theme.accent-red : Theme.accent-orange;
+                font-size: 10px;
+                wrap: word-wrap;
+            }
+
             HorizontalLayout {
                 spacing: 6px;
                 height: 24px;
@@ -688,6 +716,7 @@ component ChatBubble inherits VerticalLayout {
                 PillButton {
                     height: 24px;
                     label: "Run";
+                    enabled: !root.run-blocked;
                     tint: Theme.accent-green.with-alpha(0.85);
                     tint-hover: Theme.accent-green;
                     label-color: white;
@@ -1041,7 +1070,8 @@ export component WorkshopPanel inherits Rectangle {
     in-out property <bool> gauntlet-enabled: false;
     callback on-gauntlet-toggled(bool);
 
-    // Auto mode: run approval-gated tools without stopping to ask. Syncs with
+    // Auto mode: run read and write tools without stopping to ask; commands,
+    // deleting and anything online still ask. Syncs with
     // GlobalSoulSettings::workshop_auto_approve. Green rather than the
     // gauntlet's amber, because this one saves you work instead of spending
     // tokens.
@@ -1678,14 +1708,19 @@ export component WorkshopPanel inherits Rectangle {
         // Says what Workshop can actually do, then offers prompts that
         // exercise it. The old copy pitched only the product pipeline, which
         // is one thing Workshop does, not the agent it has become.
+        //
+        // The block sits at the bottom of the space, just above the composer,
+        // the way a conversation grows up from it. Centred, a tall dock left a
+        // band of empty space under the prompts that read as a chin.
         if root.messages.length == 0: Rectangle {
             vertical-stretch: 1;
             background: Theme.panel-background;
 
             VerticalLayout {
-                alignment: center;
+                alignment: end;
                 padding-left: 16px;
                 padding-right: 16px;
+                padding-bottom: 14px;
                 spacing: 10px;
 
                 HorizontalLayout {
@@ -1842,6 +1877,8 @@ export component WorkshopPanel inherits Rectangle {
                         tool-summary: msg.tool-summary;
                         tool-input: msg.tool-input;
                         tool-result: msg.tool-result;
+                        review-note: msg.review-note;
+                        run-blocked: msg.run-blocked;
                         model-label: msg.model-label;
                         message-id: msg.id;
                         pulse: root.pulse;
@@ -2473,6 +2510,14 @@ export component WorkshopPanel inherits Rectangle {
                         font-size: 9px;
                         vertical-alignment: center;
                     }
+                }
+
+                // Says plainly what Auto mode leaves alone, for as long as it is on.
+                if root.auto-enabled: Text {
+                    text: "Still asks before running commands, deleting, or going online.";
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    wrap: word-wrap;
                 }
 
                 // ── Attached image preview strip ──

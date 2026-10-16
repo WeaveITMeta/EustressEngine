@@ -194,11 +194,26 @@ impl Plugin for SurfacePlacementPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SurfacePlacement>()
             .add_systems(Startup, register_surface_tool)
-            .add_systems(Update, (arm_surface_placement, run_surface_placement).chain())
+            // Arming and placing, as editor input, and their end when a Play
+            // session starts (`SurfacePlacementSystems`).
+            .add_plugins(SurfacePlacementSystems)
             // Texture render + live UV tiling (see `sync_texture_surfaces`).
             .add_systems(Update, sync_texture_surfaces)
             // Decals that stand on their own, such as those on the terrain.
             .add_systems(Update, sync_standalone_decals);
+    }
+}
+
+/// The placement's own systems. Arming and placing run as editor input, so
+/// during Play a placement neither arms nor commits, and a Play session
+/// starts with none armed (`end_surface_placement_for_play`). A plugin of its
+/// own, so the tests run what the Studio runs.
+struct SurfacePlacementSystems;
+
+impl Plugin for SurfacePlacementSystems {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (arm_surface_placement, run_surface_placement).chain().run_if(crate::play_mode::editor_input_enabled))
+            .add_systems(crate::play_mode::session_start(), end_surface_placement_for_play);
     }
 }
 
@@ -216,6 +231,24 @@ fn arm_surface_placement(
 ) {
     if placement.active && active.id() != Some("surface_place") {
         activate.write(ActivateModalToolEvent { tool_id: "surface_place".to_string() });
+    }
+}
+
+/// A Play session starts with no surface placement armed: one armed while
+/// editing would wait out the session and then place onto the scene, and a
+/// placement writes the Space. The gate tool goes with it, and its own cancel
+/// despawns the preview and resets the session; a placement whose gate tool
+/// is not active is reset here.
+fn end_surface_placement_for_play(placement: Res<SurfacePlacement>, mut active: ResMut<ActiveModalTool>, mut commands: Commands) {
+    if active.id() == Some("surface_place") {
+        active.cancel(&mut commands);
+    } else if placement.active {
+        commands.queue(|world: &mut World| {
+            despawn_preview(world);
+            if let Some(mut sp) = world.get_resource_mut::<SurfacePlacement>() {
+                sp.reset();
+            }
+        });
     }
 }
 
@@ -875,24 +908,34 @@ use eustress_common::classes::{BasePart, Face, Texture};
 
 /// Renders every `Texture` instance as a tiled quad laid on the chosen face
 /// of its parent `BasePart`, and keeps its UV mapping LIVE: the quad size,
-/// tile count (face-size ÷ studs-per-tile), UV offset, tint, and alpha are
-/// recomputed EVERY frame from the current `Texture` fields + parent size,
-/// so Properties-panel edits (StudsPerTileU/V, OffsetStudsU/V, Face, Color,
-/// Transparency) and part resizes reflect in real time. The quad mesh +
-/// material are created lazily on first sight (the loader only attaches the
-/// `Texture` component). The placement is recomputed every frame, so a parent
-/// resize that a `Changed<Texture>` gate would miss still shows, but the
-/// transform and the material are only WRITTEN when they differ: an imported
-/// place can hold tens of thousands of textures (Vehicle Simulator has
-/// 27,858), and an unconditional write re-propagated every one of their
-/// transforms and re-uploaded every one of their materials each frame.
+/// tile count (face-size ÷ studs-per-tile), UV offset, tint, and alpha follow
+/// the current `Texture` fields + parent size, so Properties-panel edits
+/// (StudsPerTileU/V, OffsetStudsU/V, Face, Color, Transparency) and part
+/// resizes reflect in real time. The quad mesh + material are created lazily
+/// on first sight (the loader only attaches the `Texture` component).
+///
+/// An imported place can hold tens of thousands of textures (Vehicle
+/// Simulator has 27,858), so a texture is recomputed only when something its
+/// placement is built from may have changed since the last run: its
+/// `Texture`, its `ChildOf`, its own `Transform` (so a write from elsewhere
+/// is put back), its material handle (Material Flip installs a new one), or
+/// its parent's `BasePart` (a resize); or it has no material yet.
+/// Recomputing any other texture would give the values it already holds.
+/// Nothing else writes a texture's material in place; a system that starts
+/// to must also mark the texture changed, or its write will stand.
+///
+/// The transform and the material are also only WRITTEN when they differ:
+/// an unconditional write would re-propagate every one of their transforms
+/// and re-upload every one of their materials each frame.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_texture_surfaces(
     parents: Query<&BasePart>,
+    changed_parts: Query<&Children, Changed<BasePart>>,
     mut q: Query<(
         Entity,
-        &Texture,
-        &ChildOf,
-        Option<&MeshMaterial3d<StandardMaterial>>,
+        Ref<Texture>,
+        Ref<ChildOf>,
+        Option<Ref<MeshMaterial3d<StandardMaterial>>>,
         &mut Transform,
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -901,7 +944,27 @@ fn sync_texture_surfaces(
     mut commands: Commands,
     mut quad: Local<Option<Handle<Mesh>>>,
 ) {
+    // The textures on a part whose `BasePart` changed since the last run.
+    // Usually there are none, and the set stays unallocated.
+    let mut on_changed_parts = bevy::ecs::entity::EntityHashSet::default();
+    for children in &changed_parts {
+        for &child in children {
+            if q.contains(child) {
+                on_changed_parts.insert(child);
+            }
+        }
+    }
+
     for (entity, texture, child_of, mat_opt, mut tf) in q.iter_mut() {
+        let touched = texture.is_changed()
+            || child_of.is_changed()
+            || tf.is_changed()
+            || mat_opt.as_ref().is_none_or(|m| m.is_changed())
+            || on_changed_parts.contains(&entity);
+        if !touched {
+            continue;
+        }
+
         // No image, nothing to draw: Roblox shows nothing for a texture whose
         // image is missing, and loading "" only logs an asset error.
         if texture.texture.is_empty() {
@@ -1393,5 +1456,451 @@ mod tests {
         assert_eq!(decal.texture, "Assets/crack.png");
         assert_eq!(decal.depth_fade_factor, 2.5);
         assert_eq!(decal.face, Face::Front);
+    }
+
+    // ---- sync_texture_surfaces against its every-frame form ----
+
+    /// `sync_texture_surfaces` without its gate, recomputing every texture
+    /// every frame: the body it had before the gate, comments dropped. The
+    /// gated system must leave every value exactly as this one does.
+    fn sync_texture_surfaces_every_frame(
+        parents: Query<&BasePart>,
+        mut q: Query<(
+            Entity,
+            &Texture,
+            &ChildOf,
+            Option<&MeshMaterial3d<StandardMaterial>>,
+            &mut Transform,
+        )>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        mut materials: ResMut<Assets<StandardMaterial>>,
+        asset_server: Res<AssetServer>,
+        mut commands: Commands,
+        mut quad: Local<Option<Handle<Mesh>>>,
+    ) {
+        for (entity, texture, child_of, mat_opt, mut tf) in q.iter_mut() {
+            if texture.texture.is_empty() {
+                continue;
+            }
+            let Ok(parent_bp) = parents.get(child_of.parent()) else { continue };
+            let size = parent_bp.size;
+            let (translation, rotation, dims) = face_placement(parse_face(&texture.face), size);
+
+            let placed = Transform {
+                translation,
+                rotation,
+                scale: Vec3::new(dims.x.max(0.01), dims.y.max(0.01), 1.0),
+            };
+            if *tf != placed {
+                *tf = placed;
+            }
+
+            let mat_handle = match mat_opt {
+                Some(m) => m.0.clone(),
+                None => {
+                    let mesh = quad
+                        .get_or_insert_with(|| meshes.add(Rectangle::new(1.0, 1.0)))
+                        .clone();
+                    let tex = asset_server.load_with_settings(
+                        texture.texture.clone(),
+                        |s: &mut ImageLoaderSettings| {
+                            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                                address_mode_u: ImageAddressMode::Repeat,
+                                address_mode_v: ImageAddressMode::Repeat,
+                                address_mode_w: ImageAddressMode::Repeat,
+                                ..ImageSamplerDescriptor::linear()
+                            });
+                        },
+                    );
+                    let handle = materials.add(StandardMaterial {
+                        base_color_texture: Some(tex),
+                        alpha_mode: AlphaMode::Blend,
+                        cull_mode: None,
+                        ..default()
+                    });
+                    commands.entity(entity).insert((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(handle.clone()),
+                        Visibility::Visible,
+                    ));
+                    handle
+                }
+            };
+
+            let spu = texture.studs_per_tile_u.max(0.01);
+            let spv = texture.studs_per_tile_v.max(0.01);
+            let tiles = Vec2::new(dims.x / spu, dims.y / spv);
+            let offset = Vec2::new(texture.offset_studs_u / spu, texture.offset_studs_v / spv);
+            let uv = Affine2::from_scale_angle_translation(tiles, 0.0, offset);
+            let tint = Color::srgba(
+                texture.color3[0],
+                texture.color3[1],
+                texture.color3[2],
+                (1.0 - texture.transparency).clamp(0.0, 1.0),
+            );
+            let stale = materials
+                .get(&mat_handle)
+                .is_some_and(|m| m.uv_transform != uv || m.base_color != tint);
+            if stale {
+                if let Some(mut mat) = materials.get_mut(&mat_handle) {
+                    mat.uv_transform = uv;
+                    mat.base_color = tint;
+                }
+            }
+        }
+    }
+
+    /// An app running one of the two texture systems, with the asset stores
+    /// they use.
+    fn texture_app(gated: bool) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.init_asset::<Image>();
+        if gated {
+            app.add_systems(Update, sync_texture_surfaces);
+        } else {
+            app.add_systems(Update, sync_texture_surfaces_every_frame);
+        }
+        app
+    }
+
+    fn textured(image: &str, face: &str) -> Texture {
+        Texture { texture: image.to_string(), face: face.to_string(), ..Default::default() }
+    }
+
+    fn sized(size: Vec3) -> BasePart {
+        BasePart { size, ..Default::default() }
+    }
+
+    /// One app's entities, in the order the script spawned them.
+    #[derive(Default)]
+    struct TextureScene {
+        parts: Vec<Entity>,
+        textures: Vec<Entity>,
+    }
+
+    /// The edits made before frame `step`, the same in both apps: each input
+    /// the gate watches, and part edits it must sit through.
+    fn texture_step(world: &mut World, step: usize, scene: &mut TextureScene) {
+        let TextureScene { parts, textures } = scene;
+        match step {
+            0 => {
+                parts.push(world.spawn((sized(Vec3::new(4.0, 2.0, 6.0)), Transform::default())).id());
+                parts.push(world.spawn((sized(Vec3::new(1.0, 3.0, 0.5)), Transform::default())).id());
+                // Not a part until step 7.
+                parts.push(world.spawn(Transform::default()).id());
+                for (parent, texture) in [
+                    (0, textured("Assets/a.png", "Top")),
+                    (0, textured("Assets/b.png", "Front")),
+                    (1, Texture { studs_per_tile_u: 0.5, offset_studs_v: 0.25, ..textured("Assets/c.png", "Left") }),
+                    (2, textured("Assets/d.png", "Back")),
+                    // No image until step 6.
+                    (0, textured("", "Right")),
+                    (1, Texture { color3: [0.2, 0.4, 0.6], transparency: 0.3, ..textured("Assets/f.png", "Bottom") }),
+                ] {
+                    let child_of = ChildOf(parts[parent]);
+                    textures.push(world.spawn((texture, child_of, Transform::default())).id());
+                }
+            }
+            // A resize.
+            2 => world.get_mut::<BasePart>(parts[0]).unwrap().size = Vec3::new(8.0, 1.0, 3.0),
+            // Tiling and tint edits.
+            3 => {
+                let mut texture = world.get_mut::<Texture>(textures[2]).unwrap();
+                texture.studs_per_tile_v = 3.0;
+                texture.color3 = [1.0, 0.0, 0.5];
+            }
+            // A reparent onto a part of another size.
+            4 => {
+                world.entity_mut(textures[1]).insert(ChildOf(parts[1]));
+            }
+            // A write to the quad's transform from elsewhere.
+            5 => world.get_mut::<Transform>(textures[0]).unwrap().translation.x += 1.0,
+            // An image for the texture that had none: the lazy build.
+            6 => world.get_mut::<Texture>(textures[4]).unwrap().texture = "Assets/e.png".to_string(),
+            // The plain entity becomes a part.
+            7 => {
+                world.entity_mut(parts[2]).insert(sized(Vec3::splat(2.0)));
+            }
+            // A new material handle, installed the way Material Flip does it.
+            8 => {
+                let old = world.get::<MeshMaterial3d<StandardMaterial>>(textures[5]).unwrap().0.clone();
+                let flipped = {
+                    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+                    let mut flipped = materials.get(&old).unwrap().clone();
+                    flipped.uv_transform = Affine2::from_angle(std::f32::consts::FRAC_PI_2) * flipped.uv_transform;
+                    materials.add(flipped)
+                };
+                world.entity_mut(textures[5]).insert(MeshMaterial3d(flipped));
+            }
+            // The material taken away: it is built again.
+            9 => {
+                world.entity_mut(textures[2]).remove::<MeshMaterial3d<StandardMaterial>>();
+            }
+            10 => {
+                let mut texture = world.get_mut::<Texture>(textures[0]).unwrap();
+                texture.face = "Right".to_string();
+                texture.transparency = 0.5;
+            }
+            // A part edit that leaves the size alone.
+            11 => world.get_mut::<BasePart>(parts[1]).unwrap().transparency = 0.5,
+            12 => {
+                world.entity_mut(textures[3]).despawn();
+                let child_of = ChildOf(parts[0]);
+                textures.push(world.spawn((textured("Assets/g.png", "Top"), child_of, Transform::default())).id());
+            }
+            // The part goes away, then comes back at another size.
+            13 => {
+                world.entity_mut(parts[1]).remove::<BasePart>();
+            }
+            14 => {
+                world.entity_mut(parts[1]).insert(sized(Vec3::new(2.0, 0.5, 5.0)));
+            }
+            _ => {}
+        }
+    }
+
+    /// A texture's outputs as bits: its transform, and its material's UV
+    /// transform and tint (with the colour space the tint is in). `None`
+    /// where there is no entity or no material.
+    type TextureOutput = Option<([u32; 10], Option<([u32; 6], std::mem::Discriminant<Color>, [u32; 4])>)>;
+
+    fn texture_outputs(app: &App, textures: &[Entity]) -> Vec<TextureOutput> {
+        let world = app.world();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        textures
+            .iter()
+            .map(|&texture| {
+                let entity = world.get_entity(texture).ok()?;
+                let transform = entity.get::<Transform>()?;
+                let material = entity
+                    .get::<MeshMaterial3d<StandardMaterial>>()
+                    .and_then(|handle| materials.get(&handle.0))
+                    .map(|material| {
+                        let tint = material.base_color.to_srgba();
+                        (
+                            material.uv_transform.to_cols_array().map(f32::to_bits),
+                            std::mem::discriminant(&material.base_color),
+                            [tint.red, tint.green, tint.blue, tint.alpha].map(f32::to_bits),
+                        )
+                    });
+                Some((transform_bits(transform), material))
+            })
+            .collect()
+    }
+
+    fn transform_bits(transform: &Transform) -> [u32; 10] {
+        let [tx, ty, tz] = transform.translation.to_array();
+        let [rx, ry, rz, rw] = transform.rotation.to_array();
+        let [sx, sy, sz] = transform.scale.to_array();
+        [tx, ty, tz, rx, ry, rz, rw, sx, sy, sz].map(f32::to_bits)
+    }
+
+    #[test]
+    fn skipping_untouched_textures_leaves_what_recomputing_them_all_does() {
+        let mut every = texture_app(false);
+        let mut gated = texture_app(true);
+        let (mut every_scene, mut gated_scene) = (TextureScene::default(), TextureScene::default());
+        let mut history = Vec::new();
+        for step in 0..17 {
+            texture_step(every.world_mut(), step, &mut every_scene);
+            texture_step(gated.world_mut(), step, &mut gated_scene);
+            every.update();
+            gated.update();
+            let want = texture_outputs(&every, &every_scene.textures);
+            assert_eq!(texture_outputs(&gated, &gated_scene.textures), want, "frame {step}");
+            history.push(want);
+        }
+        // The script reached what it is for: the lazy build, held back while
+        // there is no image or no part; the resize; the swapped material put
+        // back to the texture's tiling.
+        let has_material = |frame: usize, texture: usize| matches!(history[frame][texture], Some((_, Some(_))));
+        assert!(has_material(0, 0) && !has_material(0, 3) && !has_material(0, 4));
+        assert!(has_material(6, 4) && has_material(7, 3));
+        assert_ne!(history[1][0], history[2][0], "the resize moves the quad");
+        assert_eq!(history[7][5], history[8][5], "the swapped material gets the tiling back");
+    }
+
+    #[test]
+    fn an_untouched_texture_is_not_recomputed() {
+        // A tint written straight into a texture's material shows whether a
+        // frame recomputed the texture, since recomputing writes it back. No
+        // engine system writes these materials in place; this only probes.
+        for gated in [false, true] {
+            let mut app = texture_app(gated);
+            let mut scene = TextureScene::default();
+            texture_step(app.world_mut(), 0, &mut scene);
+            // Frame 0 builds the material; frame 1 sees it arrive.
+            app.update();
+            app.update();
+            let texture = scene.textures[0];
+            let handle = app.world().get::<MeshMaterial3d<StandardMaterial>>(texture).unwrap().0.clone();
+            let tint = |app: &App| app.world().resource::<Assets<StandardMaterial>>().get(&handle).unwrap().base_color;
+            let placed = tint(&app);
+            app.world_mut().resource_mut::<Assets<StandardMaterial>>().get_mut(&handle).unwrap().base_color =
+                Color::BLACK;
+            app.update();
+            if gated {
+                assert_eq!(tint(&app), Color::BLACK, "an untouched texture is left alone");
+            } else {
+                assert_eq!(tint(&app), placed, "the every-frame body recomputes it");
+            }
+            // Touched, it is recomputed.
+            app.world_mut().get_mut::<Texture>(texture).unwrap().set_changed();
+            app.update();
+            assert_eq!(tint(&app), placed, "gated: {gated}");
+        }
+    }
+}
+
+/// A placement armed while editing does not survive into Play: the session's
+/// start ends it, with its gate tool and preview. While editing a click on a
+/// saved part places it; during Play the same click places nothing.
+#[cfg(test)]
+mod play_session_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// The Studio's placement systems (`SurfacePlacementSystems`) with what
+    /// they read: physics for the raycast, a window with the cursor at its
+    /// middle, and a camera 10 m in front of a 4 m part saved in `folder`,
+    /// which is under the cursor.
+    fn play_app(folder: &std::path::Path) -> App {
+        let mut app = App::new();
+        bevy::tasks::IoTaskPool::get_or_init(Default::default);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::diagnostic::DiagnosticsPlugin,
+            bevy::state::app::StatesPlugin,
+        ));
+        // Avian takes these unconditionally; DefaultPlugins supplies them in
+        // the Studio (as in `physics::movers`' tests).
+        app.init_resource::<avian3d::spatial_query::SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.init_asset::<Image>();
+        app.insert_resource(Time::<Fixed>::from_hz(60.0));
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / 60.0)));
+        app.add_plugins(avian3d::prelude::PhysicsPlugins::default());
+        app.init_state::<PlayModeState>()
+            .init_resource::<SurfacePlacement>()
+            .init_resource::<ActiveModalTool>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<ActivateModalToolEvent>()
+            .add_message::<CancelModalToolEvent>()
+            .add_plugins(SurfacePlacementSystems);
+        let mut window = Window {
+            resolution: bevy::window::WindowResolution::new(1280, 720),
+            ..Default::default()
+        };
+        window.set_cursor_position(Some(Vec2::new(640.0, 360.0)));
+        app.world_mut().spawn((window, PrimaryWindow));
+        // What the renderer would compute for the camera; this app has none.
+        let computed = bevy::camera::ComputedCameraValues {
+            clip_from_view: Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_4, 1280.0 / 720.0, 0.1),
+            target_info: Some(bevy::camera::RenderTargetInfo {
+                physical_size: UVec2::new(1280, 720),
+                scale_factor: 1.0,
+            }),
+            ..Default::default()
+        };
+        let camera = Camera { computed, ..Default::default() };
+        let eye = Transform::from_xyz(0.0, 0.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+        app.world_mut().spawn((camera, eye));
+        app.world_mut().spawn((
+            BasePart::default(),
+            avian3d::prelude::RigidBody::Static,
+            avian3d::prelude::Collider::cuboid(4.0, 4.0, 4.0),
+            Transform::default(),
+            crate::space::instance_loader::InstanceFile {
+                toml_path: folder.join("_instance.toml"),
+                mesh_path: std::path::PathBuf::new(),
+                name: "Wall".to_string(),
+            },
+        ));
+        // Physics steps, so the part is in the tree the raycast reads.
+        for _ in 0..10 {
+            app.update();
+        }
+        app
+    }
+
+    fn arm(app: &mut App) {
+        let mut placement = app.world_mut().resource_mut::<SurfacePlacement>();
+        placement.active = true;
+        placement.rel_path = "assets/sign.png".to_string();
+    }
+
+    fn play(app: &mut App) {
+        app.world_mut().resource_mut::<NextState<PlayModeState>>().set(PlayModeState::Playing);
+        app.update();
+    }
+
+    /// Click the left mouse button, and return the image of every Decal now
+    /// saved in the part's `folder`.
+    fn click(app: &mut App, folder: &std::path::Path) -> Vec<String> {
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+        app.update();
+        let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("Decal"))
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("_instance.toml")).ok())
+            .filter_map(|text| text.parse::<toml::Value>().ok())
+            .filter_map(|doc| doc.get("decal")?.get("texture")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn play_starts_with_no_placement_armed() {
+        let folder = std::env::temp_dir().join(format!("eustress_play_gate_decal_session_{}", std::process::id()));
+        // Armed, its gate tool not active yet.
+        let mut app = play_app(&folder);
+        arm(&mut app);
+        play(&mut app);
+        assert!(!app.world().resource::<SurfacePlacement>().active, "the placement survived into Play");
+
+        // Armed with its gate tool active: the tool goes too.
+        let mut app = play_app(&folder);
+        arm(&mut app);
+        let gate: Box<dyn ModalTool> = Box::new(SurfacePlaceGate);
+        app.world_mut().resource_mut::<ActiveModalTool>().set(Some(gate));
+        play(&mut app);
+        assert!(!app.world().resource::<SurfacePlacement>().active, "the placement survived into Play");
+        assert!(!app.world().resource::<ActiveModalTool>().is_active(), "the gate tool survived into Play");
+    }
+
+    /// While editing an armed placement stays armed until a click, and a
+    /// click on the saved part commits it: the Decal is written into the
+    /// part's folder with its image, and the session ends. During Play the
+    /// same click places nothing.
+    #[test]
+    fn editing_keeps_an_armed_placement() {
+        let folder = std::env::temp_dir().join(format!("eustress_play_gate_decal_click_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = play_app(&folder);
+        arm(&mut app);
+        app.update();
+        assert!(app.world().resource::<SurfacePlacement>().active, "the placement ended before the click");
+        assert_eq!(click(&mut app, &folder), ["assets/sign.png"], "the click placed no Decal");
+        assert!(!app.world().resource::<SurfacePlacement>().active, "the placement outlived its commit");
+
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = play_app(&folder);
+        play(&mut app);
+        arm(&mut app);
+        assert!(click(&mut app, &folder).is_empty(), "a click during Play placed a Decal");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

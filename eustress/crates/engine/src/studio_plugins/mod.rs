@@ -270,6 +270,20 @@ fn handle_plugin_menu_actions(
     }
 }
 
+/// What a plugin action writes to the Space by itself, as the words its Play
+/// notice names; `None` for the actions that only toggle or resize the panel
+/// or read. Adding, removing and saving labels and connecting nodes write and
+/// delete folders under the Space from [`handle_plugin_action_events`].
+fn plugin_space_write(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        "mindspace:add_label" => Some("add a label"),
+        "mindspace:remove_label" => Some("remove a label"),
+        "mindspace:save" => Some("save the mind map"),
+        "mindspace:connect" => Some("connect mind map nodes"),
+        _ => None,
+    }
+}
+
 /// Handle plugin action events from UI (e.g., MindSpace panel buttons)
 fn handle_plugin_action_events(
     mut commands: Commands,
@@ -286,12 +300,13 @@ fn handle_plugin_action_events(
     child_of_query: Query<&ChildOf>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
-    // Space files: which file each entity loaded from, and the open Space new
-    // folders are written into. Bundled because this system is at Bevy's
-    // 16-param ceiling.
+    // Space files: which file each entity loaded from, the open Space new
+    // folders are written into, and the Play state those writes wait on.
+    // Bundled because this system is at Bevy's 16-param ceiling.
     space_files: (
         Query<&crate::space::LoadedFromFile>,
         Option<Res<crate::space::SpaceRoot>>,
+        Option<Res<State<crate::play_mode::PlayModeState>>>,
     ),
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
@@ -310,10 +325,18 @@ fn handle_plugin_action_events(
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
     let (loaded_from_file, space_root_res) = (&space_files.0, &space_files.1);
+    let play_state = space_files.2.as_ref().map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
 
     for event in events.read() {
         info!("🔌 Processing plugin action: {}", event.action_id);
         
+        // During Play a MindSpace edit that writes the Space waits for Stop
+        // (`plugin_space_write`), and the scene is the running game. Refused
+        // where the request is read, so it never runs after Stop.
+        if let Some(notice) = plugin_space_write(&event.action_id).and_then(|what| crate::keybindings::play_refusal_to(play_state, what)) {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         match event.action_id.as_str() {
             "mindspace:toggle_panel" => {
                 // Toggle MindSpace panel visibility
@@ -1522,4 +1545,76 @@ fn write_edge_endpoints(path: &std::path::Path, a: &str, b: &str) -> Result<(), 
     beam.insert("segments".into(), Value::Integer(2));
     let out = toml::to_string(&doc).map_err(|e| e.to_string())?;
     std::fs::write(path, out).map_err(|e| e.to_string())
+}
+
+/// During Play the MindSpace actions that write the Space are refused where
+/// they are read; the rest of the panel stays live.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    const WRITES: [(&str, &str); 4] = [
+        ("mindspace:add_label", "add a label"),
+        ("mindspace:remove_label", "remove a label"),
+        ("mindspace:save", "save the mind map"),
+        ("mindspace:connect", "connect mind map nodes"),
+    ];
+
+    #[test]
+    fn the_mindspace_writes_are_named() {
+        for (id, what) in WRITES {
+            assert_eq!(plugin_space_write(id), Some(what), "{id}");
+        }
+        for id in [
+            "mindspace:toggle_panel",
+            "mindspace:update_label",
+            "mindspace:billboard_larger",
+            "mindspace:import",
+            "soul:build_all",
+            "road:add_node",
+        ] {
+            assert_eq!(plugin_space_write(id), None, "{id}");
+        }
+    }
+
+    /// Press one plugin button in `state`, and return the toasts and the
+    /// Output panel's lines it left.
+    fn press(state: PlayModeState, action_id: &str) -> (Vec<String>, Vec<String>) {
+        let mut app = App::new();
+        app.add_message::<PluginActionEvent>();
+        app.insert_resource(State::new(state));
+        app.insert_resource(crate::ui::StudioState::default());
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.init_resource::<crate::space::file_watcher::RecentlyWrittenFiles>();
+        // An explicit root, so no fallback ever reads the settings file.
+        app.insert_resource(crate::space::SpaceRoot(std::env::temp_dir().join("eustress_play_gate_mindspace")));
+        app.insert_resource(crate::rendering::BevySelectionManager(std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::commands::SelectionManager::default(),
+        ))));
+        app.add_systems(Update, handle_plugin_action_events);
+        app.world_mut().write_message(PluginActionEvent::new(action_id));
+        app.update();
+        let world = app.world();
+        (
+            world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect(),
+            world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn play_refuses_the_mindspace_writes() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for (id, what) in WRITES {
+                let notice = vec![format!("Stop Play to {what}.")];
+                assert_eq!(press(state, id), (notice.clone(), notice), "{state:?} {id}");
+            }
+        }
+        // While editing the same press runs: with nothing selected, Add
+        // Label says so.
+        let (toasts, _) = press(PlayModeState::Editing, "mindspace:add_label");
+        assert_eq!(toasts, ["Select an entity first to add a label"]);
+    }
 }

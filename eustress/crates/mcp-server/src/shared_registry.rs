@@ -57,11 +57,9 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::SimStepTool);
         // POMDP sense primitive (Phase 2) — world-space raycast.
         r.register(crate::bridge_tools::SceneRaycastTool);
-        // Independent AI camera — the AI's own off-screen eyes.
-        r.register(crate::bridge_tools::AiCameraSetPoseTool);
-        r.register(crate::bridge_tools::AiCameraOrbitTool);
-        r.register(crate::bridge_tools::AiCameraFrameTool);
-        r.register(crate::bridge_tools::AiCameraCaptureTool);
+        // The AI camera, the AI's own off-screen eyes: the shared tools
+        // crate's four tools, so every host serves the same ones.
+        eustress_tools::ai_camera_tools::register(&mut r);
         // PhysicsService: which physics domains step, gravity, clock speed.
         r.register(crate::bridge_tools::GetPhysicsSettingsTool);
         r.register(crate::bridge_tools::SetPhysicsSettingsTool);
@@ -83,6 +81,7 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::TerrainReplaceMaterialTool);
         r.register(crate::bridge_tools::TerrainLayerCreateTool);
         r.register(crate::bridge_tools::TerrainClearTool);
+        r.register(crate::bridge_tools::TerrainReloadTool);
         // Binary-ECS entity CRUD: OVERRIDE the disk entity tools by name so
         // they operate on binary cores via the bridge when the engine is
         // live, and fall back to the disk tool (FileSystem rep) when it's
@@ -133,6 +132,30 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::DiffSnapshotTool);
         r.register(crate::bridge_tools::RevertToSnapshotTool);
         r.register(crate::bridge_tools::CancelPendingRevertTool);
+        // Parameters: an instance's named values, read and edited with the
+        // Properties panel's rules.
+        r.register(crate::bridge_tools::ParametersGetTool);
+        // What scripts made in the running Play session, on command.
+        r.register(crate::bridge_tools::ListPlayInstancesTool);
+        r.register(crate::bridge_tools::ParametersSetTool);
+        // Attributes: read in Play or Edit, set in Edit as one undo step.
+        r.register(crate::bridge_tools::AttributeGetTool);
+        r.register(crate::bridge_tools::AttributeSetTool);
+        // Whole-instance edits, each one undo step.
+        r.register(crate::bridge_tools::TransformSubtreeTool);
+        r.register(crate::bridge_tools::RenameInstanceTool);
+        r.register(crate::bridge_tools::ReparentInstanceTool);
+        r.register(crate::bridge_tools::CloneInstanceTool);
+        r.register(crate::bridge_tools::CreateInstanceTool);
+        // The open Space and its meshes.
+        r.register(crate::bridge_tools::OpenSpaceTool);
+        r.register(crate::bridge_tools::ListMeshesTool);
+        r.register(crate::bridge_tools::ReloadMeshTool);
+        // Properties: any class's properties and methods, through the
+        // Properties panel's own rows and edits.
+        r.register(crate::bridge_tools::GetPropertiesTool);
+        r.register(crate::bridge_tools::SetPropertiesTool);
+        r.register(crate::bridge_tools::CallMethodTool);
         // Disk world-container tools — create Universes / Spaces (no engine).
         r.register(crate::bridge_tools::NewUniverseTool);
         r.register(crate::bridge_tools::NewSpaceTool);
@@ -185,6 +208,7 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "terrain_replace_material",
     "terrain_layer_create",
     "terrain_clear",
+    "terrain_reload",
     // The UI surface and publishing all reach the RUNNING engine.
     "list_modes",
     "list_mode_tools",
@@ -200,6 +224,24 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "diff_snapshot",
     "revert_to_snapshot",
     "cancel_pending_revert",
+    // An instance's Parameters in the RUNNING engine.
+    "parameters_get",
+    "attribute_get",
+    "attribute_set",
+    "transform_subtree",
+    "rename_instance",
+    "reparent_instance",
+    "clone_instance",
+    "create_instance",
+    "open_space",
+    "list_meshes",
+    "reload_mesh",
+    "parameters_set",
+    "list_play_instances",
+    // Any instance's properties and class methods in the RUNNING engine.
+    "get_properties",
+    "set_properties",
+    "call_method",
     // Bridge-only too: both fail outright without a live engine, so pointing
     // them at the server's nominal default Universe rather than the running
     // one just produces "engine is not running" against a Universe that was
@@ -387,12 +429,11 @@ pub fn try_dispatch(
     Some(r.dispatch(tool_name, "", args.clone(), &ctx))
 }
 
-/// Keys a tool can set in `structured_data` to return an actual image.
+/// Keys a tool can set in `structured_data` to return an actual image
+/// (defined with the shared capture helper in `eustress_tools::image_result`).
 /// `to_mcp_json` lifts them out into an MCP `image` content block, so the
-/// bytes reach clients that have no filesystem access. Underscore-prefixed
-/// so they never collide with a real engine field.
-pub const IMAGE_B64_KEY: &str = "_mcp_image_base64";
-pub const IMAGE_MIME_KEY: &str = "_mcp_image_mime";
+/// bytes reach clients that have no filesystem access.
+pub use eustress_tools::image_result::{IMAGE_B64_KEY, IMAGE_MIME_KEY};
 
 /// Cap on the raw-JSON block appended after the human summary. `ecs.inspect`
 /// over a 5 000-entity scene pretty-prints to megabytes; emitting that
@@ -513,6 +554,16 @@ mod tests {
         );
     }
 
+    /// The AI camera tools come from the shared tools crate, under their
+    /// names, so the MCP server serves the same four as every other host.
+    #[test]
+    fn the_ai_camera_tools_are_served() {
+        let names = registry().tool_names();
+        for name in eustress_tools::ai_camera_tools::NAMES {
+            assert!(names.contains(&name), "{name} is not served");
+        }
+    }
+
     fn result_with(content: &str, data: Option<Value>) -> ToolResult {
         ToolResult {
             tool_name: "t".into(),
@@ -625,6 +676,8 @@ mod tests {
             ("terrain_layer_create", Capability::Write),
             ("terrain_carve", Capability::Destructive),
             ("terrain_clear", Capability::Destructive),
+            // Its base class; a call without `discard_unsaved` is Write.
+            ("terrain_reload", Capability::Destructive),
         ];
         for (name, class) in expected {
             assert!(tools.iter().any(|t| t["name"] == name), "{name} is registered");
@@ -635,7 +688,7 @@ mod tests {
             assert_eq!(annotation(&tools, name, "readOnlyHint"), class == Capability::Read, "{name} readOnlyHint");
         }
         // Removing ground, or replacing a whole terrain, always asks first.
-        for name in ["terrain_carve", "terrain_clear", "terrain_generate", "terrain_flat"] {
+        for name in ["terrain_carve", "terrain_clear", "terrain_generate", "terrain_flat", "terrain_reload"] {
             assert_eq!(annotation(&tools, name, "destructiveHint"), true, "{name} destructiveHint");
         }
     }

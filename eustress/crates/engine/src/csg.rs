@@ -71,12 +71,24 @@ fn handle_csg_actions(
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
     mut registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
     space_root_res: Option<Res<crate::space::SpaceRoot>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
     let Some(selection) = selection else {
         return;
     };
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
 
     for event in events.read() {
+        // During Play a Boolean waits for Stop: it writes new Parts and moves
+        // its sources to the trash, and the scene is the running game. It is
+        // refused where it is read, so the request is consumed and never runs
+        // after Stop.
+        if matches!(event.action, Action::CSGUnion | Action::CSGNegate | Action::CSGIntersect | Action::CSGSeparate) {
+            if let Some(notice) = crate::keybindings::play_refusal(play_state, event.action) {
+                commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+                continue;
+            }
+        }
         let space_root = crate::space::open_space_root(space_root_res.as_deref());
         match event.action {
             Action::CSGUnion => {
@@ -404,25 +416,50 @@ fn run_boolean(
             let trash_root = space_root.join(".eustress").join("trash").join(&trash_stamp);
             let mut source_folder_moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
             let mut unbacked_sources = 0usize;
+            // Operands the boolean replaces (despawned below), and the ones
+            // whose folder could not be moved, which stay in the scene.
+            let mut replaced: Vec<Entity> = Vec::new();
+            let mut kept: Vec<String> = Vec::new();
             for src in &source_entities {
-                if let Ok(f) = instance_files.get(*src) {
-                    if let Some(folder) = f.toml_path.parent() {
-                        source_folder_moves.push((
-                            folder.to_path_buf(),
-                            trash_root.join(folder.file_name().unwrap_or_default()),
-                        ));
-                        continue;
+                let backed = instance_files.get(*src).ok().and_then(|f| {
+                    f.toml_path.parent().map(|folder| (f.toml_path.clone(), folder.to_path_buf()))
+                });
+                let Some((toml_path, folder)) = backed else {
+                    unbacked_sources += 1;
+                    replaced.push(*src);
+                    continue;
+                };
+                let trash = trash_root.join(folder.file_name().unwrap_or_default());
+                // The same move Delete and Cut make: watcher guard, retried
+                // rename, and every store purged, so a database-backed Space
+                // cannot rebuild the operand on reopen.
+                let request = crate::space::trash::TrashRequest {
+                    entity: *src,
+                    source: &folder,
+                    record: &toml_path,
+                    destination: &trash,
+                };
+                match crate::space::trash::trash_instance(&request, commands, registry.as_deref_mut()) {
+                    Ok(_) => {
+                        source_folder_moves.push((folder, trash));
+                        replaced.push(*src);
+                    }
+                    Err(e) => {
+                        warn!("🔨 CSG {label}: could not move {:?} to the trash: {e}", folder);
+                        kept.push(folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                     }
                 }
-                unbacked_sources += 1;
             }
-            for (orig, trash) in &source_folder_moves {
-                if let Some(parent) = trash.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::rename(orig, trash) {
-                    warn!("🔨 CSG {label}: failed to trash source {:?}: {e}", orig);
-                }
+            if !kept.is_empty() {
+                let one = kept.len() == 1;
+                notifications.warning(format!(
+                    "{label}: could not move {} to the trash, so {} stayed in the scene; delete {} once nothing \
+                     holds {} files",
+                    kept.join(", "),
+                    if one { "it" } else { "they" },
+                    if one { "it" } else { "them" },
+                    if one { "its" } else { "their" },
+                ));
             }
 
             if persisted.is_ok() && unbacked_sources == 0 {
@@ -452,8 +489,8 @@ fn run_boolean(
                 ));
             }
 
-            // Despawn sources (they are replaced by the boolean result).
-            for src in source_entities {
+            // Despawn the sources the result replaced; a kept one stays.
+            for src in replaced {
                 commands.entity(src).despawn();
             }
 
@@ -745,4 +782,73 @@ fn translate_mesh(mut mesh: Mesh, offset: Vec3) -> Mesh {
         }
     }
     mesh
+}
+
+/// During Play a Boolean is refused where it is read, so the request is
+/// consumed: it neither runs during Play nor after Stop.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    fn csg_app(state: PlayModeState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.add_message::<MenuActionEvent>();
+        app.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.insert_resource(SelectionSyncManager(std::sync::Arc::new(parking_lot::RwLock::new(crate::commands::SelectionManager::default()))));
+        // An explicit root, so no fallback ever reads the settings file.
+        app.insert_resource(crate::space::SpaceRoot(std::env::temp_dir().join("eustress_play_gate_csg")));
+        app.add_systems(Update, handle_csg_actions);
+        app
+    }
+
+    fn warnings(app: &App) -> Vec<String> {
+        app.world().resource::<NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect()
+    }
+
+    /// Every line in the Output panel.
+    fn output(app: &App) -> Vec<String> {
+        app.world().resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect()
+    }
+
+    #[test]
+    fn play_refuses_every_boolean() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for action in [Action::CSGUnion, Action::CSGNegate, Action::CSGIntersect, Action::CSGSeparate] {
+                let mut app = csg_app(state);
+                app.world_mut().write_message(MenuActionEvent::new(action));
+                app.update();
+                let notice = crate::keybindings::play_refusal(state, action).unwrap();
+                assert_eq!(warnings(&app), [notice.clone()], "{state:?} {action:?}");
+                assert_eq!(output(&app), [notice], "{state:?} {action:?}");
+            }
+        }
+    }
+
+    /// Refused during Play and consumed: the same request does not run once
+    /// Play stops. While editing, a union runs (and says nothing is selected).
+    #[test]
+    fn a_refused_boolean_does_not_run_after_stop() {
+        let mut app = csg_app(PlayModeState::Playing);
+        app.world_mut().write_message(MenuActionEvent::new(Action::CSGUnion));
+        // Update alone, without the frame's message bookkeeping, so the
+        // request is still there when Play stops.
+        app.world_mut().run_schedule(Update);
+        assert_eq!(warnings(&app).len(), 1);
+        assert_eq!(output(&app).len(), 1);
+        app.insert_resource(State::new(PlayModeState::Editing));
+        app.world_mut().run_schedule(Update);
+        assert_eq!(warnings(&app).len(), 1, "the refused union ran after Stop: {:?}", warnings(&app));
+        app.world_mut().write_message(MenuActionEvent::new(Action::CSGUnion));
+        app.world_mut().run_schedule(Update);
+        let warnings = warnings(&app);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(!warnings[1].starts_with("Stop Play"), "{warnings:?}");
+    }
 }

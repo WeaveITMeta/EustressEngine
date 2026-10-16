@@ -342,14 +342,15 @@ impl Plugin for AvatarRuntimePlugin {
         // animation sampling and transform propagation.
         // `AnimationSystems` is re-exported from `bevy_app`, not
         // `bevy_animation` (bevy_animation itself imports it from there).
-        // Inside the Animator's window too: after its root-motion pin, which
-        // the life layer's hips writes build on, and before scripts' joint
-        // overrides and the Motor6D pass.
+        // Inside the Animator's window too: after its root-motion pin and the
+        // matcher's inertialization (which run in that order), which the life
+        // layer's hips writes build on, and before scripts' joint overrides
+        // and the Motor6D pass.
         app.configure_sets(
             PostUpdate,
             AvatarSystems::PostAnim
                 .after(bevy::app::AnimationSystems)
-                .after(crate::animation::AnimatorSet::RootMotion)
+                .after(crate::animation::AnimatorSet::Inertialize)
                 .before(crate::animation::AnimatorSet::Overrides)
                 .before(TransformSystems::Propagate),
         );

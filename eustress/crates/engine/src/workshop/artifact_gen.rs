@@ -691,34 +691,22 @@ pub fn handle_artifact_completion(
                 let _ = std::fs::create_dir_all(&universe_assets_dir);
                 let path = workspace_product_dir.join("generate_meshes.py");
                 let _ = std::fs::create_dir_all(&workspace_product_dir);
-                // Inject the correct output directory into the script content
-                let patched_content = event.content.replace(
-                    "OUTPUT_DIR = ",
-                    &format!("OUTPUT_DIR = r\"{}\"  # ", universe_assets_dir.display()),
-                );
-                let final_content = if patched_content == event.content {
-                    format!(
-                        "# Mesh output directory: {}\n# Run: blender --background --python generate_meshes.py\n\n{}",
-                        universe_assets_dir.display(),
-                        event.content
-                    )
-                } else {
-                    patched_content
-                };
+                // Fence removed and the output directory injected (see `mesh_script_for`)
+                let final_content = mesh_script_for(&event.content, &universe_assets_dir);
                 write_artifact_file(&path, &final_content);
                 path
             }
             ArtifactStep::CatalogEntry => {
                 // README.md → Workspace/{product}/README.md
-                let parts: Vec<&str> = event.content.splitn(2, "---CATALOG_SEPARATOR---").collect();
-                if let Some(readme) = parts.first() {
+                let (readme, catalog_entry) = catalog_parts(&event.content);
+                if let Some(readme) = readme {
                     let readme_path = workspace_product_dir.join("README.md");
-                    write_artifact_file(&readme_path, readme.trim());
+                    write_artifact_file(&readme_path, &readme);
                 }
-                if let Some(catalog_entry) = parts.get(1) {
+                if let Some(catalog_entry) = catalog_entry {
                     // Catalog entry appended to Space-level Products.md
                     let catalog_path = space_path.join("Products.md");
-                    append_catalog_entry_to(&catalog_path, catalog_entry.trim());
+                    append_catalog_entry_to(&catalog_path, &catalog_entry);
                 }
                 workspace_product_dir.join("README.md")
             }
@@ -777,8 +765,180 @@ pub fn handle_artifact_completion(
 // 5. File writing helpers
 // ============================================================================
 
-/// Write a single artifact file to disk
+/// The Blender script as it is saved: the model's reply without a wrapping code fence
+/// (a fence line in a `.py` file is a syntax error), with the Universe's mesh output
+/// directory injected, or a header naming it when the script sets none.
+fn mesh_script_for(reply: &str, universe_assets_dir: &std::path::Path) -> String {
+    let script = super::normalizer::unwrap_fenced_document(reply);
+    let patched = script.replace(
+        "OUTPUT_DIR = ",
+        &format!("OUTPUT_DIR = r\"{}\"  # ", universe_assets_dir.display()),
+    );
+    if patched == script {
+        format!(
+            "# Mesh output directory: {}\n# Run: blender --background --python generate_meshes.py\n\n{}",
+            universe_assets_dir.display(),
+            script
+        )
+    } else {
+        patched
+    }
+}
+
+/// The catalog reply split into its README and its catalog row, each without a wrapping
+/// code fence: the whole reply may be fenced, or each part on its own.
+fn catalog_parts(reply: &str) -> (Option<String>, Option<String>) {
+    use super::normalizer::unwrap_fenced_document;
+    let reply = unwrap_fenced_document(reply);
+    let mut parts = reply.splitn(2, "---CATALOG_SEPARATOR---");
+    let mut next = || parts.next().map(|p| unwrap_fenced_document(p.trim()).trim().to_string());
+    let readme = next();
+    let entry = next();
+    (readme, entry)
+}
+
+/// A model told to write raw text sometimes wraps the whole reply in a code fence anyway.
+/// Each artifact step that writes a reply to disk has to save the content, not the fence:
+/// a fence line in a `.py` or `.toml` file is a syntax error, and in a document it is noise.
+#[cfg(test)]
+mod fence_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A folder in the temp directory, removed when dropped.
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new() -> Self {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "eustress_artifact_fences_{}_{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Dir(dir)
+        }
+        fn read(&self, rel: &str) -> String {
+            std::fs::read_to_string(self.0.join(rel)).unwrap_or_else(|e| format!("<{rel}: {e}>"))
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_fenced_patent_is_saved_without_its_fence() {
+        let dir = Dir::new();
+        let path = dir.0.join("PATENT.md");
+        write_artifact_file(&path, "```markdown\n# Patent\n\nClaim 1: a cell.\n```");
+        assert_eq!(dir.read("PATENT.md"), "# Patent\n\nClaim 1: a cell.");
+
+        // A document that merely contains a code block is saved exactly as written.
+        let doc = "# Patent\n\nFigure 1:\n```text\nfig\n```\n\nClaim 2.\n";
+        write_artifact_file(&dir.0.join("SOTA.md"), doc);
+        assert_eq!(dir.read("SOTA.md"), doc);
+    }
+
+    #[test]
+    fn a_fenced_blender_script_is_saved_as_python() {
+        let assets = std::path::Path::new("Universe").join("assets").join("meshes").join("Car");
+        let shown = assets.display().to_string();
+
+        // The script names its output directory: it is injected, and the fence is gone.
+        let with_dir = mesh_script_for("```python\nimport bpy\nOUTPUT_DIR = \"out\"\nprint(1)\n```", &assets);
+        assert!(!with_dir.contains("```"), "{with_dir}");
+        assert!(with_dir.contains(&format!("OUTPUT_DIR = r\"{shown}\"  # \"out\"")), "{with_dir}");
+        assert!(with_dir.starts_with("import bpy") && with_dir.ends_with("print(1)"), "{with_dir}");
+
+        // It does not: a header names the directory, and the fence is still gone.
+        let without = mesh_script_for("```python\nimport bpy\nprint(1)\n```", &assets);
+        assert!(without.starts_with(&format!("# Mesh output directory: {shown}\n")), "{without}");
+        assert!(without.ends_with("import bpy\nprint(1)") && !without.contains("```"), "{without}");
+
+        // An unfenced script is unchanged by it.
+        assert_eq!(
+            mesh_script_for("import bpy\nprint(1)", &assets),
+            format!("# Mesh output directory: {shown}\n# Run: blender --background --python generate_meshes.py\n\nimport bpy\nprint(1)")
+        );
+    }
+
+    #[test]
+    fn fenced_part_files_are_saved_as_toml() {
+        let part = |name: &str| format!("[asset]\nmesh = \"assets/meshes/Car/{name}.glb\"");
+
+        // The whole reply fenced, the file markers inside it.
+        let dir = Dir::new();
+        let whole = format!("```toml\n# --- FILE: Wheel ---\n{}\n# --- FILE: Body ---\n{}\n```", part("wheel"), part("body"));
+        write_split_part_folders(&dir.0, &whole);
+        assert_eq!(dir.read("Wheel/_instance.toml"), part("wheel"));
+        assert_eq!(dir.read("Body/_instance.toml"), part("body"));
+
+        // Each file fenced on its own.
+        let dir = Dir::new();
+        let each = format!(
+            "# --- FILE: Wheel ---\n```toml\n{}\n```\n# --- FILE: Body ---\n```toml\n{}\n```",
+            part("wheel"),
+            part("body")
+        );
+        write_split_part_folders(&dir.0, &each);
+        assert_eq!(dir.read("Wheel/_instance.toml"), part("wheel"));
+        assert_eq!(dir.read("Body/_instance.toml"), part("body"));
+    }
+
+    #[test]
+    fn fenced_rune_scripts_are_saved_as_source() {
+        let source = "fn main() {\n    1 + 1\n}";
+        let whole = format!("```rune\n# --- FILE: cycle ---\n{source}\n```");
+        let dir = Dir::new();
+        write_split_rune_script_folders(&dir.0, &whole);
+        assert_eq!(dir.read("cycle/cycle.rune"), source);
+
+        let each = format!("# --- FILE: cycle ---\n```rune\n{source}\n```\n# --- FILE: cycle.md ---\n```markdown\n# Cycle\n```");
+        let dir = Dir::new();
+        write_split_rune_script_folders(&dir.0, &each);
+        assert_eq!(dir.read("cycle/cycle.rune"), source);
+        assert_eq!(dir.read("cycle/cycle.md"), "# Cycle");
+    }
+
+    #[test]
+    fn fenced_ui_files_are_saved_as_toml() {
+        let ui = "[ScreenGui]\nname = \"Hud\"";
+        let dir = Dir::new();
+        write_split_files(&dir.0, &format!("```toml\n# --- FILE: hud.toml ---\n{ui}\n```"), "");
+        assert_eq!(dir.read("hud.toml"), ui);
+        let dir = Dir::new();
+        write_split_files(&dir.0, &format!("# --- FILE: hud.toml ---\n```toml\n{ui}\n```"), "");
+        assert_eq!(dir.read("hud.toml"), ui);
+    }
+
+    #[test]
+    fn a_fenced_catalog_reply_is_split_without_fences() {
+        let (readme, entry) = catalog_parts("```markdown\n# README\n\nA cell.\n---CATALOG_SEPARATOR---\n| Cell | conventional |\n```");
+        assert_eq!(readme.as_deref(), Some("# README\n\nA cell."));
+        assert_eq!(entry.as_deref(), Some("| Cell | conventional |"));
+
+        let (readme, entry) = catalog_parts("```markdown\n# README\n```\n---CATALOG_SEPARATOR---\n```markdown\n| Cell |\n```");
+        assert_eq!(readme.as_deref(), Some("# README"));
+        assert_eq!(entry.as_deref(), Some("| Cell |"));
+
+        // No separator: only a README. No fences: as before.
+        assert_eq!(catalog_parts("# README only"), (Some("# README only".to_string()), None));
+        let (readme, entry) = catalog_parts("# README\n---CATALOG_SEPARATOR---\n| Cell |");
+        assert_eq!((readme.as_deref(), entry.as_deref()), (Some("# README"), Some("| Cell |")));
+    }
+}
+
+/// Write a single artifact file to disk.
+///
+/// A model told to write raw text sometimes wraps the whole reply in a code fence anyway, and a
+/// fence line in a `.py` or `.toml` file is a syntax error, so a reply that is one fenced block is
+/// saved without it. Every file this module writes goes through here, the files of a split
+/// reply included.
 fn write_artifact_file(path: &PathBuf, content: &str) {
+    let content = super::normalizer::unwrap_fenced_document(content);
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             warn!("Workshop: Failed to create directory {:?}: {}", parent, e);
@@ -800,6 +960,9 @@ fn write_artifact_file(path: &PathBuf, content: &str) {
 /// Files whose name starts with "scripts/" will be placed in an output_dir/scripts/ subdirectory.
 fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &str) {
     let _ = std::fs::create_dir_all(output_dir);
+    // The whole reply may be fenced, with the file markers inside; each file is unwrapped
+    // again when it is written, for a reply that fences them one by one.
+    let content = super::normalizer::unwrap_fenced_document(content);
 
     let mut current_filename: Option<String> = None;
     let mut current_content = String::new();
@@ -858,6 +1021,9 @@ fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &st
 /// the "missing file" branch.
 fn write_split_rune_script_folders(output_dir: &PathBuf, content: &str) {
     let _ = std::fs::create_dir_all(output_dir);
+    // The whole reply may be fenced, with the file markers inside; each file is unwrapped
+    // again when it is written, for a reply that fences them one by one.
+    let content = super::normalizer::unwrap_fenced_document(content);
 
     // First pass: collect every (filename, body) pair from the stream,
     // so we can pair `foo` with its companion `foo.md` regardless of
@@ -987,6 +1153,9 @@ fn sanitize_script_folder_name(raw: &str) -> Option<String> {
 /// rather than written with a corrupted shape.
 fn write_split_part_folders(output_dir: &PathBuf, content: &str) {
     let _ = std::fs::create_dir_all(output_dir);
+    // The whole reply may be fenced, with the file markers inside; each file is unwrapped
+    // again when it is written, for a reply that fences them one by one.
+    let content = super::normalizer::unwrap_fenced_document(content);
 
     let mut current_name: Option<String> = None;
     let mut current_content = String::new();
@@ -1092,23 +1261,49 @@ fn resolve_split_file_path(output_dir: &PathBuf, filename: &str, default_extensi
 
 /// Resolve the Universe assets/meshes/{product}/ directory from a Space root path.
 ///
-/// Space layout: Universe/spaces/SpaceName/ → Universe is two levels up.
-/// Mesh assets live at Universe/assets/meshes/{product}/.
+/// Mesh assets live at `<Universe>/assets/meshes/{product}/`: the folder export
+/// ships, and the one the loader resolves an `assets/...` part path against.
+/// Earlier builds wrote them under `.eustress/assets/meshes/`, where nothing
+/// found them (see `product_meshes`).
 fn resolve_universe_assets_dir(space_root: &std::path::Path, safe_product_name: &str) -> PathBuf {
-    // Try standard layout: Universe/spaces/SpaceName/
-    let universe_root = if let Some(spaces_dir) = space_root.parent() {
-        if spaces_dir.file_name().map(|n| n == "Spaces" || n == "spaces").unwrap_or(false) {
-            // Standard: space_root.parent() = "spaces", one more up = Universe root
-            spaces_dir.parent().unwrap_or(space_root).to_path_buf()
-        } else {
-            // Legacy: Space is directly inside Universe (no "spaces" intermediary)
-            spaces_dir.to_path_buf()
-        }
-    } else {
-        space_root.to_path_buf()
-    };
+    super::product_meshes::product_mesh_dir(space_root, safe_product_name)
+}
 
-    universe_root.join(".eustress").join("assets").join("meshes").join(safe_product_name)
+/// Once per Space open: move the Workshop's product meshes out of
+/// `<Universe>/.eustress/assets/meshes/`, where earlier builds wrote them and
+/// nothing found them, to `<Universe>/assets/meshes/`. `product_meshes` says what
+/// moves and what stays. A single directory lookup when there is nothing to move.
+pub fn migrate_product_meshes_on_space_open(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut migrated_for: Local<Option<PathBuf>>,
+) {
+    let Some(space_root) = space_root else { return };
+    if migrated_for.as_ref() == Some(&space_root.0) {
+        return;
+    }
+    *migrated_for = Some(space_root.0.clone());
+
+    let universe_root = super::product_meshes::universe_root_of(&space_root.0);
+    let report = super::product_meshes::migrate_product_meshes(&universe_root);
+    if report.moved_files > 0 {
+        info!(
+            "Workshop: moved {} mesh file(s) of {} to {}",
+            report.moved_files,
+            report.moved_products.join(", "),
+            universe_root.join("assets").join("meshes").display()
+        );
+    }
+    for product in &report.pinned_products {
+        info!(
+            "Workshop: left the meshes of '{product}' in .eustress/assets/meshes, its parts name that path"
+        );
+    }
+    for path in &report.kept {
+        warn!(
+            "Workshop: could not move {} (a file is already at its destination, or it is a link)",
+            path.display()
+        );
+    }
 }
 
 /// Sanitize a product name for use as a directory name

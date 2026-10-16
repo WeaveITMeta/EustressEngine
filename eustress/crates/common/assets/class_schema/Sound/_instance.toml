@@ -9,7 +9,7 @@ playing = false
 playback_speed = 1.0
 rolloff_max_distance = 10000.0
 rolloff_min_distance = 10.0
-rolloff_mode = "InverseTapered"
+rolloff_mode = "Inverse"
 time_position = 0.0
 
 [metadata]

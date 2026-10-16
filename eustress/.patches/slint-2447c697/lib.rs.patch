@@ -1,0 +1,100 @@
+--- a/internal/renderers/software/lib.rs
++++ b/internal/renderers/software/lib.rs
+@@ -60,6 +60,21 @@
+ type PhysicalRect = euclid::Rect<i16, PhysicalPx>;
+ type PhysicalSize = euclid::Size2D<i16, PhysicalPx>;
+ type PhysicalPoint = euclid::Point2D<i16, PhysicalPx>;
++
++// EUSTRESS PATCH (.patches/slint-2447c697/PATCH.md): whether a value or a
++// rectangle survives the conversion to the i16 pixel space above. NaN does not.
++fn fits_i16(v: f32) -> bool {
++    v > i16::MIN as f32 && v < i16::MAX as f32
++}
++
++fn fits_i16_rect(r: &euclid::Rect<f32, PhysicalPx>) -> bool {
++    fits_i16(r.min_x())
++        && fits_i16(r.min_y())
++        && fits_i16(r.max_x())
++        && fits_i16(r.max_y())
++        && fits_i16(r.width())
++        && fits_i16(r.height())
++}
+ type PhysicalBorderRadius = BorderRadius<i16, PhysicalPx>;
+ 
+ pub use i_slint_core::partial_renderer::RepaintBufferType;
+@@ -3321,6 +3336,23 @@
+             (self.current_state.offset.to_vector().cast() * self.scale_factor).cast();
+ 
+         physical_rect.origin += global_offset;
++        // EUSTRESS PATCH (.patches/slint-2447c697/PATCH.md): a rectangle past
++        // the i16 pixel space (the selection or a decoration of a very tall
++        // or very wide text) keeps only its part inside the clip, and one
++        // with nothing there is not drawn, instead of panicking in the cast.
++        if !fits_i16_rect(&physical_rect) {
++            let clip: euclid::Rect<f32, PhysicalPx> = (self
++                .current_state
++                .clip
++                .translate(self.current_state.offset.to_vector())
++                .cast()
++                * self.scale_factor)
++                .round();
++            match physical_rect.intersection(&clip) {
++                Some(visible) if fits_i16_rect(&visible) => physical_rect = visible,
++                _ => return,
++            }
++        }
+         let physical_rect = physical_rect.cast().transformed(self.rotation);
+ 
+         let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
+@@ -3352,8 +3384,15 @@
+             normalized_coords,
+         );
+ 
+-        let global_offset =
+-            (self.current_state.offset.to_vector().cast() * self.scale_factor).cast();
++        // EUSTRESS PATCH (.patches/slint-2447c697/PATCH.md): positions are
++        // worked out in f32, truncated where the i16 conversions they replace
++        // truncated, so a glyph that fits lands on the same pixel as before.
++        // A glyph of a very tall or very wide text, or of a text scrolled far
++        // from its origin, can lie past the i16 pixel space, where it cannot
++        // be on screen: it is skipped instead of panicking in the cast.
++        let global_offset: euclid::Vector2D<f32, PhysicalPx> =
++            self.current_state.offset.to_vector().cast() * self.scale_factor;
++        let (offset_x, offset_y) = (global_offset.x.trunc(), global_offset.y.trunc());
+ 
+         for positioned_glyph in glyphs_it {
+             let Some(glyph) = std::num::NonZero::new(positioned_glyph.id as u16)
+@@ -3362,23 +3401,17 @@
+                 continue;
+             };
+ 
+-            let glyph_offset: euclid::Vector2D<i16, PhysicalPx> = euclid::Vector2D::from_lengths(
+-                euclid::Length::new(positioned_glyph.x),
+-                euclid::Length::new(positioned_glyph.y) + y_offset,
+-            )
+-            .cast();
+-
+             let gl_y = PhysicalLength::new(glyph.y.truncate() as i16);
+-            let target_rect: PhysicalRect = euclid::Rect::<f32, PhysicalPx>::new(
+-                (PhysicalPoint::from_lengths(PhysicalLength::new(0), -gl_y - glyph.height)
+-                    + global_offset
+-                    + glyph_offset)
+-                    .cast()
+-                    + euclid::vec2(glyph.glyph_origin_x, 0.0),
+-                glyph.size().cast(),
+-            )
+-            .cast()
+-            .transformed(self.rotation);
++            let x = offset_x + positioned_glyph.x.trunc() + glyph.glyph_origin_x;
++            let y = offset_y + (positioned_glyph.y + y_offset.get()).trunc()
++                - gl_y.get() as f32
++                - glyph.height.get() as f32;
++            let target_rect =
++                euclid::Rect::<f32, PhysicalPx>::new(euclid::point2(x, y), glyph.size().cast());
++            if !fits_i16_rect(&target_rect) {
++                continue;
++            }
++            let target_rect: PhysicalRect = target_rect.cast().transformed(self.rotation);
+ 
+             let data = {
+                 let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);

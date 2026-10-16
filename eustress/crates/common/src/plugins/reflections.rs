@@ -314,22 +314,32 @@ fn hydrate_reflection_probes(
             ReflectionProbeHydrated,
         ));
 
-        if probe.texture.is_empty() {
-            // No cubemap: drop any stale map so the probe cleanly inherits the
-            // scene environment rather than keeping a previous texture alive.
-            ec.remove::<GeneratedEnvironmentMapLight>();
-            ec.remove::<EnvironmentMapLight>();
-        } else {
+        // A Texture outside the Space is refused (see `probe_texture_url`): the
+        // probe then reflects the sky, as with no Texture at all.
+        let url = probe_texture_url(&probe.texture);
+        if url.is_none() && !probe.texture.trim().is_empty() {
+            warn!(
+                "🪞 Reflection probe {entity:?}: texture {:?} is outside the Space; reflecting the sky",
+                probe.texture
+            );
+        }
+        if let Some(url) = url {
             // Route through bevy's GPU filtering chain rather than binding the
             // cubemap raw. A raw cubemap has one mip, so `mip = roughness *
             // (mip_count - 1)` is always 0 and every surface reflects it
             // mirror-sharp. That bug is the reason this module exists.
             ec.insert(GeneratedEnvironmentMapLight {
-                environment_map: asset_server.load(probe.texture.clone()),
+                environment_map: asset_server.load(url),
                 intensity: probe.intensity.max(0.0),
                 rotation,
                 affects_lightmapped_mesh_diffuse: false,
             });
+        } else {
+            // No cubemap (or a refused one): drop any stale map so the probe
+            // cleanly inherits the scene environment rather than keeping a
+            // previous texture alive.
+            ec.remove::<GeneratedEnvironmentMapLight>();
+            ec.remove::<EnvironmentMapLight>();
         }
 
         info!(
@@ -340,9 +350,48 @@ fn hydrate_reflection_probes(
     }
 }
 
+/// The asset URL of a probe's cubemap: `None` when the Texture is empty or
+/// names somewhere outside the Space.
+///
+/// The Texture is a string from the Space, and a Space can come from anyone,
+/// so it goes through [`crate::space_path::contained_url`] before the asset
+/// server sees it: `../x.ktx2` and `C:/x.ktx2` would read outside the Space,
+/// and a network share would open over SMB and send the user's credentials to
+/// its host. `space://`, `bundled://` and `embedded://` with safe relative
+/// paths pass; a bare path is the Space's own file.
+fn probe_texture_url(texture: &str) -> Option<String> {
+    crate::space_path::contained_url(texture, std::path::Path::new(""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_probe_texture_outside_the_space_is_refused() {
+        for bad in [
+            "../x.ktx2",
+            "C:/x.ktx2",
+            r"C:\x.ktx2",
+            "space://../x.ktx2",
+            "file:///x.ktx2",
+            "https://example.com/x.ktx2",
+            "x.ktx2:stream",
+            "",
+        ] {
+            assert_eq!(probe_texture_url(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_probe_texture_inside_the_space_loads_from_it() {
+        assert_eq!(probe_texture_url("Probes/lobby.ktx2").as_deref(), Some("space://Probes/lobby.ktx2"));
+        assert_eq!(probe_texture_url("bundled://env/studio.ktx2").as_deref(), Some("bundled://env/studio.ktx2"));
+        // A share path is kept inside the Space's own folder, never opened as a share.
+        for share in ["//host/share/x.ktx2", r"\\host\share\x.ktx2"] {
+            assert_eq!(probe_texture_url(share).as_deref(), Some("space://host/share/x.ktx2"), "{share:?}");
+        }
+    }
 
     #[test]
     fn probe_falloff_stays_in_bevy_domain() {

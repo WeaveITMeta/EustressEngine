@@ -36,7 +36,7 @@ lerna-debug.log*
 *.sw?
 
 # Rust/Cargo
-Cargo.lock
+# Cargo.lock is tracked: the builds use it with --locked.
 **/*.rs.bk
 *.pdb
 

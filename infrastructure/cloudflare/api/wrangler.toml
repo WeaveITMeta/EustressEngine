@@ -2,6 +2,12 @@ name = "eustress-api"
 main = "src/index.js"
 compatibility_date = "2026-04-01"
 
+# No *.workers.dev hostname. This Worker is meant to be reached at
+# api.eustress.dev only; a second hostname onto the same KV would be a second
+# origin that a sign-in signature could name. LOGIN_ORIGINS below also refuses
+# any sign-in that did not arrive on a listed origin.
+workers_dev = false
+
 # Route: api.eustress.dev/*
 # Set this up in Cloudflare Dashboard after first deploy:
 #   Workers Routes → Add Route → api.eustress.dev/* → eustress-api
@@ -127,8 +133,8 @@ namespace_id = "2001"
 
 # Secrets (set via wrangler secret put):
 # JWT_SECRET            - persistent JWT signing key
-# GROK_API_KEY          - xAI Grok API key for AI-enhanced search, KYC, and the
-#                         moderation judge + agent
+# GROK_API_KEY          - xAI Grok API key for KYC and the moderation judge +
+#                         agent
 # JEV_API_KEY           - TypeSafe AI Jev key: the moderation triage classifier
 #                         (docs/architecture/MODERATION_PIPELINE.md). Set with
 #                           npx wrangler secret put JEV_API_KEY
@@ -137,6 +143,15 @@ namespace_id = "2001"
 #                         classification runs here, on the uploaded artifact.
 # STRIPE_SECRET_KEY     - Stripe secret key for payments + Connect
 # STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret
+# KYC_ID_PEPPER         - the key id_hash is an HMAC-SHA-256 under (src/kyc_identity.mjs):
+#                         one person, one account. 32 random bytes, set before deploy,
+#                         in each environment:
+#                           npx wrangler secret put KYC_ID_PEPPER
+#                           npx wrangler secret put KYC_ID_PEPPER --env staging
+#                         Without it sign-up and /api/kyc/link refuse (503
+#                         kyc_unconfigured), and /health says kyc_id_pepper is not
+#                         configured. Never change it once accounts exist: every
+#                         id_hash claim (R2 KYC_BUCKET claims/idhash/<hash>) is keyed by it.
 
 # Optional Workers AI binding. With it bound and JEV_API_KEY unset, the
 # moderation classifier runs Jev through Workers AI (`typesafe/jev`), billed to
@@ -215,6 +230,58 @@ class_name = "GuestAllowance"
 tag = "v4-guest"
 new_sqlite_classes = ["GuestAllowance"]
 
+# Delta (src/delta.mjs): one DeltaAccount per account, the authoritative
+# balance of the usage currency for premium Studio tools, with every credit
+# and charge keyed by its source so a repeat changes nothing. Plan records
+# live in USERS as plan:{account}.
+[[durable_objects.bindings]]
+name = "DELTA_ACCOUNTS"
+class_name = "DeltaAccount"
+
+[[migrations]]
+tag = "v5-delta"
+new_sqlite_classes = ["DeltaAccount"]
+
+# Account keys (src/account_auth.mjs): one AccountAuth per account, the
+# authority for the identity key the account signs in with, the keys it
+# replaced, its session floor, its value freeze and an audit chain of every
+# change. KV keeps a mirror written through the object's outbox. A Durable
+# Object because replacing a key and ending sessions must be atomic and
+# strongly consistent, which KV is not. See
+# docs/architecture/IDENTITY_KEY_ROTATION_AND_RECOVERY.md.
+[[durable_objects.bindings]]
+name = "ACCOUNT_AUTH"
+class_name = "AccountAuth"
+
+[[migrations]]
+tag = "v6-account-auth"
+new_sqlite_classes = ["AccountAuth"]
+
+# The live index (src/live_index.mjs): every session being hosted right now, for the
+# Gallery's "live now" strip. One object, named "all": each heartbeat tells it the
+# session's players and region, a stop removes the entry, and an entry that is not
+# renewed expires 90 seconds after its last beat on the object's own alarm. It holds
+# no join link, key or pin. See docs/networking/LIVE_INDEX.md.
+[[durable_objects.bindings]]
+name = "LIVE_INDEX"
+class_name = "LiveIndex"
+
+[[migrations]]
+tag = "v7-live-index"
+new_sqlite_classes = ["LiveIndex"]
+
+# Passkey index (src/passkey_index.mjs): one object per passkey credential id (named
+# by a hash of it), holding the one account that has claimed it. A Durable Object
+# because two accounts must never both hold an id and only the holder may release
+# it, which KV, last writer wins and eventually consistent, cannot promise.
+[[durable_objects.bindings]]
+name = "PASSKEY_INDEX"
+class_name = "PasskeyIndex"
+
+[[migrations]]
+tag = "v8-passkey-index"
+new_sqlite_classes = ["PasskeyIndex"]
+
 # Cosign claims per account. The engine sends at most 6 claims per 5-minute
 # flush; this only meets a script. Per Cloudflare location, like the manifest
 # limiter above.
@@ -250,11 +317,29 @@ namespace_id = "2004"
   limit = 30
   period = 60
 
+# New anonymous visit markers, keyed on the listing (src/visits.mjs): a launch or join by someone who is not signed in counts once a
+# day per address, and this caps how many NEW such addresses one listing counts a minute, so an unauthenticated flood cannot become
+# unbounded writes. Signed-in people and guests are not limited by it.
+[[ratelimits]]
+name = "VISIT_RATE_LIMITER"
+namespace_id = "2005"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 # Hourly: each run makes sure yesterday's settlement has started (a repeat
-# does nothing); the midnight run also refreshes the model catalog and sweeps
-# moderation. See scheduled() in src/index.js.
+# does nothing) and sweeps moderation (resumes stalled reviews); the midnight
+# run also refreshes the model catalog and the legacy backfill. See
+# scheduled() in src/index.js.
 [triggers]
 crons = ["0 * * * *"]
+
+# Keep Worker logs. Without this a failed background run (the moderation
+# pipeline, a cron tick) leaves nothing to read afterwards: `wrangler tail`
+# only shows what happens while it is attached.
+[observability]
+enabled = true
 
 # Email Workers - send identity backup emails from identity@eustress.dev
 # Requires Email Routing enabled on eustress.dev in Cloudflare dashboard
@@ -263,6 +348,28 @@ name = "EMAIL"
 
 [vars]
 FORK_ID = "eustress.dev"
+# An approved listing serves only while the objects stored are the ones its approval
+# was bound to (src/moderation.mjs, the approval binding). With this set, an approved
+# marker with no binding reads as pending, so no listing serves bytes nobody reviewed;
+# a person binds a listing after looking at it (moderation_bind). Staging leaves it
+# unset, where the sweep binds what is stored.
+#
+# Production ships with "false" and is switched on in a SECOND deploy, because any
+# approved listing that exists at the first deploy has no binding yet: with the flag
+# on it would read as pending until a person binds it. The order is in
+# docs/launch/APPROVAL_BINDING_ROLLOUT.md: deploy with "false", let the sweep bind
+# every approved listing, check moderation_binding_report (unbound: 0) and spot-check
+# a sample with moderation_bind, then change this to "true" and deploy again.
+REQUIRE_APPROVAL_BINDING = "false"
+# The origins an identity-key sign-in is accepted on (comma separated). The
+# signature covers the origin the request reached, which must be one of these.
+# A local `wrangler dev` adds http://127.0.0.1:8787 in .dev.vars.
+LOGIN_ORIGINS = "https://api.eustress.dev"
+# Passkeys (src/passkeys.mjs): the WebAuthn relying party id and the site origins
+# a passkey may be used on (comma separated). With either unset every passkey
+# route answers 503. A passkey made on one environment never works on another.
+PASSKEY_RP_ID = "eustress.dev"
+PASSKEY_ORIGINS = "https://eustress.dev"
 # Optional JSON overriding any key of DEFAULT_THRESHOLDS in src/moderation.mjs,
 # for example '{"hard_hold":0.30,"audit_rate":0.05}'. Unknown keys and
 # non-numeric values are ignored; the defaults are the calibrated baseline.
@@ -278,6 +385,7 @@ FORK_ID = "eustress.dev"
 [env.staging]
 name = "eustress-api-staging"
 routes = [{ pattern = "api-staging.eustress.dev", custom_domain = true }]
+workers_dev = false
 
 [[env.staging.kv_namespaces]]
 binding = "USERS"
@@ -355,6 +463,13 @@ namespace_id = "3004"
   limit = 30
   period = 60
 
+[[env.staging.ratelimits]]
+name = "VISIT_RATE_LIMITER"
+namespace_id = "3005"
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
+
 [[env.staging.durable_objects.bindings]]
 name = "WALLETS"
 class_name = "Wallet"
@@ -391,11 +506,53 @@ class_name = "GuestAllowance"
 tag = "v4-guest"
 new_sqlite_classes = ["GuestAllowance"]
 
+[[env.staging.durable_objects.bindings]]
+name = "DELTA_ACCOUNTS"
+class_name = "DeltaAccount"
+
+[[env.staging.migrations]]
+tag = "v5-delta"
+new_sqlite_classes = ["DeltaAccount"]
+
+[[env.staging.durable_objects.bindings]]
+name = "ACCOUNT_AUTH"
+class_name = "AccountAuth"
+
+[[env.staging.migrations]]
+tag = "v6-account-auth"
+new_sqlite_classes = ["AccountAuth"]
+
+[[env.staging.durable_objects.bindings]]
+name = "LIVE_INDEX"
+class_name = "LiveIndex"
+
+[[env.staging.migrations]]
+tag = "v7-live-index"
+new_sqlite_classes = ["LiveIndex"]
+
+[[env.staging.durable_objects.bindings]]
+name = "PASSKEY_INDEX"
+class_name = "PasskeyIndex"
+
+[[env.staging.migrations]]
+tag = "v8-passkey-index"
+new_sqlite_classes = ["PasskeyIndex"]
+
 [[env.staging.send_email]]
 name = "EMAIL"
 
+# Not inherited from the top level, so restated.
+[env.staging.observability]
+enabled = true
+
 [env.staging.vars]
+# An administrator may replace a key here (src/identity_routes.mjs). Production leaves it unset.
+ADMIN_REPLACE_KEY_ENABLED = "true"
 FORK_ID = "eustress.dev"
+LOGIN_ORIGINS = "https://api-staging.eustress.dev"
+# Passkeys on the staging site only: a staging passkey never signs in to production.
+PASSKEY_RP_ID = "staging.eustress-cbb.pages.dev"
+PASSKEY_ORIGINS = "https://staging.eustress-cbb.pages.dev"
 # Links in review emails (unsubscribe, review details). Production defaults to
 # api.eustress.dev and eustress.dev in src/moderation.mjs.
 PUBLIC_API_ORIGIN = "https://api-staging.eustress.dev"

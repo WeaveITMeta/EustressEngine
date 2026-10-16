@@ -1,0 +1,37 @@
+{
+  "about": "Test vectors for the eustress-key-rotation-v1 message (docs/architecture/IDENTITY_KEY_ROTATION_AND_RECOVERY.md). The keys are the first two test keys of RFC 8032, public by design and no account's keys. The Worker's tests (infrastructure/cloudflare/api/tests/identity_rotation.test.mjs) and the website's (web/src/api/identity_keys.rs) read this one file. Each signature verifies only over its own message.",
+  "old_key": {
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "secret_key": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  },
+  "new_key": {
+    "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "secret_key": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+  },
+  "rotations": [
+    {
+      "origin": "https://api.eustress.dev",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-key-rotation-v1\nhttps://api.eustress.dev\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "old_signature": "0e22ec726656ec2a91c0d9a7e72ea880c49cd01eed3b639e85fce07159e12047c5c29f51198705880b113e0157c84c0f9aa35a92957990c62093cc02dd32bc0f",
+      "new_signature": "3add2cc1d37ba0c58621b7f661abef573a799112851a13cd357e5777db94124d36d082a25ff2e6dc5c86be75d6d300a7fd937b79a8d08356c406b9c9a657e100"
+    },
+    {
+      "origin": "https://api-staging.eustress.dev",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-key-rotation-v1\nhttps://api-staging.eustress.dev\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "old_signature": "6e6f37644d9fd82a2b0bdabc056bc8a950072ec44207d15e342bccb7e7e7f3fd4dd3fa7157c13b8776ece73dc0eb405dfc3d14c4b8b09e020d0b335f0d1ba20e",
+      "new_signature": "f722b782761472ff92a4d51858e5e21a8a97b4aa044ac217ec98f8b5df7770ea9bb7a872f0d5769146999ae62dc63af991d076b4053b38a50758252b1588e50e"
+    },
+    {
+      "origin": "http://127.0.0.1:8787",
+      "account_id": "3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a",
+      "challenge": "0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "message": "eustress-key-rotation-v1\nhttp://127.0.0.1:8787\n3f2b8a52-9c1e-4d7a-8b0f-6a5e4c3d2b1a\nd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n0f1e2d3c4b5a69788796a5b4c3d2e1f000112233445566778899aabbccddeeff",
+      "old_signature": "098732fc0248f87ef6919396187b65bef2160de792c9bd0b1c5a9982e7c89842f9abecbbbba2deaf1a017df5961dd54a0bc9af2c6fd27e7577af3467b8885508",
+      "new_signature": "35253d59c66d31d991ffaaf218b5d9b491db04f3640e307e796873bf3243a5a9fa3bfea9b82cbc061c1b08c852aa940eba05e676becb4460302fc4eec1d1e20b"
+    }
+  ]
+}

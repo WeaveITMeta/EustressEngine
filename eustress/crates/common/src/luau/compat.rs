@@ -1085,24 +1085,24 @@ mod value_object_rewrite_tests {
 
     #[test]
     fn a_constrained_values_range_reads_and_writes_its_attributes() {
-        let mut vo = ctx(&["NitroAmount"], &[]);
-        vo.range_names.insert("NitroAmount".into());
+        let mut vo = ctx(&["FuelAmount"], &[]);
+        vo.range_names.insert("FuelAmount".into());
         assert_eq!(
-            rewrite("local cap = car.Handling.Nitro.NitroAmount.MaxValue", &vo),
-            "local cap = car.Handling.Nitro:GetAttribute(\"NitroAmount_MaxValue\")"
+            rewrite("local cap = rig.Stats.Fuel.FuelAmount.MaxValue", &vo),
+            "local cap = rig.Stats.Fuel:GetAttribute(\"FuelAmount_MaxValue\")"
         );
-        assert_eq!(rewrite("n.NitroAmount.MinValue = 5", &vo), "n:SetAttribute(\"NitroAmount_MinValue\", 5)");
+        assert_eq!(rewrite("n.FuelAmount.MinValue = 5", &vo), "n:SetAttribute(\"FuelAmount_MinValue\", 5)");
         assert_eq!(
-            rewrite("x = n:FindFirstChild(\"NitroAmount\").ConstrainedValue", &vo),
-            "x = n:GetAttribute(\"NitroAmount\")"
+            rewrite("x = n:FindFirstChild(\"FuelAmount\").ConstrainedValue", &vo),
+            "x = n:GetAttribute(\"FuelAmount\")"
         );
         assert_eq!(
-            rewrite("n.NitroAmount.Value = n.NitroAmount.MaxValue", &vo),
-            "n:SetAttribute(\"NitroAmount\", n:GetAttribute(\"NitroAmount_MaxValue\"))"
+            rewrite("n.FuelAmount.Value = n.FuelAmount.MaxValue", &vo),
+            "n:SetAttribute(\"FuelAmount\", n:GetAttribute(\"FuelAmount_MaxValue\"))"
         );
         // Only a constrained value's MaxValue is folded.
         let plain = ctx(&["Speed"], &[]);
-        assert_eq!(rewrite("x = car.Speed.MaxValue", &plain), "x = car.Speed.MaxValue");
+        assert_eq!(rewrite("x = rig.Speed.MaxValue", &plain), "x = rig.Speed.MaxValue");
     }
 
     #[test]

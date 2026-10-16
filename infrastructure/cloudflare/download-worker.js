@@ -188,6 +188,13 @@ async function handleDownload(request, env, ctx, cors) {
   const downloadUrl = new URL(platformData.url);
   const r2Key = downloadUrl.pathname.replace(/^\//, ''); // Remove leading slash
 
+  // Only a release artifact, the same shape the public route admits. The
+  // manifest is ours, but a bad entry in it must not turn this route into a
+  // read of any other key in the bucket.
+  if (!/^(player\/)?v\d+\.\d+\.\d+\/[A-Za-z0-9._-]+$/.test(r2Key)) {
+    return jsonResponse({ error: 'Release artifact not found in storage' }, 404, cors);
+  }
+
   // Fetch from R2
   const object = await env.DOWNLOADS.get(r2Key);
   if (!object) {
@@ -246,51 +253,50 @@ function extractToken(request) {
   const match = cookies.match(/auth_token=([^;]+)/);
   if (match) return match[1];
 
-  // Check query param (for direct download links)
-  const url = new URL(request.url);
-  const tokenParam = url.searchParams.get('token');
-  if (tokenParam) return tokenParam;
-
+  // No query-string token. A credential in a URL is written to access logs,
+  // browser history and Referer headers, and the website no longer links here
+  // with one: its download buttons go to the public routes above.
   return null;
 }
 
+function base64urlToBytes(text) {
+  const padded = text.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
 async function verifyJWT(token, secret) {
+  // No secret means nothing can be verified, so nothing is accepted. A missing
+  // binding must read as a closed gate, never as an open one.
+  if (typeof secret !== 'string' || secret.length === 0) return null;
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
 
-    const header = JSON.parse(atob(parts[0]));
-    const payload = JSON.parse(atob(parts[1]));
+    const header = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[0])));
+    if (header.alg !== 'HS256') return null;
 
-    // Check expiry
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      return null; // Expired
-    }
+    // Verify the signature before reading anything the token claims.
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+    const valid = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      base64urlToBytes(parts[2]),
+      encoder.encode(`${parts[0]}.${parts[1]}`)
+    );
+    if (!valid) return null;
 
-    // Verify signature using Web Crypto API
-    if (secret) {
-      const encoder = new TextEncoder();
-      const key = await crypto.subtle.importKey(
-        'raw',
-        encoder.encode(secret),
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['verify']
-      );
+    const payload = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[1])));
 
-      const signatureBytes = Uint8Array.from(
-        atob(parts[2].replace(/-/g, '+').replace(/_/g, '/')),
-        c => c.charCodeAt(0)
-      );
-
-      const valid = await crypto.subtle.verify(
-        'HMAC',
-        key,
-        signatureBytes,
-        encoder.encode(`${parts[0]}.${parts[1]}`)
-      );
-
-      if (!valid) return null;
+    // A token must expire. One without `exp` would be good forever.
+    if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) {
+      return null;
     }
 
     return payload;

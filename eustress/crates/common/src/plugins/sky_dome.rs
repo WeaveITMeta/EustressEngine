@@ -480,7 +480,7 @@ pub fn sky_dome_params(inputs: &DomeInputs) -> SkyDomeParams {
     let moon = moon_lobe(&perez, t, sky_light);
     let radius = inputs.disc_radius.unwrap_or(0.0);
     let disc = match inputs.disc_radius {
-        Some(r) => sun_disc_radiance(sky_light.sun_ground, r, inputs.exposure.camera_ev100),
+        Some(r) => sun_disc_radiance(sky_light.sun_disc_light, r, inputs.exposure.camera_ev100),
         None => Vec3::ZERO,
     };
     let stars = star_field_brightness(

@@ -205,6 +205,8 @@ impl ModalTool for ConstraintEditor {
             }),
             material: None,
             anchored: true,
+            scale_kind: None,
+            mesh_fold: Vec::new(),
         };
 
         let _ = space_root;

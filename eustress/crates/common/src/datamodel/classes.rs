@@ -90,6 +90,8 @@ pub fn class_ancestry(class: &str) -> &'static [&'static str] {
         "NumberPose" => &["NumberPose", "PoseBase", "Instance"],
         "KeyframeMarker" => &["KeyframeMarker", "Instance"],
         "KeyframeSequenceProvider" => &["KeyframeSequenceProvider", "Instance"],
+        "MotionDatabase" => &["MotionDatabase", "Instance"],
+        "MotionMatcher" => &["MotionMatcher", "Instance"],
         "Sky" => &["Sky", "Instance"],
         "Atmosphere" => &["Atmosphere", "Instance"],
         "Terrain" => &["Terrain", "BasePart", "PVInstance", "Instance"],
@@ -506,6 +508,34 @@ pub fn default_properties(class: &str) -> Vec<(&'static str, DmValue)> {
             props.push(("Weight", DmValue::Number(1.0)));
         }
         "KeyframeMarker" => props.push(("Value", DmValue::String(String::new()))),
+        // The motion matcher's classes (docs/design/MOTION_MATCHING.md).
+        "MotionDatabase" => {
+            props.push(("SampleRate", DmValue::Number(30.0)));
+            props.push(("TrajectoryTimes", DmValue::String("0.2,0.4,0.6,1.0".into())));
+            props.push(("TrajectoryWeight", DmValue::Number(1.0)));
+            props.push(("FacingWeight", DmValue::Number(1.0)));
+            props.push(("PoseWeight", DmValue::Number(0.7)));
+            props.push(("VelocityWeight", DmValue::Number(0.5)));
+            // Read only: written when a matcher builds the database.
+            props.push(("ClipCount", DmValue::Number(0.0)));
+            props.push(("FrameCount", DmValue::Number(0.0)));
+        }
+        "MotionMatcher" => {
+            props.push(("Database", DmValue::Nil));
+            // "Off", "Shadow" or "Drive".
+            props.push(("Mode", DmValue::String("Off".into())));
+            props.push(("SearchInterval", DmValue::Number(0.1)));
+            props.push(("BlendTime", DmValue::Number(0.2)));
+            props.push(("MinDwell", DmValue::Number(0.15)));
+            props.push(("Hysteresis", DmValue::Number(0.1)));
+            props.push(("Responsiveness", DmValue::Number(0.15)));
+            props.push(("FootLock", DmValue::Bool(false)));
+            props.push(("Debug", DmValue::Bool(false)));
+            // Read only: what the matcher is playing and how well it fits.
+            props.push(("CurrentClip", DmValue::String(String::new())));
+            props.push(("CurrentTime", DmValue::Number(0.0)));
+            props.push(("LastCost", DmValue::Number(0.0)));
+        }
         _ => {}
     }
     props

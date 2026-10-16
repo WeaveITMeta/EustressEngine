@@ -64,11 +64,14 @@ export function corsHeaders(request, env) {
     'Vary': 'Origin',
     // PUT is listed for the upload routes. DELETE is for the website's commerce
     // views and key list (archive a product, delete a webhook endpoint, revoke
-    // a key). Eustress-Mode is how a signed-in page chooses live commerce data
-    // (src/commerce.mjs); without it in the list every such request fails
-    // preflight.
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key, Eustress-Mode, X-Eustress-Lease',
+    // a key). PATCH is the site's edit of a listing's tags
+    // (PATCH /api/simulations/{id}/tags). Eustress-Mode is how a signed-in page
+    // chooses live commerce data (src/commerce.mjs); without it in the list every
+    // such request fails preflight.
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    // X-KYC-Token: a KYC session's token, which its GET routes read from a header,
+    // never the query string (src/kyc_identity.mjs kycReader).
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key, Eustress-Mode, X-Eustress-Lease, X-KYC-Token',
     'Access-Control-Max-Age': '86400',
   };
 }

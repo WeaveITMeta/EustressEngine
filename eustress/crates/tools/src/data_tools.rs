@@ -14,15 +14,10 @@ use eustress_data::DataError;
 use crate::modes::WorkshopMode;
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 
-/// The same sandbox rule as the file tools: relative to the Universe root,
-/// never climbing out of it.
-fn resolve_in_universe(ctx: &ToolContext, relative: &str) -> Option<PathBuf> {
-    let cleaned = relative.replace('\\', "/");
-    if cleaned.contains("..") {
-        return None;
-    }
-    let resolved = ctx.universe_root.join(&cleaned);
-    resolved.starts_with(&ctx.universe_root).then_some(resolved)
+/// The same sandbox rule as the file tools ([`crate::sandbox`]): inside the
+/// Universe folder.
+fn resolve_in_universe(ctx: &ToolContext, relative: &str) -> Result<PathBuf, crate::sandbox::Refusal> {
+    crate::sandbox::resolve(&ctx.universe_root, relative)
 }
 
 pub struct MineDataTool;
@@ -175,8 +170,7 @@ impl ToolHandler for MineDataTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let resolve = |name: &str| -> eustress_data::Result<PathBuf> {
-            resolve_in_universe(ctx, name)
-                .ok_or_else(|| DataError::Schema(format!("`{name}` is outside the Universe folder")))
+            resolve_in_universe(ctx, name).map_err(|why| DataError::Schema(why.to_string()))
         };
         let (success, content, structured_data) = match api::run(&input, &resolve) {
             Ok(reply) => (true, api::render(&reply), Some(reply)),

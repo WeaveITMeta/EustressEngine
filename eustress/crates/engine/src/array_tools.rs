@@ -110,7 +110,7 @@ fn descriptor_for_copy(
     suffix: &str,
     space_root: &std::path::Path,
 ) -> NewPartDescriptor {
-    let (mesh, class_name, color, material, anchored) = source
+    let (mesh, class_name, color, material, anchored, (scale_kind, mesh_fold)) = source
         .source_toml
         .as_ref()
         .and_then(|p| crate::space::instance_loader::load_instance_definition(p).ok())
@@ -120,6 +120,7 @@ fn descriptor_for_copy(
             Some(def.properties.color),
             Some(def.properties.material.clone()),
             def.properties.anchored,
+            crate::tools_smart::mesh_carry(&def),
         ))
         .unwrap_or_else(|| (
             "parts/block.glb".to_string(),
@@ -127,6 +128,7 @@ fn descriptor_for_copy(
             None,
             None,
             false,
+            (None, Vec::new()),
         ));
 
     // Parent folder: same service as the source if we can resolve it,
@@ -154,6 +156,8 @@ fn descriptor_for_copy(
         color_rgba: color,
         material,
         anchored,
+        scale_kind,
+        mesh_fold,
     }
 }
 

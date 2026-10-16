@@ -19,8 +19,9 @@
 //! `TerrainMaterialFill`, `TerrainScatter`, `TerrainWaterBody`) keep their properties in field tables of the same
 //! shape and show here too: their field rows, then Position and Rotation,
 //! whose edits fall through to the generic Transform writer. They have no
-//! Runtime section, and their edits are saved even during Play, since
-//! nothing restores layers on Stop.
+//! Runtime section. Their edits are saved and recorded for undo; during Play
+//! the drain refuses them before they reach [`handle_edit`] (see
+//! [`live_during_play`]), since nothing restores layers on Stop.
 
 use std::collections::HashSet;
 
@@ -344,6 +345,20 @@ pub struct EditOutcome {
     pub undo: Option<crate::undo::Action>,
 }
 
+/// Whether a Properties edit of `key` on `entity` stays live during Play: a
+/// field of a particle simulation or species, which [`handle_edit`] applies
+/// to the running sim without saving it, and Stop puts back. Every other
+/// Properties edit waits for Stop, a terrain layer's included: nothing
+/// restores layers on Stop, so an edit made during Play would be saved for
+/// good. Asked in the order [`handle_edit`] takes the classes.
+pub fn live_during_play(entity: Entity, key: &str, queries: &EditQueries) -> bool {
+    use eustress_common::realism::particle_sim::class::field;
+    if queries.sims.contains(entity) {
+        return field(ParticleSimulation::FIELDS, key).is_some();
+    }
+    queries.species.contains(entity) && field(ParticleSpecies::FIELDS, key).is_some()
+}
+
 /// Apply a Properties edit if `key` is a field of the selected entity's
 /// particle or terrain layer class. `None` means "not ours" (e.g. Name, or a
 /// layer's Position): the generic handler takes it.
@@ -361,8 +376,9 @@ pub fn handle_edit(
     if let Ok(mut sp) = queries.species.get_mut(entity) {
         return apply_field(&mut *sp, toml_path, key, raw, playing);
     }
-    // Terrain layers save and record undo even during Play: nothing restores
-    // them on Stop, so an unsaved edit would silently part from the file.
+    // Terrain layers save and record undo. During Play their edits never get
+    // here: nothing restores layers on Stop, so the drain refuses them
+    // (`live_during_play`).
     if let Ok((spline, point, stamp, pad, noise, fill, scatter, water)) = queries.layers.get_mut(entity) {
         if let Some(mut c) = spline {
             return apply_field(&mut *c, toml_path, key, raw, false);

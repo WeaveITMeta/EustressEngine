@@ -240,10 +240,12 @@ impl ToolContext {
 /// Built once at startup by calling `register(handler)` for each tool.
 /// Both the engine (via a Bevy-Resource newtype) and the MCP server
 /// hold a registry built with the same default handlers, so a tool
-/// added once is exposed through every surface.
+/// added once is exposed through every surface. A clone shares the
+/// handlers, so a host can hand one to a worker thread cheaply.
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::resource::Resource))]
+#[derive(Clone)]
 pub struct ToolRegistry {
-    handlers: HashMap<&'static str, Box<dyn ToolHandler>>,
+    handlers: HashMap<&'static str, Arc<dyn ToolHandler>>,
 }
 
 impl Default for ToolRegistry {
@@ -256,7 +258,7 @@ impl ToolRegistry {
     /// Register a tool handler.
     pub fn register(&mut self, handler: impl ToolHandler) {
         let name = handler.definition().name;
-        self.handlers.insert(name, Box::new(handler));
+        self.handlers.insert(name, Arc::new(handler));
     }
 
     /// Return definitions for every tool exposed under the given active

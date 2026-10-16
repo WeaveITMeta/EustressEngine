@@ -719,7 +719,19 @@ impl Plugin for ProfilerPlugin {
 
         // Log any system the stall watchdog caught running long (see
         // `stall_watch`). Always on; a no-op frame costs one mutex check.
-        app.add_systems(Last, stall_watch::report_stalls);
+        // It runs before the frame counter advances, so it logs the frame
+        // number this frame's systems saw, as the script budget line does.
+        app.add_systems(Last, stall_watch::report_stalls.before(bevy::diagnostic::update_frame_count));
+
+        // Per-script timing of the scripting runtimes (see
+        // `script_recorder`). Registers nothing unless
+        // `EUSTRESS_SCRIPT_PROFILE` is set.
+        script_recorder::install(app);
+
+        // Frame staggering (`eustress_common::utils::stagger`): a bulk load
+        // opens every slot, so while it lasts the load throttle alone decides
+        // which frames the UI syncs run on.
+        eustress_common::utils::set_stagger_hold(crate::space::file_loader::bulk_load_active);
 
         // LOAD-PHASE milestone 7: one-shot first-rendered-frame marker.
         // Always-added, env-gated on EUSTRESS_PROFILE like the phase
@@ -769,7 +781,7 @@ pub fn custom_layer(_app: &mut App) -> Option<bevy::log::BoxedLayer> {
 /// profiling build is running. This layer watches every Bevy system span,
 /// main and render world alike, and queues any single run longer than
 /// `EUSTRESS_STALL_MS` (default 250; `0` turns it off) for
-/// [`stall_watch::report_stalls`] to log as `STALL: system <name> ran N ms`.
+/// [`stall_watch::report_stalls`] to log as `STALL frame <n>: system <name> ran N ms`.
 ///
 /// Cheap enough to leave on: the name is captured once per system (its span
 /// is created once), and each run costs two `Instant::now()` calls and a
@@ -891,17 +903,768 @@ pub mod stall_watch {
         Some(Box::new(layer))
     }
 
-    /// Log what the watchdog caught since the last frame.
-    pub fn report_stalls() {
+    /// Log what the watchdog caught since the last frame, with the frame's
+    /// number (`FrameCount`), so a stall lines up with the script profile's
+    /// budget line for the same frame (see `script_recorder`).
+    pub fn report_stalls(frame: Option<bevy::prelude::Res<bevy::diagnostic::FrameCount>>) {
         let caught = match SLOW.lock() {
             Ok(mut slow) if !slow.is_empty() => std::mem::take(&mut *slow),
             _ => return,
         };
+        let frame = frame.map_or(0, |frame| frame.0);
         for (name, elapsed) in caught {
             tracing::warn!(
-                "🐢 STALL: system {name} ran {:.0} ms",
+                "🐢 STALL frame {frame}: system {name} ran {:.0} ms",
                 elapsed.as_secs_f64() * 1000.0
             );
+        }
+    }
+}
+
+// ─────────────────────────── script recorder ───────────────────────────
+/// Per-script, per-step timing of the scripting runtimes, drawn as an inferno
+/// flame graph, to find which script a slow frame spent its time in.
+///
+/// The runtimes report to `eustress_common::utils::script_profile`, armed by
+/// `EUSTRESS_SCRIPT_PROFILE`; without it nothing here is registered. Each
+/// frame, in `Last`, before the frame counter advances:
+/// - the frame's tally is taken, and when its scripts took more than
+///   `EUSTRESS_SCRIPT_BUDGET_PCT` percent (default 25) of the frame interval,
+///   one `🧪 SCRIPTS frame N:` line names the costliest steps, with the frame
+///   number a `STALL` line from the same frame carries;
+/// - the tally joins the current window. A window opens with the first frame
+///   that ran script work and is written `EUSTRESS_SCRIPT_PROFILE_SECS`
+///   seconds later (default 60), when a Play session ends and when the app
+///   exits, as folded stacks (`runtime;script;step <µs>`, plus
+///   `runtime;(runtime) <µs>` for the driver time no step took) and an
+///   inferno flame graph of them.
+///
+/// The files go to `<Universe>/.eustress/profile/` (the Universe being the
+/// nearest folder above the open Space that holds a `Spaces` folder), else
+/// `<Space>/.eustress/profile/`, else the per-user data folder
+/// (`%LOCALAPPDATA%\Eustress\profile` on Windows), never the working
+/// directory, named `<unix ms>_scripts.folded` and `<unix ms>_scripts.svg`.
+/// Only the newest `KEEP_WINDOWS` windows are kept. They hold names, step
+/// names, times and counts only: names arrive sanitized from `script_profile`
+/// (no `;`, no control characters, at most 96 characters), and inferno
+/// escapes every frame name it writes into the SVG.
+///
+/// The files are written on a thread of their own, so a frame never waits on
+/// the disk, except at exit, when the app waits for the last window.
+mod script_recorder {
+    use std::borrow::Cow;
+    use std::collections::{HashMap, HashSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, OnceLock};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use bevy::prelude::*;
+    use eustress_common::utils::script_profile::{self, FrameTally};
+
+    /// Windows kept in the profile folder; older ones are deleted after each write.
+    pub const KEEP_WINDOWS: usize = 20;
+
+    /// Entries named on a budget line, costliest first.
+    const BUDGET_LINE_ENTRIES: usize = 5;
+
+    /// `EUSTRESS_SCRIPT_BUDGET_PCT`, read once: the share of a frame, in
+    /// percent, the scripts may take before the frame is logged.
+    fn budget_pct() -> f64 {
+        static PCT: OnceLock<f64> = OnceLock::new();
+        *PCT.get_or_init(|| {
+            std::env::var("EUSTRESS_SCRIPT_BUDGET_PCT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|pct| pct.is_finite() && *pct >= 0.0)
+                .unwrap_or(25.0)
+        })
+    }
+
+    /// `EUSTRESS_SCRIPT_PROFILE_SECS`, read once: the wall time one window covers.
+    fn window_length() -> Duration {
+        static SECS: OnceLock<u64> = OnceLock::new();
+        Duration::from_secs(*SECS.get_or_init(|| {
+            std::env::var("EUSTRESS_SCRIPT_PROFILE_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|secs| *secs > 0)
+                .unwrap_or(60)
+        }))
+    }
+
+    /// Registers the recorder when `EUSTRESS_SCRIPT_PROFILE` is set, and
+    /// nothing otherwise.
+    pub(super) fn install(app: &mut App) {
+        if !script_profile::armed() {
+            return;
+        }
+        app.insert_resource(ScriptRecorder::default())
+            .add_systems(First, sync_space_root)
+            .add_systems(Last, script_frame_end.before(bevy::diagnostic::update_frame_count));
+        crate::play_mode::add_session_end_systems(app, request_flush);
+        info!(
+            "script profile: armed; frames whose scripts take over {}% are logged, and a flame graph is written every {} s under <Universe>/.eustress/profile/",
+            budget_pct(),
+            window_length().as_secs()
+        );
+    }
+
+    /// One step's key in a window: runtime, script, step.
+    type StepKey = (&'static str, Arc<str>, Arc<str>);
+
+    /// The script work gathered since the last window was written.
+    #[derive(Default)]
+    struct Window {
+        /// When the first frame with script work in this window ended.
+        opened: Option<Instant>,
+        /// Frames with script work in this window.
+        frames: u64,
+        /// Summed time and calls per step.
+        steps: HashMap<StepKey, (Duration, u64)>,
+        /// Summed driver time per runtime.
+        drivers: HashMap<&'static str, Duration>,
+        dm_reads: u64,
+        dm_writes: u64,
+    }
+
+    impl Window {
+        /// Adds a frame's tally. A frame with no script work leaves the window
+        /// as it is, so a window's frames are the frames that ran scripts.
+        fn add(&mut self, tally: &FrameTally, now: Instant) {
+            if tally.is_empty() {
+                return;
+            }
+            self.opened.get_or_insert(now);
+            self.frames += 1;
+            for step in &tally.steps {
+                let sums = self.steps.entry((step.runtime, step.script.clone(), step.step.clone())).or_default();
+                sums.0 += step.total;
+                sums.1 += step.calls;
+            }
+            for (runtime, elapsed) in &tally.drivers {
+                *self.drivers.entry(*runtime).or_default() += *elapsed;
+            }
+            self.dm_reads += tally.dm_reads;
+            self.dm_writes += tally.dm_writes;
+        }
+
+        /// Whether the window has covered its length of wall time.
+        fn due(&self, now: Instant) -> bool {
+            self.opened.is_some_and(|opened| now.saturating_duration_since(opened) >= window_length())
+        }
+
+        /// Empties the window into the text of its two files, stamped
+        /// `stamp`. `None` when it holds no step of a microsecond or more.
+        fn take_job(&mut self, now: Instant, stamp: u128, space_root: Option<PathBuf>) -> Option<WindowJob> {
+            let window = std::mem::take(self);
+            let opened = window.opened?;
+            if window.steps.is_empty() {
+                return None;
+            }
+            let folded = folded_stacks(&window.steps, &window.drivers);
+            if folded.is_empty() {
+                return None;
+            }
+            let frames = window.frames;
+            let seconds = now.saturating_duration_since(opened).as_secs_f64();
+            Some(WindowJob {
+                folded,
+                title: format!("Eustress scripts: {frames} frames over {seconds:.1} s"),
+                subtitle: format!(
+                    "Total microseconds per step over the window; divide by {frames} for one frame. DataModel: {} reads, {} writes.",
+                    window.dm_reads, window.dm_writes
+                ),
+                stamp,
+                space_root,
+            })
+        }
+    }
+
+    /// One window, ready to write.
+    struct WindowJob {
+        folded: String,
+        title: String,
+        subtitle: String,
+        stamp: u128,
+        space_root: Option<PathBuf>,
+    }
+
+    /// The recorder's state between frames.
+    #[derive(Resource, Default)]
+    pub struct ScriptRecorder {
+        window: Window,
+        /// When the previous frame's `Last` ran, for the frame interval.
+        last_frame: Option<Instant>,
+        /// Set when a Play session ends, so that frame writes the window.
+        flush_requested: bool,
+        /// The open Space, for the output folder.
+        space_root: Option<PathBuf>,
+        /// The last file stamp, so two windows never share a name.
+        last_stamp: u128,
+        /// Writer threads not yet seen to finish.
+        writers: Vec<JoinHandle<()>>,
+    }
+
+    impl ScriptRecorder {
+        /// Unix milliseconds, one past the last stamp when the clock has not
+        /// moved on since.
+        fn next_stamp(&mut self) -> u128 {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+            self.last_stamp = now.max(self.last_stamp + 1);
+            self.last_stamp
+        }
+
+        /// Writes the window and starts a new one: on a thread of its own,
+        /// or, with `wait` (the app is exiting), on this thread once the
+        /// writers still running are done.
+        fn flush(&mut self, now: Instant, wait: bool) {
+            self.flush_requested = false;
+            self.writers.retain(|writer| !writer.is_finished());
+            let stamp = self.next_stamp();
+            let job = self.window.take_job(now, stamp, self.space_root.clone());
+            if wait {
+                for writer in self.writers.drain(..) {
+                    let _ = writer.join();
+                }
+                if let Some(job) = job {
+                    write_window(job);
+                }
+                return;
+            }
+            let Some(job) = job else { return };
+            match std::thread::Builder::new().name("script-profile-writer".into()).spawn(move || write_window(job)) {
+                Ok(writer) => self.writers.push(writer),
+                Err(e) => warn!("script profile: could not start a writer thread, so this window is lost: {e}"),
+            }
+        }
+    }
+
+    impl Drop for ScriptRecorder {
+        // The app is closing. This also covers an exit that skips the last
+        // frame's `Last` (the Slint window-close path): write what the window
+        // holds and wait for every writer, since the process ends next.
+        fn drop(&mut self) {
+            self.flush(Instant::now(), true);
+        }
+    }
+
+    /// Hands the open Space to `script_profile` (for script labels) and to
+    /// the recorder (for the output folder) whenever it changes.
+    fn sync_space_root(space_root: Option<Res<crate::space::SpaceRoot>>, mut recorder: ResMut<ScriptRecorder>) {
+        match space_root {
+            Some(root) if root.is_changed() || recorder.space_root.is_none() => {
+                script_profile::set_space_root(Some(root.0.as_path()));
+                recorder.space_root = Some(root.0.clone());
+            }
+            None if recorder.space_root.is_some() => {
+                script_profile::set_space_root(None);
+                recorder.space_root = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// A Play session ended: this frame's `Last` writes the window, so a
+    /// window never mixes two sessions.
+    fn request_flush(mut recorder: ResMut<ScriptRecorder>) {
+        recorder.flush_requested = true;
+    }
+
+    /// Takes the frame's tally, logs the frame when its scripts went over
+    /// budget, adds it to the window, and writes the window when it is due,
+    /// when a Play session ended this frame, or when the app is exiting.
+    fn script_frame_end(
+        mut recorder: ResMut<ScriptRecorder>,
+        frame: Option<Res<bevy::diagnostic::FrameCount>>,
+        mut exit: MessageReader<AppExit>,
+    ) {
+        let now = Instant::now();
+        let interval = recorder.last_frame.replace(now).map(|last| now.saturating_duration_since(last));
+        let tally = script_profile::take_frame();
+        if let Some(interval) = interval {
+            let frame = frame.map_or(0, |frame| frame.0);
+            if let Some(line) = budget_line(frame, &tally, interval, budget_pct()) {
+                warn!("{line}");
+            }
+        }
+        recorder.window.add(&tally, now);
+        if exit.read().next().is_some() {
+            recorder.flush(now, true);
+        } else if recorder.flush_requested || recorder.window.due(now) {
+            recorder.flush(now, false);
+        }
+    }
+
+    /// Each runtime's driver time and step time in a frame.
+    fn per_runtime(tally: &FrameTally) -> HashMap<&'static str, (Duration, Duration)> {
+        let mut runtimes: HashMap<&'static str, (Duration, Duration)> = HashMap::new();
+        for (runtime, driver) in &tally.drivers {
+            runtimes.entry(*runtime).or_default().0 += *driver;
+        }
+        for step in &tally.steps {
+            runtimes.entry(step.runtime).or_default().1 += step.total;
+        }
+        runtimes
+    }
+
+    /// The frame's script time: per runtime, its driver time, or the sum of
+    /// its steps when that is larger (steps recorded outside any driver).
+    fn script_time(tally: &FrameTally) -> Duration {
+        per_runtime(tally).values().map(|(driver, steps)| (*driver).max(*steps)).sum()
+    }
+
+    /// The budget line for a frame whose scripts took more than `budget_pct`
+    /// percent of `interval`, naming its costliest steps and each runtime's
+    /// own time; `None` for a frame within budget.
+    fn budget_line(frame: u32, tally: &FrameTally, interval: Duration, budget_pct: f64) -> Option<String> {
+        if interval.is_zero() || tally.is_empty() {
+            return None;
+        }
+        let scripts = script_time(tally);
+        let pct = scripts.as_secs_f64() / interval.as_secs_f64() * 100.0;
+        if pct <= budget_pct {
+            return None;
+        }
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        // (runtime, what, time), where `what` is "script step" or "(runtime)".
+        let mut entries: Vec<(&str, String, Duration)> = tally
+            .steps
+            .iter()
+            .map(|step| (step.runtime, format!("{} {}", step.script, step.step), step.total))
+            .collect();
+        for (runtime, (driver, steps)) in per_runtime(tally) {
+            let own = driver.saturating_sub(steps);
+            if !own.is_zero() {
+                entries.push((runtime, "(runtime)".to_string(), own));
+            }
+        }
+        entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| (a.0, &a.1).cmp(&(b.0, &b.1))));
+        let mut line = format!("🧪 SCRIPTS frame {frame}: {:.1} ms of {:.1} ms ({pct:.0}%)", ms(scripts), ms(interval));
+        for (runtime, what, time) in entries.iter().take(BUDGET_LINE_ENTRIES) {
+            line.push_str(&format!(" | {} {what} {:.1}", script_profile::sanitize(runtime), ms(*time)));
+        }
+        if entries.len() > BUDGET_LINE_ENTRIES {
+            line.push_str(&format!(" | {} more", entries.len() - BUDGET_LINE_ENTRIES));
+        }
+        line.push_str(&format!(" | dm reads {} writes {}", tally.dm_reads, tally.dm_writes));
+        Some(line)
+    }
+
+    /// The window as folded stacks for inferno: `runtime;script;step <µs>`
+    /// per step, and `runtime;(runtime) <µs>` for the driver time the
+    /// runtime's steps did not take. Sorted, so a file reads the same way
+    /// each time; a line under a microsecond is left out.
+    fn folded_stacks(steps: &HashMap<StepKey, (Duration, u64)>, drivers: &HashMap<&'static str, Duration>) -> String {
+        let mut step_time: HashMap<&'static str, Duration> = HashMap::new();
+        let mut lines: Vec<String> = Vec::new();
+        for ((runtime, script, step), (total, _calls)) in steps {
+            *step_time.entry(*runtime).or_default() += *total;
+            let micros = total.as_micros();
+            if micros > 0 {
+                lines.push(format!("{};{};{} {micros}", frame_name(runtime), frame_name(script), frame_name(step)));
+            }
+        }
+        for (runtime, driver) in drivers {
+            let own = driver.saturating_sub(step_time.get(runtime).copied().unwrap_or_default());
+            let micros = own.as_micros();
+            if micros > 0 {
+                lines.push(format!("{};(runtime) {micros}", frame_name(runtime)));
+            }
+        }
+        lines.sort();
+        lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    /// A name as one folded frame: sanitized again (a runtime name is a code
+    /// literal `script_profile` keeps as given), and never blank, since a
+    /// blank frame would draw as a bar with no name.
+    fn frame_name(name: &str) -> Cow<'_, str> {
+        let name = script_profile::sanitize(name);
+        if name.trim().is_empty() {
+            Cow::Borrowed("(unnamed)")
+        } else {
+            name
+        }
+    }
+
+    /// Renders folded stacks as an inferno flame graph. inferno XML-escapes
+    /// every frame name it writes: inferno 0.11.21 writes a frame's tooltip
+    /// at `src/flamegraph/mod.rs:649` and its label at
+    /// `src/flamegraph/svg.rs:299`, both through quick-xml 0.26's
+    /// `BytesText::new`, which escapes `<`, `>`, `&`, `'` and `"`.
+    fn render_svg(folded: &str, title: &str, subtitle: &str, out: impl std::io::Write) -> Result<(), String> {
+        let mut options = inferno::flamegraph::Options::default();
+        options.title = title.to_string();
+        options.subtitle = Some(subtitle.to_string());
+        options.count_name = "µs".to_string();
+        inferno::flamegraph::from_lines(&mut options, folded.lines(), out).map_err(|e| e.to_string())
+    }
+
+    /// Where profiles go: `<Universe>/.eustress/profile/` for an open Space
+    /// inside a Universe, else `<Space>/.eustress/profile/`, else
+    /// `<user_data>/Eustress/profile/` (`user_data` being the per-user data
+    /// folder). Never the working directory: a Space path that is not
+    /// absolute counts as no Space.
+    fn profile_dir(space_root: Option<&Path>, user_data: Option<PathBuf>) -> Option<PathBuf> {
+        if let Some(space) = space_root.filter(|space| space.is_absolute() && space.is_dir()) {
+            let universe = space
+                .ancestors()
+                .skip(1)
+                .take(16)
+                .find(|dir| dir.join("Spaces").is_dir() || dir.join("spaces").is_dir());
+            return Some(universe.unwrap_or(space).join(".eustress").join("profile"));
+        }
+        user_data.map(|dir| dir.join("Eustress").join("profile"))
+    }
+
+    /// Writes one window and prunes the old ones, logging what happened. Runs
+    /// on a writer thread, or on the main thread at exit.
+    fn write_window(job: WindowJob) {
+        let dir = profile_dir(job.space_root.as_deref(), dirs::data_local_dir());
+        match write_window_files(&job, dir) {
+            Ok(svg) => info!("script profile: wrote {}", svg.display()),
+            Err(e) => warn!("script profile: could not write a window: {e}"),
+        }
+    }
+
+    /// Writes `<stamp>_scripts.folded` and `<stamp>_scripts.svg` into `dir`,
+    /// then keeps only the newest [`KEEP_WINDOWS`] windows there. Returns the
+    /// SVG's path.
+    fn write_window_files(job: &WindowJob, dir: Option<PathBuf>) -> Result<PathBuf, String> {
+        let dir = dir.ok_or("no Space is open and there is no per-user data folder")?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let folded = dir.join(format!("{}_scripts.folded", job.stamp));
+        std::fs::write(&folded, &job.folded).map_err(|e| format!("{}: {e}", folded.display()))?;
+        let svg = dir.join(format!("{}_scripts.svg", job.stamp));
+        let rendered = std::fs::File::create(&svg)
+            .map_err(|e| e.to_string())
+            .and_then(|file| render_svg(&job.folded, &job.title, &job.subtitle, std::io::BufWriter::new(file)));
+        // The old windows go whether or not this one rendered.
+        if let Err(e) = prune(&dir, KEEP_WINDOWS) {
+            warn!("script profile: could not prune {}: {e}", dir.display());
+        }
+        rendered.map_err(|e| format!("{}: {e}", svg.display()))?;
+        Ok(svg)
+    }
+
+    /// Deletes all but the newest `keep` windows in `dir` and returns how
+    /// many files went. Only files named `<digits>_scripts.folded` or
+    /// `<digits>_scripts.svg` count, a window being the files that share the
+    /// digits; nothing else in the folder is touched, links and folders
+    /// included.
+    fn prune(dir: &Path, keep: usize) -> std::io::Result<usize> {
+        let mut windows: Vec<(String, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(dir)?.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            if let Some(stamp) = entry.file_name().to_str().and_then(window_stamp) {
+                windows.push((stamp.to_string(), entry.path()));
+            }
+        }
+        let mut stamps: Vec<&str> = windows.iter().map(|(stamp, _)| stamp.as_str()).collect();
+        stamps.sort_by(|a, b| newer_first(a, b));
+        stamps.dedup();
+        let kept: HashSet<&str> = stamps.into_iter().take(keep).collect();
+        let mut removed = 0;
+        for (stamp, path) in &windows {
+            if kept.contains(stamp.as_str()) {
+                continue;
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => removed += 1,
+                // Another writer pruned it first.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(removed)
+    }
+
+    /// The digits of a window file's name: `<digits>_scripts.folded` or
+    /// `<digits>_scripts.svg`, exactly.
+    fn window_stamp(name: &str) -> Option<&str> {
+        let stamp = name.strip_suffix("_scripts.folded").or_else(|| name.strip_suffix("_scripts.svg"))?;
+        (!stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit())).then_some(stamp)
+    }
+
+    /// Orders stamps newest first, comparing their values without parsing
+    /// them, so any number of digits works.
+    fn newer_first(a: &str, b: &str) -> std::cmp::Ordering {
+        let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+        b.len().cmp(&a.len()).then_with(|| b.cmp(a))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use eustress_common::utils::script_profile::StepTotal;
+
+        const MS: Duration = Duration::from_millis(1);
+
+        fn step(runtime: &'static str, script: &str, step: &str, total: Duration) -> StepTotal {
+            StepTotal { runtime, script: Arc::from(script), step: Arc::from(step), total, calls: 1 }
+        }
+
+        fn key(runtime: &'static str, script: &str, step: &str) -> StepKey {
+            (runtime, Arc::from(script), Arc::from(step))
+        }
+
+        /// An empty folder of this test's own under the system temp folder.
+        fn temp_dir(name: &str) -> PathBuf {
+            // The process id keeps parallel test binaries apart, and the name
+            // keeps the tests within one apart.
+            let dir = std::env::temp_dir().join(format!("eustress-script-profile-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            dir
+        }
+
+        /// A frame where Rune's driver covers its steps and Luau ran a step
+        /// with no driver of its own.
+        fn busy_frame() -> FrameTally {
+            FrameTally {
+                steps: vec![
+                    step("rune", "Workspace/Car.rune", "on_update", 6 * MS),
+                    step("luau", "ServerScriptService.Playground", "Heartbeat", 3 * MS),
+                    step("rune", "Workspace/Car.rune", "on_init", MS / 10),
+                ],
+                drivers: vec![("rune", 7 * MS)],
+                dm_reads: 1520,
+                dm_writes: 340,
+            }
+        }
+
+        #[test]
+        fn script_time_is_each_runtimes_driver_or_its_steps_whichever_is_larger() {
+            assert_eq!(script_time(&busy_frame()), 10 * MS);
+            assert_eq!(script_time(&FrameTally::default()), Duration::ZERO);
+        }
+
+        #[test]
+        fn a_frame_over_budget_names_its_costliest_entries() {
+            let line = budget_line(12345, &busy_frame(), 38 * MS, 25.0).expect("10 of 38 ms is over 25%");
+            assert_eq!(
+                line,
+                "🧪 SCRIPTS frame 12345: 10.0 ms of 38.0 ms (26%) \
+                 | rune Workspace/Car.rune on_update 6.0 \
+                 | luau ServerScriptService.Playground Heartbeat 3.0 \
+                 | rune (runtime) 0.9 \
+                 | rune Workspace/Car.rune on_init 0.1 \
+                 | dm reads 1520 writes 340"
+            );
+        }
+
+        #[test]
+        fn a_frame_within_budget_logs_nothing() {
+            assert_eq!(budget_line(1, &busy_frame(), 40 * MS, 25.0), None, "exactly 25% is within");
+            assert_eq!(budget_line(1, &busy_frame(), 100 * MS, 25.0), None);
+            assert_eq!(budget_line(1, &FrameTally::default(), MS, 25.0), None);
+            assert_eq!(budget_line(1, &busy_frame(), Duration::ZERO, 25.0), None);
+        }
+
+        #[test]
+        fn a_budget_line_names_at_most_five_entries() {
+            let steps = (0..8).map(|i| step("rune", &format!("S{i}.rune"), "on_update", (i + 1) * MS)).collect();
+            let tally = FrameTally { steps, ..FrameTally::default() };
+            let line = budget_line(7, &tally, 40 * MS, 25.0).unwrap();
+            assert_eq!(line.matches(" on_update ").count(), 5);
+            assert!(line.contains("S7.rune on_update 8.0") && !line.contains("S2.rune"), "{line}");
+            assert!(line.contains(" | 3 more | dm reads 0 writes 0"), "{line}");
+        }
+
+        #[test]
+        fn folded_stacks_give_each_runtime_its_own_time() {
+            let steps = HashMap::from([
+                (key("rune", "Workspace/Car.rune", "on_update"), (6 * MS, 60)),
+                (key("rune", "Workspace/Car.rune", "on_init"), (Duration::from_nanos(500), 1)),
+                (key("luau", "Playground", "Heartbeat"), (3 * MS, 60)),
+            ]);
+            // Luau's driver is shorter than its steps (a step outside it), so
+            // it has no own time rather than a negative one.
+            let drivers = HashMap::from([("rune", 7 * MS), ("luau", 2 * MS)]);
+            assert_eq!(
+                folded_stacks(&steps, &drivers),
+                "luau;Playground;Heartbeat 3000\nrune;(runtime) 999\nrune;Workspace/Car.rune;on_update 6000\n"
+            );
+        }
+
+        #[test]
+        fn a_blank_name_is_still_a_named_frame() {
+            let steps = HashMap::from([(key("rune", " ", "on_update"), (MS, 1))]);
+            assert_eq!(folded_stacks(&steps, &HashMap::new()), "rune;(unnamed);on_update 1000\n");
+        }
+
+        /// Security's case: a label a script could choose comes out escaped in
+        /// the SVG, and as one frame on one line in the folded file.
+        #[test]
+        fn a_hostile_label_is_escaped_in_the_svg_and_one_frame_in_the_folded_file() {
+            const LABEL: &str = "<script>alert(1)</script>\"&";
+            const WORSE: &str = "<script>alert(1)</script>\"&;more;frames\nmore lines";
+            let ((), captured) = script_profile::capture(|| {
+                script_profile::record("rune", LABEL, "on_update", 3 * MS);
+                script_profile::record("rune", WORSE, "on_update", 2 * MS);
+            });
+            let steps: HashMap<StepKey, (Duration, u64)> = captured
+                .records
+                .iter()
+                .map(|r| (key(r.runtime, &r.script, &r.step), (r.elapsed, 1)))
+                .collect();
+            let folded = folded_stacks(&steps, &HashMap::new());
+            assert_eq!(
+                folded,
+                "rune;<script>alert(1)</script>\"&;on_update 3000\n\
+                 rune;<script>alert(1)</script>\"&_more_frames_more lines;on_update 2000\n"
+            );
+            for line in folded.lines() {
+                let (stack, count) = line.rsplit_once(' ').unwrap();
+                assert!(count.parse::<u64>().is_ok(), "{line}");
+                assert_eq!(stack.split(';').count(), 3, "runtime, script and step, nothing more: {line}");
+            }
+            let mut svg = Vec::new();
+            render_svg(&folded, "Eustress scripts", "test", &mut svg).unwrap();
+            let svg = String::from_utf8(svg).unwrap();
+            assert!(svg.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;&amp;"), "escaped in the SVG");
+            assert!(!svg.contains("<script>alert"), "never markup in the SVG");
+        }
+
+        #[test]
+        fn a_window_counts_only_frames_that_ran_scripts() {
+            let mut window = Window::default();
+            let t0 = Instant::now();
+            window.add(&FrameTally::default(), t0);
+            assert!(window.opened.is_none(), "a frame with no script work opens no window");
+            let frame = FrameTally {
+                steps: vec![step("rune", "Car.rune", "on_update", 2 * MS)],
+                drivers: vec![("rune", 3 * MS)],
+                dm_reads: 5,
+                dm_writes: 1,
+            };
+            window.add(&frame, t0);
+            window.add(&FrameTally::default(), t0 + MS);
+            window.add(&frame, t0 + 2 * MS);
+            assert!(!window.due(t0 + 2 * MS));
+            assert!(window.due(t0 + window_length()));
+            let job = window.take_job(t0 + Duration::from_secs(30), 42, None).expect("a window with steps");
+            assert_eq!(job.folded, "rune;(runtime) 2000\nrune;Car.rune;on_update 4000\n");
+            assert_eq!(job.title, "Eustress scripts: 2 frames over 30.0 s");
+            assert!(job.subtitle.contains("divide by 2 for one frame"), "{}", job.subtitle);
+            assert!(job.subtitle.contains("10 reads, 2 writes"), "{}", job.subtitle);
+            assert_eq!(job.stamp, 42);
+            assert!(window.opened.is_none() && window.steps.is_empty() && window.frames == 0, "emptied");
+            assert!(window.take_job(t0, 43, None).is_none(), "an empty window writes nothing");
+        }
+
+        #[test]
+        fn a_window_with_only_driver_time_writes_nothing() {
+            let mut window = Window::default();
+            window.add(&FrameTally { drivers: vec![("rune", MS)], ..FrameTally::default() }, Instant::now());
+            assert!(window.take_job(Instant::now(), 1, None).is_none());
+        }
+
+        #[test]
+        fn stamps_never_repeat() {
+            let mut recorder = ScriptRecorder::default();
+            let first = recorder.next_stamp();
+            let second = recorder.next_stamp();
+            assert!(second > first);
+            recorder.last_stamp = u128::from(u64::MAX);
+            assert_eq!(recorder.next_stamp(), u128::from(u64::MAX) + 1, "never behind the last one");
+        }
+
+        #[test]
+        fn profiles_go_to_the_universe_then_the_space_then_the_user_folder() {
+            let root = temp_dir("dirs");
+            let universe = root.join("Universe");
+            let space = universe.join("Spaces").join("Garage");
+            let lone = root.join("Lone");
+            std::fs::create_dir_all(&space).unwrap();
+            std::fs::create_dir_all(&lone).unwrap();
+            let user = || Some(root.join("user"));
+            assert_eq!(profile_dir(Some(space.as_path()), user()), Some(universe.join(".eustress").join("profile")));
+            assert_eq!(profile_dir(Some(lone.as_path()), user()), Some(lone.join(".eustress").join("profile")));
+            let in_user = Some(root.join("user").join("Eustress").join("profile"));
+            assert_eq!(profile_dir(Some(root.join("missing").as_path()), user()), in_user);
+            assert_eq!(profile_dir(Some(Path::new("relative/space")), user()), in_user);
+            assert_eq!(profile_dir(None, user()), in_user);
+            assert_eq!(profile_dir(None, None), None, "never the working directory");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn a_window_is_written_as_a_folded_file_and_a_flame_graph() {
+            let dir = temp_dir("write");
+            let job = WindowJob {
+                folded: "rune;Workspace/Car.rune;on_update 4000\n".to_string(),
+                title: "Eustress scripts: 2 frames over 1.0 s".to_string(),
+                subtitle: "test".to_string(),
+                stamp: 1_700_000_000_123,
+                space_root: None,
+            };
+            let svg = write_window_files(&job, Some(dir.clone())).unwrap();
+            assert_eq!(svg, dir.join("1700000000123_scripts.svg"));
+            let folded = std::fs::read_to_string(dir.join("1700000000123_scripts.folded")).unwrap();
+            assert_eq!(folded, job.folded);
+            let svg = std::fs::read_to_string(&svg).unwrap();
+            assert!(svg.starts_with("<?xml") && svg.contains("Workspace/Car.rune"), "a flame graph");
+            assert!(svg.contains("Eustress scripts: 2 frames over 1.0 s"));
+            assert!(write_window_files(&job, None).is_err(), "no folder, no file");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn pruning_keeps_the_newest_windows_and_touches_nothing_else() {
+            let dir = temp_dir("prune");
+            let stamp = |i: u64| 1_700_000_000_000 + i;
+            for i in 1..=25 {
+                std::fs::write(dir.join(format!("{}_scripts.folded", stamp(i))), "x").unwrap();
+                std::fs::write(dir.join(format!("{}_scripts.svg", stamp(i))), "x").unwrap();
+            }
+            // The newest window's SVG failed to render; it is a window still.
+            std::fs::write(dir.join(format!("{}_scripts.folded", stamp(26))), "x").unwrap();
+            let others = [
+                "notes.txt",
+                "12_scripts.txt",
+                "x12_scripts.svg",
+                "12_scripts.svg.bak",
+                "_scripts.svg",
+                "12_Scripts.svg",
+                "1_scripts.folded.tmp",
+            ];
+            for name in others {
+                std::fs::write(dir.join(name), "keep").unwrap();
+            }
+            std::fs::create_dir(dir.join("5_scripts.svg")).unwrap();
+
+            assert_eq!(prune(&dir, KEEP_WINDOWS).unwrap(), 12, "the six oldest windows, two files each");
+            for i in 1..=6 {
+                assert!(!dir.join(format!("{}_scripts.folded", stamp(i))).exists(), "window {i} went");
+                assert!(!dir.join(format!("{}_scripts.svg", stamp(i))).exists(), "window {i} went");
+            }
+            for i in 7..=25 {
+                assert!(dir.join(format!("{}_scripts.folded", stamp(i))).exists(), "window {i} stays");
+                assert!(dir.join(format!("{}_scripts.svg", stamp(i))).exists(), "window {i} stays");
+            }
+            assert!(dir.join(format!("{}_scripts.folded", stamp(26))).exists());
+            for name in others {
+                assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "keep", "{name} is untouched");
+            }
+            assert!(dir.join("5_scripts.svg").is_dir(), "a folder is never a window");
+            assert_eq!(prune(&dir, KEEP_WINDOWS).unwrap(), 0, "nothing more to prune");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn window_stamps_are_exactly_digits_and_the_suffix() {
+            assert_eq!(window_stamp("1700000000123_scripts.svg"), Some("1700000000123"));
+            assert_eq!(window_stamp("1700000000123_scripts.folded"), Some("1700000000123"));
+            for name in ["_scripts.svg", "12a_scripts.svg", "12_scripts.svg.bak", "12_Scripts.svg", "12_scripts.txt"] {
+                assert_eq!(window_stamp(name), None, "{name}");
+            }
+            let mut stamps = vec!["9", "10", "0011", "2"];
+            stamps.sort_by(|a, b| newer_first(a, b));
+            assert_eq!(stamps, vec!["0011", "10", "9", "2"]);
         }
     }
 }

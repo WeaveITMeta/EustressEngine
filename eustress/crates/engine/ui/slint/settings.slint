@@ -33,6 +33,10 @@ export global Preferences {
     in property <bool> shadows: true;
     in property <bool> anti-aliasing: true;
     in property <int> max-fps: 120; // 0 is unlimited
+    // Ray tracing: 0 Auto, 1 On, 2 Off (RayTracingMode::index). Read at the
+    // next launch; the note says what this run did and why.
+    in property <int> ray-tracing: 0;
+    in property <string> ray-tracing-note: "";
     // Audio, 0 to 100
     in-out property <float> master-volume: 100;
     in-out property <float> effects-volume: 100;
@@ -108,11 +112,18 @@ component PageTitle inherits VerticalLayout {
     }
 }
 
-// A password field with its label above, for the AI keys page.
+// A password field with its label above, for the AI keys page. It holds
+// only what the person types; the saved key shows as its mask, in the
+// placeholder.
 component KeyField inherits VerticalLayout {
     in property <string> label;
     in property <string> hint;
     in-out property <string> value;
+    // The saved key's mask, "checking" or the waiting text: never a key.
+    in property <string> placeholder: "";
+    // A key is saved: offer Remove.
+    in property <bool> can-remove: false;
+    callback remove();
 
     spacing: 5px;
     padding-top: 10px;
@@ -124,11 +135,19 @@ component KeyField inherits VerticalLayout {
         font-size: 12px;
         font-weight: 500;
     }
-    LineEdit {
-        text <=> root.value;
-        input-type: password;
-        placeholder-text: "Paste a key";
-        font-size: 12px;
+    HorizontalLayout {
+        spacing: 8px;
+        LineEdit {
+            horizontal-stretch: 1;
+            text <=> root.value;
+            input-type: password;
+            placeholder-text: root.placeholder != "" ? root.placeholder : "Paste a key";
+            font-size: 12px;
+        }
+        if root.can-remove: KitButton {
+            text: "Remove";
+            clicked => { root.remove(); }
+        }
     }
     Text {
         text: root.hint;
@@ -245,7 +264,7 @@ export component SettingsDialog inherits Rectangle {
     // Appearance: themes from the ThemeRegistry. Clicking a card applies it
     // at once and saves the choice; Rescan re-reads the user Themes folder.
     in property <[ThemeEntry]> available-themes: [];
-    in-out property <string> active-theme-id: "modern";
+    in-out property <string> active-theme-id: "voltec";
     callback select-theme(string);
     callback rescan-themes();
 
@@ -280,6 +299,21 @@ export component SettingsDialog inherits Rectangle {
     // Keys for the other Workshop providers, BYOK like Anthropic's.
     in-out property <string> soul-xai-api-key: "";
     in-out property <string> soul-openai-api-key: "";
+    // The saved keys' masks (or "checking"): placeholders, never keys.
+    in property <string> soul-api-key-mask: "";
+    in property <string> soul-xai-api-key-mask: "";
+    in property <string> soul-openai-api-key-mask: "";
+    // A key is saved for that provider: its Remove button shows.
+    in property <bool> soul-api-key-can-remove: false;
+    in property <bool> soul-xai-api-key-can-remove: false;
+    in property <bool> soul-openai-api-key-can-remove: false;
+    // Store warnings, waits and failure lines.
+    in property <string> soul-key-status: "";
+    // The Remove confirmation's text; empty when none is open.
+    in property <string> soul-key-remove-prompt: "";
+    callback on-soul-key-remove(string);
+    callback on-soul-key-remove-confirm();
+    callback on-soul-key-remove-cancel();
 
     callback on-close();
     callback on-save();
@@ -534,6 +568,16 @@ export component SettingsDialog inherits Rectangle {
                                         toggled(on) => { Preferences.set("anti_aliasing", on ? "1" : "0"); }
                                     }
                                 }
+                                SettingRow {
+                                    label: "Ray tracing";
+                                    description: "Ray-traced sun, sky, bounce light and glowing surfaces (experimental). Auto turns it on where this GPU runs it well. Off applies at once; Auto and On at the next launch. " + Preferences.ray-tracing-note;
+                                    KitSegmented {
+                                        managed: true;
+                                        options: ["Auto", "On", "Off"];
+                                        current-index: Preferences.ray-tracing;
+                                        selected(i) => { Preferences.set("ray_tracing", i == 0 ? "auto" : i == 1 ? "on" : "off"); }
+                                    }
+                                }
                             }
 
                             SettingsGroup {
@@ -662,21 +706,54 @@ export component SettingsDialog inherits Rectangle {
                                     label: "Anthropic (Claude)";
                                     hint: "Used by Soul, the Workshop and the UI Builder's Claude mode.";
                                     value <=> root.soul-api-key;
+                                    placeholder: root.soul-api-key-mask;
+                                    can-remove: root.soul-api-key-can-remove;
+                                    remove => { root.on-soul-key-remove("anthropic"); }
                                 }
                                 KitDivider { }
                                 KeyField {
                                     label: "xAI (Grok)";
                                     hint: "Used when the Workshop's model is an xAI model.";
                                     value <=> root.soul-xai-api-key;
+                                    placeholder: root.soul-xai-api-key-mask;
+                                    can-remove: root.soul-xai-api-key-can-remove;
+                                    remove => { root.on-soul-key-remove("xai"); }
                                 }
                                 KitDivider { }
                                 KeyField {
                                     label: "OpenAI";
                                     hint: "Used when the Workshop's model is an OpenAI model.";
                                     value <=> root.soul-openai-api-key;
+                                    placeholder: root.soul-openai-api-key-mask;
+                                    can-remove: root.soul-openai-api-key-can-remove;
+                                    remove => { root.on-soul-key-remove("openai"); }
                                 }
                             }
 
+                            // Remove asks first; Cancel changes nothing.
+                            if root.soul-key-remove-prompt != "": VerticalLayout {
+                                spacing: 8px;
+                                KitNotice {
+                                    kind: "warn";
+                                    text: root.soul-key-remove-prompt;
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    KitButton {
+                                        text: "Cancel";
+                                        clicked => { root.on-soul-key-remove-cancel(); }
+                                    }
+                                    KitButton {
+                                        text: "Remove";
+                                        clicked => { root.on-soul-key-remove-confirm(); }
+                                    }
+                                }
+                            }
+                            if root.soul-key-status != "": KitNotice {
+                                kind: "warn";
+                                text: root.soul-key-status;
+                            }
                             if root.soul-api-key-valid: KitNotice {
                                 kind: "success";
                                 text: "Anthropic key validated.";
@@ -699,7 +776,7 @@ export component SettingsDialog inherits Rectangle {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: "Tests the keys typed above, saved or not.";
+                                        text: "Tests the keys typed above; an empty field tests the saved key.";
                                         color: Theme.text-disabled;
                                         font-size: Theme.font-xs;
                                     }

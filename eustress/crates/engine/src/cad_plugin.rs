@@ -623,8 +623,17 @@ fn handle_cad_insert(
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
     mut registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
     space_root_res: Option<Res<crate::space::SpaceRoot>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a CAD insert waits for Stop: it writes a new part's
+        // folder into the Space. Refused where it is read, so the request is
+        // consumed and never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "insert a CAD part") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let pos = event.position.unwrap_or_else(|| camera_forward_spawn(&cameras));
         let toml = template_toml(event.template);
         let label = template_label(event.template);
@@ -1285,9 +1294,19 @@ fn handle_cad_add_constraint(
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     use eustress_cad::{FeatureEntry, SketchConstraint};
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a sketch edit waits for Stop: it rewrites the part's
+        // features.toml. Refused where it is read, so it never runs after
+        // Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "edit a CAD sketch") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             continue;
         };
@@ -1415,8 +1434,18 @@ fn handle_cad_solve_sketch(
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a solve waits for Stop: it rewrites the part's
+        // features.toml. Refused where it is read, so it never runs after
+        // Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "solve a CAD sketch") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             if let Some(ref mut n) = notifications {
                 n.warning("Solve Sketch: select a CadPart");
@@ -1516,9 +1545,19 @@ fn handle_cad_tree_ops(
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
     use eustress_cad::FeatureTree;
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a feature tree edit waits for Stop: it rewrites the
+        // part's features.toml. Refused where it is read, so it never runs
+        // after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "edit a CAD feature tree") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             continue;
         };
@@ -1632,7 +1671,10 @@ fn handle_cad_set_variable(
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     // One undo entry per entity per frame — a single resize gesture
     // fires up to three variable events (length/width/height); the
     // user made ONE edit and gets ONE Ctrl+Z.
@@ -1640,6 +1682,14 @@ fn handle_cad_set_variable(
         std::collections::HashMap::new();
 
     for event in events.read() {
+        // During Play a variable change waits for Stop: it rewrites the
+        // part's features.toml. The Properties panel's Var rows and the
+        // Scale tool's resize of a CAD part both send it; refused where it is
+        // read, so it never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "change a CAD variable") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             if let Some(ref mut n) = notifications {
                 n.warning("CadPart: entity has no CadPart component");
@@ -2074,8 +2124,18 @@ fn handle_cad_export_glb(
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
     space_root_res: Option<Res<crate::space::SpaceRoot>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut commands: Commands,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play an export waits for Stop: it writes the GLB beside the
+        // part and a copy into the Space's Workspace/Assets/Cad. Refused
+        // where it is read, so it never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "export a CAD part") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((cad, name, inst_file)) = query.get(event.entity) else {
             if let Some(ref mut n) = notifications {
                 n.warning("Export GLB: select a CadPart first");
@@ -2339,5 +2399,125 @@ mod collider_tests {
         assert!(!is_valid_cad_source_id("../../etc/passwd"));
         assert!(!is_valid_cad_source_id("nested/id"));
         assert!(!is_valid_cad_source_id("back\\slash"));
+    }
+}
+
+/// During Play the CAD edits are refused where they are read: no part is
+/// inserted, no tree or variable changes, nothing is exported, and each
+/// request is consumed. While editing the same variable change applies.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// The six CAD edit readers in `state`, with what they use, and a Box
+    /// part with no file of its own.
+    fn cad_app(state: PlayModeState) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.add_message::<CadInsertTemplateEvent>()
+            .add_message::<CadSetVariableEvent>()
+            .add_message::<CadExportGlbEvent>()
+            .add_message::<CadTreeOpEvent>()
+            .add_message::<CadSolveSketchEvent>()
+            .add_message::<CadAddConstraintEvent>();
+        app.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        // An explicit root, so no fallback ever reads the settings file.
+        app.insert_resource(crate::space::SpaceRoot(std::env::temp_dir().join("eustress_play_gate_cad")));
+        app.add_systems(
+            Update,
+            (
+                handle_cad_insert,
+                handle_cad_set_variable,
+                handle_cad_export_glb,
+                handle_cad_tree_ops,
+                handle_cad_solve_sketch,
+                handle_cad_add_constraint,
+            ),
+        );
+        let part = app.world_mut().spawn(CadPart::new(template_toml(CadTemplate::Box))).id();
+        (app, part)
+    }
+
+    /// The edit both states are given: the Box's size, 0.05 m in its
+    /// template, set to 80 mm.
+    fn resize(part: Entity) -> CadSetVariableEvent {
+        CadSetVariableEvent {
+            entity: part,
+            name: "size".to_string(),
+            value: "80 mm".to_string(),
+        }
+    }
+
+    /// The part's size, as its feature tree holds it.
+    fn size(app: &App, part: Entity) -> Option<String> {
+        parse_tree(&app.world().get::<CadPart>(part).unwrap().tree_toml).unwrap().variables.get("size").cloned()
+    }
+
+    /// The Output panel's lines, sorted.
+    fn output(app: &App) -> Vec<String> {
+        let mut lines: Vec<String> = app.world().resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        lines.sort();
+        lines
+    }
+
+    #[test]
+    fn play_refuses_every_cad_edit() {
+        let mut refused: Vec<String> = [
+            "insert a CAD part",
+            "change a CAD variable",
+            "export a CAD part",
+            "edit a CAD feature tree",
+            "solve a CAD sketch",
+            "edit a CAD sketch",
+        ]
+        .iter()
+        .map(|what| format!("Stop Play to {what}."))
+        .collect();
+        refused.sort();
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let (mut app, part) = cad_app(state);
+            let tree = app.world().get::<CadPart>(part).unwrap().tree_toml.clone();
+            let world = app.world_mut();
+            world.write_message(CadInsertTemplateEvent {
+                template: CadTemplate::Box,
+                position: Some(Vec3::ZERO),
+            });
+            world.write_message(resize(part));
+            world.write_message(CadExportGlbEvent {
+                entity: part,
+                path: Some(std::env::temp_dir().join("eustress_play_gate_cad.glb")),
+            });
+            world.write_message(CadTreeOpEvent {
+                entity: part,
+                op: CadTreeOp::Suppress { index: 0 },
+            });
+            world.write_message(CadSolveSketchEvent { entity: part });
+            world.write_message(CadAddConstraintEvent {
+                entity: part,
+                kind: eustress_cad::ConstraintKind::Coincident,
+                e1: 0,
+                e2: Some(1),
+            });
+            app.update();
+            assert_eq!(output(&app), refused, "{state:?}");
+            assert_eq!(app.world().get::<CadPart>(part).unwrap().tree_toml, tree, "{state:?}: the part's tree changed");
+            assert_eq!(size(&app, part).as_deref(), Some("0.05 m"), "{state:?}: the size changed");
+            let parts = app.world_mut().query::<&CadPart>().iter(app.world()).count();
+            assert_eq!(parts, 1, "{state:?}: a CAD part was inserted");
+        }
+        // While editing the same resize applies and nothing is refused, so
+        // the refusals above are the gate's.
+        let (mut app, part) = cad_app(PlayModeState::Editing);
+        assert_eq!(size(&app, part).as_deref(), Some("0.05 m"));
+        app.world_mut().write_message(resize(part));
+        app.update();
+        assert!(output(&app).is_empty(), "{:?}", output(&app));
+        assert_eq!(size(&app, part).as_deref(), Some("80 mm"), "the resize did not apply while editing");
     }
 }

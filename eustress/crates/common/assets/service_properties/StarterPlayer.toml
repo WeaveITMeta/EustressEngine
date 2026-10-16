@@ -37,3 +37,7 @@ EnableMouseLockOption = { type = "bool", value = true, description = "Allow play
 LoadCharacterAppearance = { type = "bool", value = true, description = "Load player character appearance from profile" }
 LoadCharacterLayeredClothing = { type = "enum", value = "Default", options = ["Default", "Disabled", "Enabled"], description = "Load layered clothing" }
 UserEmotesEnabled = { type = "bool", value = true, description = "Enable player emotes" }
+
+[Multiplayer]
+ServerMovementCheck = { type = "bool", value = true, description = "The host refuses a joined player's movement faster than its character moves. Turn it off only if this Space's own player scripts move characters faster than they walk; the host's Output says so while it is off" }
+StandardPlayerBodies = { type = "bool", value = false, description = "Every player takes this Space's standard body (its height and build), for equal hitboxes and speed; face, colours and items stay the player's. Off, players keep their own proportions, and their hitboxes and speeds differ" }

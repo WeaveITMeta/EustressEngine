@@ -31,18 +31,20 @@ channel: the simple geometry that is authoritative, that Avian collides with, th
 raycasts hit, that scripts see. **Realistic** shows the appearance channel derived
 from that state: PBR materials with real textures, mesh detail, Gaussian splats
 where a captured or baked surface exists, atmosphere, reflections, and the post
-stack. Realism comes from geometry, materials and light transport. There is no
-neural upscaler, no image model in the render path, and no per-scene "training"
-except the per-scene optimisation that 3DGS capture already is. The same world
-looks better on a stronger machine because a stronger machine runs a higher
-quality tier of the same deterministic pipeline, not because it draws from a
-different source.
+stack. Realism comes from geometry, materials, splats and light transport,
+rendered deterministically. No learned model runs in the render loop: generative
+models author appearance assets offline (section 5), and the renderer only draws
+what they stored. The same world looks better on a stronger machine because a
+stronger machine runs a higher quality tier of the same deterministic pipeline,
+not because it draws from a different source.
 
 Three things must be true for this to count as done, each of which can be
 observed to be false:
 
 1. The same brief plus the same seed produces a byte-identical WorldDb digest on
-   two runs (determinism, the house thesis).
+   two runs, given the same stored generated assets (determinism, the house
+   thesis). Regenerating an asset from its seed is best effort, because
+   diffusion sampling is not guaranteed identical across GPUs and drivers.
 2. Every rung's efficacy gates pass before its effectiveness score is even
    computed (a broken world cannot outscore a working one).
 3. Raycast, collision and measurement return identical results in Abstract and
@@ -234,7 +236,7 @@ by construction (it already uses a hash-seeded lattice). The `texture.generate`
 verb lets the agent author a material variant per brief without leaving the
 deterministic path. The tier selects the resolution.
 
-**3DGS.** Three sources, one contract:
+**3DGS.** Four sources, one contract:
 1. **Baked from state** (`splat.bake`): sample the state mesh surface, one
    Gaussian per sample with colour from the resolved material and texture,
    scale from local sample spacing, orientation from the surface normal. This
@@ -249,6 +251,13 @@ deterministic path. The tier selects the resolution.
    colliders and classes like everything else. This is where a model would enter,
    and only as an *asset author* with provenance, never as the renderer. A
    `synthetic_only` policy flag keeps a world entirely in-house when that matters.
+4. **Generated in-house** (the photorealism path): NVIDIA's commercially
+   licensed open models paint appearance over the authored block-out.
+   Cosmos-Transfer restyles rendered depth and segmentation frames into photoreal
+   video, Brush lifts it to splats with the known camera poses, and the splats
+   bind to their state objects. A sentence-only variant runs Cosmos-Predict2
+   text-to-image into Lyra 1.0. Provenance `IngestSource::Synthetic`. Design,
+   licences and hardware: `WORLD_MODEL_VS_MARBLE_2026_09_30.md` section 10.
 
 ---
 
@@ -354,9 +363,11 @@ its own pass.
   the plan can defend is the one in section 0: the same world looks better on a
   stronger machine because it runs a higher tier of the same deterministic
   pipeline.
-- **Splats from text without images do not exist as a technique.** The in-house
-  route is bake-from-state. Anything richer is a vendor backend with provenance,
-  and it is opt-in.
+- **Generated splats need big GPUs and run offline.** Lyra 1.0 turns one image
+  or a sentence into splats and is licensed for commercial use; it peaked near
+  43 GB in NVIDIA's tests. Lyra 2.0's weights are research-only. Generation runs
+  as a separate service on a 48 GB or larger GPU or in the cloud; the splats it
+  produces play on ordinary GPUs.
 - **Token economics are real.** Per-entity MCP calls are the wrong unit for a
   200-instance world; the batch verb and `partition_scene` (multi-agent by
   Morton cell) are on Stage 1 for that reason.

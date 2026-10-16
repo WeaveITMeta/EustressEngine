@@ -9,7 +9,7 @@
 // the same guarded surface with the same refusals, and the playbook at
 // docs/moderation/PLAYBOOK.md reads the same for both.
 //
-// They reach api.eustress.dev with an admin JWT taken from
+// They reach the Eustress API (`api_base` below) with an admin JWT taken from
 // `EUSTRESS_MODERATOR_TOKEN`. Without that variable they refuse before any
 // request leaves the machine, and the MCP server only grants the Network
 // capability these carry when the variable is present (shared_registry.rs), so
@@ -32,8 +32,9 @@ fn token() -> Result<String, String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            "EUSTRESS_MODERATOR_TOKEN is not set. Export an admin JWT for api.eustress.dev \
-             in the MCP server's environment to use the moderation tools."
+            "EUSTRESS_MODERATOR_TOKEN is not set. Export an admin JWT for the Eustress API \
+             (the one EUSTRESS_API_URL names, production when it is unset) in the MCP \
+             server's environment to use the moderation tools."
                 .to_string()
         })
 }

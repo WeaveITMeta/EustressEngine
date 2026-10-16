@@ -180,7 +180,13 @@ fn discover_script_plugins(
     }
     if runtime_state.runtime.is_none() {
         match eustress_common::luau::runtime::LuauRuntime::new() {
-            Ok(rt) => {
+            Ok(mut rt) => {
+                // Plugins are the user's own installed code, loaded only from
+                // %LOCALAPPDATA%/Eustress/Plugins. Nothing may install one from a Space,
+                // the Gallery, a joined session or an agent's file tools; a plugin from a
+                // future marketplace starts Denied, with a per-plugin grant the person gives.
+                // Their HTTP stays on, as before.
+                rt.set_network_access(eustress_common::luau::runtime::NetworkAccess::Allowed);
                 runtime_state.runtime = Some(rt);
                 runtime_state.initialized = true;
                 info!("script_plugin_host: Luau VM lazily initialized for Edit-mode plugin discovery");

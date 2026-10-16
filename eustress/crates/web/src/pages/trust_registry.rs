@@ -491,7 +491,7 @@ pub fn TrustRegistryPage() -> impl IntoView {
             {move || show_revoke_modal.get().then(|| {
                 let fork = selected_fork.get().unwrap_or_default();
                 view! {
-                    <div class="modal-overlay" on:click=move |_| show_revoke_modal.set(false)>
+                    <div class="modal-overlay" on:click=move |_| crate::utils::after_event(move || show_revoke_modal.set(false))>
                         <div class="modal-content revoke-modal" on:click=|e| e.stop_propagation()>
                             <h3 class="modal-title">"Revoke Fork"</h3>
                             <p class="modal-desc">
@@ -519,16 +519,18 @@ pub fn TrustRegistryPage() -> impl IntoView {
                             <div class="modal-actions">
                                 <button
                                     class="btn btn-secondary"
-                                    on:click=move |_| show_revoke_modal.set(false)
+                                    on:click=move |_| crate::utils::after_event(move || show_revoke_modal.set(false))
                                 >"Cancel"</button>
                                 <button
                                     class="btn btn-danger"
                                     disabled=move || revoke_reason.get().trim().is_empty()
                                     on:click=move |_| {
                                         // In production, this calls the API to revoke the fork
-                                        show_revoke_modal.set(false);
-                                        revoke_reason.set(String::new());
-                                        selected_fork.set(None);
+                                        crate::utils::after_event(move || {
+                                            show_revoke_modal.set(false);
+                                            revoke_reason.set(String::new());
+                                            selected_fork.set(None);
+                                        });
                                     }
                                 >"Confirm Revocation"</button>
                             </div>

@@ -24,6 +24,7 @@
 //! | V-Sync | the primary window's present mode |
 //! | Frame rate while editing | `IdleSettings::active_update_ms` |
 //! | Volumes | `GlobalVolume` and every playing sink |
+//! | Ray tracing | read by `raytracing` at the next launch; Off also stops a running session at once; the line under it is `RaytracingNote` |
 //!
 //! A launch variable that measures one of these (`EUSTRESS_SMAA`,
 //! `EUSTRESS_MAX_FPS`, `EUSTRESS_SHADOW_DISTANCE`) wins over the Settings
@@ -87,6 +88,10 @@ impl Plugin for PreferencesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PreferencesInbox>()
             .init_resource::<VolumePreview>()
+            // Registered here too (RaytracingPlugin does it as well; adding a
+            // message twice is a no-op), so `apply_messages` can always
+            // write it.
+            .add_message::<crate::raytracing::RasterFallbackRequest>()
             .init_resource::<ShadowsOff>()
             .add_systems(
                 Update,
@@ -193,6 +198,7 @@ fn apply_messages(
     inbox: Res<PreferencesInbox>,
     mut settings: ResMut<EditorSettings>,
     mut preview: ResMut<VolumePreview>,
+    mut raytracing_requests: MessageWriter<crate::raytracing::RasterFallbackRequest>,
 ) {
     let msgs: Vec<PrefMsg> = match inbox.0.lock() {
         Ok(mut v) if !v.is_empty() => std::mem::take(&mut *v),
@@ -209,7 +215,18 @@ fn apply_messages(
                     _ => {}
                 }
             }
-            PrefMsg::Set(key, value) => apply_set(&mut settings, &mut preview, &key, &value),
+            PrefMsg::Set(key, value) => {
+                apply_set(&mut settings, &mut preview, &key, &value);
+                // Off stops a ray-traced session at once (the live fallback);
+                // Auto and On wait for the next launch.
+                if key == "ray_tracing"
+                    && crate::raytracing::RayTracingMode::parse(&value) == Some(crate::raytracing::RayTracingMode::Off)
+                {
+                    raytracing_requests.write(crate::raytracing::RasterFallbackRequest(
+                        crate::raytracing::FallbackReason::TurnedOff,
+                    ));
+                }
+            }
             PrefMsg::Reset => {
                 let d = EditorSettings::default();
                 *preview = VolumePreview::default();
@@ -242,6 +259,9 @@ fn apply_messages(
                 }
                 if settings.auto_save_interval != d.auto_save_interval {
                     settings.auto_save_interval = d.auto_save_interval;
+                }
+                if settings.ray_tracing != d.ray_tracing {
+                    settings.ray_tracing = d.ray_tracing;
                 }
             }
         }
@@ -327,6 +347,12 @@ fn apply_set(settings: &mut ResMut<EditorSettings>, preview: &mut VolumePreview,
                 settings.music_volume = v;
             }
         }
+        "ray_tracing" => {
+            let Some(v) = crate::raytracing::RayTracingMode::parse(value) else { return };
+            if settings.ray_tracing != v {
+                settings.ray_tracing = v;
+            }
+        }
         other => warn!("Settings: unknown preference {other:?}"),
     }
 }
@@ -337,10 +363,15 @@ fn sync_to_slint(
     slint: Option<NonSend<crate::ui::SlintUiState>>,
     settings: Res<EditorSettings>,
     preview: Res<VolumePreview>,
+    ray_tracing_note: Option<Res<crate::raytracing::RaytracingNote>>,
     mut pushed: Local<bool>,
 ) {
     let Some(slint) = slint else { return };
-    if *pushed && !settings.is_changed() {
+    // The note changes on its own (the GPU's capabilities arrive after the
+    // first push; the performance guard can record "too slow"), so it is a
+    // reason to push too.
+    let note_changed = ray_tracing_note.as_ref().is_some_and(|note| note.is_changed());
+    if *pushed && !settings.is_changed() && !note_changed {
         return;
     }
     *pushed = true;
@@ -354,6 +385,10 @@ fn sync_to_slint(
     g.set_anti_aliasing(settings.anti_aliasing);
     g.set_vsync(settings.vsync);
     g.set_max_fps(settings.max_fps.min(i32::MAX as u32) as i32);
+    g.set_ray_tracing(settings.ray_tracing.index());
+    if let Some(note) = &ray_tracing_note {
+        g.set_ray_tracing_note(note.0.as_str().into());
+    }
     if preview.master.is_none() {
         g.set_master_volume(settings.master_volume * 100.0);
     }

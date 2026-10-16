@@ -43,17 +43,16 @@ use eustress_common::services::sound::{
 };
 
 /// A Sound's `SoundId` as an asset URL, or `None` for ids Eustress cannot
-/// play (Roblox asset ids). A path inside the Space (`Assets/Sounds/shot.ogg`)
-/// becomes `space://...`, which a Player resolves in its own copy of the Space.
+/// play (Roblox asset ids) and for any path that leaves the Space or the
+/// bundled library ([`crate::space_paths`]). A path inside the Space
+/// (`Assets/Sounds/shot.ogg`) becomes `space://...`, which a Player resolves
+/// in its own copy of the Space.
 pub fn sound_url(id: &str) -> Option<String> {
-    let id = id.trim().replace('\\', "/");
+    let id = id.trim();
     if id.is_empty() || id.starts_with("rbxassetid://") || id.starts_with("rbxasset://") {
         return None;
     }
-    if id.contains("://") {
-        return Some(id);
-    }
-    Some(format!("space://{}", id.trim_start_matches('/')))
+    crate::space_paths::contained_url(id, std::path::Path::new(""))
 }
 
 /// The player's step. A Play app orders it after the session's apply
@@ -340,6 +339,15 @@ mod tests {
         assert_eq!(sound_url("rbxassetid://367735596"), None);
         assert_eq!(sound_url("rbxasset://sounds/x.wav"), None);
         assert_eq!(sound_url("   "), None);
+    }
+
+    /// A SoundId never reads outside the Space, the disk or a network share.
+    #[test]
+    fn a_sound_id_outside_the_space_is_refused() {
+        for bad in ["../../x.ogg", "C:/Windows/Media/x.wav", "space://../x.ogg", "file:///C:/x.ogg", "https://x.dev/a.ogg"] {
+            assert_eq!(sound_url(bad), None, "{bad:?}");
+        }
+        assert_eq!(sound_url(r"\\host\share\x.ogg").as_deref(), Some("space://host/share/x.ogg"));
     }
 
     #[test]

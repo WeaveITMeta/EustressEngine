@@ -39,6 +39,9 @@
 pub mod capability;
 pub mod modes;
 pub mod registry;
+/// The one containment check every tool runs a caller's path through, and
+/// the rules for running git on a caller's behalf.
+pub mod sandbox;
 
 pub use capability::{authorize, capability_of, Capability, Denial, Permissions};
 
@@ -57,6 +60,8 @@ pub mod embedvec_tools;
 pub mod entity_tools;
 pub mod file_tools;
 pub mod git_tools;
+pub mod import_tools;
+pub mod mesh_tools;
 pub mod memory_tools;
 pub mod particle_sim_tools;
 pub mod physics_tools;
@@ -70,6 +75,15 @@ pub mod spatial_tools;
 pub mod universe_tools;
 pub mod website_tools;
 pub mod moderation_tools;
+/// A tool result that carries an image (the screenshot tools).
+pub mod image_result;
+/// The AI camera tools, for the hosts that run them off the engine's main
+/// thread (`ai_camera_tools::register`).
+pub mod ai_camera_tools;
+
+/// The tools' refusals of paths and names outside what they may touch.
+#[cfg(test)]
+mod tool_containment_tests;
 
 /// Build a `ToolRegistry` preloaded with every tool this crate ships.
 ///
@@ -100,6 +114,11 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(entity_tools::QueryEntitiesTool);
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);
+
+    // Meshes made elsewhere (headless Blender, say): import a GLB from inside
+    // the Universe into the Space, and place Parts that draw it.
+    registry.register(import_tools::ImportAssetTool);
+    registry.register(import_tools::PlaceInstancesTool);
 
     // Particle simulations (fluids, charged particles, conduction): author
     // and inspect ParticleSimulation / ParticleSpecies files.

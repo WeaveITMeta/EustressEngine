@@ -5,7 +5,7 @@
 #   %LOCALAPPDATA%/Eustress/Themes/<yourtheme>.toml
 # give it a unique [meta].id, change any tokens you like, and it shows up in
 # File > Settings > Theme after a Rescan. You only need to keep the tokens you
-# actually change — anything omitted falls back to the Modern base palette.
+# actually change — anything omitted falls back to the Voltec base palette.
 
 [meta]
 id = "classic"

@@ -42,7 +42,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use super::abilities::AvatarAbilities;
-use eustress_avatar_schema::{AvatarDescriptor, AvatarIdentity, RigDefinition};
+use eustress_avatar_schema::{AvatarDescriptor, AvatarIdentity, BodyMorphs, RigDefinition};
 
 /// What the open Space asks of the avatars it spawns. The host inserts it
 /// before requesting an avatar; without it the engine defaults apply.
@@ -61,7 +61,26 @@ pub struct SpaceCharacterPolicy {
     pub abilities: AvatarAbilities,
     /// The pace and jump every avatar starts with.
     pub movement: SpaceMovement,
+    /// StarterPlayer `ServerMovementCheck`: whether a host refuses a joined
+    /// player's movement faster than its character moves. `None` (unset) is
+    /// on; a Space whose own player-side scripts move characters faster
+    /// turns it off ([`Self::movement_check`]).
+    pub server_movement_check: Option<bool>,
+    /// StarterPlayer `StandardPlayerBodies`: every player's character takes
+    /// this Space's standard body (its height and build), so hitboxes and
+    /// speed are equal; face, colours and items stay the player's. Off
+    /// unless the Space turns it on.
+    pub standard_player_bodies: bool,
 }
+
+/// While present, a saved avatar keeps none of the account's own motion
+/// (walk, run, sprint and jump overrides): how fast it moves is the open
+/// Space's to say. A Player holds it while joined to a host
+/// (eustress-networking), since the host measures each player's movement
+/// against the Space's pace, and an account's own pace would get an honest
+/// player refused.
+#[derive(Resource, Debug, Default)]
+pub struct SpaceOwnsMotion;
 
 /// The movement a Space sets for every character through StarterPlayer
 /// (`CharacterWalkSpeed`, `CharacterJumpHeight`, `CharacterJumpPower` and
@@ -200,15 +219,12 @@ fn option_of(stem: &str) -> Option<Option<AvatarIdentity>> {
     }
 }
 
-/// A Space-relative path as an asset path; `bundled://` and `space://` pass
-/// through.
-fn asset_path(path: &str) -> String {
-    let p = path.trim().replace('\\', "/");
-    if p.starts_with("bundled://") || p.starts_with("space://") {
-        p
-    } else {
-        format!("space://{}", p.trim_start_matches("./"))
-    }
+/// A path a Space's character file names, as the asset path it loads: a bare
+/// path is the Space's own, `bundled://` and `space://` keep their source, and
+/// a path that leaves the Space (a `..`, a drive, a network path, another
+/// scheme) is refused, by [`crate::space_path::contained_url`].
+fn asset_path(path: &str, space_root: &Path) -> Result<String, String> {
+    crate::space_path::contained_url(path, space_root).ok_or_else(|| format!("{path:?} leaves the Space"))
 }
 
 /// Empty clip slots take the engine's own clip for that body option.
@@ -222,13 +238,16 @@ fn fill_default_clips(rig: &mut RigDefinition, identity: AvatarIdentity) {
 }
 
 /// The file behind a clip's asset path: `bundled://` from the engine's asset
-/// root, `space://` from the Space folder.
+/// root, `space://` from the Space folder. `None` for a path that would leave
+/// either: a `..`, a drive or network path, a name Windows reserves, or a link
+/// inside the Space that leads out ([`crate::space_path`]).
 pub fn clip_file(asset: &str, space_root: Option<&Path>) -> Option<PathBuf> {
     if let Some(rel) = asset.strip_prefix("bundled://") {
+        let rel = crate::space_path::relative_in_space(Path::new(rel))?;
         return Some(super::boot::bundled_root().join(rel));
     }
     let rel = asset.strip_prefix("space://")?;
-    Some(space_root?.join(rel))
+    crate::space_path::resolve_in_space(space_root?, Path::new(rel))
 }
 
 impl SpaceCharacterPolicy {
@@ -282,7 +301,7 @@ impl SpaceCharacterPolicy {
                 warnings.push(format!("StarterPlayer/Characters/{name}: name it Masculine, Feminine, Robot or Default"));
                 continue;
             };
-            match read_rig(&path, stem, option.unwrap_or(AvatarIdentity::Male)) {
+            match read_rig(&path, stem, option.unwrap_or(AvatarIdentity::Male), space_root) {
                 Ok((rig, height)) => {
                     if let Some(h) = height {
                         policy.heights.insert(rig.id.clone(), h);
@@ -329,14 +348,30 @@ impl SpaceCharacterPolicy {
             jump_power_mps: metres("CharacterJumpPower"),
             use_jump_power: look("CharacterUseJumpPower") == Some(StarterValue::Bool(true)),
         };
+        self.server_movement_check = match look("ServerMovementCheck") {
+            Some(StarterValue::Bool(on)) => Some(on),
+            _ => None,
+        };
+        self.standard_player_bodies = look("StandardPlayerBodies") == Some(StarterValue::Bool(true));
         warnings
     }
 
+    /// Whether a host checks joined players' movement in this Space: on
+    /// unless StarterPlayer `ServerMovementCheck` turns it off. Read from
+    /// the host's own world only, never from anything a player sends.
+    pub fn movement_check(&self) -> bool {
+        self.server_movement_check.unwrap_or(true)
+    }
+
     /// The descriptor at this Space's pace, with this Space's body for its
-    /// body option. The body is unchanged when the Space has none, or when the
-    /// result would not validate.
+    /// body option, and its standard proportions when the Space asks for
+    /// them (`standard_player_bodies`). The body is unchanged when the Space
+    /// has none, or when the result would not validate.
     pub fn apply(&self, descriptor: AvatarDescriptor) -> AvatarDescriptor {
-        let descriptor = self.movement.apply_to(descriptor);
+        let mut descriptor = self.movement.apply_to(descriptor);
+        if self.standard_player_bodies {
+            descriptor.morphs = standard_morphs(&descriptor);
+        }
         let identity = descriptor.resolved_identity();
         let Some(rig) = self.rigs.get(&identity).or(self.fallback.as_ref()) else {
             return descriptor;
@@ -360,22 +395,44 @@ impl SpaceCharacterPolicy {
     }
 }
 
-fn read_rig(path: &Path, stem: &str, identity: AvatarIdentity) -> Result<(RigDefinition, Option<f32>), String> {
+/// The standard body for `descriptor`'s body option: the default height,
+/// build and legs (a Robot's one fixed body), with the player's face kept.
+/// A Space's own height for its character still applies after this.
+fn standard_morphs(descriptor: &AvatarDescriptor) -> BodyMorphs {
+    let own = &descriptor.morphs;
+    let base = if descriptor.resolved_identity() == AvatarIdentity::Robot { BodyMorphs::robot() } else { BodyMorphs::default() };
+    BodyMorphs {
+        face_round: own.face_round,
+        face_square: own.face_square,
+        face_oval: own.face_oval,
+        face_diamond: own.face_diamond,
+        ..base
+    }
+}
+
+fn read_rig(
+    path: &Path,
+    stem: &str,
+    identity: AvatarIdentity,
+    space_root: &Path,
+) -> Result<(RigDefinition, Option<f32>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let file: CharacterFile = toml::from_str(&text).map_err(|e| e.to_string())?;
-    let clip = |c: &Option<String>| c.as_deref().map(asset_path).unwrap_or_default();
+    let clip = |c: &Option<String>| -> Result<String, String> {
+        c.as_deref().map(|p| asset_path(p, space_root)).unwrap_or_else(|| Ok(String::new()))
+    };
     let rig = RigDefinition {
         id: format!("space-{}", stem.to_ascii_lowercase()),
         label: file.label.unwrap_or_else(|| stem.to_string()),
         identity,
-        body_asset: asset_path(&file.body),
+        body_asset: asset_path(&file.body, space_root)?,
         // Empty = the engine's own clip for the player's body option, filled
         // in by `apply` once that option is known.
         animations: [
-            clip(&file.animations.idle),
-            clip(&file.animations.walk),
-            clip(&file.animations.run),
-            clip(&file.animations.jump),
+            clip(&file.animations.idle)?,
+            clip(&file.animations.walk)?,
+            clip(&file.animations.run)?,
+            clip(&file.animations.jump)?,
         ],
         bone_aliases: file.bones.into_iter().map(|(from, to)| (from, to.to_ascii_lowercase())).collect(),
     };
@@ -518,11 +575,78 @@ mod tests {
     }
 
     #[test]
-    fn clip_files_resolve_per_source() {
-        let space = Path::new("C:/Spaces/Game");
-        assert_eq!(clip_file("space://Anim/idle.glb", Some(space)), Some(space.join("Anim/idle.glb")));
+    fn clip_files_resolve_per_source_and_stay_inside_it() {
+        let space = starter_player_space("clip-files", "[properties]\n");
+        assert_eq!(clip_file("space://Anim/idle.glb", Some(&space)), Some(space.join("Anim/idle.glb")));
         assert_eq!(clip_file("space://Anim/idle.glb", None), None);
         assert!(clip_file("bundled://characters/animations/male_idle.glb", None).is_some());
-        assert_eq!(clip_file("https://example.com/idle.glb", Some(space)), None);
+        assert_eq!(clip_file("https://example.com/idle.glb", Some(&space)), None);
+        // Nothing leaves the Space or the bundled library.
+        assert_eq!(clip_file("space://../outside.glb", Some(&space)), None);
+        assert_eq!(clip_file("space://C:/outside.glb", Some(&space)), None);
+        assert_eq!(clip_file("space:////host/share/x.glb", Some(&space)), None);
+        assert_eq!(clip_file("bundled://../secrets.glb", None), None);
+        let _ = std::fs::remove_dir_all(space);
+    }
+
+    /// A character file cannot name a path outside the Space: each of these
+    /// costs its body option, with a warning, and nothing else.
+    #[test]
+    fn a_character_file_cannot_name_a_path_outside_the_space() {
+        let root = space_with(&[
+            ("Masculine.rig.toml", "body = \"Hero.glb\"\n[animations]\nidle = \"C:/x/idle.glb\"\n"),
+            ("Feminine.rig.toml", "body = \"../outside.glb\"\n"),
+            ("Robot.rig.toml", "body = \"Hero.glb\"\n[animations]\nwalk = \"https://example.com/walk.glb\"\n"),
+        ]);
+        let (policy, warnings) = SpaceCharacterPolicy::load(&root);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings.iter().all(|w| w.contains("leaves the Space")), "{warnings:?}");
+        assert!(policy.rigs.is_empty() && policy.fallback.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Space checks joined players' movement unless StarterPlayer turns
+    /// ServerMovementCheck off, and gives players its standard body only when
+    /// it turns StandardPlayerBodies on; both read as file keys or Roblox
+    /// names.
+    #[test]
+    fn the_movement_check_is_on_and_standard_bodies_off_unless_the_space_says() {
+        let load = |tag: &str, text: &str| SpaceCharacterPolicy::load(&starter_player_space(tag, text)).0;
+        let unset = load("checks-unset", "[properties]\ncharacter_walk_speed = 16.0\n");
+        assert!(unset.movement_check() && !unset.standard_player_bodies);
+        assert!(SpaceCharacterPolicy::default().movement_check(), "no StarterPlayer at all");
+        let set = load("checks-set", "[properties]\nserver_movement_check = false\nstandard_player_bodies = true\n");
+        assert!(!set.movement_check() && set.standard_player_bodies);
+        let named = load("checks-named", "[properties]\nServerMovementCheck = false\nStandardPlayerBodies = false\n");
+        assert!(!named.movement_check() && !named.standard_player_bodies);
+        let odd = load("checks-odd", "[properties]\nserver_movement_check = 0\n");
+        assert!(odd.movement_check(), "only a boolean turns it off");
+    }
+
+    /// A Space's standard body: every player the same height, build and legs
+    /// (a Robot keeps its one body); face, colours and items stay the
+    /// player's. Off, a player keeps its own proportions.
+    #[test]
+    fn standard_bodies_keep_face_colours_and_items() {
+        use eustress_avatar_schema::{ItemId, Norm01, SlotKind};
+        let mut mine = AvatarDescriptor::default();
+        mine.morphs.height = Norm01::new(1.0);
+        mine.morphs.build = Norm01::new(0.0);
+        mine.morphs.leg_ratio = Norm01::new(0.9);
+        mine.morphs.face_round = Norm01::new(0.0);
+        mine.morphs.face_square = Norm01::new(1.0);
+        mine.set_slot(SlotKind::Hat, Some(ItemId("cap".into())));
+        let standard = SpaceCharacterPolicy { standard_player_bodies: true, ..Default::default() };
+        let out = standard.apply(mine.clone());
+        let base = BodyMorphs::default();
+        assert_eq!((out.morphs.height, out.morphs.build, out.morphs.leg_ratio), (base.height, base.build, base.leg_ratio));
+        assert_eq!((out.morphs.face_round, out.morphs.face_square), (mine.morphs.face_round, mine.morphs.face_square));
+        assert_eq!((&out.slots, &out.palette), (&mine.slots, &mine.palette));
+        assert!(out.validate().is_ok());
+        assert_eq!(SpaceCharacterPolicy::default().apply(mine.clone()).morphs, mine.morphs, "off: its own");
+        let mut robot = AvatarDescriptor::default();
+        robot.select_identity(AvatarIdentity::Robot);
+        let out = standard.apply(robot);
+        assert!(out.morphs.is_robot_body() && out.validate().is_ok());
     }
 }

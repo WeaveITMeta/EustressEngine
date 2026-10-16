@@ -8,7 +8,7 @@
       "name": "What is Eustress Engine?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. Built from the ground up in 100% Rust, it delivers unprecedented performance, memory safety, and developer experience—all while remaining free forever."
+        "text": "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds. It offers performance, memory safety and developer experience, and it stays free forever."
       }
     },
     {
@@ -16,7 +16,7 @@
       "name": "Is Eustress free?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes, Eustress Engine is free forever. You can create and publish games without paying anything. Premium subscriptions (Player Plus, Creator Pro, Bundle) are available for enhanced features like higher revenue share, more storage, and monthly Bliss currency."
+        "text": "Yes, Eustress Engine is free forever. You can create and publish simulations and games without paying anything. Premium subscriptions (Player Plus, Creator, Professional, Bundle) are available for enhanced features like higher revenue share, more storage, and monthly Bliss currency."
       }
     },
     {
@@ -32,7 +32,7 @@
       "name": "Does Eustress have visual scripting?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No. Eustress uses Soul, a text-based scripting language designed for game development. It does not have visual/node-based scripting like Unreal Blueprints or Unity Visual Scripting."
+        "text": "No. Eustress uses Soul, a text-based scripting language. It does not have visual/node-based scripting like Unreal Blueprints or Unity Visual Scripting."
       }
     },
     {
@@ -56,7 +56,7 @@
       "name": "How much do creators earn?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Free creators earn 25% of marketplace sales. Creator Pro subscribers earn 40% revenue share. All transactions use Bliss currency."
+        "text": "Free creators earn 25% of marketplace sales. Creator subscribers earn 40% revenue share. All transactions use Bliss currency."
       }
     },
     {
@@ -72,7 +72,7 @@
       "name": "What is the difference between Eustress Engine and Eustress Player?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Eustress Engine is the game engine and creation suite for building games. Eustress Player is the platform for discovering and playing community-created experiences via Steam."
+        "text": "Eustress Engine is the simulation and creation suite for building simulations, games and interactive worlds. Eustress Player is the platform for discovering and playing community-created simulations via Steam."
       }
     },
     {

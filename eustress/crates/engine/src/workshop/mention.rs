@@ -181,6 +181,13 @@ impl MentionEntry {
             format!("{}:{}/{}", kind.as_str(), space, rel_trimmed)
         }
     }
+
+    /// Whether `save_meta` writes this entry to disk. Live ECS mirrors are
+    /// session-scoped and re-derived every launch, so only Toml and
+    /// Filesystem entries are persisted.
+    pub fn is_persisted(&self) -> bool {
+        !matches!(self.source, MentionSource::Ecs)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -354,6 +361,13 @@ pub struct MentionIndex {
     /// Bump on every mutation. UI consumers track this to skip redundant
     /// model rebuilds.
     generation: u64,
+    /// Bumped only by changes to what `persist_all` writes: a persisted
+    /// (non-Ecs) entry added, replaced or removed, a rebuild, the MRU
+    /// queues, the Universe root (a new place to write) and the active user
+    /// (whose MRU bucket later uses fill). `autosave_index` tracks this one:
+    /// the live ECS mirror upserts every Instance that changes, all through
+    /// Play, and none of those entries reach disk.
+    persisted_generation: u64,
 }
 
 impl Default for MentionIndex {
@@ -365,6 +379,7 @@ impl Default for MentionIndex {
             active_user: "_offline".to_string(),
             universe_root: None,
             generation: 0,
+            persisted_generation: 0,
         }
     }
 }
@@ -388,6 +403,7 @@ impl MentionIndex {
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn generation(&self) -> u64 { self.generation }
+    pub fn persisted_generation(&self) -> u64 { self.persisted_generation }
     pub fn entries(&self) -> &HashMap<MentionId, MentionEntry> { &self.entries }
     pub fn get(&self, id: MentionId) -> Option<&MentionEntry> { self.entries.get(&id) }
     pub fn universe_root(&self) -> Option<&Path> { self.universe_root.as_deref() }
@@ -399,6 +415,7 @@ impl MentionIndex {
         if key != self.active_user {
             self.active_user = key;
             self.generation = self.generation.wrapping_add(1);
+            self.persisted_generation = self.persisted_generation.wrapping_add(1);
         }
     }
 
@@ -409,6 +426,7 @@ impl MentionIndex {
     pub fn set_universe_root(&mut self, root: Option<PathBuf>) {
         self.universe_root = root;
         self.generation = self.generation.wrapping_add(1);
+        self.persisted_generation = self.persisted_generation.wrapping_add(1);
     }
 
     /// Top-`k` entries for `query`. If `query` is empty, returns the
@@ -453,6 +471,7 @@ impl MentionIndex {
         let mru = self.mru.entry(user).or_default();
         mru.bump(id);
         self.generation = self.generation.wrapping_add(1);
+        self.persisted_generation = self.persisted_generation.wrapping_add(1);
     }
 
     /// Upsert one entry. Live ECS entries (source `Ecs`) override static
@@ -466,16 +485,30 @@ impl MentionIndex {
             }
         }
         self.searcher.upsert(&entry);
-        self.entries.insert(entry.id, entry);
+        let persisted = entry.is_persisted();
+        let replaced = self.entries.insert(entry.id, entry);
         self.generation = self.generation.wrapping_add(1);
+        // Disk changes when the entry is persisted or replaces one that was
+        // (an Ecs mirror taking over a Toml id drops that row from the
+        // file). An Ecs entry that is new, or replaces another Ecs entry,
+        // changes nothing there.
+        if persisted || replaced.is_some_and(|old| old.is_persisted()) {
+            self.persisted_generation = self.persisted_generation.wrapping_add(1);
+        }
     }
 
     /// Remove by id. MRU entries are retained across removals (since the
     /// same id might reappear if e.g. a file is restored from trash).
     pub(crate) fn remove(&mut self, id: MentionId) {
-        self.entries.remove(&id);
+        let removed = self.entries.remove(&id);
         self.searcher.remove(id);
         self.generation = self.generation.wrapping_add(1);
+        // Only a persisted entry leaving changes the file. The live mirror
+        // removes one id per kind for every despawned entity: most are
+        // absent, the rest Ecs.
+        if removed.is_some_and(|old| old.is_persisted()) {
+            self.persisted_generation = self.persisted_generation.wrapping_add(1);
+        }
     }
 
     /// Full rebuild. Called after a Universe scan finishes.
@@ -483,6 +516,7 @@ impl MentionIndex {
         self.searcher.rebuild(&new_entries);
         self.entries = new_entries;
         self.generation = self.generation.wrapping_add(1);
+        self.persisted_generation = self.persisted_generation.wrapping_add(1);
     }
 
     /// Merge one batch of scan results into the existing index. Useful for
@@ -504,6 +538,7 @@ impl MentionIndex {
     pub fn set_mru(&mut self, mru: HashMap<String, UserMru>) {
         self.mru = mru;
         self.generation = self.generation.wrapping_add(1);
+        self.persisted_generation = self.persisted_generation.wrapping_add(1);
     }
 }
 
@@ -680,5 +715,190 @@ pub fn sync_mention_active_user(
         .unwrap_or_else(|| "_offline".to_string());
     if key != index.active_user() {
         index.set_active_user(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch Universe root, removed again when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entry(id: u64, source: MentionSource) -> MentionEntry {
+        MentionEntry {
+            id: MentionId(id),
+            kind: MentionKind::Entity,
+            name: format!("Part{id}"),
+            qualifier: "Part".to_string(),
+            canonical_path: format!("entity:Space1/Workspace/Part{id}"),
+            space: "Space1".to_string(),
+            rel_path: format!("Workspace/Part{id}"),
+            icon_hint: "part".to_string(),
+            source,
+            entity: None,
+        }
+    }
+
+    fn counters(index: &MentionIndex) -> (u64, u64) {
+        (index.generation(), index.persisted_generation())
+    }
+
+    /// Adding or replacing a Toml or Filesystem entry changes the file, so
+    /// it moves the counter autosave reads.
+    #[test]
+    fn a_persisted_upsert_moves_the_persisted_generation() {
+        let mut index = MentionIndex::default();
+        let mut last = index.persisted_generation();
+        for (id, source) in [
+            (1, MentionSource::Toml),
+            (1, MentionSource::Toml),
+            (2, MentionSource::Filesystem),
+            (2, MentionSource::Filesystem),
+        ] {
+            index.upsert(entry(id, source));
+            assert_ne!(index.persisted_generation(), last, "{source:?} upsert of id {id}");
+            last = index.persisted_generation();
+        }
+    }
+
+    /// The live mirror's entries never reach disk: a new Ecs id, or an Ecs
+    /// entry over another, moves only `generation`.
+    #[test]
+    fn an_ecs_upsert_leaves_the_persisted_generation_alone() {
+        let mut index = MentionIndex::default();
+        index.upsert(entry(1, MentionSource::Toml));
+        let (generation, persisted) = counters(&index);
+        index.upsert(entry(2, MentionSource::Ecs));
+        index.upsert(entry(2, MentionSource::Ecs));
+        assert_eq!(counters(&index), (generation + 2, persisted));
+    }
+
+    /// An Ecs mirror taking over a persisted id drops that row from the
+    /// file, so it moves the counter.
+    #[test]
+    fn an_ecs_upsert_over_a_persisted_entry_moves_it() {
+        for source in [MentionSource::Toml, MentionSource::Filesystem] {
+            let mut index = MentionIndex::default();
+            index.upsert(entry(1, source));
+            let persisted = index.persisted_generation();
+            index.upsert(entry(1, MentionSource::Ecs));
+            assert_ne!(index.persisted_generation(), persisted, "Ecs over {source:?}");
+            assert_eq!(index.get(MentionId(1)).map(|e| e.source), Some(MentionSource::Ecs));
+        }
+    }
+
+    /// A late Toml upsert under a live Ecs mirror is turned away, as before,
+    /// and moves neither counter.
+    #[test]
+    fn a_toml_upsert_under_an_ecs_mirror_changes_nothing() {
+        let mut index = MentionIndex::default();
+        index.upsert(entry(1, MentionSource::Ecs));
+        let before = counters(&index);
+        index.upsert(entry(1, MentionSource::Toml));
+        assert_eq!(counters(&index), before);
+        assert_eq!(index.get(MentionId(1)).map(|e| e.source), Some(MentionSource::Ecs));
+    }
+
+    /// A remove moves the counter only when a persisted entry actually left.
+    #[test]
+    fn a_remove_moves_it_only_when_a_persisted_entry_left() {
+        let mut index = MentionIndex::default();
+        index.upsert(entry(1, MentionSource::Toml));
+        index.upsert(entry(2, MentionSource::Filesystem));
+        index.upsert(entry(3, MentionSource::Ecs));
+        // An absent id, an Ecs entry, the two persisted ones, one already gone.
+        for (id, moves) in [(99, false), (3, false), (1, true), (2, true), (2, false)] {
+            let persisted = index.persisted_generation();
+            index.remove(MentionId(id));
+            assert_eq!(index.persisted_generation() != persisted, moves, "remove of id {id}");
+        }
+    }
+
+    /// Every other change that reaches disk still moves it: a rebuild, the
+    /// MRU queues, a recorded use, the Universe root and the active user.
+    #[test]
+    fn every_other_change_that_reaches_disk_still_moves_it() {
+        let mut index = MentionIndex::default();
+        let mut seen = vec![index.persisted_generation()];
+        index.rebuild(HashMap::from([(MentionId(1), entry(1, MentionSource::Toml))]));
+        seen.push(index.persisted_generation());
+        index.set_mru(HashMap::new());
+        seen.push(index.persisted_generation());
+        index.record_usage(MentionId(1));
+        seen.push(index.persisted_generation());
+        index.set_universe_root(Some(PathBuf::from("Universe")));
+        seen.push(index.persisted_generation());
+        index.set_active_user("someone");
+        seen.push(index.persisted_generation());
+        let steps = ["rebuild", "set_mru", "record_usage", "set_universe_root", "set_active_user"];
+        for (step, pair) in steps.iter().zip(seen.windows(2)) {
+            assert_ne!(pair[0], pair[1], "{step} left the persisted generation alone");
+        }
+        // As before, a use of an unknown id and the same user again change nothing.
+        let before = counters(&index);
+        index.record_usage(MentionId(42));
+        index.set_active_user("someone");
+        assert_eq!(counters(&index), before);
+    }
+
+    /// A new searcher changes nothing on disk.
+    #[test]
+    fn swapping_the_searcher_moves_only_generation() {
+        let mut index = MentionIndex::default();
+        let (generation, persisted) = counters(&index);
+        index.swap_searcher(Box::new(SubstringSearcher::new()));
+        assert_eq!(counters(&index), (generation + 1, persisted));
+    }
+
+    /// A Play session's live-mirror churn (entities appear, change frame
+    /// after frame, then despawn) makes autosave write nothing, while the
+    /// first persisted change is written, so this rig can write.
+    #[test]
+    fn autosave_writes_nothing_for_a_play_style_stream_of_ecs_changes() {
+        use crate::workshop::mention_persistence::{autosave_index, meta_path};
+        let root = Scratch(std::env::temp_dir().join(format!("eustress-mention-autosave-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&root.0);
+        std::fs::create_dir_all(&root.0).unwrap();
+        // The root is set without its bump, so the counter starts where the
+        // system's last save (none yet, at 0) left it.
+        let mut world = World::new();
+        world.insert_resource(MentionIndex { universe_root: Some(root.0.clone()), ..MentionIndex::default() });
+        let autosave = world.register_system(autosave_index);
+
+        // Fifty entities spawn, then change on each of five frames.
+        for _ in 0..6 {
+            {
+                let mut index = world.resource_mut::<MentionIndex>();
+                for id in 1000..1050 {
+                    index.upsert(entry(id, MentionSource::Ecs));
+                }
+            }
+            world.run_system(autosave).unwrap();
+        }
+        // They despawn: the mirror removes the id for each kind of entry,
+        // two of the three absent.
+        {
+            let mut index = world.resource_mut::<MentionIndex>();
+            for id in 1000..1050 {
+                for kind in 0..3 {
+                    index.remove(MentionId(id + kind * 10_000));
+                }
+            }
+        }
+        world.run_system(autosave).unwrap();
+        assert_eq!(counters(world.resource::<MentionIndex>()), (6 * 50 + 3 * 50, 0));
+        assert!(!meta_path(&root.0).exists(), "autosave wrote the catalogue for live-mirror changes");
+
+        // Control: one persisted change, and the next frame writes it.
+        world.resource_mut::<MentionIndex>().upsert(entry(1, MentionSource::Toml));
+        world.run_system(autosave).unwrap();
+        assert!(meta_path(&root.0).exists(), "this rig never writes, so the check above proves nothing");
     }
 }

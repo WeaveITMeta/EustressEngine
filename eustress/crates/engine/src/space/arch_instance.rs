@@ -190,6 +190,7 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
             } else {
                 core.scene.clone()
             },
+            scale_kind: None,
         })
     };
 
@@ -281,6 +282,7 @@ mod tests {
             asset: Some(AssetReference {
                 mesh: "parts/block.glb".into(),
                 scene: "Scene0".into(),
+                scale_kind: None,
             }),
             transform: TransformData {
                 position: [1.0, 2.0, 3.0],

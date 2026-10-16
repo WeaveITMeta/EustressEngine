@@ -832,15 +832,18 @@ pub fn build_batch_parts(
 /// The `space://` asset URLs of a Custom layer's mesh and material: the first
 /// primitive of the first mesh and the first material of `path`, a file
 /// inside the Space folder named relative to it, as every Space mesh is
-/// loaded. A path that names its own asset source (`bundled://...`) keeps
-/// it, and a label after `#` is replaced. `None` for an empty path.
+/// loaded. A path that names Eustress's own sources (`space://`, `bundled://`,
+/// `embedded://`) keeps them, and a label after `#` is replaced. `None` for
+/// an empty path, and for one that leaves the Space or names any other
+/// source ([`crate::space_path::contained_url`]): a Space from anywhere loads
+/// nothing from outside itself, and never opens a network share.
 pub fn custom_asset_urls(path: &str) -> Option<(String, String)> {
     let path = path.trim().replace('\\', "/");
     let file = path.split('#').next().unwrap_or("").trim();
     if file.is_empty() {
         return None;
     }
-    let source = if file.contains("://") { file.to_string() } else { format!("space://{}", file.trim_start_matches('/')) };
+    let source = crate::space_path::contained_url(file, std::path::Path::new(""))?;
     Some((format!("{source}#Mesh0/Primitive0"), format!("{source}#Material0/std")))
 }
 
@@ -876,8 +879,8 @@ fn scatter_material(material: ScatterMaterial) -> StandardMaterial {
     match material {
         ScatterMaterial::Foliage => StandardMaterial {
             base_color: Color::WHITE,
-            perceptual_roughness: 0.85,
-            reflectance: 0.25,
+            perceptual_roughness: 0.9,
+            reflectance: 0.12,
             // A blade is one strip seen from both sides. Culling is off
             // rather than `double_sided` set: that flips a back face's
             // normal, and the blades' normals lean up so that both faces
@@ -887,8 +890,10 @@ fn scatter_material(material: ScatterMaterial) -> StandardMaterial {
         },
         ScatterMaterial::Solid => StandardMaterial {
             base_color: Color::WHITE,
-            perceptual_roughness: 0.9,
-            reflectance: 0.3,
+            // Leaves, bark and weathered stone have almost no sheen: a higher
+            // reflectance puts a plastic highlight on a lit crown.
+            perceptual_roughness: 0.95,
+            reflectance: 0.18,
             ..default()
         },
     }
@@ -1741,6 +1746,7 @@ mod tests {
                 smoothing: 0.5,
                 bed_material: None,
                 shoulder_material: None,
+                design: None,
             }),
         }
     }
@@ -1914,6 +1920,27 @@ mod tests {
         assert_eq!(custom_asset_urls("   "), None);
         let custom = ScatterLayer { kind: ScatterKind::Custom, ..ScatterLayer::default() };
         assert!(!custom.can_place(&config(), IVec2::ZERO), "a custom layer without a mesh places nothing");
+    }
+
+    #[test]
+    fn custom_meshes_never_load_from_outside_the_space() {
+        // Out of the folder, off another drive, through another scheme: nothing.
+        for path in ["../../x.glb", "Assets/../../x.glb", "C:/x.glb", "C:\\Users\\x.glb", "file:///x.glb", "https://example.com/x.glb"] {
+            assert_eq!(custom_asset_urls(path), None, "{path} loads from outside the Space");
+        }
+        // A network share never becomes a share, only a folder inside the Space.
+        for path in ["//host/share/x.glb", "\\\\host\\share\\x.glb"] {
+            assert_eq!(
+                custom_asset_urls(path).map(|(mesh, _)| mesh),
+                Some("space://host/share/x.glb#Mesh0/Primitive0".into()),
+                "{path} reaches a network share"
+            );
+        }
+        // A leading slash is the Space's root.
+        assert_eq!(
+            custom_asset_urls("/Assets/pine.glb").map(|(mesh, _)| mesh),
+            Some("space://Assets/pine.glb#Mesh0/Primitive0".into())
+        );
     }
 
     // ── The system ───────────────────────────────────────────────────────

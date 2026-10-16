@@ -19,6 +19,8 @@ enabled = true
 intensity = 130000.0
 color = [255, 250, 242]
 angular_size = 8.0
+# Marks the size above as the author's: it is never migrated.
+size_version = 1
 cast_shadows = true
 god_rays = 1.0
 day_of_year = 172

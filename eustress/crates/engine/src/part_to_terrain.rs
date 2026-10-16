@@ -117,8 +117,18 @@ fn handle_part_to_terrain(
     // Optional so this plugin keeps working without `EngineTerrainPlugin`.
     mut dirty: Option<ResMut<TerrainDirtyChunks>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     for event in events.read() {
+        // During Play a conversion waits for Stop: it raises the terrain and
+        // can despawn its sources. Nothing sends this request today; refused
+        // where it is read, like the other terrain edits, so one sent later
+        // is consumed and never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "turn parts into terrain") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let Ok((root, config, mut data)) = terrain.single_mut() else {
             warn!("🏔 Part to Terrain: no terrain is active");
             continue;
@@ -275,5 +285,25 @@ mod tests {
         assert_eq!(material_label_to_slot("stone"), TerrainMaterial::Rock.to_u8());
         assert_eq!(material_label_to_slot("brown"), TerrainMaterial::Dirt.to_u8());
         assert_eq!(material_label_to_slot("unobtainium"), TerrainMaterial::Grass.to_u8());
+    }
+
+    /// During Play a conversion is refused and said, and the request is
+    /// consumed; while editing nothing is refused.
+    #[test]
+    fn play_refuses_part_to_terrain() {
+        use crate::play_mode::PlayModeState;
+        for (state, refused) in [(PlayModeState::Playing, true), (PlayModeState::Paused, true), (PlayModeState::Editing, false)] {
+            let mut app = App::new();
+            app.add_plugins(PartToTerrainPlugin);
+            app.insert_resource(State::new(state));
+            // `new()`, not the derived default, which keeps no notice.
+            app.insert_resource(crate::notifications::NotificationManager::new());
+            app.init_resource::<crate::ui::OutputConsole>();
+            app.world_mut().write_message(PartToTerrainEvent::default());
+            app.update();
+            let output: Vec<String> = app.world().resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+            let expected: Vec<String> = if refused { vec!["Stop Play to turn parts into terrain.".to_string()] } else { Vec::new() };
+            assert_eq!(output, expected, "{state:?}");
+        }
     }
 }

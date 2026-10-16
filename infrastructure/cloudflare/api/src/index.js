@@ -37,74 +37,100 @@ import {
   blissEmissionRate, yearsSince, readSupplyMinor, readDistributedMinor, valueScoreForDay, projectEmissionMinor,
 } from './bliss.mjs';
 import { treasuryCall, treasuryView, splitSale, dripFor } from './treasury.mjs';
+import {
+  handleDeltaRoute, deltaCredit, deltaDebit, readPlan, writePlan, planAllowsCashout, planGrantExpiry,
+  creditRefForDeposit, PLANS,
+} from './delta.mjs';
 // Durable Object classes are exported from the Worker's main module.
 export { Wallet, CommerceHub } from './commerce.mjs';
 export { Treasury } from './treasury.mjs';
+export { DeltaAccount } from './delta.mjs';
 export { LiveHost } from './live.mjs';
+export { LiveIndex } from './live_index.mjs';
 export { GuestAllowance } from './guest.mjs';
+export { AccountAuth } from './account_auth.mjs';
+export { PasskeyIndex } from './passkey_index.mjs';
+import { accountCall, accountState, keyReplaceTerms } from './account_auth.mjs';
+import { handleKeyRotationRoute, handleAdminReplaceKeyRoute, handleKeyRestoreRoute } from './identity_routes.mjs';
+import { handlePasskeyRoute, identityFileRequired } from './passkeys.mjs';
+import { handleEmailRoute } from './email_routes.mjs';
+import { handleReleaseNotify } from './release_notify.mjs';
+import { isAdmin } from './admin_check.mjs';
+import { readAccountEmail } from './email_ops.mjs';
+import { freshGate, verifyFreshAuth, payoutPinnedUntil } from './fresh_auth.mjs';
 import { handleGuest } from './guest.mjs';
-import { handleLive } from './live.mjs';
+import { handleLive, livePlayInfo } from './live.mjs';
+import { handleLiveNow } from './live_index.mjs';
+import { handleCoverRoute, coverFields } from './cover.mjs';
+import { handleChangelogRoute } from './changelogs.mjs';
+import { handleMakers } from './makers.mjs';
+import { handleTimeZoneRoute, accountTimeZone, timeZoneKey } from './account_time_zone.mjs';
+import { handleProfileRoute, publicProfileOf, ownerPendingOf } from './account_profile.mjs';
+import {
+  handleAdultContentRoute, viewerOf, ratingCap, ratingOf, isAdultListing, refuseAdult, viewerHeaders,
+  refuseUnsignedImage, imageCacheControl, withSignedImages, resolveDob, ageAt,
+} from './adult_content.mjs';
+import { countVisit, viewerKey, playCountOf } from './visits.mjs';
+import { leaseIsLive } from './guest.mjs';
 import { corsHeaders, siteOrigin } from './cors.mjs';
 import { imagePart, textPart, userMessage } from './xai.mjs';
+import { prepareUserImage, sha256Hex as sha256OfBytes } from './user_images.mjs';
 import {
   handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
-  handleNotificationRoute, authorStatusOf,
-  POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION,
+  handleNotificationRoute, authorStatusOf, contentLockedFor, inReview,
+  simWithLegalLock, legalLockedIds, withLegalLockFrom, simForServing, thumbnailApproved, objectMatchesBinding,
+  POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION, RATINGS, REVIEW_SCHEMA,
 } from './moderation.mjs';
-import { handleWorldRoute, WORLD_FORMAT } from './world.mjs';
+import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkMaxPlayers } from './world.mjs';
+import { checkTags, listingTags, tagFilter, queryMatchesTag, genreTag, listingTagFields, setAuthorTags, withTagsWrittenBack, genreAliasValues } from './tags.mjs';
 import { handleIdentityRoute } from './identity.mjs';
+import { handleEconomicsRoute } from './economics.mjs';
+import { handleTakedownRoute, sweepTakedowns, refuseBlockedUpload, hashStoredObject, checkCaptureUpload } from './takedown.mjs';
+import { handleCaseRoute } from './case_history.mjs';
+// Illegal content: the evidence vault and the legal reports written from it (src/evidence_vault.mjs, src/legal_reports.mjs).
+import { handleEvidenceRoute, retryPendingEvidence } from './evidence_vault.mjs';
+import { handleLegalReportRoute, sweepLegalReports } from './legal_reports.mjs';
 // The Guardian Policy and the moderation playbook, as shipped. Generated from
 // the docs by `npm run sync-policy`; the moderation tests fail when the copy
 // drifts from docs/, and /health reports whether the shipped policy still
 // hashes to the anchor recorded in DECENTRALIZATION_PLAN.md section 5.
 import { GUARDIAN_POLICY_TEXT, MODERATION_PLAYBOOK_TEXT } from './generated/policy_text.mjs';
-
-const GROK_MODEL = 'grok-4.6';
+// The Grok model: one resolver, auto-update behind a canary, admin pin (src/grok_model.mjs).
+import { grokClient, resolveGrokModel, sweepGrokModel, handleGrokModelRoute } from './grok_model.mjs';
+// Identity verification: an outage is not a verdict, and every account is made from one verified KYC session (src/kyc_identity.mjs).
+import {
+  kycGate, kycSessionForAccount, consumeKycSession, linkKycRecords, needsKyc, handleKycLink, handleKycLegacyRoute,
+  rejectedForService, reopenedUpload, modelFlags, noteGrokKyc, grokKycHealth,
+  handleKycStart, uploadTokenValid, kycReader, holderFreeReason, undoAccountWrites, claimPersonAndSession, releaseIdHash, handleKycCollisionRoute, idPepperSet, KYC_UPLOAD_REFUSED,
+  KYC_UNAVAILABLE_MESSAGE, KYC_UNAVAILABLE_RETRY_AFTER, KYC_SERVICE_REFUNDS_PER_SESSION,
+} from './kyc_identity.mjs';
 
 // Everything moderation.mjs needs from this file, injected so the pipeline
 // stays testable without a Worker runtime. The policy hash is computed once
 // per isolate over the text actually shipped, never copied from the doc.
 let shippedPolicyHash = null;
-async function moderationDeps(cors) {
+async function moderationDeps(cors, env) {
   if (!shippedPolicyHash) shippedPolicyHash = 'sha256:' + await sha256Hex(GUARDIAN_POLICY_TEXT);
   if (shippedPolicyHash !== POLICY_HASH_ANCHORED)
     console.error(`moderation: shipped policy hash ${shippedPolicyHash} differs from the anchored ${POLICY_HASH_ANCHORED}; verdicts cite the shipped hash`);
+  const grok = await grokFor(env);
   return {
-    verifyAuth, requireAdmin, json, auditLog, grokFetch, extractGrokText, cors,
+    verifyAuth, requireAdmin, json, auditLog, grokFetch: grok.fetch, extractGrokText, cors,
     policyText: GUARDIAN_POLICY_TEXT, policyHash: shippedPolicyHash, playbookText: MODERATION_PLAYBOOK_TEXT,
+    // The model grokFetch sends, so the review costs are recorded under it (src/review_costs.mjs).
+    grokModel: grok.model,
   };
 }
 
-/// Single entry point for every xAI call.
-///
-/// The Responses API is STATEFUL: it stores prompts and outputs for 30 days by
-/// default, retrievable later by response id. For these calls that payload is
-/// photographs of government identity documents plus applicants' legal names
-/// and dates of birth, so `store: false` is mandatory, not a preference.
-///
-/// The privacy fields are applied AFTER the caller's body is spread, so a call
-/// site cannot override them, and routing every request through here means a
-/// new call site cannot forget them.
-///
-/// Two limits this cannot reach, both account-level rather than per-request:
-///   - xAI retains API traffic for 30 days for abuse auditing (encrypted at
-///     rest, then deleted). Removing that needs a Zero Data Retention
-///     agreement arranged with xAI on the account.
-///   - xAI states it does not train on API data.
-async function grokFetch(body, apiKey) {
-  return fetch('https://api.x.ai/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      ...body,
-      model: GROK_MODEL,
-      store: false,
-    }),
-  });
-}
+// What src/takedown.mjs and src/case_history.mjs need from this file.
+const takedownDeps = () => ({ verifyAuth, requireAdmin, json, auditLog });
+
+/// Single entry point for every xAI call: a client holding the model
+/// resolveGrokModel(env) chose, whose fetch sends it with `store: false`
+/// (src/grok_model.mjs says why that is mandatory). `grok.model` is the model
+/// to record beside a result.
+const grokDeps = () => ({ requireAdmin, json, auditLog });
+const grokFor = (env) => grokClient(env, grokDeps());
 
 // KYC jurisdiction ontology
 // ═══════════════════════════════════════════════════════════════════════════
@@ -213,7 +239,8 @@ function eligibleAtFrom(dob, minAge) {
 /// becomes eligible on its 18th birthday with nobody doing anything. Caching
 /// "underage" as a decision would lock the account out permanently.
 ///
-/// The date of birth is resolved by strength of evidence:
+/// The date of birth is resolved by strength of evidence (adult_content.mjs
+/// resolveDob, which the Adult content setting's 21+ band reads too):
 ///   1. `extracted_dob` — read off the document. Always wins when present.
 ///   2. `age_dob` — previously resolved and pinned to the record, so a later
 ///      edit to a self-declared birthday cannot move the bar.
@@ -252,9 +279,7 @@ async function requireVerifiedAdult(userId, user, env) {
   if (kyc.age_verified === true) return { ok: true, kyc };
 
   const minAge = minimumAgeFor(kyc.iso2 || 'XX');
-  const dob = kyc.extracted_dob || kyc.age_dob || user?.birthday || '';
-  const source = kyc.extracted_dob ? 'document'
-    : (kyc.age_dob ? kyc.age_source || 'pinned' : (user?.birthday ? 'declared' : null));
+  const { dob, source } = resolveDob(kyc, user);
   const age = ageFromDob(dob);
 
   if (age === null) {
@@ -332,24 +357,11 @@ function normaliseDocumentSex(value) {
   return '';
 }
 
+// Whole years from `dob` (YYYY-MM-DD) to now, in UTC; null when the date is
+// absent, malformed, rolled over (2009-02-30) or in the future. One count for
+// every age check, the Adult content 21+ band's included (adult_content.mjs ageAt).
 function ageFromDob(dob) {
-  if (typeof dob !== 'string') return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dob.trim());
-  if (!m) return null;
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const t = Date.UTC(y, mo - 1, d);
-  const dt = new Date(t);
-  // Reject dates that rolled over (e.g. 2009-02-30) or are impossible.
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d)
-    return null;
-  const now = new Date();
-  if (t > now.getTime()) return null; // born in the future
-  let age = now.getUTCFullYear() - y;
-  const beforeBirthday =
-    now.getUTCMonth() < mo - 1 ||
-    (now.getUTCMonth() === mo - 1 && now.getUTCDate() < d);
-  if (beforeBirthday) age -= 1;
-  return age;
+  return ageAt(dob, Date.now());
 }
 
 // Desktop gear icon (icon.png from `crates/engine/assets/`) embedded as
@@ -359,203 +371,12 @@ function ageFromDob(dob) {
 // reliable way to brand the email header.
 import { ICON_GEAR_PNG_B64 } from './icon-gear.js';
 
-// ─── Identity email — branded template ─────────────────────────────────────
-// One canonical place to assemble the registration / identity-backup
-// email so /api/auth/register's auto-send and /api/identity/email-backup
-// share pixel-identical output. Emits HTML + plain-text bodies + an
-// attachment descriptor for the multipart/mixed wrapper.
-//
-// Brand cues match `crates/web/src/components/footer.rs` (industrial
-// dark theme, "Creation at the speed of thought." tagline, four-column
-// nav) and `crates/engine/assets/icon.png` (the desktop gear). The
-// gear ships as a hosted PNG (served by this same Worker at
-// `/assets/eustress-gear.png`) — Gmail strips inline `<svg>` for
-// security, so PNG-via-URL is the only reliable header-image path.
-//
-// Per-feedback layout choices (2026-04-25):
-//   * Header has the gear above the "EUSTRESS ENGINE" wordmark, both
-//     centred — matches the website footer's brand block.
-//   * No inline TOML preview block; the body points the user to the
-//     attached `.toml` file instead.
-//   * Footer wordmark, tagline, social row, nav columns, copyright —
-//     all centred. Status pill removed.
-//   * Subject + copy reframed as "Registration", not "Backup".
-function buildIdentityEmail({ username, toml_content, host }) {
-  const safeName = (username || 'Creator').replace(/[<>"']/g, '');
-  const filename = `eustress-${safeName}.toml`;
-  // Public URL of the gear PNG. Defaults to the production hostname
-  // — the `/assets/eustress-gear.png` route is bound to both
-  // `api.eustress.dev/*` and the workers.dev URL, so either resolves.
-  // Caller-supplied `host` (when the Worker is reached via HTTP) still
-  // wins, keeping image origin == request origin during dev.
-  const iconUrl = (host || 'https://api.eustress.dev') + '/assets/eustress-gear.png';
-
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
-  <meta name="supported-color-schemes" content="dark">
-  <title>Eustress Identity Registration</title>
-</head>
-<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#c9d1d9;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0d1117;">
-    <tr>
-      <td align="center" style="padding:32px 16px;">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#161b22;border:1px solid #30363d;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-
-          <!-- Header: gear PNG centred above "EUSTRESS ENGINE" wordmark.
-               Mirrors the website footer's brand block so the same
-               identity reads top-of-email and bottom-of-email. -->
-          <tr>
-            <td align="center" style="background:linear-gradient(135deg,#1a1f2e 0%,#0f1729 50%,#16213e 100%);padding:40px 32px 32px;text-align:center;border-bottom:1px solid #30363d;">
-              <img src="${iconUrl}" width="80" height="80" alt="" style="display:block;margin:0 auto 18px;border:0;outline:none;text-decoration:none;">
-              <div style="color:#f0f6fc;font-size:18px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;line-height:1;">Eustress Engine</div>
-              <div style="color:#8b949e;font-size:12px;margin-top:8px;letter-spacing:0.02em;">Identity Registration</div>
-            </td>
-          </tr>
-
-          <!-- Body -->
-          <tr>
-            <td style="padding:32px 32px 8px;">
-              <p style="color:#f0f6fc;font-size:15px;margin:0 0 16px;line-height:1.5;">Welcome, <strong>${safeName}</strong>.</p>
-              <p style="color:#8b949e;font-size:14px;margin:0 0 24px;line-height:1.6;">
-                Your Eustress account is registered. Your identity file
-                <code style="background:#21262d;padding:2px 6px;border-radius:4px;color:#79c0ff;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:12px;">${filename}</code>
-                is attached to this email — it contains your Ed25519 private key, the cryptographic root of the account. Treat it like a password-manager vault key: store it securely, back it up off-device, and never share it.
-              </p>
-
-              <!-- Centred call-to-action pointing at the attachment dock.
-                   Replaces the inline TOML preview block so the user
-                   downloads the real .toml file from this email
-                   instead of copy-pasting from a code block. -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;">
-                <tr>
-                  <td align="center" style="background:linear-gradient(135deg,#1a2a3a 0%,#1e2a40 100%);border:1px solid #2a3a4a;border-radius:10px;padding:24px 20px;">
-                    <div style="color:#8ab4f8;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;margin:0 0 8px;">Your Identity File</div>
-                    <div style="color:#f0f6fc;font-size:15px;font-family:'SF Mono',Consolas,Monaco,monospace;margin:0 0 4px;">${filename}</div>
-                    <div style="color:#8b949e;font-size:12px;line-height:1.5;">Download from the attachment dock.</div>
-                  </td>
-                </tr>
-              </table>
-
-              <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:18px 20px;margin:0 0 22px;">
-                <div style="color:#c9d1d9;font-size:13px;font-weight:600;letter-spacing:0.02em;margin:0 0 10px;">How to use your registration</div>
-                <ol style="color:#8b949e;font-size:13px;margin:0;padding-left:20px;line-height:1.8;">
-                  <li>Save the attached <code style="background:#21262d;padding:1px 5px;border-radius:3px;color:#79c0ff;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:11px;">${filename}</code> on the device(s) you sign in from.</li>
-                  <li>Sign in at <a href="https://eustress.dev/login" style="color:#58a6ff;text-decoration:none;border-bottom:1px solid #2a4a6a;">eustress.dev/login</a></li>
-                  <li>Or load it in EustressEngine via the Sign In dialog.</li>
-                </ol>
-              </div>
-
-              <p style="color:#f85149;font-size:12px;margin:0 0 6px;text-align:center;font-weight:500;">
-                ⚠ Never share your <code style="background:rgba(248,81,73,0.1);padding:1px 5px;border-radius:3px;color:#ff7b72;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:11px;">private_key</code> with anyone.
-              </p>
-              <p style="color:#6e7681;font-size:11px;margin:0;text-align:center;line-height:1.5;">
-                Eustress staff will never ask for it. If you receive a request claiming otherwise, it is fraudulent.
-              </p>
-            </td>
-          </tr>
-
-          <!-- Footer brand block — mirrors the website footer. Everything
-               here is centred per design feedback (top + footer share the
-               same EUSTRESS ENGINE wordmark, both centred). -->
-          <tr>
-            <td align="center" style="padding:30px 32px 14px;border-top:1px solid #30363d;background:#0d1117;text-align:center;">
-              <div style="color:#f0f6fc;font-size:13px;font-weight:700;letter-spacing:0.10em;text-transform:uppercase;margin:0 0 8px;">Eustress Engine</div>
-              <div style="color:#6e7681;font-size:12px;margin:0 0 18px;">Creation at the speed of thought.</div>
-              <div>
-                <a href="https://twitter.com/eustressengine" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">X</a>
-                <span style="color:#30363d;">·</span>
-                <a href="https://discord.gg/DGP9my8DYN" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">Discord</a>
-                <span style="color:#30363d;">·</span>
-                <a href="https://github.com/WeaveITMeta/EustressEngine" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">GitHub</a>
-              </div>
-            </td>
-          </tr>
-
-          <!-- Footer nav columns — centred grid, each column header
-               centred over centred links. Outlook desktop renders nested
-               tables fine; this stays predictable across clients. -->
-          <tr>
-            <td style="padding:8px 16px 24px;background:#0d1117;">
-              <table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-                <tr>
-                  <td valign="top" align="center" style="padding:0 14px;">
-                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Product</p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/gallery" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Gallery</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/learn" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Learn</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/bliss" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Bliss</a></p>
-                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/premium" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Premium</a></p>
-                  </td>
-                  <td valign="top" align="center" style="padding:0 14px;">
-                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Community</p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/groups" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Groups</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://discord.gg/DGP9my8DYN" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Discord</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://x.com/search?q=%23EustressEngine" style="color:#c9d1d9;text-decoration:none;font-size:12px;">X</a></p>
-                    <p style="margin:0;text-align:center;"><a href="https://x.com/simbuilder" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Forums</a></p>
-                  </td>
-                  <td valign="top" align="center" style="padding:0 14px;">
-                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Company</p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/about" style="color:#c9d1d9;text-decoration:none;font-size:12px;">About</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/careers" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Careers</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/contact" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Contact</a></p>
-                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/press" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Press Kit</a></p>
-                  </td>
-                  <td valign="top" align="center" style="padding:0 14px;">
-                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Legal</p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/terms" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Terms</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/privacy" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Privacy</a></p>
-                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/cookies" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Cookies</a></p>
-                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/acts" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Acts</a></p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- Bottom bar — centred copyright only; status pill removed
-               per design feedback. -->
-          <tr>
-            <td align="center" style="padding:14px 32px 22px;background:#0d1117;border-top:1px solid #30363d;text-align:center;">
-              <span style="color:#484f58;font-size:11px;">© 2025 Eustress Engine. All rights reserved.</span>
-            </td>
-          </tr>
-
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-
-  const text =
-    `EUSTRESS ENGINE — Identity Registration\n\n` +
-    `Welcome, ${safeName}.\n\n` +
-    `Your Eustress account is registered. Your identity file (${filename}) is attached to this email.\n` +
-    `It contains your Ed25519 private key — store it securely, back it up off-device, and never share it.\n\n` +
-    `Download the attached ${filename} from this email to use it.\n\n` +
-    `How to use your registration:\n` +
-    `  1. Save the attached ${filename} on the device(s) you sign in from.\n` +
-    `  2. Sign in at https://eustress.dev/login\n` +
-    `  3. Or load it in EustressEngine via the Sign In dialog.\n\n` +
-    `WARNING: Never share your private_key with anyone. Eustress staff will never ask for it.\n\n` +
-    `— Eustress Engine\n` +
-    `Creation at the speed of thought.\n` +
-    `https://eustress.dev`;
-
-  return {
-    subject: `Your Eustress Identity Registration — ${safeName}`,
-    html,
-    text,
-    attachment: {
-      filename,
-      mime: 'application/toml',
-      content: toml_content,
-    },
-  };
-}
+// ─── Identity email ─────────────────────────────────────────────────────────
+// The registration / identity-backup email is built in src/identity_email.mjs,
+// on the same shell (src/email_shell.mjs) as the account emails, so
+// /api/auth/register's auto-send and /api/identity/email-backup share one
+// output; its header gear is the asset served at `/assets/eustress-gear.png`.
+import { buildIdentityEmail } from './identity_email.mjs';
 
 // ─── Hand-built MIME helpers ────────────────────────────────────────────────
 // Workers' `EmailMessage(from, to, raw)` constructor takes a full RFC 5322
@@ -638,6 +459,128 @@ function wrapBase64(b64, width = 76) {
  *     │    └─ text/html
  *     └─ <attachmentMime> (Content-Disposition: attachment)
  */
+/// A single plain email address, lowercased, or null. No display names, no
+/// lists, no control characters: this value goes into a `To:` header and the
+/// envelope recipient, so anything that could add a header or a second
+/// recipient is refused.
+const EMAIL_ADDRESS = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+function cleanEmailAddress(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (v.length > 254 || !EMAIL_ADDRESS.test(v)) return null;
+  return v.toLowerCase();
+}
+
+/// The longest identity file the Worker will email. A real one is about 600
+/// bytes; the limit leaves room and no more.
+const MAX_BACKUP_TOML = 4 * 1024;
+
+/// An Ed25519 public key as the sign-up page and login use it: 32 bytes, hex.
+const PUBLIC_KEY_HEX = /^[0-9a-fA-F]{64}$/;
+
+/// The key in its one stored spelling (lower case), or null when it is not a
+/// 64-hex string.
+function normalPublicKey(value) {
+  return typeof value === 'string' && PUBLIC_KEY_HEX.test(value) ? value.toLowerCase() : null;
+}
+
+/// Whether `text` is the identity file for THIS account and nothing else.
+///
+/// The Worker mails this file from identity@eustress.dev under the company's
+/// branding to an address that nobody has verified, so what it carries must be
+/// fixed by us, not written by the caller. The file is the one the sign-up page
+/// builds (`generate_identity_toml` in web/src/pages/login.rs): three sections,
+/// fixed keys, every value of a fixed shape, the username and public key
+/// exactly the account's, and no free text anywhere. A comment is allowed only
+/// as one of the two header lines the page writes. Changing that file's shape
+/// means changing this check, or no backup is sent.
+///
+/// The page's file carries the account, the keys and `verified`, and nothing
+/// about the person. Files issued before that also hold `[profile] birthday` and
+/// the ID type and hash; both shapes pass, so the Worker and the site can be
+/// deployed in either order. Once every sign-up page is the new one, the three
+/// old fields can be refused here.
+const IDENTITY_FILE_VALUES = {
+  identity: {
+    version: /^[0-9.]{1,10}$/,
+    user_id: /^[0-9a-f-]{36}$/,
+    username: null,   // must equal the account's
+    public_key: null, // must equal the account's
+    private_key: /^[0-9a-f]{64}$/,
+    issued_at: /^[0-9TZ:+.-]{10,40}$/,
+  },
+  profile: { birthday: /^\d{4}-\d{2}-\d{2}$/ },
+  verification: {
+    id_type: /^[\p{L}\p{N}_.()/+-]{1,48}$/u,
+    id_hash: /^[0-9a-f]{64}$/,
+    verified: /^(true|false)$/,
+  },
+};
+const IDENTITY_FILE_COMMENTS = [
+  /^# Eustress Identity [—-] generated [0-9TZ:+.-]{10,40}$/,
+  /^# This file IS your account\. Keep it safe\. Do not share your private key\.$/,
+];
+
+function validIdentityFile(text, { username, public_key }) {
+  if (typeof text !== 'string' || text.length < 50 || text.length > MAX_BACKUP_TOML) return false;
+  if (typeof username !== 'string' || typeof public_key !== 'string' || !PUBLIC_KEY_HEX.test(public_key)) return false;
+  let section = null;
+  const seen = new Set();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (line === '') continue;
+    if (line.startsWith('#')) {
+      if (!IDENTITY_FILE_COMMENTS.some((re) => re.test(line))) return false;
+      continue;
+    }
+    const header = /^\[([a-z]+)\]$/.exec(line);
+    if (header) {
+      if (!Object.hasOwn(IDENTITY_FILE_VALUES, header[1]) || seen.has(header[1])) return false;
+      section = header[1];
+      seen.add(section);
+      continue;
+    }
+    const pair = /^([a-z_]+) = (?:"([^"\\\r\n]*)"|(true|false))$/.exec(line);
+    if (!pair || section === null) return false;
+    const [, key, quoted, bare] = pair;
+    if (!Object.hasOwn(IDENTITY_FILE_VALUES[section], key) || seen.has(`${section}.${key}`)) return false;
+    seen.add(`${section}.${key}`);
+    const value = quoted ?? bare;
+    if (section === 'identity' && key === 'username') { if (value !== username) return false; continue; }
+    if (section === 'identity' && key === 'public_key') { if (value.toLowerCase() !== public_key.toLowerCase()) return false; continue; }
+    if (!IDENTITY_FILE_VALUES[section][key].test(value)) return false;
+  }
+  return seen.has('identity.username') && seen.has('identity.public_key');
+}
+
+/// How many identity emails one address or one account can be sent in a day,
+/// the two sends (sign-up and the backup route) counted together. The address
+/// on an account is not verified, so the number of accounts an attacker can
+/// create is no limit on what lands in one stranger's inbox: the recipient is
+/// what is counted.
+const IDENTITY_EMAILS_PER_DAY = 3;
+
+/// Spend one send from a daily allowance kept in KV; false when it is used up.
+/// Read then write, so a parallel burst can overrun it by a few; the platform
+/// limiter in front of every caller bounds that.
+async function takeDailySlot(env, scope, id) {
+  if (!env.USERS) return true;
+  const key = `mailcap:${scope}:${id}:${new Date().toISOString().slice(0, 10)}`;
+  const used = parseInt((await env.USERS.get(key)) || '0', 10) || 0;
+  if (used >= IDENTITY_EMAILS_PER_DAY) return false;
+  await env.USERS.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
+  return true;
+}
+
+/// One identity email's worth of allowance for `address`, and for `accountId`
+/// when there is one. The address is stored hashed.
+async function identityEmailAllowed(env, address, accountId) {
+  const recipient = (await sha256Hex(address)).slice(0, 32);
+  if (!(await takeDailySlot(env, 'to', recipient))) return false;
+  if (accountId && !(await takeDailySlot(env, 'acct', accountId))) return false;
+  return true;
+}
+
 function buildMimeWithAttachment({
   from,
   to,
@@ -646,6 +589,11 @@ function buildMimeWithAttachment({
   text,
   attachment, // { filename, mime, content } — content is utf-8 string
 }) {
+  // A CR or LF in any header value would let its writer add headers (a Bcc, a
+  // second To). Callers validate, and this refuses anyway.
+  for (const value of [from, to, subject]) {
+    if (/[\r\n]/.test(String(value))) throw new Error('header value contains a line break');
+  }
   const mixedBoundary = '----=_eustress_mixed_' + Math.random().toString(36).slice(2);
   const altBoundary = '----=_eustress_alt_' + Math.random().toString(36).slice(2);
   const b64 = btoa(unescape(encodeURIComponent(attachment.content)));
@@ -700,6 +648,17 @@ export default {
       const scoreDate = new Date(at.getTime() - 86400 * 1000).toISOString().split('T')[0];
       let settlement = null;
       let failed = [];
+      // TAKE IT DOWN requests, every hour and first, for the law's 48 hours: every step a takedown still owes runs again,
+      // staff are emailed while a removal is owed, and the scan for identical copies goes on (src/takedown.mjs).
+      try { const td = await sweepTakedowns(env, takedownDeps()); if (td.still_pending) failed.push(`takedowns: ${td.still_pending} case(s) still owe a step`); }
+      catch (e) { failed.push(`takedowns: ${e.message}`); console.error('takedown sweep failed:', e); }
+      // Illegal content, every hour: seals that failed are tried again (nothing is deleted while they wait), legal reports waiting
+      // for a sender are tried (every sender is off by default, so they stay queued as ready to send), and once a week the
+      // confirmed scam removals become one batched report.
+      try { const ev = await retryPendingEvidence(env); if (ev.still_pending) failed.push(`evidence: ${ev.still_pending} seal(s) still pending`); }
+      catch (e) { failed.push(`evidence: ${e.message}`); console.error('evidence sweep failed:', e); }
+      try { await sweepLegalReports(env, {}, { now: at.getTime() }); }
+      catch (e) { failed.push(`legal reports: ${e.message}`); console.error('legal report sweep failed:', e); }
       for (let attempt = 1; attempt <= 3 && !settlement?.ok; attempt++) {
         settlement = await treasuryCall(env, 'start_settlement', { date: scoreDate })
           .catch((e) => ({ ok: false, error: e.message }));
@@ -708,13 +667,19 @@ export default {
         failed.push(`settlement: ${settlement?.error || 'did not start'}`);
         console.error(`settlement ${scoreDate} did not start:`, settlement?.error);
       }
-      if (at.getUTCHours() !== 0) return;
-
-      // Moderation sweep: resume cases a dropped waitUntil left mid-pipeline
-      // and classify a bounded slice of listings that predate the gate.
+      // Moderation sweep, every hour: resume cases a dropped waitUntil left
+      // mid-pipeline, and run listings stranded at `pending` after a publish
+      // that never reached review. Both are bounded. The legacy backfill is a
+      // full scan, so it joins the sweep at midnight only.
+      // The Grok model, every hour: roll back a new model that is failing, then adopt a newer flagship from xAI's list once
+      // its canary passes (src/grok_model.mjs). A pin stops the adopting. Bounded: one list fetch and at most one canary.
+      try { const gm = await sweepGrokModel(env, grokDeps()); if (gm.error) failed.push(`grok model: ${gm.error}`); }
+      catch (e) { failed.push(`grok model: ${e.message}`); console.error('grok model sweep failed:', e); }
       let moderation = null;
-      try { moderation = await sweepModeration(env, await moderationDeps({})); }
+      try { moderation = await sweepModeration(env, await moderationDeps({}, env), { backfill: at.getUTCHours() === 0 }); }
       catch (e) { failed.push(`moderation: ${e.message}`); console.error('moderation sweep failed:', e); }
+
+      if (at.getUTCHours() !== 0) return;
 
       // The night's record, so a skipped or failed night is visible from
       // `/api/admin/cron-health`. The settlement's own outcome is written by
@@ -729,6 +694,7 @@ export default {
         settlement_queued: !!settlement?.queued,
         settlement_phase: settlement?.settlement?.phase ?? null,
         moderation_resumed: moderation?.resumed ?? 0,
+        moderation_stalled: moderation?.stalled ?? 0,
         moderation_backfilled: moderation?.backfilled ?? 0,
       }), { expirationTtl: 86400 * 365 });
     })());
@@ -752,12 +718,31 @@ export default {
     }
 
     try {
-      // The three auth routes that take no token are limited per address, so a
-      // loop cannot mint accounts or fill the challenge store.
+      // The routes that take no token are limited per address, so a loop cannot
+      // mint accounts, fill the challenge store, or fill the KYC bucket.
       if (request.method === 'POST' && UNAUTHENTICATED_AUTH_PATHS.has(url.pathname)) {
         const limited = await authRateLimited(request, env, cors);
         if (limited) return limited;
       }
+
+      // Every request that changes something is classed by src/route_policy.mjs.
+      // A fresh or value route asks the account's object whether this session is
+      // still current, and a value route refuses a frozen account.
+      const gated = await freshGate(request, env, cors, { json, verifyJwt });
+      if (gated) return gated;
+
+      // Every admin route needs an identity-file session (McKale, 2026-10-08). An
+      // administrator signed in with a passkey is told so here; requireAdmin also
+      // answers null for that session, so an admin power reached any other way is
+      // refused as well.
+      if (isAdminOnlyPath(url.pathname)) {
+        const passkeyAdmin = await adminPasskeyRefusal(request, env, cors);
+        if (passkeyAdmin) return passkeyAdmin;
+      }
+      // An account made without identity verification may read its own account
+      // and verify, and nothing else (src/kyc_identity.mjs names what is blocked).
+      const kycGated = await kycGate(request, env, cors, { json, verifyJwt });
+      if (kycGated) return kycGated;
 
       // Guest play: the Gallery without an account (src/guest.mjs).
       if (url.pathname.startsWith('/api/guest/'))
@@ -770,10 +755,65 @@ export default {
         return handleChallenge(request, env, cors);
       if (url.pathname === '/api/auth/verify-challenge' && request.method === 'POST')
         return handleVerify(request, env, cors);
+      if (url.pathname === '/api/auth/logout' && request.method === 'POST')
+        return handleLogout(request, env, cors);
       if (url.pathname === '/api/auth/me' && request.method === 'GET')
         return handleMe(request, env, cors);
       if (url.pathname === '/api/avatar' && ['GET', 'PUT'].includes(request.method))
         return handleAvatar(request, env, cors, verifyAuth, json);
+
+      // Replacing the identity key (src/identity_routes.mjs)
+      if (url.pathname.startsWith('/api/identity/rotate')) {
+        const handled = await handleKeyRotationRoute(request, url, env, { verifyAuth, authMethod, json, cors, loginOrigins, createJwt, publicUser });
+        if (handled) return handled;
+      }
+
+      // Passkeys: second keys that sign in to the website (src/passkeys.mjs)
+      if (url.pathname === '/api/passkeys' || url.pathname.startsWith('/api/passkeys/')) {
+        const handled = await handlePasskeyRoute(request, url, env, { verifyAuth, authMethod, json, cors, loginOrigins, createJwt, publicUser });
+        if (handled) return handled;
+      }
+
+      // An administrator replaces a key after a manual identity check (src/identity_routes.mjs)
+      if (url.pathname.startsWith('/api/admin/accounts/')) {
+        const handled = await handleAdminReplaceKeyRoute(request, url, env, { requireAdmin, authMethod, json, cors, auditLog });
+        if (handled) return handled;
+      }
+      // The owner's link that puts the earlier key back (no session: the link is the proof)
+      if (url.pathname === '/api/account/key-restore') {
+        const handled = await handleKeyRestoreRoute(request, url, env, { json, cors });
+        if (handled) return handled;
+      }
+
+      // The time zone the account's emails are written in (src/account_time_zone.mjs)
+      if (url.pathname === '/api/account/time-zone') {
+        const handled = await handleTimeZoneRoute(request, url, env, { authenticate: verifyAuth, json, cors });
+        if (handled) return handled;
+      }
+
+      // The public profile the account edits: display name, bio, avatar picture (src/account_profile.mjs)
+      if (url.pathname === '/api/account/profile') {
+        const handled = await handleProfileRoute(request, url, env, { authenticate: verifyAuth, json, cors });
+        if (handled) return handled;
+      }
+
+      // Adult content: off until a verified adult turns it on in Profile (src/adult_content.mjs)
+      if (url.pathname === '/api/account/adult-content') {
+        const handled = await handleAdultContentRoute(request, url, env, { authenticate: verifyAuth, json, cors, requireVerifiedAdult });
+        if (handled) return handled;
+      }
+
+      // The account's email: verify it, change it (src/email_routes.mjs)
+      if (url.pathname.startsWith('/api/account/email')) {
+        const handled = await handleEmailRoute(request, url, env, { authenticate: (req, e) => verifyFreshAuth(req, e, { verifyJwt, verifyAuth }), requireIdentityFileSession, json, cors, loginOrigins, siteOrigin });
+        if (handled) return handled;
+      }
+
+      // "Tell me when it is out": a release notice for the Player and Studio, and the administrator's send (src/release_notify.mjs)
+      if (url.pathname.startsWith('/api/release-notify/') || url.pathname.startsWith('/api/admin/release-notify/')) {
+        const handled = await handleReleaseNotify(request, url, env, cors, { verifyAuth, requireAdmin, json, auditLog });
+        if (handled) return handled;
+      }
 
       // Identity backup email
       if (url.pathname === '/api/identity/email-backup' && request.method === 'POST')
@@ -790,19 +830,31 @@ export default {
       // KYC
       if (url.pathname === '/api/kyc/jurisdiction')
         return handleJurisdiction(request, env, cors);
+      // A session: a server-chosen id, a claim secret and an upload-only token, returned once.
+      if (url.pathname === '/api/kyc/start' && request.method === 'POST')
+        return handleKycStart(request, env, cors, { json });
       if (url.pathname === '/api/kyc/upload' && request.method === 'POST')
         return handleKycUpload(request, env, cors);
       if (url.pathname === '/api/kyc/submit' && request.method === 'POST')
         return handleKycSubmit(request, env, cors);
       if (url.pathname.startsWith('/api/kyc/status/'))
-        return handleKycStatus(url.pathname.split('/').pop(), env, cors);
+        return handleKycStatus(url.pathname.split('/').pop(), env, cors, request);
       // Desktop → mobile handoff (QR code flow)
       if (url.pathname === '/api/kyc/handoff' && request.method === 'POST')
         return handleKycHandoffCreate(request, env, cors);
       if (url.pathname.startsWith('/api/kyc/handoff/'))
-        return handleKycHandoffGet(url.pathname.split('/').pop(), env, cors);
+        return handleKycHandoffGet(url.pathname.split('/').pop(), env, cors, request);
       if (url.pathname.startsWith('/api/kyc/session/'))
-        return handleKycSessionStatus(url.pathname.split('/').pop(), env, cors);
+        return handleKycSessionStatus(url.pathname.split('/').pop(), env, cors, request);
+      // An account made before KYC was required links a verified session to itself.
+      if (url.pathname === '/api/kyc/link' && request.method === 'POST')
+        return handleKycLink(request, env, cors, { verifyAuth, json, publicUser });
+      // Count (GET) and reconcile (POST with apply: true) the accounts made without KYC.
+      if (url.pathname === '/api/admin/kyc-legacy')
+        return handleKycLegacyRoute(request, url, env, cors, { requireAdmin, json, auditLog });
+      // A true id_hash collision (two people whose documents read alike), resolved by manual review.
+      if (url.pathname === '/api/admin/kyc-collision')
+        return handleKycCollisionRoute(request, url, env, cors, { requireAdmin, json, auditLog });
 
       // Co-sign
       if (url.pathname === '/api/cosign' && request.method === 'POST')
@@ -859,6 +911,10 @@ export default {
         return handleAdminScreeningReport(request, env, cors);
       if (url.pathname === '/api/admin/stats' && request.method === 'GET')
         return handleAdminStats(request, env, cors);
+      if (url.pathname === '/api/admin/treasury/holds' && request.method === 'GET')
+        return handleAdminHolds(request, env, cors);
+      if (url.pathname === '/api/admin/treasury/holds/resolve' && request.method === 'POST')
+        return handleAdminResolveHold(request, env, cors);
 
       // Public, cookieless pageview beacon (feeds the admin funnel)
       // Engine usage telemetry (anonymous tool-click aggregates + feedback).
@@ -911,10 +967,24 @@ export default {
         return handlePayoutHistory(request, env, cors);
       if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
         return handlePayoutRate(env, cors);
+      // Economics statements for the Economics page's Actual mode: /api/economics/actual is public,
+      // /api/admin/economics/* is admin only. See src/economics.mjs.
+      if (url.pathname === '/api/economics/actual' || url.pathname.startsWith('/api/admin/economics/')) {
+        const economics = await handleEconomicsRoute(request, url, env, cors, { json, requireAdmin, publicCors });
+        if (economics) return economics;
+      }
 
       // Ledger transparency (public, read-only, wildcard CORS) + health.
       // These take `publicCors()` so browsers on any origin can audit
       // them; /api/ledger/me below stays origin-pinned AND bearer-gated.
+      // Delta: balances, packs, the tool catalog, checkout and charges, plus
+      // subscription checkout. See src/delta.mjs.
+      if (url.pathname.startsWith('/api/delta/') || url.pathname === '/api/subscriptions/checkout') {
+        const delta = await handleDeltaRoute(request, url, env, cors, {
+          verifyAuth, json, stripeRequest, siteOrigin, isVerified: accountIsVerified,
+        });
+        if (delta) return delta;
+      }
       if (url.pathname === '/api/ledger/summary' && request.method === 'GET')
         return handleLedgerSummary(env, publicCors());
       if (url.pathname.startsWith('/api/ledger/distribution/') && request.method === 'GET')
@@ -929,6 +999,11 @@ export default {
         return handleLedgerMe(request, env, cors);
       if (url.pathname === '/api/admin/cron-health' && request.method === 'GET')
         return handleCronHealth(request, env, cors);
+      // The Grok model: its state, an administrator's pin and unpin (src/grok_model.mjs).
+      if (url.pathname === '/api/admin/grok-model' || url.pathname.startsWith('/api/admin/grok-model/')) {
+        const handled = await handleGrokModelRoute(request, url, env, cors, grokDeps());
+        if (handled) return handled;
+      }
 
       // Node heartbeat
       if (url.pathname === '/api/node/heartbeat' && request.method === 'POST')
@@ -936,12 +1011,30 @@ export default {
       if (url.pathname === '/api/node/stats' && request.method === 'GET')
         return handleNodeStats(env, cors);
 
+      // TAKE IT DOWN requests and a person's review of them (src/takedown.mjs); case references and the account's case
+      // history (src/case_history.mjs).
+      if (url.pathname === '/api/takedown/requests' || url.pathname.startsWith('/api/admin/takedowns') || url.pathname.startsWith('/api/cases/') || url.pathname.startsWith('/api/account/cases')) {
+        const handled = (await handleTakedownRoute(request, url, env, cors, takedownDeps())) || (await handleCaseRoute(request, url, env, cors, takedownDeps()));
+        if (handled) return handled;
+      }
+      // The evidence vault (an administrator, and legal process to open it) and the legal report queue (an administrator).
+      if (url.pathname.startsWith('/api/admin/evidence/') || url.pathname.startsWith('/api/admin/legal/')) {
+        const handled = (await handleEvidenceRoute(request, url, env, cors, takedownDeps())) || (await handleLegalReportRoute(request, url, env, cors, takedownDeps()));
+        if (handled) return handled;
+      }
+      // A review capture can become a public preview: its bytes are checked against the takedown blocklist before moderation stores them.
+      if (request.method === 'PUT' && /^\/api\/simulations\/[a-f0-9-]+\/captures\/[0-7]$/.test(url.pathname)) {
+        const checked = await checkCaptureUpload(request, env, cors, takedownDeps());
+        if (checked.response) return checked.response;
+        request = checked.request;
+      }
+
       // Moderation: dossier + capture uploads, submit-for-review, the author's
       // status view, appeals, and the admin queue and tool surface. Dispatched
       // before the simulation routes because `/api/simulations/{id}/moderation`
       // would otherwise be swallowed by the `/api/simulations/{id}` catch-all.
       if (url.pathname.startsWith('/api/simulations/') || url.pathname.startsWith('/api/admin/moderation/')) {
-        const handled = await handleModerationRoute(request, url, env, ctx, await moderationDeps(cors));
+        const handled = await handleModerationRoute(request, url, env, ctx, await moderationDeps(cors, env));
         if (handled) return handled;
       }
 
@@ -958,15 +1051,35 @@ export default {
         const world = await handleWorldRoute(request, url, env, cors, {
           verifyAuth, requireAdmin, json, isListable, canServe, readSpaceNames,
           MODERATION_VERSION, POLICY_VERSION,
+          // The Player fetching a world to play it is a visit.
+          onLaunch: async (req, sim) => { await countVisit(env, sim, await viewerKey(env, req, await verifyAuth(req, env))); },
         });
         if (world) return world;
       }
 
-      // Simulations (published)
+      // Simulations (published). Each list is cut to the viewer's Adult content setting, read from an optional session: a
+      // visitor with none is off, and never refused (src/adult_content.mjs).
       if (url.pathname === '/api/simulations' && request.method === 'GET')
-        return handleListSimulations(url, env, cors);
+        return handleListSimulations(url, env, cors, { viewer: await viewerOf(request, env, verifyAuth) });
+      // The tags most used on listed listings (docs/networking/LISTING_TAGS.md).
+      if (url.pathname === '/api/simulations/tags' && request.method === 'GET')
+        return handlePopularTags(url, env, cors, await viewerOf(request, env, verifyAuth));
+      // The live sessions of listed listings, for the Gallery's "live now" strip (src/live_index.mjs).
+      if (url.pathname === '/api/simulations/live' && request.method === 'GET') {
+        const viewer = await viewerOf(request, env, verifyAuth);
+        // An adult card is on the strip only for a viewer who turned Adult content on, and carries signed image URLs.
+        return handleLiveNow(url, env, cors, { json, isListable, viewer, view: (sim) => withSignedImages(env, galleryView(sim, url.origin), sim, viewer) });
+      }
+      // The people with a listed listing, for the Gallery's search (src/makers.mjs).
+      if (url.pathname === '/api/makers' && request.method === 'GET')
+        return handleMakers(url, env, cors, { json, viewer: await viewerOf(request, env, verifyAuth), listViews: (scope, cap) => handleListSimulations(scope, env, cors, { viewsOnly: true, cap }) });
       if (url.pathname === '/api/simulations/publish' && request.method === 'POST')
         return handlePublishSimulation(request, env, cors);
+      if (/^\/api\/simulations\/[a-f0-9-]+\/(archive|unarchive)$/.test(url.pathname) && request.method === 'POST')
+        return handleArchiveSimulation(request, url.pathname.split('/')[3], url.pathname.endsWith('/archive'), env, cors);
+      // The author edits the listing's tags from the site (docs/networking/LISTING_TAGS.md).
+      if (/^\/api\/simulations\/[a-f0-9-]+\/tags$/.test(url.pathname) && request.method === 'PATCH')
+        return handleSetListingTags(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space$/) && request.method === 'PUT')
         return handleUploadScene(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space\/multipart\/create$/) && request.method === 'POST')
@@ -983,6 +1096,12 @@ export default {
       // worker. Without it nothing served thumbnails/{id}/thumb.{ext} at all.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/thumbnail$/) && request.method === 'GET')
         return handleGetThumbnail(request, url.pathname.split('/')[3], env, cors);
+      // The author's change log of each publish (src/changelogs.mjs; docs/architecture/PUBLISH_CHANGELOG.md).
+      const changelogRoute = await handleChangelogRoute(request, url, env, cors, { verifyAuth, requireAdmin, json });
+      if (changelogRoute) return changelogRoute;
+      // A listing's cover image and the review captures served as previews (src/cover.mjs).
+      const coverRoute = await handleCoverRoute(request, url, env, cors, { verifyAuth, requireAdmin, json });
+      if (coverRoute) return coverRoute;
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/download$/) && request.method === 'GET')
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
@@ -990,7 +1109,11 @@ export default {
       // Live hosts: Studio's heartbeat while it hosts a simulation, and the
       // listing's Live indicator and join link. See src/live.mjs.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live(\/admit)?$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
-        return handleLive(request, env, cors, url.pathname.split('/')[3], { verifyAuth, requireAdmin, json, isListable });
+        return handleLive(request, env, cors, url.pathname.split('/')[3], {
+          verifyAuth, requireAdmin, json, isListable,
+          // The host admitting a joining player is a visit by that player.
+          onJoin: async (sim, who) => { await countVisit(env, sim, who.guest ? `g:${who.id}` : `u:${who.accountId}`); },
+        });
       // Website manifest upload. Its own object and its own route, so a publish
       // can never overwrite the listing record the marketplace reads.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
@@ -1016,16 +1139,17 @@ export default {
       // Gallery (frontend-facing aliases for simulations)
       // Featured is the judge's optional upside flag on an approved listing;
       // it never gates listing, it only feeds this shelf.
+      // The shelf never carries adult content, so it is the same for every viewer and reads no session.
       if (url.pathname === '/api/gallery/featured' && request.method === 'GET')
         return handleListSimulations(url, env, cors, { featuredOnly: true });
       if (url.pathname === '/api/gallery' && request.method === 'GET')
-        return handleListSimulations(url, env, cors);
+        return handleListSimulations(url, env, cors, { viewer: await viewerOf(request, env, verifyAuth) });
 
       // Commerce (microtransactions in published simulations) and the
       // account's API keys. See src/commerce.mjs.
       if (url.pathname.startsWith('/api/commerce/') || url.pathname === '/api/keys' || url.pathname.startsWith('/api/keys/')) {
         const commerce = await handleCommerceRoute(request, url, env, ctx, cors, {
-          verifyAuth, json, isListable, resolveAttribution,
+          verifyAuth, json, isListable, resolveAttribution, requireIdentityFileSession,
         });
         if (commerce) return commerce;
       }
@@ -1081,13 +1205,28 @@ export default {
 
 async function handleRegister(request, env, cors) {
   const body = await request.json();
-  const { username, public_key, birthday, id_type, id_hash, kyc_session_id, email, toml_content } = body;
+  // The session id and its claim secret, which only whoever started the session holds.
+  const { username, kyc_session_id, kyc_claim_secret } = body;
+  // One spelling per key: lower case, so `pubkey:{key}` is one record however
+  // the key was typed and the same key cannot register twice.
+  const public_key = normalPublicKey(body.public_key);
+  // The identity-backup email goes to this address, so it must be one plain
+  // address (no line breaks, no second recipient). Nothing here has been
+  // verified yet, so what is mailed is limited to this registration's own
+  // identity file. Either being wrong only means no email, not no account.
+  const email = cleanEmailAddress(body.email);
+  // Kept only when it is this registration's own identity file (see
+  // validIdentityFile); anything else means no email, not no account.
+  const toml_content = validIdentityFile(body.toml_content, { username, public_key }) ? body.toml_content : null;
 
   if (!username || username.length < 3 || username.length > 32)
     return json({ error: 'Username must be 3-32 characters' }, 400, cors);
   if (!/^[a-zA-Z0-9_]+$/.test(username))
     return json({ error: 'Username: letters, numbers, and _ only' }, 400, cors);
-  if (!public_key || public_key.length < 32)
+  // A public key is an Ed25519 key in hex: 64 characters, which is all that
+  // can ever sign in. Anything else is not a key, and it would still be stored
+  // and compared as if it were one.
+  if (!public_key)
     return json({ error: 'Invalid public key' }, 400, cors);
 
   // Check username taken
@@ -1095,87 +1234,65 @@ async function handleRegister(request, env, cors) {
   if (existingByName) return json({ error: 'Username already taken' }, 409, cors);
 
   // Check public key already registered
-  const existingByKey = await env.USERS.get(`pubkey:${public_key}`);
+  // In the one spelling kept now, and in all upper case, which is how an older
+  // account could have been filed (see the fallback in handleVerify). Without the
+  // second look, the lower-case spelling of a key that is already registered in
+  // upper case would register as a new account and take that key's sign-ins.
+  const existingByKey = (await env.USERS.get(`pubkey:${public_key}`))
+    || (await env.USERS.get(`pubkey:${public_key.toUpperCase()}`))
+    // A key an account replaced is never a new account's key.
+    || (await env.USERS.get(`retired-key:${public_key}`));
   if (existingByKey) return json({ error: 'Public key already registered' }, 409, cors);
 
-  // Check ID hash (Sybil protection)
-  if (id_hash) {
-    const existingByHash = await env.USERS.get(`idhash:${id_hash}`);
-    if (existingByHash) return json({ error: 'This ID has already been used to register' }, 409, cors);
-  }
+  // ── Identity verification ────────────────────────────────────────────────
+  // Every account is made from one completed, verified KYC session (src/
+  // kyc_identity.mjs). The identity facts come from that session's record,
+  // never from the request: a body's id_hash, id_type and birthday are not read.
+  const kyc = await kycSessionForAccount(env, kyc_session_id, kyc_claim_secret);
+  if (!kyc.ok) return json(kyc.body, kyc.status, cors);
+  const kycRecord = kyc.record;
+  const { id_hash, id_type } = kyc;
+  const birthday = kyc.dob;
 
   // ── Age gate ─────────────────────────────────────────────────────────────
-  // Two layers. First the self-declared birthday, which catches the obvious
-  // case cheaply. Then, when a KYC session exists, the document-verified age,
-  // which is the one that actually counts.
-  const regCountry = request.headers.get('cf-ipcountry') || 'XX';
-  let kycRecord = null;
-  if (kyc_session_id) {
-    const raw = await env.KYC_STATUS.get(`kyc-${kyc_session_id}-front`);
-    if (raw) kycRecord = JSON.parse(raw);
-  }
-  const regMinAge = minimumAgeFor(kycRecord?.iso2 || regCountry);
-
-  const declaredAge = ageFromDob(birthday);
-  if (declaredAge === null)
-    return json({ error: 'A valid date of birth (YYYY-MM-DD) is required' }, 400, cors);
-  if (declaredAge < regMinAge)
+  // The document's date of birth, checked again against the minimum for the
+  // country the document was uploaded from. A typed birthday is never read.
+  const regMinAge = kycRecord.minimum_age || minimumAgeFor(kycRecord.iso2 || request.headers.get('cf-ipcountry') || 'XX');
+  const documentAge = ageFromDob(birthday);
+  if (documentAge === null || documentAge < regMinAge)
     return json({
-      error: `You must be at least ${regMinAge} years old to create an account`,
-      code: 'underage', minimum_age: regMinAge,
+      error: documentAge === null
+        ? 'Your age could not be confirmed from your identity document'
+        : `You must be at least ${regMinAge} years old to create an account`,
+      code: documentAge === null ? 'age_unverified' : 'underage',
+      minimum_age: regMinAge,
     }, 403, cors);
 
-  // A client that supplies a KYC session must supply one that actually passed.
-  // Without this the browser could simply skip the upload step and register.
-  if (kyc_session_id) {
-    if (!kycRecord)
-      return json({ error: 'Identity verification session not found', code: 'kyc_missing' }, 400, cors);
-    if (kycRecord.status !== 'verified')
-      return json({ error: 'Identity verification has not passed', code: 'kyc_incomplete' }, 403, cors);
-    if (kycRecord.age_verified !== true)
-      return json({
-        error: kycRecord.age_status === 'underage'
-          ? `You must be at least ${kycRecord.minimum_age || regMinAge} years old to create an account`
-          : 'Your age could not be confirmed from your identity document',
-        code: kycRecord.age_status === 'underage' ? 'underage' : 'age_unverified',
-        minimum_age: kycRecord.minimum_age || regMinAge,
-      }, 403, cors);
+  // Screening: the result of the KYC submit's single call (document check, OCR
+  // and background screening together). Registration makes no model call.
+  const kycScreening = await env.SCREENING.get(`screen:session-${kyc_session_id}`);
+  const screening = kycScreening ? JSON.parse(kycScreening) : null;
+  if (screening?.decision === 'DENY') {
+    return json({
+      error: 'Registration denied based on background screening',
+      risk_score: screening.risk_score,
+      reason: screening.reason,
+      appeal: 'Contact support@eustress.dev to appeal this decision',
+    }, 403, cors);
   }
-
-  // AI Screening — reuse the result from KYC submit (single Grok call did
-  // document verification + OCR + criminal screening together).
-  // Only call performScreening as a fallback if KYC submit wasn't done.
-  let screening = null;
-  if (kyc_session_id) {
-    const kycScreening = await env.SCREENING.get(`screen:session-${kyc_session_id}`);
-    if (kycScreening) screening = JSON.parse(kycScreening);
-  }
-  if (!screening && env.GROK_API_KEY && username && birthday) {
-    // Fallback: no KYC session or KYC submit wasn't called — run standalone screening
-    screening = await performScreening(username, birthday, id_type, id_hash, env);
-  }
-  if (screening) {
-    const screeningKey = `screen:${id_hash || public_key}`;
-    await env.SCREENING.put(screeningKey, JSON.stringify(screening), { expirationTtl: 86400 * 365 * 7 });
-
-    if (screening.decision === 'DENY') {
-      return json({
-        error: 'Registration denied based on background screening',
-        risk_score: screening.risk_score,
-        reason: screening.reason,
-        appeal: 'Contact support@eustress.dev to appeal this decision',
-      }, 403, cors);
-    }
-    // REVIEW: allow registration but flag for manual review
-  }
+  // REVIEW: allow registration but flag for manual review
 
   const user_id = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  // Get screening result if it was performed
-  const screeningResult = (env.GROK_API_KEY && (id_hash || public_key))
-    ? JSON.parse(await env.SCREENING.get(`screen:${id_hash || public_key}`) || 'null')
-    : null;
+  // One person, one account; one verification, one account. The person's
+  // id_hash is claimed in R2 (create-if-absent), then the session is consumed,
+  // both before the account exists; the person is released if the session is
+  // not had. A second sign-up for either, in parallel or later, is refused here.
+  const claimed = await claimPersonAndSession(env, id_hash, kyc_session_id, user_id);
+  if (!claimed.ok) return json(claimed.body, claimed.status, cors);
+  if (screening)
+    await env.SCREENING.put(`screen:${id_hash}`, JSON.stringify(screening), { expirationTtl: 86400 * 365 * 7 });
 
   const user = {
     id: user_id,
@@ -1188,54 +1305,50 @@ async function handleRegister(request, env, cors) {
     // on their document, agents are Robot, and neither is a choice. A record
     // without the field predates it and is treated as human.
     account_type: 'human',
-    birthday: birthday || null,
-    id_type: id_type || null,
-    id_hash: id_hash || null,
+    // From the consumed KYC session's record, never from the request.
+    birthday,
+    id_type,
+    id_hash,
     bliss_balance: 0,
     created_at: now,
     email: email || null,
     // Identity + age verification state. `age_verified` is true only when a
     // government document was read and its date of birth cleared the minimum,
     // so payout features can gate on it without re-deriving anything.
-    kyc_verified: kycRecord?.status === 'verified',
-    age_verified: kycRecord?.age_verified === true,
-    verified_dob: kycRecord?.extracted_dob || null,
+    kyc_verified: true,
+    age_verified: true,
+    verified_dob: birthday,
     minimum_age: regMinAge,
     avatar_url: null,
     discord_id: null,
     // Screening
-    risk_score: screeningResult?.risk_score || 0,
-    risk_decision: screeningResult?.decision || 'UNSCREENED',
-    last_screened: screeningResult?.screened_at || null,
-    screening_flags: screeningResult?.flags || [],
+    risk_score: screening?.risk_score || 0,
+    risk_decision: screening?.decision || 'UNSCREENED',
+    last_screened: screening?.screened_at || null,
+    screening_flags: screening?.flags || [],
     banned: false,
     ban_reason: null,
     warnings: [],
   };
 
-  // Store user (multiple indexes for lookup)
+  // Store user (multiple indexes for lookup). If any write fails, what was
+  // written goes and the person's claim is released (the consumed session stays
+  // consumed: the applicant verifies again), so a claim never names an account
+  // that was never written.
   const userData = JSON.stringify(user);
-  await env.USERS.put(`user:${user_id}`, userData);
-  await env.USERS.put(`username:${username}`, user_id);
-  await env.USERS.put(`pubkey:${public_key}`, user_id);
-  if (id_hash) await env.USERS.put(`idhash:${id_hash}`, user_id);
-
-  // Link KYC uploads from registration session to this user
-  if (kyc_session_id) {
-    for (const side of ['front', 'back']) {
-      const kycKey = `kyc-${kyc_session_id}-${side}`;
-      const kycData = await env.KYC_STATUS.get(kycKey);
-      if (kycData) {
-        const kyc = JSON.parse(kycData);
-        kyc.user_id = user_id;
-        kyc.status = 'linked';
-        // Re-store under the real user ID
-        await env.KYC_STATUS.put(`kyc-${user_id}-${side}`, JSON.stringify(kyc), { expirationTtl: 86400 * 365 * 7 });
-        // Clean up session key
-        await env.KYC_STATUS.delete(kycKey);
-      }
-    }
+  try {
+    await env.USERS.put(`user:${user_id}`, userData);
+    await env.USERS.put(`username:${username}`, user_id);
+    await env.USERS.put(`pubkey:${public_key}`, user_id);
+    await env.USERS.put(`idhash:${id_hash}`, user_id);
+  } catch (e) {
+    console.error('register: the account was not written; the person is released:', e?.message || e);
+    await undoAccountWrites(env, { user_id, username, public_key, id_hash });
+    return json({ error: 'Sign-up could not be completed. Verify your ID again, then try again.', code: 'signup_failed' }, 503, cors);
   }
+
+  // Link KYC uploads from registration session to this user, as `linked`.
+  await linkKycRecords(env, kyc_session_id, user_id);
 
   const token = await createJwt(user_id, env.JWT_SECRET);
 
@@ -1246,7 +1359,7 @@ async function handleRegister(request, env, cors) {
   // Failure is non-fatal: signup still succeeds, the client can
   // retry by hitting POST /api/identity/email-backup directly.
   let backup_emailed = false;
-  if (email && toml_content && env.EMAIL) {
+  if (email && toml_content && env.EMAIL && await identityEmailAllowed(env, email, user_id)) {
     try {
       const { EmailMessage } = await import('cloudflare:email');
       // Use whichever hostname this request came in on (api.eustress.dev
@@ -1276,53 +1389,133 @@ async function handleRegister(request, env, cors) {
 }
 
 async function handleChallenge(request, env, cors) {
-  const { public_key } = await request.json();
-  if (!public_key) return json({ error: 'Missing public_key' }, 400, cors);
+  const claimed = (await request.json().catch(() => ({}))).public_key;
+  if (!claimed) return json({ error: 'Missing public_key' }, 400, cors);
+  // Only a 64-hex key can ever sign in, so nothing else gets a stored challenge.
+  const public_key = normalPublicKey(claimed);
+  if (!public_key) return json({ error: 'Invalid public_key' }, 400, cors);
 
   const challenge = hexEncode(crypto.getRandomValues(new Uint8Array(32)));
   const expires_at = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
-  await env.CHALLENGES.put(public_key, JSON.stringify({ challenge, expires_at }), {
+  // Filed under the challenge itself (its digest, so a listing of the namespace
+  // shows nothing usable), with the key it was issued for. Filed under the key,
+  // anyone could ask for a challenge for someone else's key and replace theirs,
+  // which kept that person from signing in.
+  await env.CHALLENGES.put(await loginChallengeKey(challenge), JSON.stringify({ public_key, challenge, expires_at }), {
     expirationTtl: 300
   });
 
   return json({ challenge, expires_at }, 200, cors);
 }
 
-async function handleVerify(request, env, cors) {
-  const { public_key, challenge, signature } = await request.json();
-  if (!public_key || !challenge || !signature)
-    return json({ error: 'Missing fields' }, 400, cors);
+/// What a login signature covers (docs/architecture/STUDIO_IDENTITY_SIGNIN.md):
+/// three lines joined by "\n", no trailing newline, UTF-8. The origin is the one
+/// the request reached, so a signature made for another API, one relaying this
+/// API's challenge, does not verify here. The shared test vectors are in
+/// docs/architecture/login-v1-vectors.json.
+const LOGIN_FORMAT = 'eustress-login-v1';
+function loginMessage(origin, challenge) {
+  return `${LOGIN_FORMAT}\n${origin}\n${challenge}`;
+}
+const LOGIN_CHALLENGE = /^[0-9a-f]{64}$/;
+const loginChallengeKey = async (challenge) => `chal:${await sha256Hex(challenge)}`;
 
-  // Get and consume challenge
-  const stored = await env.CHALLENGES.get(public_key);
+/// The origins this deployment signs people in for. `LOGIN_ORIGINS` (comma
+/// separated) names them; unset, it is production's. A signature is checked
+/// against the origin the request reached, and only when that is one of these:
+/// a Worker also reachable on a hostname nobody listed (workers.dev, a
+/// preview, a fork's domain) signs no one in there.
+function loginOrigins(env) {
+  const listed = String(env.LOGIN_ORIGINS || 'https://api.eustress.dev').split(',');
+  const origins = new Set();
+  for (const raw of listed) {
+    try { origins.add(new URL(raw.trim()).origin); } catch { /* not an address */ }
+  }
+  return origins;
+}
+
+async function handleVerify(request, env, cors) {
+  const { public_key: claimed, challenge, signature, format } = await request.json().catch(() => ({}));
+  // The bare challenge is no longer a login message: a signature that names no
+  // API is one any API could be handed. There is no window in which both are
+  // accepted.
+  if (format !== LOGIN_FORMAT)
+    return json({ error: 'This sign-in is out of date. Update Eustress and sign in again.', code: 'login_format_required', format: LOGIN_FORMAT }, 400, cors);
+  if (!claimed || !challenge || !signature)
+    return json({ error: 'Missing fields' }, 400, cors);
+  const public_key = normalPublicKey(claimed);
+  if (!public_key) return json({ error: 'Invalid public_key' }, 400, cors);
+  if (typeof challenge !== 'string' || !LOGIN_CHALLENGE.test(challenge))
+    return json({ error: 'No pending challenge' }, 400, cors);
+
+  const origin = new URL(request.url).origin;
+  if (!loginOrigins(env).has(origin))
+    return json({ error: 'This address does not accept sign-in', code: 'login_origin_not_allowed' }, 400, cors);
+
+  // Get and consume the challenge: the first verify, right or wrong, uses it up.
+  const filed = await loginChallengeKey(challenge);
+  const stored = await env.CHALLENGES.get(filed);
   if (!stored) return json({ error: 'No pending challenge' }, 400, cors);
-  await env.CHALLENGES.delete(public_key);
+  await env.CHALLENGES.delete(filed);
 
   const parsed = JSON.parse(stored);
-  if (parsed.challenge !== challenge)
+  if (parsed.public_key !== public_key)
     return json({ error: 'Challenge mismatch' }, 400, cors);
   if (new Date(parsed.expires_at) < new Date())
     return json({ error: 'Challenge expired' }, 400, cors);
 
-  // Verify Ed25519 signature using Web Crypto
+  // Verify the Ed25519 signature over the login message using Web Crypto.
+  const refused = () => json({ error: 'Signature verification failed' }, 401, cors);
+  if (typeof signature !== 'string' || !/^[0-9a-fA-F]{128}$/.test(signature)) return refused();
   try {
-    const pubKeyBytes = hexDecode(public_key);
-    const sigBytes = hexDecode(signature);
-    const msgBytes = new TextEncoder().encode(challenge);
-
     const cryptoKey = await crypto.subtle.importKey(
-      'raw', pubKeyBytes, { name: 'Ed25519' }, false, ['verify']
+      'raw', hexDecode(public_key), { name: 'Ed25519' }, false, ['verify']
     );
-    const valid = await crypto.subtle.verify('Ed25519', cryptoKey, sigBytes, msgBytes);
-    if (!valid) return json({ error: 'Signature verification failed' }, 401, cors);
-  } catch (e) {
-    return json({ error: `Signature error: ${e.message}` }, 400, cors);
+    // The challenge in the message is the one this API issued, not the client's
+    // spelling of it.
+    const message = new TextEncoder().encode(loginMessage(origin, parsed.challenge));
+    const valid = await crypto.subtle.verify('Ed25519', cryptoKey, hexDecode(signature), message);
+    if (!valid) return refused();
+  } catch {
+    return refused();
   }
 
   // Find user by public key
-  const userId = await env.USERS.get(`pubkey:${public_key}`);
-  if (!userId) return json({ error: 'Identity not registered' }, 404, cors);
+  // An account registered before keys were kept in lower case is filed under the
+  // spelling it used then, so that one is tried when the lower-case record is
+  // absent.
+  const userId = (await env.USERS.get(`pubkey:${public_key}`))
+    || (claimed !== public_key ? await env.USERS.get(`pubkey:${claimed}`) : null);
+  if (!userId) {
+    // A key the account replaced is not "not registered": say it was replaced,
+    // so a client can show the owner their new file is the one to use.
+    const owner = env.ACCOUNT_AUTH ? await env.USERS.get(`retired-key:${public_key}`) : null;
+    if (owner) {
+      const old = await accountCall(env, owner, 'check_login', { public_key });
+      if (old.code === 'key_retired') return keyReplaced(old.retired_at, cors);
+    }
+    return json({ error: 'Identity not registered' }, 404, cors);
+  }
+
+  // The account's object is the authority on which key is current. The `pubkey:`
+  // index may lag by about a minute, so it is a hint and never the decision. An
+  // object that cannot be reached means no sign-in, not a sign-in on the hint.
+  let objectFloor = 0;
+  if (env.ACCOUNT_AUTH) {
+    const seeded = await accountState(env, userId);
+    if (!seeded.ok && seeded.code !== 'no_account')
+      return json({ error: 'Sign-in is temporarily unavailable. Try again in a minute.', code: 'account_unavailable' }, 503, cors);
+    if (seeded.ok) {
+      const check = await accountCall(env, userId, 'check_login', { public_key });
+      if (!check.ok) {
+        if (check.code === 'key_retired') return keyReplaced(check.retired_at, cors);
+        if (check.code === 'key_not_current') return keyReplaced(null, cors);
+        return json({ error: 'Sign-in is temporarily unavailable. Try again in a minute.', code: 'account_unavailable' }, 503, cors);
+      }
+      objectFloor = Number(check.floor) || 0;
+    }
+  }
 
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User data missing' }, 500, cors);
@@ -1334,20 +1527,68 @@ async function handleVerify(request, env, cors) {
     return json({ error: 'Account suspended', reason: user.ban_reason || 'Contact support@eustress.dev' }, 403, cors);
   }
 
-  const token = await createJwt(userId, env.JWT_SECRET);
+  // Not stamped before the account's session floor: a sign-in straight after a
+  // sign-out must get a token the floor lets through.
+  const floor = Math.max(Number(await env.USERS.get(`authfloor:${userId}`)) || 0, objectFloor);
+  const token = await createJwt(userId, env.JWT_SECRET, floor, 'key');
 
   return json({ token, user: await publicUser(user, env) }, 200, cors);
 }
 
+/// The answer to a sign-in with a key the account replaced. 403 with an error
+/// and a reason, which is the shape Studio shows as "error: reason".
+function keyReplaced(retiredAt, cors) {
+  const when = retiredAt ? ` on ${String(retiredAt).slice(0, 10)}` : '';
+  return json({
+    error: `This identity file was replaced${when}`,
+    reason: 'Sign in with your newer identity file, or recover your account from the sign-in page.',
+    code: 'key_retired',
+    retired_at: retiredAt || null,
+  }, 403, cors);
+}
+
 // ── Identity Backup Email (Cloudflare Email Workers) ────────────────────────
 async function handleEmailIdentityBackup(request, env, cors) {
-  const body = await request.json();
-  const { email, username, toml_content } = body;
+  // Sent from identity@eustress.dev, so it must not be open: anyone could have
+  // had the Worker mail any text to any address under the company's name. Now
+  // the caller is signed in, and the only address it writes to is the one on
+  // that account.
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
-  if (!email || !email.includes('@'))
+  const body = await request.json().catch(() => ({}));
+  const email = cleanEmailAddress(body.email);
+  const toml_content = body.toml_content;
+
+  if (!email)
     return json({ error: 'Valid email required' }, 400, cors);
-  if (!toml_content || toml_content.length < 50)
+  const userData = await env.USERS.get(`user:${userId}`);
+  const user = userData ? JSON.parse(userData) : null;
+  if (!user || cleanEmailAddress(await readAccountEmail(env, user)) !== email)
+    return json({ error: 'Backups are sent only to the email address on your account', code: 'email_not_on_account' }, 403, cors);
+  // The name in the email is the account's, not whatever the request says.
+  const username = user.username;
+  // What goes out is this account's own identity file and nothing else.
+  // The account's key is the object's to say: the user record's copy can be a
+  // stale write behind it.
+  let accountKey = user.public_key;
+  if (env.ACCOUNT_AUTH) {
+    const held = await accountState(env, userId);
+    if (held.ok && held.public_key) accountKey = held.public_key;
+  }
+  if (!validIdentityFile(toml_content, { username, public_key: accountKey }))
     return json({ error: 'Invalid TOML content' }, 400, cors);
+
+  // Up to 30 a minute per account from the platform limiter, which counts
+  // atomically. That is a ceiling on bursts, not on volume: the account's
+  // address is unverified, so what bounds the mail one inbox can receive is the
+  // daily allowance below, counted per address and per account.
+  if (env.AUTH_RATE_LIMITER) {
+    const { success } = await env.AUTH_RATE_LIMITER.limit({ key: `identity-backup:${userId}` });
+    if (!success) return json({ error: 'Too many requests. Try again in a minute.', code: 'rate_limited' }, 429, { ...cors, 'Retry-After': '60' });
+  }
+  if (!(await identityEmailAllowed(env, email, userId)))
+    return json({ error: 'Backup emails for today have been sent. Try again tomorrow.', code: 'daily_limit' }, 429, { ...cors, 'Retry-After': '86400' });
 
   // All branding + body assembly lives in `buildIdentityEmail` so this
   // route and the auto-send inside `/api/auth/register` produce
@@ -1397,7 +1638,7 @@ async function handleEmailIdentityBackup(request, env, cors) {
 
     const errText = await emailResp.text();
     console.error('MailChannels error:', emailResp.status, errText);
-    return json({ error: 'Email delivery failed', detail: errText }, 502, cors);
+    return json({ error: 'Email delivery failed' }, 502, cors);
   } catch (e) {
     console.error('Email send error:', e);
     return json({ error: 'Email service error: ' + e.message }, 503, cors);
@@ -1497,7 +1738,9 @@ async function handleMe(request, env, cors) {
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User not found' }, 404, cors);
 
-  return json(await publicUser(JSON.parse(userData), env), 200, cors);
+  // How this session signed in: "key" (the identity file) or "passkey". The site
+  // turns the key-change buttons off in a passkey session; the routes refuse anyway.
+  return json({ ...(await publicUser(JSON.parse(userData), env)), auth_method: await authMethod(request, env) }, 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1533,7 +1776,8 @@ async function handleKycUpload(request, env, cors) {
   const formData = await request.formData();
   const side = formData.get('side') || 'front';
   const idType = formData.get('id_type') || 'unknown';
-  const sessionId = formData.get('session_id') || crypto.randomUUID();
+  // Server-chosen at /api/kyc/start; a caller never names a new one.
+  const sessionId = formData.get('session_id');
   const file = formData.get('document');
 
   if (!file || !(file instanceof File))
@@ -1564,6 +1808,15 @@ async function handleKycUpload(request, env, cors) {
 
   if (side !== 'front' && side !== 'back')
     return json({ error: 'side must be "front" or "back"' }, 400, cors);
+
+  // The record below is keyed by the caller-supplied session id. Refuse any id
+  // that could name a registered account's record (see KYC_SESSION_ID).
+  if (await kycSessionIdProblem(sessionId, env))
+    return json({ error: 'Invalid verification session', code: 'kyc_session_invalid' }, 400, cors);
+  // Only the holder of the session's upload token (from /api/kyc/start, or the
+  // phone hand-off link) may add a document to it.
+  if (!(await uploadTokenValid(env, sessionId, formData.get('upload_token'))))
+    return json({ ...KYC_UPLOAD_REFUSED }, 403, cors);
 
   // Authenticated user → use real user ID; registration → use session_id
   let userId = await verifyAuth(request, env);
@@ -1611,10 +1864,72 @@ async function handleKycUpload(request, env, cors) {
   }, 200, cors);
 }
 
-async function handleKycStatus(verificationId, env, cors) {
+// A KYC session id is the bearer the browser mints for one registration (a
+// UUID). It must never be able to name anything else in KYC_STATUS. The adult
+// gate reads `kyc-<userId>-front`, so a session id equal to a real account's id
+// would let a caller overwrite that account's record (and fail its gate),
+// re-run verification on its stored document, or read its verdict back.
+const KYC_SESSION_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+/// Null when `sessionId` is a usable registration session id, otherwise why not:
+/// 'malformed' (not an id of the expected shape) or 'reserved' (it is a
+/// registered account's id).
+async function kycSessionIdProblem(sessionId, env) {
+  if (typeof sessionId !== 'string' || !KYC_SESSION_ID.test(sessionId)) return 'malformed';
+  if (await env.USERS.get(`user:${sessionId}`)) return 'reserved';
+  return null;
+}
+
+/// Why a rejected record was rejected, in words the applicant can act on. The
+/// screening reason stays server-side.
+function publicKycRejectReason(rec) {
+  if (rejectedForService(rec)) return KYC_UNAVAILABLE_MESSAGE;
+  if (rec.age_status === 'underage')
+    return `You must be at least ${rec.minimum_age || 18} years old`;
+  if (rec.age_status === 'unreadable')
+    return 'Date of birth could not be read from the document';
+  if (rec.age_status === 'mismatch')
+    return 'The birthday you entered does not match the document';
+  if (rec.grok_analysis && rec.grok_analysis.doc_decision !== 'APPROVE')
+    return holderFreeReason(rec.grok_analysis.doc_reason, rec) || 'Document could not be verified';
+  return 'Application requires review';
+}
+
+/// The verdict for a session's own `kyc-<session>-<side>` id, and nothing else.
+///
+/// This used to hand the path segment straight to KV, so any key in KYC_STATUS
+/// could be read with no auth: `handoff:<id>` (full name and birthday) and every
+/// verification record (document date of birth, OCR name, sex, screening
+/// flags). Now only the shape the browser polls is served, a registered
+/// account's own record is not reachable, and the response carries the verdict
+/// and age result only, never a document field.
+///
+/// The session id alone (which the phone link carries in the clear) reads the
+/// status and nothing else; the age result and the reason need the session's
+/// upload token or claim secret in the X-KYC-Token header. A session nobody
+/// started is 404.
+async function handleKycStatus(verificationId, env, cors, request) {
+  const m = /^kyc-([A-Za-z0-9_-]{8,64})-(front|back)$/.exec(verificationId || '');
+  if (!m || await kycSessionIdProblem(m[1], env))
+    return json({ error: 'Not found' }, 404, cors);
+  const reader = await kycReader(request, env, m[1]);
+  if (!reader) return json({ error: 'Not found' }, 404, cors);
+
   const data = await env.KYC_STATUS.get(verificationId);
   if (!data) return json({ error: 'Not found' }, 404, cors);
-  return json(JSON.parse(data), 200, cors);
+
+  const rec = JSON.parse(data);
+  const status = rec.status || 'uploaded';
+  if (reader !== 'holder') return json({ status }, 200, cors);
+  const out = {
+    status,
+    verified: status === 'verified',
+    age_verified: rec.age_verified === true,
+    age_status: rec.age_status || null,
+    minimum_age: rec.minimum_age || null,
+  };
+  if (status === 'rejected') out.decision = { reasons: [publicKycRejectReason(rec)] };
+  return json(out, 200, cors);
 }
 
 // ── Desktop → mobile handoff ─────────────────────────────────────────────────
@@ -1636,6 +1951,13 @@ async function handleKycHandoffCreate(request, env, cors) {
   const sessionId = body.session_id;
   if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8)
     return json({ error: 'A session_id of at least 8 characters is required' }, 400, cors);
+  // Upload and submit refuse ids of any other shape, so a link minted for one
+  // could never be used.
+  if (await kycSessionIdProblem(sessionId, env))
+    return json({ error: 'Invalid verification session', code: 'kyc_session_invalid' }, 400, cors);
+  // The phone gets the upload token and nothing that can make an account.
+  if (!(await uploadTokenValid(env, sessionId, body.upload_token)))
+    return json({ ...KYC_UPLOAD_REFUSED }, 403, cors);
 
   const country = request.headers.get('cf-ipcountry') || 'XX';
   const jurisdiction = JURISDICTIONS.jurisdictions[country];
@@ -1661,21 +1983,26 @@ async function handleKycHandoffCreate(request, env, cors) {
     // The phone must land on the site that started the session: the session
     // lives in this deployment's storage, so staging's phone link points at
     // staging's site (PUBLIC_SITE_ORIGIN) and production's at eustress.dev.
-    verify_url: `${siteOrigin(env)}/verify?s=${encodeURIComponent(sessionId)}`,
+    // The upload token rides in the fragment, which a browser never sends to a
+    // server, so it is in no request log. The claim secret is never in the link.
+    verify_url: `${siteOrigin(env)}/verify?s=${encodeURIComponent(sessionId)}#t=${body.upload_token}`,
     expires_at: expiresAt,
     expires_in: HANDOFF_TTL_SECONDS,
   }, 200, cors);
 }
 
 /// Context the phone needs to run the capture flow. Deliberately excludes the
-/// applicant's name and date of birth.
-async function handleKycHandoffGet(sessionId, env, cors) {
-  const raw = await env.KYC_STATUS.get(`handoff:${sessionId}`);
+/// applicant's name and date of birth. The id alone reads that the link is
+/// live; the context needs the upload token the link carries (X-KYC-Token).
+async function handleKycHandoffGet(sessionId, env, cors, request) {
+  const reader = await kycReader(request, env, sessionId);
+  const raw = reader ? await env.KYC_STATUS.get(`handoff:${sessionId}`) : null;
   // A missing key means the TTL lapsed — KV removes it for us.
   if (!raw)
     return json({ error: 'This verification link has expired', code: 'expired' }, 404, cors);
 
   const h = JSON.parse(raw);
+  if (reader !== 'holder') return json({ session_id: sessionId, status: 'active' }, 200, cors);
   return json({
     session_id: h.session_id,
     id_type: h.id_type,
@@ -1688,19 +2015,31 @@ async function handleKycHandoffGet(sessionId, env, cors) {
 }
 
 /// Whole-session progress for the polling desktop tab.
-async function handleKycSessionStatus(sessionId, env, cors) {
+///
+/// A registered account's id, or an id nobody started, is 404, so this route
+/// cannot read an account's record. The session id alone (the phone link
+/// carries it in the clear) reads the status and nothing else; the progress and
+/// age result need the session's upload token or claim secret (X-KYC-Token).
+/// The name read off the document is never returned.
+async function handleKycSessionStatus(sessionId, env, cors, request) {
+  if (await kycSessionIdProblem(sessionId, env))
+    return json({ error: 'Not found' }, 404, cors);
+  const reader = await kycReader(request, env, sessionId);
+  if (!reader) return json({ error: 'Not found' }, 404, cors);
+
   const [frontRaw, backRaw] = await Promise.all([
     env.KYC_STATUS.get(`kyc-${sessionId}-front`),
     env.KYC_STATUS.get(`kyc-${sessionId}-back`),
   ]);
 
+  const front = frontRaw ? JSON.parse(frontRaw) : null;
+  const status = front?.status || (frontRaw || backRaw ? 'uploaded' : 'pending');
+  if (reader !== 'holder') return json({ session_id: sessionId, status }, 200, cors);
   if (!frontRaw && !backRaw)
     return json({
       session_id: sessionId, status: 'pending',
       front_uploaded: false, back_uploaded: false,
     }, 200, cors);
-
-  const front = frontRaw ? JSON.parse(frontRaw) : null;
 
   return json({
     session_id: sessionId,
@@ -1711,16 +2050,19 @@ async function handleKycSessionStatus(sessionId, env, cors) {
     age_verified: front?.age_verified === true,
     age_status: front?.age_status || null,
     minimum_age: front?.minimum_age || null,
-    ocr_name: front?.ocr_name || '',
-    reason: front?.status === 'rejected'
-      ? (front?.grok_analysis?.doc_reason || 'Verification did not pass')
-      : null,
+    reason: front?.status === 'rejected' ? publicKycRejectReason(front) : null,
   }, 200, cors);
 }
 
 /// Submit KYC for verification after documents are uploaded.
 /// Fetches ALL document images from R2, sends them to Grok in a SINGLE call
 /// that performs document verification + OCR + criminal background screening.
+// Verification attempts one address may submit per hour. A normal applicant
+// needs one or two (a retake after a blurry photo); this leaves a shared office
+// address room and stops a loop that runs the vision model for free.
+const KYC_SUBMITS_PER_HOUR = 20;
+const KYC_SUBMITS_PER_SESSION = 5;
+
 async function handleKycSubmit(request, env, cors) {
   try {
     const body = await request.json();
@@ -1728,6 +2070,23 @@ async function handleKycSubmit(request, env, cors) {
 
     if (!sessionId)
       return json({ error: 'Missing session_id' }, 400, cors);
+
+    // Submitting re-runs verification and overwrites `kyc-<session>-front`, so
+    // a session id that is a registered account's id must never get this far.
+    if (await kycSessionIdProblem(sessionId, env))
+      return json({ error: 'Invalid verification session', code: 'kyc_session_invalid' }, 400, cors);
+    // A paid check runs only for the holder of the session's upload token.
+    if (!(await uploadTokenValid(env, sessionId, body.upload_token)))
+      return json({ ...KYC_UPLOAD_REFUSED }, 403, cors);
+
+    // Every submit pays for a vision-model call and this route takes no token.
+    // Cap it per address per hour (the per-minute limiter is in the router).
+    const submitIp = request.headers.get('cf-connecting-ip') || 'unknown';
+    const submitRateKey = `kyc-submit-rate:${submitIp}`;
+    const submitCount = parseInt(await env.SCREENING.get(submitRateKey) || '0');
+    if (submitCount >= KYC_SUBMITS_PER_HOUR)
+      return json({ error: 'Too many verification attempts. Try again later.', code: 'rate_limited' }, 429, { ...cors, 'Retry-After': '3600' });
+    await env.SCREENING.put(submitRateKey, (submitCount + 1).toString(), { expirationTtl: 3600 });
 
     // When the capture happened on a phone via the QR handoff, the identity
     // claims live server-side in the handoff record. Prefer those so the phone
@@ -1747,8 +2106,32 @@ async function handleKycSubmit(request, env, cors) {
     if (!frontData)
       return json({ error: 'Front document not uploaded', status: 'incomplete' }, 400, cors);
 
-    const front = JSON.parse(frontData);
+    let front = JSON.parse(frontData);
     let back = null;
+
+    // A finished verification is returned as it stands. Running it again would
+    // pay for another model call to reach an answer already on record, and
+    // could overturn it. A rejected applicant uploads a new document, which
+    // starts the record over.
+    if (front.status === 'verified' || front.status === 'linked') {
+      return json({
+        status: 'verified',
+        verification_id: frontKey,
+        age_verified: front.age_verified === true,
+        minimum_age: front.minimum_age || null,
+      }, 200, cors);
+    }
+
+    // A rejection that was only an outage (xAI could not be asked; recorded
+    // before outages stopped being verdicts) goes back to its uploads, and the
+    // tries that outage spent are given back, so this submit runs the check.
+    let reopened = false;
+    if (rejectedForService(front)) {
+      reopened = true;
+      front = reopenedUpload(front);
+      await env.KYC_STATUS.put(frontKey, JSON.stringify(front), { expirationTtl: 86400 * 30 });
+      await env.KYC_STATUS.delete(`kyc-submits:${sessionId}`);
+    }
 
     // Check back if required
     if (needsBack) {
@@ -1761,6 +2144,14 @@ async function handleKycSubmit(request, env, cors) {
 
     const verificationId = frontKey;
 
+    // At most a few paid checks per session per day, on top of the per-address
+    // limits: a session is one registration, and a few tries are all it needs.
+    const sessionTriesKey = `kyc-submits:${sessionId}`;
+    const sessionTries = reopened ? 0 : parseInt(await env.KYC_STATUS.get(sessionTriesKey) || '0');
+    if (sessionTries >= KYC_SUBMITS_PER_SESSION)
+      return json({ error: 'Too many verification attempts for this session. Start again later.', code: 'rate_limited' }, 429, { ...cors, 'Retry-After': '86400' });
+    await env.KYC_STATUS.put(sessionTriesKey, String(sessionTries + 1), { expirationTtl: 86400 });
+
     // ── Single Grok call: document verification + OCR + criminal screening ──
     const grokResult = await performFullKycVerification(
       front.r2_key,
@@ -1770,6 +2161,27 @@ async function handleKycSubmit(request, env, cors) {
       front.id_type || '',
       env,
     );
+
+    // An outage is not a verdict (src/kyc_identity.mjs): nothing is recorded
+    // against the applicant, the uploads stay, the try and the address's count
+    // are given back, and the administrators hear about a refused key or
+    // credits. Only a parsed answer reaches the verdict below.
+    if (grokResult.service_failure) {
+      try {
+        const failsKey = `kyc-svcfail:${sessionId}`;
+        const fails = parseInt(await env.KYC_STATUS.get(failsKey) || '0');
+        await kvPutRetry(env.KYC_STATUS, failsKey, String(fails + 1), { expirationTtl: 86400 });
+        if (fails < KYC_SERVICE_REFUNDS_PER_SESSION) {
+          await kvPutRetry(env.KYC_STATUS, sessionTriesKey, String(sessionTries), { expirationTtl: 86400 });
+          await kvPutRetry(env.SCREENING, submitRateKey, String(submitCount), { expirationTtl: 3600 });
+        }
+      } catch (e) {
+        console.error('kyc: the try was not given back:', e?.message || e);
+      }
+      await noteGrokKyc(env, { ok: false, status: grokResult.xai_status, kind: grokResult.failure_kind, error: grokResult.xai_error }, grokDeps());
+      return json({ status: 'unavailable', code: 'kyc_unavailable', error: KYC_UNAVAILABLE_MESSAGE }, 503, { ...cors, 'Retry-After': KYC_UNAVAILABLE_RETRY_AFTER });
+    }
+    if (grokResult.model) await noteGrokKyc(env, { ok: true });
 
     // Store screening result in SCREENING KV (same format as performScreening)
     // so handleRegister can skip the duplicate call
@@ -1782,7 +2194,7 @@ async function handleKycSubmit(request, env, cors) {
       verdict_found: grokResult.verdict_found,
       details: grokResult.screening_details,
       screened_at: new Date().toISOString(),
-      model: GROK_MODEL,
+      model: grokResult.model || await resolveGrokModel(env),
     }), { expirationTtl: 86400 * 365 * 7 });
 
     // ── Age verification ───────────────────────────────────────────────────
@@ -1847,18 +2259,15 @@ async function handleKycSubmit(request, env, cors) {
       return json({
         status: 'verified',
         verification_id: verificationId,
-        ocr_name: grokResult.extracted_name || claimedName,
+        // No name: nothing about the document's holder leaves the Worker in an answer.
         age_verified: true,
         minimum_age: minAge,
       }, 200, cors);
     } else {
-      // Surface WHY in a form the UI can show the applicant. Age failures get
-      // a plain-language reason; document and screening failures keep theirs.
-      const reason = !ageApproved
-        ? ageReason
-        : (!docApproved
-            ? (grokResult.doc_reason || 'Document could not be verified')
-            : (grokResult.screening_reason || 'Application requires review'));
+      // WHY, in words the applicant can act on: the same sentence the status
+      // route gives. The model's own result (a background-check finding, a risk
+      // score, flags) stays on the record and is never sent back.
+      const reason = publicKycRejectReason(verifiedRecord);
 
       return json({
         status: 'rejected',
@@ -1867,7 +2276,7 @@ async function handleKycSubmit(request, env, cors) {
         age_status: ageStatus,
         age_verified: ageApproved,
         minimum_age: minAge,
-        decision: grokResult,
+        decision: { reasons: [reason] },
       }, 200, cors);
     }
   } catch (e) {
@@ -1947,7 +2356,9 @@ function bytesToBase64(buf) {
  * 5. Criminal background screening — public court verdicts for extracted name + DOB
  *
  * Receives front image (required) + back image (optional) + claimed identity.
- * Falls back to APPROVE if Grok is unavailable.
+ * When xAI could not be asked (no key, a non-2xx, an exception, an answer with
+ * no verdict in it) the result carries `service_failure: true`: an outage, never
+ * a verdict, and never an approval.
  */
 async function performFullKycVerification(frontR2Key, backR2Key, claimedName, claimedBirthday, idType, env) {
   // Fail CLOSED. This decision gates access to money (Bliss earning and cash
@@ -1960,6 +2371,7 @@ async function performFullKycVerification(frontR2Key, backR2Key, claimedName, cl
       reason: 'Verification unavailable', extracted_name: '',
       extracted_dob: '', extracted_sex: '', risk_score: 0, screening_flags: ['verification_unavailable'],
       confidence: 0, requires_manual_review: true,
+      service_failure: true, failure_kind: 'unconfigured', xai_status: null, xai_error: 'GROK_API_KEY is not set',
     };
   }
 
@@ -1995,7 +2407,7 @@ async function performFullKycVerification(frontR2Key, backR2Key, claimedName, cl
 
     const imageCount = backB64 ? 'two images (front and back)' : 'one image (front only — passport or single-sided ID)';
 
-    const prompt = `You are the KYC + Background Screening AI for Eustress, a game engine platform.
+    const prompt = `You are the KYC + Background Screening AI for Eustress, a simulation and digital-twin platform.
 You are given ${imageCount} of an ID document. The user claims:
 - Name: "${claimedName}"
 - Date of Birth: "${claimedBirthday}"
@@ -2063,7 +2475,8 @@ Screening rules:
     parts.push(textPart(prompt));
     const input = [userMessage(parts)];
 
-    const resp = await grokFetch({ input }, env.GROK_API_KEY);
+    const grok = await grokFor(env);
+    const resp = await grok.fetch({ input }, env.GROK_API_KEY);
 
     if (!resp.ok) {
       const errText = await resp.text();
@@ -2076,6 +2489,7 @@ Screening rules:
         reason: 'Verification service error', extracted_name: '', extracted_dob: '', extracted_sex: '',
         risk_score: 0, screening_flags: ['verification_error'], confidence: 0,
         requires_manual_review: true,
+        service_failure: true, failure_kind: 'http', xai_status: resp.status, xai_error: errText,
       };
     }
 
@@ -2083,20 +2497,23 @@ Screening rules:
     const responseText = extractGrokText(data);
 
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      // Fail CLOSED for the same reason: an unreadable verdict is not a pass.
+    let r = null;
+    try { r = jsonMatch ? JSON.parse(jsonMatch[0]) : null; } catch { r = null; }
+    // Fail CLOSED for the same reason: an unreadable verdict is not a pass. Only
+    // an answer that says APPROVE or DENY in so many words is a verdict.
+    if (!r || typeof r !== 'object' || (r.doc_decision !== 'APPROVE' && r.doc_decision !== 'DENY')) {
       return {
         doc_decision: 'DENY', screening_decision: 'REVIEW',
         doc_reason: 'Verification response could not be parsed',
         reason: 'Could not parse verification response', extracted_name: '', extracted_dob: '', extracted_sex: '',
         risk_score: 0, screening_flags: ['unparseable_response'], confidence: 0,
         requires_manual_review: true,
+        service_failure: true, failure_kind: 'unparseable', xai_status: resp.status, xai_error: 'the answer held no verdict',
       };
     }
 
-    const r = JSON.parse(jsonMatch[0]);
     return {
-      doc_decision: r.doc_decision || 'APPROVE',
+      doc_decision: r.doc_decision,
       doc_reason: r.doc_reason || 'No issues found',
       is_id_document: r.is_id_document ?? true,
       document_type: r.document_type || 'unknown',
@@ -2109,11 +2526,11 @@ Screening rules:
       screening_decision: r.screening_decision || 'APPROVE',
       screening_reason: r.screening_reason || 'No concerns found',
       risk_score: Math.min(100, Math.max(0, r.risk_score || 0)),
-      screening_flags: r.screening_flags || [],
+      screening_flags: modelFlags(r.screening_flags),
       verdict_found: r.verdict_found || false,
       screening_details: r.screening_details || '',
       confidence: Math.min(100, Math.max(0, r.confidence || 0)),
-      model: GROK_MODEL,
+      model: grok.model,
     };
   } catch (e) {
     console.error('Grok KYC exception:', e);
@@ -2126,6 +2543,7 @@ Screening rules:
       extracted_name: '', extracted_dob: '', extracted_sex: '',
       risk_score: 0, screening_flags: ['verification_exception'], confidence: 0,
       requires_manual_review: true,
+      service_failure: true, failure_kind: 'exception', xai_status: null, xai_error: String(e?.message || e),
     };
   }
 }
@@ -2341,15 +2759,25 @@ async function handleHealth(env, cors) {
     service: 'eustress-api',
     fork_id: env.FORK_ID || 'eustress.dev',
     timestamp: new Date().toISOString(),
-    model: GROK_MODEL,
+    model: await resolveGrokModel(env),
     integrations: {
-      grok: { configured: present(env.GROK_API_KEY), key_length: (env.GROK_API_KEY || '').length },
+      // `kyc`: ok, or the last ID verification call xAI refused or failed (status and time only).
+      grok: { configured: present(env.GROK_API_KEY), key_length: (env.GROK_API_KEY || '').length, kyc: await grokKycHealth(env) },
+      // The secret id_hash is keyed with. Without it sign-up refuses (503 kyc_unconfigured).
+      kyc_id_pepper: { configured: idPepperSet(env) },
       // Either transport makes Jev reachable; the key is preferred (pinned
       // model string, usage visible in TypeSafe's dashboard).
       jev: { configured: present(env.JEV_API_KEY) || !!env.AI, transport: present(env.JEV_API_KEY) ? 'typesafe' : (env.AI ? 'workers-ai' : null) },
       stripe: { configured: present(env.STRIPE_SECRET_KEY) },
       email: { configured: !!env.EMAIL },
       kyc_bucket: { configured: !!env.KYC_BUCKET },
+      // The account objects behind fresh sessions and the value freeze. Without
+      // the binding those checks switch off without a sound, so it is reported.
+      account_auth: { configured: !!env.ACCOUNT_AUTH },
+      value_sources: { payouts: !!env.PAYOUTS, wallets: !!env.WALLETS, delta: !!env.DELTA_ACCOUNTS, social: !!env.SOCIAL },
+      // The administrator's key replacement, and what it needs before it may be switched on:
+      // mail to send the second channel, and a mailbox for it to go to.
+      admin_replace: { enabled: String(env.ADMIN_REPLACE_KEY_ENABLED || '').toLowerCase() === 'true', email_bound: !!env.EMAIL, security_mailbox_set: present(env.SECURITY_MAILBOX) },
     },
     moderation: {
       version: MODERATION_VERSION,
@@ -2372,12 +2800,19 @@ function presentedBearer(request) {
   return /^Bearer\s+\S+/i.test(request.headers.get('Authorization') || '');
 }
 
-async function createJwt(userId, secret) {
+/// `notBefore` is the account's session floor (see endSessions). A token is
+/// stamped no earlier than it, so signing in again right after signing out gets
+/// a token the floor lets through even inside the same second.
+/// `amr` says how the session signed in: "key" (the identity file) or
+/// "passkey". A token without one is a "key" token (issued before passkeys).
+async function createJwt(userId, secret, notBefore = 0, amr = 'key') {
   const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
   const payload = {
     sub: userId,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 72 * 3600, // 72 hours
+    iat: Math.max(now, notBefore),
+    exp: now + 72 * 3600, // 72 hours
+    amr: amr === 'passkey' ? 'passkey' : 'key',
   };
 
   const enc = new TextEncoder();
@@ -2395,27 +2830,98 @@ async function createJwt(userId, secret) {
 }
 
 async function verifyJwt(token, secret) {
-  const [headerB64, payloadB64, sigB64] = token.split('.');
-  if (!headerB64 || !payloadB64 || !sigB64) return null;
+  // A malformed token is a refused token, never an error: anything that is not
+  // a well-formed, correctly signed, unexpired token returns null.
+  try {
+    const [headerB64, payloadB64, sigB64] = String(token).split('.');
+    if (!headerB64 || !payloadB64 || !sigB64) return null;
 
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-  );
-  const sigInput = enc.encode(`${headerB64}.${payloadB64}`);
-  const sig = base64urlDecode(sigB64);
-  const valid = await crypto.subtle.verify('HMAC', key, sig, sigInput);
-  if (!valid) return null;
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+    );
+    const sigInput = enc.encode(`${headerB64}.${payloadB64}`);
+    const sig = base64urlDecode(sigB64);
+    const valid = await crypto.subtle.verify('HMAC', key, sig, sigInput);
+    if (!valid) return null;
 
-  const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
-  if (payload.exp < Math.floor(Date.now() / 1000)) return null;
-  return payload.sub;
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
+    // A token must expire; one with no `exp` would be good forever.
+    if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 async function verifyAuth(request, env) {
   const auth = request.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
-  return verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const userId = claims?.sub;
+  if (!userId) return null;
+  // Signing out and a ban both end the tokens the account already holds, not
+  // only the next sign-in: the account has a floor, and a token issued before
+  // it is refused. Without this a banned user keeps every route until their 72
+  // hours run out. One read, for both.
+  if (env.USERS) {
+    const floor = Number(await env.USERS.get(`authfloor:${userId}`)) || 0;
+    if (floor && !(claims.iat >= floor)) return null;
+  }
+  return userId;
+}
+
+/// How the request's session signed in: "key" (the identity file; also a token
+/// with no `amr`, issued before passkeys), "passkey", or null with no valid
+/// token. Any other value is returned as it is, so a key-change route, which
+/// asks for "key", refuses it.
+async function authMethod(request, env) {
+  const auth = request.headers.get('Authorization');
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  if (!claims?.sub) return null;
+  if (claims.amr === undefined || claims.amr === 'key') return 'key';
+  return typeof claims.amr === 'string' ? claims.amr : 'unknown';
+}
+
+/// Null when the request's session signed in with the identity file, otherwise
+/// the 403 `identity_file_required`. For what a passkey session may not do: change
+/// keys, change the account's email address or its verification, mint a
+/// credential that acts as the account (an API key, a webhook endpoint), or set
+/// where the account's payouts go.
+async function requireIdentityFileSession(request, env, headers) {
+  return (await authMethod(request, env)) === 'key' ? null : identityFileRequired(json, headers);
+}
+
+/// Ends every token `userId` holds: the account's session floor moves past them
+/// all, so a token issued up to now is refused. The record outlives the longest
+/// token (72 hours) and then lapses. Signing in again is unaffected:
+/// createJwt never stamps a token before the floor, so nothing needs deleting
+/// when a ban is lifted.
+async function endSessions(env, userId, reason = 'ended') {
+  // With account objects the floor is theirs: strongly consistent, audited, and
+  // mirrored to KV through the outbox. An account that has no record any more (a
+  // deletion removes it first) or a deployment without objects keeps a floor in
+  // KV alone.
+  if (env.ACCOUNT_AUTH) {
+    const state = await accountState(env, userId);
+    if (state.ok) {
+      const moved = await accountCall(env, userId, 'bump_floor', { reason });
+      if (moved.ok) return;
+    }
+  }
+  // Past every iat that can exist: a token is stamped no later than the later of
+  // now and the current floor, so the new floor is one beyond that.
+  const current = Number(await env.USERS.get(`authfloor:${userId}`)) || 0;
+  const floor = Math.max(Math.floor(Date.now() / 1000), current) + 1;
+  await env.USERS.put(`authfloor:${userId}`, String(floor), { expirationTtl: 80 * 3600 });
+}
+
+async function handleLogout(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  await endSessions(env, userId, 'logout');
+  return json({ ok: true }, 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2474,13 +2980,17 @@ async function handleCommunitySearch(request, env, cors) {
         const userData = await env.USERS.get(`user:${userId}`);
         if (userData) {
           const user = JSON.parse(userData);
+          // The real count: the follow route keeps each account's followers as a list under `followers:{id}`, the figure the
+          // profile route reports. One read per hit, and a search answers at most 20 hits.
+          const followers = JSON.parse(await env.SOCIAL.get(`followers:${userId}`) || '[]');
           results.push({
             username: user.username,
             display_name: user.username,
             avatar_url: user.avatar_url || null,
-            is_verified: !!user.id_hash,
-            follower_count: 0,
+            is_verified: user.kyc_verified === true,
+            follower_count: Array.isArray(followers) ? followers.length : 0,
             created_at: user.created_at,
+            joined_at: user.created_at,
           });
         }
       }
@@ -2488,36 +2998,9 @@ async function handleCommunitySearch(request, env, cors) {
     }
   }
 
-  // If no KV results and Grok is configured, try AI-enhanced search
-  if (results.length === 0 && env.GROK_API_KEY) {
-    try {
-      const grokResults = await searchWithGrok(query, env.GROK_API_KEY);
-      if (grokResults) {
-        return json({ users: results, query, ai_suggestion: grokResults }, 200, cors);
-      }
-    } catch (e) {
-      // Log it. Swallowing this made a failing xAI integration indistinguishable
-      // from a search that simply found nothing.
-      console.error('xAI search threw:', e?.name, e?.message);
-    }
-  }
-
+  // Nothing here calls xAI. This route answers anyone, signed in or not, and a paid call behind it would be a way to spend
+  // the key with no account at all.
   return json({ users: results, query }, 200, cors);
-}
-
-async function searchWithGrok(query, apiKey) {
-  const resp = await grokFetch({
-    input: `The user is searching for "${query}" on the Eustress Engine community platform. Eustress is a Rust-based simulation and data platform with a Bliss currency. Suggest what they might be looking for: a username, a simulation, a feature, or a concept. Reply in 1-2 short sentences only.`,
-  }, apiKey);
-
-  // Log upstream failures. Swallowing them silently hid a broken model id and
-  // an expired key behind an ordinary-looking empty search result.
-  if (!resp.ok) {
-    console.error('xAI search failed:', resp.status, (await resp.text()).slice(0, 300));
-    return null;
-  }
-  const data = await resp.json();
-  return extractGrokText(data) || null;
 }
 
 async function handleCommunityLeaderboard(env, cors) {
@@ -2635,12 +3118,16 @@ async function handleUserProfile(username, request, env, cors) {
 
   // Compute badges
   const badges = computeBadges(user, followers.length, simCount, totalPlays, inventory.length);
+  // What the account chose to show and review approved (src/account_profile.mjs), cleaned again on the way out. What is
+  // waiting for review is shown to the owner alone, and that answer is never cached.
+  const shown = await publicProfileOf(env, userId, user);
+  const own = !!viewerUserId && viewerUserId === userId;
 
   return json({
     username: user.username,
-    display_name: user.username,
-    bio: user.bio || '',
-    avatar_url: user.avatar_url || null,
+    display_name: shown.display_name,
+    bio: shown.bio,
+    avatar_url: shown.avatar_url,
     banner_url: null,
     join_date: joinDate,
     follower_count: followers.length,
@@ -2651,11 +3138,12 @@ async function handleUserProfile(username, request, env, cors) {
     favorite_count: favorites.length,
     inventory_count: inventory.length,
     badges,
-    is_verified: !!user.id_hash,
+    is_verified: user.kyc_verified === true,
     is_following: isFollowing,
     discord_linked: false,
     created_at: user.created_at,
-  }, 200, cors);
+    ...(own ? await ownerPendingOf(env, userId) : {}),
+  }, 200, own ? { ...cors, 'Cache-Control': 'private, no-store' } : cors);
 }
 
 function computeBadges(user, followerCount, simCount, totalPlays, inventoryCount) {
@@ -2666,7 +3154,7 @@ function computeBadges(user, followerCount, simCount, totalPlays, inventoryCount
 
   if (user.role === 'admin')
     badges.push({ id: 'admin', name: 'Administrator', icon: '⚡', description: 'Platform administrator' });
-  if (user.id_hash)
+  if (user.kyc_verified === true)
     badges.push({ id: 'verified', name: 'Verified', icon: '✓', description: 'Identity verified via KYC' });
   if (created < new Date('2030-01-01'))
     badges.push({ id: 'early', name: 'Early Adopter', icon: '🚀', description: 'Joined before 2030' });
@@ -2764,17 +3252,37 @@ async function handleUnfavorite(request, env, cors) {
 }
 
 async function handlePlay(request, env, cors) {
-  const { simulation_id, author_id } = await request.json();
-  if (!simulation_id) return json({ error: 'Missing simulation_id' }, 400, cors);
+  // A play counts for a signed-in account, once a day per simulation. This used
+  // to take any caller and credit whichever author id the body named, so anyone
+  // could inflate any simulation's or author's numbers.
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
-  // Increment per-simulation play counter
-  const simPlays = parseInt(await env.SOCIAL.get(`plays:${simulation_id}`) || '0') + 1;
-  await env.SOCIAL.put(`plays:${simulation_id}`, simPlays.toString());
+  const body = await request.json().catch(() => ({}));
+  const simulationId = body.simulation_id;
+  if (typeof simulationId !== 'string' || !/^[a-f0-9-]{1,64}$/.test(simulationId))
+    return json({ error: 'Missing simulation_id' }, 400, cors);
 
-  // Increment author's total plays
-  if (author_id) {
-    const authorPlays = parseInt(await env.SOCIAL.get(`totalPlays:${author_id}`) || '0') + 1;
-    await env.SOCIAL.put(`totalPlays:${author_id}`, authorPlays.toString());
+  // The author is whoever the listing says, never whoever the request names.
+  const raw = await env.SOCIAL.get(`sim:${simulationId}`);
+  if (!raw) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = await simWithLegalLock(env, JSON.parse(raw));
+  if (!isListable(sim)) return json({ error: 'Simulation not found' }, 404, cors);
+  // A play of adult content counts for a viewer who turned it on, and for its author (src/adult_content.mjs).
+  const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+  if (refused) return refused;
+
+  const day = new Date().toISOString().slice(0, 10);
+  const seenKey = `playseen:${userId}:${simulationId}:${day}`;
+  let simPlays = parseInt(await env.SOCIAL.get(`plays:${simulationId}`) || '0');
+  if (!(await env.SOCIAL.get(seenKey))) {
+    await env.SOCIAL.put(seenKey, '1', { expirationTtl: 2 * 86400 });
+    simPlays += 1;
+    await env.SOCIAL.put(`plays:${simulationId}`, simPlays.toString());
+    if (sim.author_id) {
+      const authorPlays = parseInt(await env.SOCIAL.get(`totalPlays:${sim.author_id}`) || '0') + 1;
+      await env.SOCIAL.put(`totalPlays:${sim.author_id}`, authorPlays.toString());
+    }
   }
 
   return json({ success: true, plays: simPlays }, 200, cors);
@@ -2809,7 +3317,7 @@ async function performScreening(username, birthday, idType, idHash, env) {
   }
 
   try {
-    const prompt = `You are a background screening AI for Eustress, a game engine platform.
+    const prompt = `You are a background screening AI for Eustress, a simulation and digital-twin platform.
 Your job is to assess risk based ONLY on publicly available criminal record VERDICTS (final court decisions).
 Do NOT consider arrests, charges, accusations, or pending cases — ONLY convictions/verdicts.
 
@@ -2846,7 +3354,8 @@ Rules:
 - A username is a chosen handle, NOT a legal name. Do not search for the username as a real name.
 - Only consider PUBLICLY DOCUMENTED court verdicts from official sources`;
 
-    const resp = await grokFetch({ input: prompt }, env.GROK_API_KEY);
+    const grok = await grokFor(env);
+    const resp = await grok.fetch({ input: prompt }, env.GROK_API_KEY);
 
     if (!resp.ok) {
       return { decision: 'APPROVE', risk_score: 0, reason: 'Screening service unavailable', flags: [], screened_at };
@@ -2871,7 +3380,7 @@ Rules:
       verdict_found: result.verdict_found || false,
       details: result.details || '',
       screened_at,
-      model: GROK_MODEL,
+      model: grok.model,
     };
   } catch (e) {
     return { decision: 'APPROVE', risk_score: 0, reason: `Screening error: ${e.message}`, flags: [], screened_at };
@@ -2880,18 +3389,23 @@ Rules:
 
 // Pre-registration screening check (can be called separately before register)
 async function handleScreeningCheck(request, env, cors) {
+  // An admin tool. Registration takes its screening from the KYC submit, so
+  // nothing needs this route open: it spends a paid model call and its result
+  // replaces the stored screening record for the name or hash it is given, so
+  // an anonymous caller could overwrite a stored DENY with a fresh answer.
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
   const { username, birthday, id_type, id_hash } = await request.json();
   if (!username || !birthday)
     return json({ error: 'Username and birthday required for screening' }, 400, cors);
 
-  // Rate limit: max 5 screening checks per IP per hour
-  const clientIp = request.headers.get('cf-connecting-ip') || 'unknown';
-  const rateLimitKey = `screen-rate:${clientIp}`;
-  const currentCount = parseInt(await env.SCREENING.get(rateLimitKey) || '0');
-  if (currentCount >= 5) {
-    return json({ error: 'Rate limit exceeded. Try again later.' }, 429, cors);
+  // Bounded per admin by the platform limiter, which counts atomically (a KV
+  // counter read-then-written lets parallel requests all pass).
+  if (env.AUTH_RATE_LIMITER) {
+    const { success } = await env.AUTH_RATE_LIMITER.limit({ key: `screening:${adminId}` });
+    if (!success) return json({ error: 'Rate limit exceeded. Try again later.' }, 429, { ...cors, 'Retry-After': '60' });
   }
-  await env.SCREENING.put(rateLimitKey, (currentCount + 1).toString(), { expirationTtl: 3600 });
 
   const result = await performScreening(username, birthday, id_type, id_hash, env);
 
@@ -2907,6 +3421,10 @@ async function handleScreeningCheck(request, env, cors) {
 
 // Get screening status for a user
 async function handleScreeningStatus(request, env, cors) {
+  // Risk scores, decisions and screening flags are moderation data, not public.
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
   const url = new URL(request.url);
   const userId = url.searchParams.get('user_id');
   const idHash = url.searchParams.get('id_hash');
@@ -2948,19 +3466,26 @@ const ADMIN_USERS = new Set([
 async function requireAdmin(request, env) {
   const userId = await verifyAuth(request, env);
   if (!userId) return null;
+  // No admin power for a passkey session: an administrator signs in with the identity file.
+  if ((await authMethod(request, env)) !== 'key') return null;
 
-  // Check admin role in KV
-  const adminFlag = await env.USERS.get(`admin:${userId}`);
-  if (adminFlag) return userId;
+  // The flag in KV, or the role on the record: one predicate (src/admin_check.mjs).
+  return (await isAdmin(env, userId)) ? userId : null;
+}
 
-  // Check user record for admin role
-  const userData = await env.USERS.get(`user:${userId}`);
-  if (userData) {
-    const user = JSON.parse(userData);
-    if (user.role === 'admin') return userId;
-  }
+/// The routes that are an administrator's only (each one refuses anyone requireAdmin
+/// does not name). Other routes use requireAdmin only to show an administrator more.
+function isAdminOnlyPath(path) {
+  return path.startsWith('/api/admin/') || path.startsWith('/api/accounting/')
+    || ['/api/payouts/daily', '/api/screening/check', '/api/screening/status', '/api/telemetry/summary'].includes(path);
+}
 
-  return null; // Not an admin
+/// The 403 identity_file_required for an administrator whose session signed in with
+/// a passkey; null for anyone else (whom the route answers as it always has).
+async function adminPasskeyRefusal(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId || (await authMethod(request, env)) === 'key') return null;
+  return (await isAdmin(env, userId)) ? identityFileRequired(json, cors) : null;
 }
 
 async function auditLog(env, action, adminId, target, details) {
@@ -3323,6 +3848,9 @@ async function handleAdminBan(request, env, cors) {
   user.banned_by = adminId;
 
   await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+  // Every token the account holds ends now; the login check on `user.banned`
+  // is what holds after that.
+  await endSessions(env, userId, 'ban');
   await auditLog(env, 'BAN', adminId, username, { reason: user.ban_reason });
 
   return json({ success: true, username, banned: true, reason: user.ban_reason }, 200, cors);
@@ -3466,6 +3994,11 @@ async function handleAdminRescreen(request, env, cors) {
 
 // Delete a user account — removes all KV entries so they can re-register
 async function handleAdminDeleteUser(request, env, cors) {
+  // Every other admin handler starts here. Without it, anyone could delete any
+  // account by its (public) username.
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
   const { username } = await request.json();
   if (!username) return json({ error: 'Username required' }, 400, cors);
 
@@ -3481,13 +4014,33 @@ async function handleAdminDeleteUser(request, env, cors) {
   await env.USERS.delete(`user:${userId}`);
   await env.USERS.delete(`username:${username}`);
   if (user.public_key) await env.USERS.delete(`pubkey:${user.public_key}`);
+  // A replaced key's entry went when it was replaced; the current key's is the
+  // account object's to name (the user record keeps the key the account joined with).
+  if (env.ACCOUNT_AUTH) {
+    const held = await accountCall(env, userId, 'state');
+    if (held.ok && held.public_key) await env.USERS.delete(`pubkey:${held.public_key}`);
+  }
   if (user.id_hash) await env.USERS.delete(`idhash:${user.id_hash}`);
+  // The account's claim on its person (src/kyc_identity.mjs) goes with it.
+  if (user.id_hash) await releaseIdHash(env, user.id_hash, userId);
+  // What the account object kept in KV for it goes with the account.
+  await env.USERS.delete(`email:${userId}`);
+  await env.USERS.delete(`valuefreeze:${userId}`);
+  await env.USERS.delete(timeZoneKey(userId));
+  // A deleted account's tokens end with it, and so do its passkeys and their claims.
+  await endSessions(env, userId, 'deletion');
+  if (env.ACCOUNT_AUTH) {
+    const cleared = await accountCall(env, userId, 'passkeys_clear');
+    if (!cleared.ok && cleared.code !== 'not_seeded') console.error('passkeys of a deleted account not cleared:', cleared.code);
+  }
 
   // Clean up social data
   await env.SOCIAL.delete(`followers:${userId}`);
   await env.SOCIAL.delete(`following:${userId}`);
   await env.SOCIAL.delete(`favorites:${userId}`);
   await env.SOCIAL.delete(`plays:${userId}`);
+
+  await auditLog(env, 'DELETE_USER', adminId, username, { user_id: userId });
 
   return json({ success: true, username, user_id: userId }, 200, cors);
 }
@@ -3552,6 +4105,14 @@ async function stripeRequest(method, endpoint, body, env, idempotencyKey) {
   return resp.json();
 }
 
+// Every price id and the product id below are live-mode objects: a test-mode key finds no such price or product ("a similar object
+// exists in live mode"). A test-mode key therefore prices a purchase inline, at the same amount, so staging can buy end to end. The
+// webhook credits by the session's metadata, never by price id, so the credit is the same.
+const isTestKey = (env) => /^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY || '');
+
+// What each treasury tier costs, in cents: the amounts of the live prices below (Stripe has them at $25, $100, $500 and $1,000).
+const TIER_CENTS = { seed: 2500, growth: 10000, sustainer: 50000, patron: 100000 };
+
 // Stripe price IDs
 const STRIPE_PRICES = {
   seed_one_time: 'price_1THyC7RgsC7hEeKMmD71Pdcm',
@@ -3587,6 +4148,11 @@ async function handleStripeCheckout(request, env, cors) {
   } else {
     return json({ error: 'Select a tier or enter a custom amount from $5 to $100,000' }, 400, cors);
   }
+  const testMode = isTestKey(env);
+  if (priceId && testMode) {
+    amountCents = TIER_CENTS[tier];
+    priceId = undefined;
+  }
 
   const params = {
     'mode': isRecurring ? 'subscription' : 'payment',
@@ -3600,9 +4166,10 @@ async function handleStripeCheckout(request, env, cors) {
     params['line_items[0][price]'] = priceId;
     params['line_items[0][quantity]'] = '1';
   } else {
-    // Custom amount — create price inline
+    // Custom amount (or a tier under a test key) — create price inline
     params['line_items[0][price_data][currency]'] = 'usd';
-    params['line_items[0][price_data][product]'] = 'prod_UGVCI0rliegrSC';
+    if (testMode) params['line_items[0][price_data][product_data][name]'] = 'Eustress treasury contribution';
+    else params['line_items[0][price_data][product]'] = 'prod_UGVCI0rliegrSC';
     params['line_items[0][price_data][unit_amount]'] = amountCents.toString();
     params['line_items[0][quantity]'] = '1';
     if (isRecurring) {
@@ -3704,7 +4271,20 @@ async function handleStripeWebhook(request, env) {
     const amount = grossCents / 100; // dollars
     const userId = session.metadata?.user_id || session.client_reference_id;
 
-    const isTicketPurchase = session.metadata?.type === 'ticket_purchase';
+    const sessionType = session.metadata?.type || null;
+
+    // A Delta pack, or the Checkout that starts a plan. A plan's grants come
+    // with each paid invoice (invoice.paid below), its first one included.
+    if (sessionType === 'delta_purchase') return settleDeltaPurchase(session, grossCents, userId, env);
+    if (sessionType === 'subscription') return recordPlanCheckout(session, env);
+    // Anything else that is not a Ticket pack or a treasury contribution was
+    // not created by this Worker: acknowledge it and move no money.
+    if (sessionType && sessionType !== 'ticket_purchase' && sessionType !== 'treasury_fund') {
+      console.error(`checkout session ${session.id} has unknown type ${sessionType}; ignored`);
+      return new Response('OK', { status: 200 });
+    }
+
+    const isTicketPurchase = sessionType === 'ticket_purchase';
 
     if (isTicketPurchase) {
       // TICKET PURCHASE — credit tickets + split revenue
@@ -3797,6 +4377,7 @@ async function handleStripeWebhook(request, env) {
   if (type === 'invoice.paid') {
     const invoice = event.data.object;
     const meta = invoice.subscription_details?.metadata || invoice.parent?.subscription_details?.metadata || {};
+    if (meta.type === 'subscription' && PLANS.includes(meta.eustress_plan)) return settlePlanInvoice(invoice, meta, env);
     if (invoice.billing_reason !== 'subscription_cycle' || meta.type !== 'treasury_fund') {
       return new Response('OK', { status: 200 });
     }
@@ -3812,6 +4393,24 @@ async function handleStripeWebhook(request, env) {
         return new Response('Treasury deposit failed', { status: 500 });
       }
     }
+    return new Response('OK', { status: 200 });
+  }
+
+  // A plan changed state (renewed, past due, cancelled, ended). The record
+  // it writes is what the Delta balance and the cash-out rule read.
+  if (type === 'customer.subscription.updated' || type === 'customer.subscription.deleted') {
+    const sub = event.data.object;
+    const meta = sub.metadata || {};
+    if (meta.type !== 'subscription' || !PLANS.includes(meta.eustress_plan) || !meta.user_id) {
+      return new Response('OK', { status: 200 });
+    }
+    await writePlan(env, meta.user_id, {
+      plan: meta.eustress_plan,
+      status: type === 'customer.subscription.deleted' ? 'canceled' : sub.status,
+      subscription_id: sub.id,
+      current_period_end: sub.current_period_end ?? sub.items?.data?.[0]?.current_period_end ?? null,
+      cancel_at_period_end: !!sub.cancel_at_period_end,
+    });
     return new Response('OK', { status: 200 });
   }
 
@@ -3850,6 +4449,22 @@ async function handleStripeWebhook(request, env) {
       return new Response('Reversal failed', { status: 500 });
     }
     const rv = result.reversal;
+    if (rv && rv.user_id && rv.delta > 0) {
+      const delta = rv.kind === 'dispute_won'
+        ? await deltaCredit(env, rv.user_id, { ref: `restore:${rv.ref}`, amount: rv.delta, kind: 'restore', reason: 'Dispute resolved' })
+        : await deltaDebit(env, rv.user_id, {
+          ref: `reversal:${rv.ref}`, amount: rv.delta, kind: 'reversal',
+          reason: rv.kind === 'refund' ? 'Payment refunded' : 'Payment disputed', allow_negative: true,
+          prefer_lot: creditRefForDeposit(rv.deposit_ref),
+        });
+      if (!delta.ok) {
+        console.error(`Delta ${rv.kind} for ${rv.ref} failed:`, delta.error);
+        return new Response('Delta reversal failed', { status: 500 });
+      }
+    }
+    if (rv && rv.user_id && rv.kind === 'dispute' && !(rv.tickets > 0)) {
+      await env.PAYOUTS.put(`chargeback:${rv.user_id}:${rv.ref}`, JSON.stringify(rv), { expirationTtl: 86400 * 365 * 3 });
+    }
     if (rv && rv.user_id && rv.tickets > 0) {
       const wallet = rv.kind === 'dispute_won'
         ? await walletCredit(env, rv.user_id, {
@@ -3875,16 +4490,155 @@ async function handleStripeWebhook(request, env) {
   return new Response('OK', { status: 200 });
 }
 
+/// A Delta pack was paid for: credit the Delta, then deposit the payment's
+/// split in the Treasury. Both are keyed by the session, so a redelivery adds
+/// nothing, and a failure answers 500 so Stripe redelivers.
+async function settleDeltaPurchase(session, grossCents, userId, env) {
+  const delta = parseInt(session.metadata?.delta || '0', 10);
+  if (!userId || !(delta > 0)) {
+    console.error(`Delta session ${session.id} has no account or amount; nothing credited`);
+    return new Response('OK', { status: 200 });
+  }
+  const credit = await deltaCredit(env, userId, {
+    ref: `stripe:${session.id}`, amount: delta, kind: 'purchase', reason: `Delta pack (${delta})`,
+  });
+  if (!credit.ok) {
+    console.error(`Delta credit for session ${session.id} failed:`, credit.error);
+    return new Response('Delta credit failed', { status: 500 });
+  }
+  const channel = session.metadata?.channel || 'web';
+  const split = splitSale(grossCents, channel);
+  const deposit = await treasuryCall(env, 'deposit', {
+    ref: `stripe:${session.id}`, kind: 'delta_purchase',
+    gross_cents: split.gross_cents, fee_cents: split.fee_cents,
+    treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
+    user_id: userId, payment_intent: session.payment_intent || null, delta, channel,
+  });
+  if (!deposit.ok) {
+    console.error(`treasury deposit for Delta session ${session.id} failed:`, deposit.error);
+    return new Response('Treasury deposit failed', { status: 500 });
+  }
+  return new Response('OK', { status: 200 });
+}
+
+/// The Checkout that starts a plan completed: record the plan as active. Its
+/// grants arrive with the first paid invoice.
+async function recordPlanCheckout(session, env) {
+  const plan = session.metadata?.eustress_plan;
+  const userId = session.metadata?.user_id || session.client_reference_id;
+  if (!PLANS.includes(plan) || !userId) return new Response('OK', { status: 200 });
+  const prior = await readPlan(env, userId);
+  await writePlan(env, userId, {
+    plan,
+    status: 'active',
+    subscription_id: session.subscription || prior?.subscription_id || null,
+    current_period_end: prior?.subscription_id === session.subscription ? prior?.current_period_end ?? null : null,
+  });
+  return new Response('OK', { status: 200 });
+}
+
+/// A plan's invoice was paid, its first included: grant what the price's
+/// metadata says (tickets_per_invoice, delta_per_invoice), deposit the
+/// payment's split in the Treasury, and keep the plan record current. Each
+/// grant is keyed by the invoice, so a redelivery grants nothing twice.
+async function settlePlanInvoice(invoice, meta, env) {
+  const userId = meta.user_id;
+  const line = invoice.lines?.data?.[0] || {};
+  const priceId = line.price?.id || line.pricing?.price_details?.price || null;
+  if (!userId || !priceId) {
+    console.error(`plan invoice ${invoice.id} has no account or price; nothing granted`);
+    return new Response('OK', { status: 200 });
+  }
+  const price = await stripeRequest('GET', `/prices/${encodeURIComponent(priceId)}`, null, env);
+  if (price?.error) {
+    console.error(`price ${priceId} for invoice ${invoice.id} unreadable:`, price.error.message);
+    return new Response('Price lookup failed', { status: 500 });
+  }
+  const tickets = Math.max(0, parseInt(price.metadata?.tickets_per_invoice || '0', 10) || 0);
+  const delta = Math.max(0, parseInt(price.metadata?.delta_per_invoice || '0', 10) || 0);
+  if (tickets > 0) {
+    const credit = await walletCredit(env, userId, {
+      ref: `sub:${invoice.id}`, amount: tickets, reason: `${meta.eustress_plan} plan`, paid: true,
+    });
+    if (!credit.ok) {
+      console.error(`plan Tickets for invoice ${invoice.id} failed:`, credit.error);
+      return new Response('Ticket grant failed', { status: 500 });
+    }
+  }
+  if (delta > 0) {
+    // A plan grant lasts its period plus one more, at most a month.
+    const credit = await deltaCredit(env, userId, {
+      ref: `sub:${invoice.id}`, amount: delta, kind: 'plan', reason: `${meta.eustress_plan} plan`,
+      expires_at: planGrantExpiry(line.period?.start, line.period?.end),
+    });
+    if (!credit.ok) {
+      console.error(`plan Delta for invoice ${invoice.id} failed:`, credit.error);
+      return new Response('Delta grant failed', { status: 500 });
+    }
+  }
+  const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - (invoice.tax || 0)));
+  if (cents > 0) {
+    const split = splitSale(cents, 'web');
+    const deposit = await treasuryCall(env, 'deposit', {
+      ref: `stripe-invoice:${invoice.id}`, kind: 'subscription',
+      gross_cents: split.gross_cents, fee_cents: split.fee_cents,
+      treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
+      user_id: userId, payment_intent: invoice.payment_intent || null, tickets, delta, channel: 'web',
+    });
+    if (!deposit.ok) {
+      console.error(`treasury deposit for invoice ${invoice.id} failed:`, deposit.error);
+      return new Response('Treasury deposit failed', { status: 500 });
+    }
+  }
+  await writePlan(env, userId, {
+    plan: meta.eustress_plan,
+    status: 'active',
+    subscription_id: invoice.subscription || invoice.parent?.subscription_details?.subscription || null,
+    current_period_end: line.period?.end ?? null,
+  });
+  return new Response('OK', { status: 200 });
+}
+
+/// Has this account passed identity verification? Unlocks the Delta trial.
+async function accountIsVerified(accountId, env) {
+  const raw = await env.USERS.get(`user:${accountId}`);
+  if (!raw) return false;
+  try {
+    return (await requireVerifiedAdult(accountId, JSON.parse(raw), env)).ok === true;
+  } catch {
+    return false;
+  }
+}
+
 // Stripe Connect — onboard a contributor to receive payouts
 async function handleStripeConnectOnboard(request, env, cors) {
   if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
 
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  // Where the account's money goes is set with the identity file: a passkey session
+  // neither creates the payout account nor opens the page that edits its bank details.
+  const refusedSession = await requireIdentityFileSession(request, env, cors);
+  if (refusedSession) return refusedSession;
 
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User not found' }, 404, cors);
   const user = JSON.parse(userData);
+
+  // The payout destination is pinned for 30 days after the identity key was
+  // replaced: whoever holds the new key cannot point the account's payouts at an
+  // account of their own the day after taking it (docs/architecture/
+  // IDENTITY_KEY_ROTATION_AND_RECOVERY.md). Creating a Connect account and
+  // opening the page that edits its bank details are both refused.
+  const pin = await payoutPinnedUntil(env, userId);
+  if (!pin.ok) return json({ error: 'This is temporarily unavailable. Try again in a minute.', code: 'account_unavailable' }, 503, cors);
+  if (pin.until) {
+    return json({
+      error: `The payout account cannot be set up or changed until ${new Date(pin.until).toISOString().slice(0, 10)}, because the identity key was replaced.`,
+      code: 'payout_pinned',
+      until: new Date(pin.until).toISOString(),
+    }, 423, cors);
+  }
 
   // Money gate: verified identity AND a document-confirmed age at or above the
   // jurisdiction minimum. This is the point where a person becomes able to
@@ -3892,6 +4646,13 @@ async function handleStripeConnectOnboard(request, env, cors) {
   const gate = await requireVerifiedAdult(userId, user, env);
   if (!gate.ok)
     return json({ error: gate.error, reason: gate.reason, code: gate.code }, gate.status, cors);
+  // Cash-out also needs a plan that includes it: Creator, Professional or Bundle.
+  if (!(await planAllowsCashout(env, userId)))
+    return json({
+      error: 'Bliss cash-out needs a Creator, Professional or Bundle plan',
+      reason: 'Subscribe to Creator, Professional or Bundle, then link your payout account.',
+      code: 'plan_required',
+    }, 403, cors);
 
   // Check if user already has a Connect account
   let connectId = user.stripe_connect_id;
@@ -3915,7 +4676,8 @@ async function handleStripeConnectOnboard(request, env, cors) {
       'tos_acceptance[ip]': clientIp,
     };
 
-    if (user.email) accountParams['email'] = user.email;
+    const accountEmail = await readAccountEmail(env, user);
+    if (accountEmail) accountParams['email'] = accountEmail;
     // Don't set first_name to username — Stripe will reject if it doesn't match the ID photo
     // Name comes from the ID document uploaded via R2 sync or Stripe's own onboarding
     // Prefer the date of birth READ FROM THE DOCUMENT over the one the user
@@ -4053,6 +4815,69 @@ async function handleDailyPayout(request, env, cors) {
   return json(result, 200, cors);
 }
 
+// Payouts held after key replacements. ?status=review lists only the holds
+// set aside for an administrator (an account banned or gone while frozen, or
+// a destination Stripe refuses).
+async function handleAdminHolds(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+  const status = new URL(request.url).searchParams.get('status');
+  const r = await treasuryCall(env, 'holds', { status: status || null });
+  if (!r.ok) return json({ error: r.error, code: r.code }, r.status || 500, cors);
+  const holds = [];
+  for (const h of r.holds) {
+    holds.push({
+      user_id: h.user_id, username: h.username, date: h.date, amount_usd: h.cents / 100, status: h.status,
+      reason: h.reason || 'key_replaced', review_reason: h.review_reason || null, review_since: h.review_since || null,
+      held_at: h.held_at, attempts: h.attempts, error: h.error || null,
+      // Side by side, so an administrator choosing use_current_destination
+      // sees whether the account's destination changed since the day.
+      day_destination: maskConnectId(h.connect),
+      current_destination: maskConnectId(await currentConnectId(env, h.user_id)),
+    });
+  }
+  return json({ holds }, 200, cors);
+}
+
+const maskConnectId = (id) => (typeof id === 'string' && id ? `acct_...${id.slice(-4)}` : null);
+
+async function currentConnectId(env, userId) {
+  try {
+    const raw = await env.USERS.get(`user:${userId}`);
+    return raw ? JSON.parse(raw).stripe_connect_id || null : null;
+  } catch {
+    return null;
+  }
+}
+
+// Decide a held payout in review: {user_id, date, action: 'pay' | 'return',
+// use_current_destination?}. `pay` queues it for the next settlement, to the
+// day's destination or, with use_current_destination, to the account's own
+// current one (the treasury reads it and checks the pin); `return` puts the
+// money back in the treasury. An administrator cannot name a destination.
+async function handleAdminResolveHold(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+  const body = await request.json().catch(() => null);
+  if (!body) return json({ error: 'Body must be JSON' }, 400, cors);
+  const { user_id, date, action } = body;
+  const use_current_destination = body.use_current_destination === true;
+  if ('destination' in body) {
+    return json({ error: 'A destination cannot be named; use use_current_destination', code: 'invalid_request' }, 400, cors);
+  }
+  // The intent is logged first, so no decision is ever made unrecorded, with
+  // both destinations the administrator saw.
+  const listed = await treasuryCall(env, 'holds', { status: 'review' });
+  const hold = listed.ok ? listed.holds.find((h) => h.user_id === user_id && h.date === date) : null;
+  await auditLog(env, `treasury_hold_${action}`, adminId, user_id, {
+    date, use_current_destination,
+    day_destination: maskConnectId(hold?.connect), current_destination: maskConnectId(await currentConnectId(env, user_id)),
+  });
+  const r = await treasuryCall(env, 'resolve_hold', { user_id, date, action, use_current_destination });
+  if (!r.ok) return json({ error: r.error, code: r.code }, r.status || 500, cors);
+  return json({ ok: true, status: r.status, amount_usd: r.cents / 100, destination: r.destination || null }, 200, cors);
+}
+
 // Get payout history
 async function handlePayoutHistory(request, env, cors) {
   const userId = await verifyAuth(request, env);
@@ -4162,15 +4987,15 @@ async function handleTicketCheckout(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Sign in to purchase tickets' }, 401, cors);
 
-  const { package: pkgKey } = await request.json();
+  const body = await request.json().catch(() => null);
+  const pkgKey = body && typeof body === 'object' ? body.package : undefined;
+  if (typeof pkgKey !== 'string' || !Object.hasOwn(TICKET_PACKAGES, pkgKey)) return json({ error: 'Invalid package' }, 400, cors);
   const pkg = TICKET_PACKAGES[pkgKey];
-  if (!pkg) return json({ error: 'Invalid package' }, 400, cors);
 
   const params = {
     'mode': 'payment',
     'success_url': `${siteOrigin(env)}/tickets?purchased=true`,
     'cancel_url': `${siteOrigin(env)}/tickets?purchased=false`,
-    'line_items[0][price]': pkg.price_id,
     'line_items[0][quantity]': '1',
     'metadata[type]': 'ticket_purchase',
     'metadata[package]': pkgKey,
@@ -4178,6 +5003,13 @@ async function handleTicketCheckout(request, env, cors) {
     'metadata[user_id]': userId,
     'client_reference_id': userId,
   };
+  if (isTestKey(env)) {
+    params['line_items[0][price_data][currency]'] = 'usd';
+    params['line_items[0][price_data][unit_amount]'] = String(Math.round(pkg.usd * 100));
+    params['line_items[0][price_data][product_data][name]'] = `Eustress Tickets: ${pkg.name} (${pkg.total} Tickets)`;
+  } else {
+    params['line_items[0][price]'] = pkg.price_id;
+  }
 
   const session = await stripeRequest('POST', '/checkout/sessions', params, env);
   if (session.error) return json({ error: session.error.message }, 400, cors);
@@ -4388,15 +5220,36 @@ async function handlePublishSimulation(request, env, cors) {
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json();
-  const { name, description, genre, max_players, thumbnail_url, is_public, content_root, spaces } = body;
+  const { name, description, genre, max_players, tags: sentTags, thumbnail_url, is_public, content_root, spaces } = body;
 
   if (!name) return json({ error: 'name required' }, 400, cors);
 
-  // A quarantine freezes the author until a person releases it. The freeze
-  // is the one moderation outcome that reaches back to the publish step
-  // itself, because re-uploading under a fresh id is the obvious evasion.
-  const frozen = await env.USERS.get(`publish-frozen:${userId}`);
-  if (frozen) return json({ error: 'Publishing is paused on this account pending review', code: 'publish_frozen' }, 403, cors);
+  // The Space's authored player count (docs/networking/MAX_PLAYERS.md): a whole number from 1 to 10,000, else 10.
+  let maxPlayers = DEFAULT_MAX_PLAYERS;
+  if (max_players !== undefined && max_players !== null) {
+    const checked = checkMaxPlayers(max_players);
+    if (!checked.ok) return json({ error: checked.error, code: 'bad_max_players' }, 400, cors);
+    maxPlayers = checked.value;
+  }
+
+  // The listing's tags (docs/networking/LISTING_TAGS.md): checked before anything is written. A bad tag refuses the whole
+  // request, and the message names it. `[]` asks the review to choose them. Tags are the only category: a `genre` (an older
+  // Studio still sends one) is ignored, except that with no tags sent at all a genre that is a valid tag, and not "all",
+  // becomes the listing's one tag, as a genre from before tags does (src/tags.mjs genreTag).
+  let tags = [];
+  let migratedGenre = null;
+  if (sentTags !== undefined && sentTags !== null) {
+    const checked = checkTags(sentTags);
+    if (!checked.ok) return json({ error: checked.error, code: 'bad_tags' }, 400, cors);
+    tags = checked.tags;
+  } else {
+    migratedGenre = genreTag({ genre });
+    if (migratedGenre !== null) tags = [migratedGenre];
+  }
+
+  // No moderation outcome reaches the account (McKale, 2026-10-15: no
+  // automatic freeze, no automatic ban). An author whose listing was removed
+  // publishes like anyone else, and every publish is reviewed on its own.
 
   const userData = await env.USERS.get(`user:${userId}`);
   const user = userData ? JSON.parse(userData) : {};
@@ -4404,7 +5257,8 @@ async function handlePublishSimulation(request, env, cors) {
   const simId = crypto.randomUUID();
   const sim = {
     id: simId, name, description: description || '',
-    genre: genre || 'all', max_players: max_players || 10,
+    // `genre` is kept only when it became the tag above, for the one release the deprecated mirror is served.
+    genre: migratedGenre, tags, tags_source: 'author', genre_migrated: true, max_players: maxPlayers,
     author_id: userId, author_name: user.username || 'Unknown',
     // Explicit: handleDownloadPak gates on `!sim.is_public`, and the listing
     // endpoint separately defaults undefined to public. Leaving it unset made
@@ -4419,7 +5273,7 @@ async function handlePublishSimulation(request, env, cors) {
     content_root: typeof content_root === 'string' && content_root.length < 128 ? content_root : null,
     // The Spaces the Universe package holds, as the engine listed them.
     space_names: readSpaceNames(spaces) || [],
-    moderation: { status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION },
+    moderation: { status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION, review_schema: REVIEW_SCHEMA },
     // Only an https address is kept: the gallery puts this in an <img>.
     thumbnail_url: typeof thumbnail_url === 'string' && /^https:\/\/\S{1,500}$/.test(thumbnail_url) ? thumbnail_url : null,
     // Never taken from the request. The download route streams whatever object
@@ -4439,10 +5293,88 @@ async function handlePublishSimulation(request, env, cors) {
   const simCount = parseInt(await env.SOCIAL.get(`simCount:${userId}`) || '0') + 1;
   await env.SOCIAL.put(`simCount:${userId}`, simCount.toString());
 
-  return json({ id: simId, ...sim }, 201, cors);
+  return json({ id: simId, ...sim, ...listingTagFields(sim) }, 201, cors);
+}
+
+// An author unlists their own listing (Archive) and relists it (Unarchive). Archive makes the listing private, which the Gallery
+// already reads as "not served", and remembers whether it was public; Unarchive restores exactly that. Its review, world and counts
+// are untouched. Only the author, and never while a hold is on it.
+async function handleArchiveSimulation(request, simId, archive, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  const raw = await env.SOCIAL.get(`sim:${simId}`);
+  const sim = raw ? JSON.parse(raw) : null;
+  // One answer for a listing that does not exist and one that is not yours.
+  if (!sim || sim.author_id !== userId) return json({ error: 'Simulation not found' }, 404, cors);
+  const held = await refuseWhileHeld(env, sim, userId, cors);
+  if (held) return held;
+  if (archive && sim.archived !== true) {
+    sim.archived = true;
+    sim.archived_was_public = sim.is_public !== false;
+    sim.archived_at = new Date().toISOString();
+    sim.is_public = false;
+  } else if (!archive && sim.archived === true) {
+    sim.is_public = sim.archived_was_public !== false;
+    delete sim.archived;
+    delete sim.archived_was_public;
+    delete sim.archived_at;
+  } else {
+    return json({ ok: true, archived: sim.archived === true, changed: false }, 200, cors);
+  }
+  sim.updated_at = new Date().toISOString();
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
+  return json({ ok: true, archived: sim.archived === true, changed: true }, 200, cors);
+}
+
+// An author changes their own listing's tags from the site: PATCH /api/simulations/{id}/tags with `{ "tags": [...] }`
+// (docs/networking/LISTING_TAGS.md). Checked like a publish's tags: a bad one refuses the whole request (400 bad_tags) and
+// nothing is written. `[]` asks the review to choose them. The same set the listing has, in any order, is no change: it is
+// stored in the order sent, keeps who chose it (a judge's tags sent back stay the judge's) and is not reviewed again. Any
+// other set is the author's, and sends the listing back to review the way a changed name in a commit does
+// (sendBackToReview). Only the author, and never while a hold is on it.
+async function handleSetListingTags(request, simId, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  const raw = await env.SOCIAL.get(`sim:${simId}`);
+  const sim = raw ? JSON.parse(raw) : null;
+  // One answer for a listing that does not exist and one that is not yours.
+  if (!sim || sim.author_id !== userId) return json({ error: 'Simulation not found' }, 404, cors);
+  const held = await refuseWhileHeld(env, sim, userId, cors);
+  if (held) return held;
+  let body = null;
+  try { body = await request.json(); } catch { body = null; }
+  const sent = body && typeof body === 'object' && !Array.isArray(body) ? body.tags : undefined;
+  if (sent === undefined || sent === null) return json({ error: 'tags is required: a list of tags, or [] for the review to choose them.', code: 'bad_tags' }, 400, cors);
+  const checked = checkTags(sent);
+  if (!checked.ok) return json({ error: checked.error, code: 'bad_tags' }, 400, cors);
+  const changed = setAuthorTags(sim, checked.tags);
+  if (changed) sendBackToReview(sim);
+  sim.updated_at = new Date().toISOString();
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  return json({ ok: true, id: simId, ...listingTagFields(sim), changed, status: authorStatusOf(sim.moderation?.status, sim.is_public !== false) }, 200, cors);
+}
+
+// While a listing is under a legal hold its stored content is evidence, and
+// the account that published it is frozen: no route that writes content may
+// overwrite either. The CASE decides (contentLockedFor), not the listing's
+// marker, which an upload resets. world.mjs asks the same question, and the
+// refusal reads as ordinary review, never as a hold (see authorView in
+// moderation.mjs).
+async function refuseWhileHeld(env, sim, userId, cors) {
+  return (await contentLockedFor(env, sim, userId)) ? inReview(json, cors) : null;
 }
 
 // Upload .pak scene file to R2
+// A package that lands in a listing is not the one that was judged. Until a new
+// run passes it (POST .../submit) the listing is pending, so an approved world
+// cannot be swapped for another one that is served under the old approval. A
+// quarantine is a hold, not a verdict on content; only a person lifts it, so an
+// upload must not clear it.
+function sendBackToReview(sim) {
+  if (sim.moderation?.status === 'quarantined') return;
+  sim.moderation = { ...(sim.moderation || {}), status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION, review_schema: REVIEW_SCHEMA };
+}
+
 async function handleUploadScene(request, simId, env, cors) {
   const auth = await verifyAuth(request, env);
   if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
@@ -4452,6 +5384,8 @@ async function handleUploadScene(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   // Read the binary body (the .pak file)
   const body = await request.arrayBuffer();
@@ -4462,23 +5396,34 @@ async function handleUploadScene(request, simId, env, cors) {
     return json({ error: 'Scene file too large (max 500MB)' }, 413, cors);
 
   const r2Key = `universes/${simId}/universe.pak`;
+  // With a SHA-256 of the bytes: R2 verifies it and returns it from head, which is
+  // what an approval binds (an MD5 etag can be collided).
+  const packSha = await sha256OfBytes(body);
+  // A package on the takedown blocklist is refused before it is stored (src/takedown.mjs).
+  const blocked = await refuseBlockedUpload(env, [packSha], { json, cors, accountId: auth, simId, route: 'space' });
+  if (blocked) return blocked;
   const stored = await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType: 'application/octet-stream' },
     customMetadata: { simId, authorId: auth, uploadedAt: new Date().toISOString() },
+    sha256: packSha,
   });
 
   // Update simulation record with R2 key and file size. The etag is R2's own
   // digest of what landed, which is what moderation dedups on: the client's
   // content_root is an assertion, this is not.
   sim.r2_key = r2Key;
+  // A .pak is the listing's content from now on: its format says so, which ends every world route (worldIsCurrent in world.mjs).
+  sim.format = PAK_FORMAT;
   sim.scene_size_bytes = body.byteLength;
   sim.pak_etag = stored?.etag || null;
+  sim.pak_sha256 = packSha;
   sim.updated_at = new Date().toISOString();
+  sendBackToReview(sim);
   // A republish into an existing listing names its Spaces in a header, the
   // body being the package itself.
   const spaceNames = readSpaceNames(request.headers.get('X-Eustress-Spaces'));
   if (spaceNames) sim.space_names = spaceNames;
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return json({ r2_key: r2Key, size_bytes: body.byteLength }, 200, cors);
 }
@@ -4492,6 +5437,8 @@ async function handleMultipartCreate(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const r2Key = `universes/${simId}/universe.pak`;
   const multipart = await env.SCENES.createMultipartUpload(r2Key, {
@@ -4540,6 +5487,8 @@ async function handleMultipartComplete(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const r2Key = `universes/${simId}/universe.pak`;
   const multipart = env.SCENES.resumeMultipartUpload(r2Key, upload_id);
@@ -4551,15 +5500,26 @@ async function handleMultipartComplete(request, simId, env, cors) {
   }));
 
   const assembled = await multipart.complete(uploadedParts);
+  // R2 keeps no SHA-256 for an object assembled from parts, so its bytes are hashed here for the takedown blocklist; a blocked
+  // package is removed again before the listing names it (src/takedown.mjs).
+  const assembledHash = await hashStoredObject(env, r2Key);
+  const blocked = await refuseBlockedUpload(env, [assembledHash?.sha256], { json, cors, accountId: auth, simId, route: 'space_multipart' });
+  if (blocked) { await env.SCENES.delete(r2Key); return blocked; }
 
   // Update simulation record
   sim.r2_key = r2Key;
+  sim.format = PAK_FORMAT;
   sim.scene_size_bytes = assembled?.size || total_size || 0;
   sim.pak_etag = assembled?.etag || null;
+  // An object assembled from parts has no whole-object SHA-256: it is identified by etag and version, and never deduplicated.
+  sim.pak_sha256 = null;
+  // The hash taken above, kept for the takedown scan of identical copies only; moderation still identifies the object by etag and version.
+  sim.pak_content_sha256 = assembledHash?.sha256 || null;
   sim.updated_at = new Date().toISOString();
+  sendBackToReview(sim);
   const spaceNames = readSpaceNames(spaces);
   if (spaceNames) sim.space_names = spaceNames;
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return json({ r2_key: r2Key, complete: true }, 200, cors);
 }
@@ -4573,6 +5533,8 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const body = await request.arrayBuffer();
   if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
@@ -4581,6 +5543,10 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
 
   const decodedName = decodeURIComponent(spaceName);
   const r2Key = `universes/${simId}/spaces/${decodedName}.pak`;
+  // A Space package on the takedown blocklist is refused before it is stored (src/takedown.mjs).
+  const spaceSha = await sha256OfBytes(body);
+  const blocked = await refuseBlockedUpload(env, [spaceSha], { json, cors, accountId: auth, simId, route: 'space_single' });
+  if (blocked) return blocked;
   await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType: 'application/octet-stream' },
     customMetadata: { simId, spaceName: decodedName, authorId: auth, uploadedAt: new Date().toISOString() },
@@ -4588,14 +5554,15 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
 
   // Track individual space uploads in the simulation record
   if (!sim.spaces) sim.spaces = {};
-  sim.spaces[decodedName] = { r2_key: r2Key, size_bytes: body.byteLength, updated_at: new Date().toISOString() };
+  sim.spaces[decodedName] = { r2_key: r2Key, size_bytes: body.byteLength, sha256: spaceSha, updated_at: new Date().toISOString() };
   sim.updated_at = new Date().toISOString();
   // The content changed, so the previous decision no longer describes it:
   // back to pending until the engine resubmits, and no etag to dedup against,
   // since the Universe .pak this listing was judged on is not what plays now.
-  sim.moderation = { ...(sim.moderation || {}), status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION };
+  sendBackToReview(sim);
   sim.pak_etag = null;
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  sim.pak_sha256 = null;
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return json({ r2_key: r2Key, space: decodedName, size_bytes: body.byteLength }, 200, cors);
 }
@@ -4609,6 +5576,8 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const body = await request.arrayBuffer();
   if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
@@ -4617,14 +5586,30 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   if (body.byteLength > 5 * 1024 * 1024)
     return json({ error: 'Thumbnail too large (max 5MB)' }, 413, cors);
 
-  const contentType = request.headers.get('content-type') || 'image/webp';
-  const ext = contentType.includes('png') ? 'png' : contentType.includes('jpeg') ? 'jpg' : 'webp';
+  // The type comes from the file's own bytes, never from the request header. A
+  // thumbnail is served from this origin, so a body the author labelled
+  // text/html would otherwise be a web page here.
+  const contentType = sniffFileType(body);
+  if (contentType !== 'image/png' && contentType !== 'image/jpeg' && contentType !== 'image/webp')
+    return json({ error: 'Thumbnail must be a PNG, JPEG or WebP image' }, 415, cors);
+  // Dimensions bounded, metadata (EXIF and GPS, XMP, text chunks) dropped, and a
+  // SHA-256 taken before it is stored (src/user_images.mjs): an approval binds it.
+  const prepared = await prepareUserImage(body);
+  if (!prepared.ok) return json({ error: prepared.error }, 413, cors);
+  const ext = prepared.info.ext;
   const r2Key = `thumbnails/${simId}/thumb.${ext}`;
+  // An image on the takedown blocklist, as sent or as it would be stored, is refused (src/takedown.mjs).
+  const blocked = await refuseBlockedUpload(env, [await sha256OfBytes(body), prepared.sha256], { json, cors, accountId: auth, simId, route: 'thumbnail' });
+  if (blocked) return blocked;
 
-  await env.SCENES.put(r2Key, body, {
-    httpMetadata: { contentType },
+  await env.SCENES.put(r2Key, prepared.bytes, {
+    httpMetadata: { contentType: prepared.info.mime },
     customMetadata: { simId, authorId: auth },
+    sha256: prepared.sha256,
   });
+  // One thumbnail per listing: an older one in another format must not outlive
+  // this one, because the route serves the first it finds.
+  for (const other of ['webp', 'png', 'jpg']) if (other !== ext) await env.SCENES.delete(`thumbnails/${simId}/thumb.${other}`).catch(() => {});
 
   // Public thumbnail URL. This was simulations.eustress.dev, a host that never
   // had a DNS record, so every record published before now carries a dead link.
@@ -4632,7 +5617,7 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   const thumbnailUrl = `${new URL(request.url).origin}/api/simulations/${simId}/thumbnail`;
   sim.thumbnail_url = thumbnailUrl;
   sim.updated_at = new Date().toISOString();
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return json({ thumbnail_url: thumbnailUrl }, 200, cors);
 }
@@ -4652,6 +5637,7 @@ async function handleUserProjects(request, url, env, cors) {
     // Find all simulations authored by this user via sim-author:{userId}:* keys
     const list = await env.SOCIAL.list({ prefix: `sim-author:${auth}:`, limit: 100 });
     const projects = [];
+    const locked = await legalLockedIds(env);
 
     for (const key of list.keys) {
       const simId = await env.SOCIAL.get(key.name);
@@ -4660,34 +5646,37 @@ async function handleUserProjects(request, url, env, cors) {
       if (!simData) continue;
 
       try {
-        const sim = JSON.parse(simData);
-        projects.push({
+        const sim = withLegalLockFrom(JSON.parse(simData), locked);
+        // The author always sees their own listing, so an adult one's images are signed URLs (src/adult_content.mjs).
+        projects.push(await withSignedImages(env, {
           id: sim.id || simId,
           name: sim.name || 'Untitled',
           description: sim.description || null,
           thumbnail_url: liveThumbnailUrl(sim),
+          ...coverFields(sim, url.origin),
           // 'published' means listed in the gallery. Anything else is the
           // author-facing review status (in_review, not_listed,
           // changes_requested, appeal_in_review, approved_private), or
           // 'unreviewed' for a listing that predates the gate. Held and
           // quarantined both read as in_review; see authorView.
-          status: isListable(sim) ? 'published' : authorStatusOf(sim.moderation?.status, sim.is_public !== false),
+          status: sim.archived === true ? 'archived' : isListable(sim) ? 'published' : authorStatusOf(sim.moderation?.status, sim.is_public !== false),
           moderation: sim.moderation ? {
             status: authorStatusOf(sim.moderation.status, sim.is_public !== false), rating: sim.moderation.status === 'approved' ? (sim.moderation.rating || null) : null,
             child_directed: sim.moderation.child_directed === true, featured: sim.moderation.featured === true,
             updated_at: sim.moderation.updated_at || null,
           } : null,
-          genre: sim.genre || 'All',
+          // `tags` is the only category; `genre` is its deprecated mirror for one release (src/tags.mjs listingTagFields).
+          ...listingTagFields(sim),
           max_players: sim.max_players || 10,
           is_public: sim.is_public !== false,
           version: sim.version || 1,
-          play_count: sim.play_count || 0,
+          play_count: await playCountOf(env, sim),
           favorite_count: sim.favorite_count || 0,
           last_edited: sim.updated_at || sim.published_at || '',
           created_at: sim.published_at || '',
           published_at: sim.published_at || null,
           storage_url: sim.r2_key || null,
-        });
+        }, sim, { accountId: auth, signedIn: true, adult: false }));
       } catch (_) {}
     }
 
@@ -4702,13 +5691,16 @@ async function handleUserProjects(request, url, env, cors) {
 
 // The gallery-facing projection of a listing: no storage keys, no internal
 // moderation detail, just the rating and flags a card needs.
-function galleryView(sim) {
+function galleryView(sim, origin) {
   const m = sim.moderation || {};
   return {
     id: sim.id, name: sim.name, description: sim.description || '',
-    genre: sim.genre || 'all', max_players: sim.max_players || 10,
+    // `tags` is the only category, `tags_source` says who chose them, and `genre` is the deprecated mirror for one release.
+    ...listingTagFields(sim), max_players: sim.max_players || 10,
     author_id: sim.author_id, author_name: sim.author_name,
     thumbnail_url: liveThumbnailUrl(sim),
+    // The creator's own cover art when there is one (src/cover.mjs); the Gallery shows the thumbnail otherwise.
+    ...coverFields(sim, origin),
     play_count: sim.play_count || 0, favorite_count: sim.favorite_count || 0,
     version: sim.version || 1, published_at: sim.published_at, updated_at: sim.updated_at,
     rating: m.rating || null, child_directed: m.child_directed === true, featured: m.featured === true,
@@ -4723,48 +5715,104 @@ function galleryView(sim) {
 // Only listings with a recorded approval are served. Pinning is free, listing
 // is curated: a rejected or pending Universe still exists for its author, it
 // is simply not surfaced here. `?rating_max=` lets a client that has not
-// age-gated its viewer ask for the all-ages slice only.
+// age-gated its viewer ask for the all-ages slice only. Adult content follows
+// the viewer's own setting (src/adult_content.mjs): `opts.viewer` is who asked,
+// signed out when absent. A viewer whose setting is off is shown nothing above
+// mature_17, one with it on and a verified age under 21 nothing above adult_18,
+// whatever `?rating_max=` says (ratingCap). `opts.cap` is the highest rating,
+// for a caller that has already worked the slice out (makers, tags).
 async function handleListSimulations(url, env, cors, opts = {}) {
+  // The featured shelf is the same for everyone; every other list depends on who asked.
+  const headers = opts.featuredOnly ? cors : viewerHeaders(cors, opts.viewer, null);
   try {
-    const ratingMax = url?.searchParams?.get('rating_max') || null;
-    const order = ['all_ages', 'teen_13', 'mature_17', 'adult_18'];
-    const maxIdx = ratingMax && order.includes(ratingMax) ? order.indexOf(ratingMax) : order.length - 1;
-    const genre = (url?.searchParams?.get('genre') || '').toLowerCase();
-    const list = await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
+    const cap = RATINGS.includes(opts.cap) ? opts.cap : ratingCap(url?.searchParams?.get('rating_max'), opts.viewer);
+    const maxIdx = RATINGS.indexOf(cap);
+    // `?tag=` (repeatable): a listing must carry every tag asked for. A value that is not a valid tag matches nothing and is
+    // no error. `?genre=` is a deprecated alias of `?tag=` for one release ("all" and an empty value ask nothing). `?q=`:
+    // free text over name, description, author and tags. docs/networking/LISTING_TAGS.md.
+    const wanted = tagFilter([...(url?.searchParams?.getAll('tag') || []), ...genreAliasValues(url?.searchParams?.getAll('genre'))]);
+    const query = (url?.searchParams?.get('q') || '').normalize('NFKC').trim().toLowerCase();
+    const list = wanted.none ? { keys: [] } : await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
     const sims = [];
 
+    // One R2 list for every locked listing, so a page does not pay a read each.
+    const locked = await legalLockedIds(env);
     for (const key of list.keys) {
       if (key.name.startsWith('sim-author:')) continue;
       if (key.name.startsWith('simCount:')) continue;
       const data = await env.SOCIAL.get(key.name);
       if (data) {
         try {
-          const sim = JSON.parse(data);
+          const sim = withLegalLockFrom(JSON.parse(data), locked);
           if (!isListable(sim)) continue;
-          // Featured never carries adult_18: the shelf is what an un-gated visitor sees first.
-          if (opts.featuredOnly && (sim.moderation?.featured !== true || sim.moderation?.rating === 'adult_18')) continue;
-          const idx = order.indexOf(sim.moderation?.rating || 'adult_18');
-          if (idx > maxIdx) continue;
-          if (genre && genre !== 'all' && (sim.genre || '').toLowerCase() !== genre) continue;
-          sims.push(galleryView(sim));
+          // Featured never carries adult content: the shelf is what an un-gated visitor sees first.
+          if (opts.featuredOnly && (sim.moderation?.featured !== true || isAdultListing(sim))) continue;
+          // No rating, or one this Worker does not know, reads as adult_21, the most restrictive band (ratingOf).
+          if (RATINGS.indexOf(ratingOf(sim)) > maxIdx) continue;
+          const card = galleryView(sim, url?.origin);
+          if (!wanted.tags.every((t) => card.tags.includes(t))) continue;
+          if (query && !galleryTextMatches(card, query)) continue;
+          // The popular-tags read needs only the tags, not the play count's extra read. An adult card, which only a
+          // viewer who turned Adult content on is shown, carries signed image URLs (src/adult_content.mjs).
+          sims.push(opts.viewsOnly ? card : { ...(await withSignedImages(env, card, sim, opts.viewer)), play_count: await playCountOf(env, sim) });
         } catch (_) {}
       }
     }
 
     sims.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
-    if (opts.featuredOnly) return json({ featured: sims, timestamp: new Date().toISOString() }, 200, cors);
-    return json({ simulations: sims, total: sims.length }, 200, cors);
+    // The popular-tags read counts the same listings this list serves.
+    if (opts.viewsOnly) return sims;
+    if (opts.featuredOnly) return json({ featured: sims, timestamp: new Date().toISOString() }, 200, headers);
+    return json({ simulations: sims, total: sims.length }, 200, headers);
   } catch (e) {
-    if (opts.featuredOnly) return json({ featured: [], timestamp: new Date().toISOString() }, 200, cors);
-    return json({ simulations: [], total: 0 }, 200, cors);
+    if (opts.viewsOnly) return [];
+    if (opts.featuredOnly) return json({ featured: [], timestamp: new Date().toISOString() }, 200, headers);
+    return json({ simulations: [], total: 0 }, 200, headers);
   }
+}
+
+// Free-text search over what a gallery card shows: name, description, author and tags, case-insensitive. `query` arrives
+// trimmed and lower-cased.
+function galleryTextMatches(view, query) {
+  const has = (text) => typeof text === 'string' && text.toLowerCase().includes(query);
+  return has(view.name) || has(view.description) || has(view.author_name) || queryMatchesTag(query, view.tags);
+}
+
+// The tags most used on listed listings, for the gallery's tag chips: the top 30, each { tag, count }, by count and then by
+// tag. It counts the listings the list route serves (so a tag it names always has listings behind it, and an unlisted
+// listing's tags never appear), at the viewer's slice like the list: `rating_max`, and the viewer's Adult content setting
+// (src/adult_content.mjs). The signed-out answer is cached by the browser for five minutes; one for a signed-in viewer is
+// not cached at all (viewerHeaders). docs/networking/LISTING_TAGS.md.
+const POPULAR_TAGS_LIMIT = 30;
+async function handlePopularTags(url, env, cors, viewer) {
+  const scope = new URL('https://api.eustress.dev/api/simulations');
+  const cap = ratingCap(url?.searchParams?.get('rating_max'), viewer);
+  const views = await handleListSimulations(scope, env, cors, { viewsOnly: true, cap });
+  const counts = new Map();
+  for (const view of views) for (const tag of new Set(view.tags)) counts.set(tag, (counts.get(tag) || 0) + 1);
+  const tags = [...counts]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0))
+    .slice(0, POPULAR_TAGS_LIMIT);
+  return json({ tags }, 200, viewerHeaders(cors, viewer, 'public, max-age=300'));
 }
 
 async function handleGetSimulation(request, simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
-  const sim = JSON.parse(data);
-  if (isListable(sim)) return json(galleryView(sim), 200, cors);
+  const sim = await simWithLegalLock(env, JSON.parse(data));
+  if (isListable(sim)) {
+    // Adult content: shown to a viewer who turned it on, and to its author; anyone else is told why (src/adult_content.mjs).
+    // An adult listing is only ever served to a signed-in viewer, so its answer is never cached, and its images are
+    // signed URLs, the only ones its image routes serve.
+    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    if (refused) return refused;
+    const adult = isAdultListing(sim);
+    const headers = adult ? { ...cors, 'Cache-Control': 'private, no-store' } : cors;
+    const view = galleryView(sim, new URL(request.url).origin);
+    const shown = adult ? await withSignedImages(env, view, sim, await viewerOf(request, env, verifyAuth)) : view;
+    return json({ ...shown, play_count: await playCountOf(env, sim) }, 200, headers);
+  }
   // Unlisted: the author sees their own record with the moderation summary,
   // an admin sees the same, everyone else sees nothing distinguishable from
   // a missing id (a 404 does not confirm that a held listing exists).
@@ -4772,7 +5820,9 @@ async function handleGetSimulation(request, simId, env, cors) {
   const admin = auth ? await requireAdmin(request, env) : null;
   if (!auth || (auth !== sim.author_id && !admin)) return json({ error: 'Simulation not found' }, 404, cors);
   const rec = await env.SOCIAL.get(`modcase:${simId}`);
-  return json({ ...galleryView(sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec), sim) : { status: authorStatusOf(sim.moderation?.status, sim.is_public !== false) } }, 200, cors);
+  // An adult listing's images are signed for its author, and for an admin who turned Adult content on.
+  const view = isAdultListing(sim) ? await withSignedImages(env, galleryView(sim, new URL(request.url).origin), sim, await viewerOf(request, env, verifyAuth)) : galleryView(sim, new URL(request.url).origin);
+  return json({ ...view, play_count: await playCountOf(env, sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec), sim) : { status: authorStatusOf(sim.moderation?.status, sim.is_public !== false) } }, 200, isAdultListing(sim) ? { ...cors, 'Cache-Control': 'private, no-store' } : cors);
 }
 
 // Play a simulation — returns server connection info
@@ -4781,7 +5831,10 @@ async function handleGetSimulation(request, simId, env, cors) {
 async function handleDownloadPak(request, simId, env, cors) {
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
-  const sim = JSON.parse(simData);
+  // The listing as serving sees it: a legal lock overrides the marker, which
+  // other writers rewrite whole, and so does an approval whose reviewed package
+  // is no longer the one stored (see simForServing in moderation.mjs).
+  const sim = await simForServing(env, JSON.parse(simData), 'content');
 
   // Approved public listings are open. Anything else is the author's alone,
   // and a quarantined .pak is served to nobody but an admin: the legal lane
@@ -4793,6 +5846,11 @@ async function handleDownloadPak(request, simId, env, cors) {
     // would tell a suspected uploader that a legal hold exists.
     if (!canServe(sim, auth, !!admin))
       return json({ error: 'Simulation not available' }, 403, cors);
+  } else {
+    // Adult content is served to a viewer who turned it on, and to its author (src/adult_content.mjs). The Player sends its
+    // session with the download (crates/client space_fetch.rs), so a signed-in Player is judged by its own setting.
+    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    if (refused) return refused;
   }
 
   // An .echk listing's r2_key names its manifest, which is not a .pak.
@@ -4807,12 +5865,29 @@ async function handleDownloadPak(request, simId, env, cors) {
   const object = await env.SCENES.get(sim.r2_key);
   if (!object) return json({ error: '.pak not found in storage' }, 404, cors);
 
+  // The listing was judged servable from a head. The object fetched now has to be
+  // the same one: an upload between the two reads is not served unreviewed (only
+  // its author and an admin are given it).
+  if (isListable(sim) && !(await objectMatchesBinding(env, sim, 'content', object))) {
+    const auth = await verifyAuth(request, env);
+    const admin = auth ? await requireAdmin(request, env) : null;
+    if (auth !== sim.author_id && !admin) {
+      await object.body?.cancel?.();
+      return json({ error: 'Simulation not available' }, 403, cors);
+    }
+  }
+
+  // The world is being fetched to be played: a visit.
+  await countVisit(env, sim, await viewerKey(env, request, await verifyAuth(request, env)));
+
   return new Response(object.body, {
     headers: {
       ...cors,
       'Content-Type': 'application/octet-stream',
       'Content-Disposition': `attachment; filename="${sim.name || simId}.pak"`,
       'Content-Length': object.size.toString(),
+      // Adult content goes only to a signed-in viewer, so no cache keeps it.
+      ...(isAdultListing(sim) ? { 'Cache-Control': 'private, no-store' } : {}),
     },
   });
 }
@@ -4821,7 +5896,7 @@ async function handlePlaySimulation(request, simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
 
-  const sim = JSON.parse(data);
+  const sim = await simWithLegalLock(env, JSON.parse(data));
 
   // Same gate as the download: approved and public, or the author, or an admin.
   if (!isListable(sim)) {
@@ -4829,36 +5904,49 @@ async function handlePlaySimulation(request, simId, env, cors) {
     const admin = auth ? await requireAdmin(request, env) : null;
     if (!canServe(sim, auth, !!admin))
       return json({ error: 'Simulation not available' }, auth ? 403 : 401, cors);
+  } else {
+    // Adult content plays for a viewer who turned it on, and for its author (src/adult_content.mjs).
+    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    if (refused) return refused;
   }
 
-  // Increment play count
-  sim.play_count = (sim.play_count || 0) + 1;
-  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  // Nothing is counted here: this route only says how to open the listing, and the page asks for it on a click that may
+  // open nothing. A visit is counted where the world is fetched or a join admitted (src/visits.mjs).
 
-  // Increment author's total plays
-  if (sim.author_id) {
-    const plays = parseInt(await env.SOCIAL.get(`totalPlays:${sim.author_id}`) || '0') + 1;
-    await env.SOCIAL.put(`totalPlays:${sim.author_id}`, plays.toString());
-  }
-
-  // A published simulation plays solo: the Player downloads the world and
-  // runs it locally. No server registers itself with the API, so there is
-  // none to hand out; a multiplayer session is one a Studio host shares as a
-  // join link, outside this route.
+  // With nobody hosting, a published simulation plays solo: the Player
+  // downloads the world and runs it locally ('solo', play/<id>). While a
+  // Studio host is live, Play hands the Player the host's own join link
+  // ('live', join/<host>:<port>?key=..&pin=..), the exact string the host
+  // produced and live.mjs validated, so the Player joins and is admitted
+  // instead of playing a private copy. A visitor who may not have the link
+  // (signed out, no guest lease) is told it is live and gets the solo link.
   const origin = new URL(request.url).origin;
   const echk = sim.format === WORLD_FORMAT;
-  return json({
-    status: 'solo',
-    launch: {
-      // Opens the Player, which registers the eustress-player:// scheme.
-      link: `eustress-player://play/${simId}`,
-      command: 'eustress-client',
-      args: ['--sim', simId],
-      manifest_url: echk ? `${origin}/api/simulations/${simId}/world/manifest` : null,
-      pak_url: !echk && sim.r2_key ? `${origin}/api/simulations/${simId}/download` : null,
-    },
+  const now = Date.now();
+  const viewer = await verifyAuth(request, env);
+  const lease = viewer ? false : await leaseIsLive(env, request.headers.get('X-Eustress-Lease'), now);
+  const host = await livePlayInfo(env, simId, { signedIn: !!viewer, lease, now });
+  const solo = `eustress-player://play/${simId}`;
+  const launch = {
+    // Opens the Player, which registers the eustress-player:// scheme.
+    link: host?.link || solo,
+    // Always the way to play alone, so the page can offer it next to a live session.
+    solo_link: solo,
+    command: 'eustress-client',
+    args: ['--sim', simId],
+    manifest_url: echk ? `${origin}/api/simulations/${simId}/world/manifest` : null,
+    pak_url: !echk && sim.r2_key ? `${origin}/api/simulations/${simId}/download` : null,
+  };
+  const out = {
+    status: host?.link ? 'live' : 'solo',
+    launch,
     simulation: { id: sim.id, name: sim.name, description: sim.description, format: echk ? WORLD_FORMAT : 'pak' },
-  }, 200, cors);
+  };
+  if (host) {
+    out.live = { players: host.players, max_players: host.max_players };
+    if (!host.link) out.link_hidden = true;
+  }
+  return json(out, 200, { ...cors, 'Cache-Control': 'no-store' });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5131,6 +6219,13 @@ async function handleGetWebsiteManifest(request, url, segment, env) {
   const objectKey = websiteManifestKey(target.simId);
   const inm = request.headers.get('If-None-Match');
 
+  // A manifest follows its listing: one under a legal hold, or one a review
+  // decided against, publishes nothing. The answer is the one for a manifest
+  // that does not exist, so it says nothing about why.
+  const listingRaw = await env.SOCIAL.get(`sim:${target.simId}`);
+  const listing = listingRaw ? await simWithLegalLock(env, JSON.parse(listingRaw)) : null;
+  const withheld = ['quarantined', 'held', 'rejected', 'changes_requested', 'appealed'].includes(listing?.moderation?.status);
+
   // A conditional request only needs metadata to answer, so HEAD first when the
   // caller offered a validator and fall through to a full GET only if it does
   // not match. Worst case is HEAD plus GET, which is exactly the case where a
@@ -5144,7 +6239,7 @@ async function handleGetWebsiteManifest(request, url, segment, env) {
     meta = object;
   }
 
-  if (!meta)
+  if (!meta || withheld)
     return manifestError(404, 'manifest_not_found',
       `No website manifest is published for ${target.namespace ? `namespace "${target.namespace}"` : `simulation ${target.simId}`}. Add a Website service to the Space and publish it.`,
       { namespace: target.namespace, sim_id: target.simId }, cors);
@@ -5188,7 +6283,7 @@ async function handleGetWebsiteManifest(request, url, segment, env) {
   const etag = storedHash ? `"${storedHash}"` : undefined;
   const pinned = url.searchParams.get('v');
 
-  // A pinned response promises one exact state for a year, so serving a
+  // A pinned response promises one exact state, so serving a
   // different state under that promise is worse than refusing: the consumer
   // pinned precisely because it must not drift.
   if (pinned !== null && normalizeHash(pinned) !== normalizeHash(storedHash))
@@ -5197,7 +6292,7 @@ async function handleGetWebsiteManifest(request, url, segment, env) {
       { namespace, requested: pinned, current: storedHash }, cors);
 
   const cacheControl = pinned !== null
-    ? 'public, max-age=31536000, immutable'
+    ? 'public, max-age=3600'
     : 'public, max-age=300, stale-while-revalidate=86400';
 
   // `public` plus authentication by request header is a cache-poisoning shape
@@ -5240,6 +6335,10 @@ async function handlePutWebsiteManifest(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
   if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  // The manifest is stored content like the .pak: it is not written while the
+  // listing's content is locked.
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const raw = await request.text();
   const rawBytes = new TextEncoder().encode(raw).length;
@@ -5441,25 +6540,67 @@ async function handlePutWebsiteManifest(request, simId, env, cors) {
 // `{id}/thumbnail.webp` - a key namespace nothing ever wrote. The live key is
 // the one handleUploadThumbnail writes. webp is tried first because that is
 // what the engine uploads, so the common case is a single R2 read.
+// What the public sees in place of a thumbnail that is not the one that was reviewed.
+function thumbnailPlaceholder(cors, cacheControl = 'public, max-age=60') {
+  return new Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 9" preserveAspectRatio="xMidYMid slice"><rect width="16" height="9" fill="#2b2f36"/></svg>', {
+    headers: {
+      ...cors,
+      'Content-Type': 'image/svg+xml',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': cacheControl,
+    },
+  });
+}
+
 async function handleGetThumbnail(request, simId, env, cors) {
   // A thumbnail of held or quarantined content is itself the content, so it
   // follows the same gate as the .pak instead of leaking through a public URL.
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Thumbnail not found' }, 404, cors);
-  const sim = JSON.parse(simData);
+  const sim = await simWithLegalLock(env, JSON.parse(simData));
+  // An adult listing's thumbnail needs the signed URL its listing gives an allowed
+  // viewer, whoever asks: an image tag carries no session (src/adult_content.mjs).
+  // Every other listing's thumbnail is served as it always was.
+  const unsigned = await refuseUnsignedImage(request, env, sim, json, cors);
+  if (unsigned) return unsigned;
+  const placeholder = () => thumbnailPlaceholder(cors, imageCacheControl(request, sim, 'public, max-age=60'));
   if (!isListable(sim)) {
     const auth = await verifyAuth(request, env);
     const admin = auth ? await requireAdmin(request, env) : null;
     if (!canServe(sim, auth, !!admin)) return json({ error: 'Thumbnail not found' }, 404, cors);
+  } else if (!(await thumbnailApproved(env, sim))) {
+    // The image on file is not the one that was reviewed (it changed after the
+    // approval). The listing stays available; the public sees a plain panel
+    // until the next review binds the new image. Its author and an admin see it.
+    const auth = await verifyAuth(request, env);
+    const admin = auth ? await requireAdmin(request, env) : null;
+    if (auth !== sim.author_id && !admin) return placeholder();
   }
   for (const ext of ['webp', 'png', 'jpg']) {
     const object = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
     if (!object) continue;
+    // Judged from a head, so the object fetched now is compared too (see handleDownloadPak).
+    if (isListable(sim) && !(await objectMatchesBinding(env, sim, 'thumb', object))) {
+      const auth = await verifyAuth(request, env);
+      const admin = auth ? await requireAdmin(request, env) : null;
+      if (auth !== sim.author_id && !admin) {
+        await object.body?.cancel?.();
+        return placeholder();
+      }
+    }
+    // The type follows the object's extension, which only an image sniffed at
+    // upload can have. Never the stored header: an object written before that
+    // check may carry any type its author chose. nosniff and a sandbox policy
+    // keep even a mislabelled body from running as a page on this origin.
     return new Response(object.body, {
       headers: {
         ...cors,
-        'Content-Type': object.httpMetadata?.contentType || `image/${ext === 'jpg' ? 'jpeg' : ext}`,
-        'Cache-Control': 'public, max-age=3600',
+        'Content-Type': `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        // An adult listing's: private, and no longer than its signed URL has left.
+        'Cache-Control': imageCacheControl(request, sim, 'public, max-age=3600'),
       },
     });
   }
@@ -5986,9 +7127,24 @@ async function handleCronHealth(request, env, cors) {
   const active = await treasuryCall(env, 'settlement', {});
   const lastOk = runs.find((r) => r.ok);
   const settled = new Set(settlements.filter((s) => s.phase === 'done').map((s) => s.date));
+  const treasury = await treasuryCall(env, 'snapshot');
   return json({
     runs,
     last_success: lastOk ? lastOk.date : null,
+    // Days on which Stripe would not take more than a fifth of the transfers
+    // (a short platform balance, a bad key): the shares are held and paid
+    // later, but the books claim money Stripe did not hold. Needs a look.
+    payout_alerts: settlements
+      .filter((s) => s.payout?.stripe_shortfall_alert)
+      .map((s) => ({
+        date: s.date,
+        stripe_unavailable_usd: (s.payout.stripe_unavailable_cents || 0) / 100,
+        stripe_unavailable_count: s.payout.stripe_unavailable_count || 0,
+      })),
+    // Payouts owed and waiting: held (paid on a later run) and, of those,
+    // set aside for an administrator.
+    held_usd: treasury.ok ? treasury.view.held_usd : null,
+    held_review_usd: treasury.ok ? treasury.view.held_review_usd : null,
     // Settlements by score date, and the one the Treasury is running now.
     settlements,
     active_settlement: active.ok ? active.settlement : null,
@@ -6019,7 +7175,7 @@ async function publicUser(user, env) {
   return {
     id: user.id,
     username: user.username,
-    email: user.email || null,
+    email: (env ? await readAccountEmail(env, user) : user.email) || null,
     avatar_url: user.avatar_url || null,
     discord_id: user.discord_id || null,
     bliss_balance: fromMinor(minor),
@@ -6030,6 +7186,28 @@ async function publicUser(user, env) {
     // on its record.
     ticket_balance: await ticketBalanceMirror(env, user),
     created_at: user.created_at,
+    // The zone the account's emails are written in, so the site can tell whether to send its own.
+    time_zone: await accountTimeZone(env, user.id),
+    ...(await keyFields(env, user)),
+    // Made before identity verification was required: the site asks it to verify (src/kyc_identity.mjs).
+    ...(needsKyc(user) ? { kyc_required: true } : {}),
+  };
+}
+
+/// What the site needs to decide whether to ask this account to replace its key:
+/// how many times it has, and whether the one-time prompt was shown. Absent when
+/// the deployment has no account objects or the object cannot be read.
+async function keyFields(env, user) {
+  if (!env?.ACCOUNT_AUTH || !user?.id) return {};
+  const held = await accountState(env, user.id);
+  if (!held.ok) return {};
+  return {
+    key_epoch: held.key_epoch,
+    key_prompt_seen_at: held.prompt_seen_at || null,
+    ...(held.discord_unlinked_at ? { discord_id: null } : {}),
+    email_verified_at: held.email_verified_at || null,
+    email_change_pending: held.email_change_pending || null,
+    key_replace_terms: keyReplaceTerms(),
   };
 }
 
@@ -6064,8 +7242,21 @@ const UNAUTHENTICATED_AUTH_PATHS = new Set([
   '/api/auth/register',
   '/api/auth/challenge',
   '/api/auth/verify-challenge',
+  // Passkey sign-in takes no token either (src/passkeys.mjs).
+  '/api/passkeys/login/begin',
+  '/api/passkeys/login',
+  // The links in an email carry their own proof, not a session.
+  '/api/account/email/confirm',
+  '/api/account/email/cancel',
+  '/api/account/key-restore',
   // Opening a guest session takes no token either.
   '/api/guest/play',
+  // Registration-time identity verification takes no token. Upload writes to
+  // the KYC bucket and submit runs a paid model call.
+  '/api/kyc/upload',
+  '/api/kyc/submit',
+  '/api/kyc/handoff',
+  '/api/kyc/start',
 ]);
 
 /// A 429 when this caller's address has used up its minute on the auth routes,

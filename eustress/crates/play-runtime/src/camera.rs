@@ -132,10 +132,13 @@ pub fn apply_scripted_camera(
     if camera_type != "Scriptable" && !space_view {
         if scripted {
             commands.entity(entity).remove::<AvatarCameraScripted>();
-            *projection = Projection::Perspective(PerspectiveProjection {
-                fov: AVATAR_FOV_DEG.to_radians(),
-                ..default()
-            });
+            // Keeps the camera's near and far planes (`..default()` put the
+            // far plane back to 1,000 m).
+            let next = eustress_common::plugins::camera_look::view_perspective(
+                AVATAR_FOV_DEG.to_radians(),
+                &projection,
+            );
+            *projection = next;
         }
         return;
     }
@@ -180,7 +183,8 @@ pub fn apply_scripted_camera(
             _ => true,
         };
         if needs {
-            *projection = Projection::Perspective(PerspectiveProjection { fov: want, ..default() });
+            let next = eustress_common::plugins::camera_look::view_perspective(want, &projection);
+            *projection = next;
         }
     }
 }

@@ -356,6 +356,7 @@ fn build_binary_part_def(
         asset: Some(AssetReference {
             mesh: mesh.to_string(),
             scene: "Scene0".to_string(),
+            scale_kind: None,
         }),
         transform: TransformData {
             position: [position.x, position.y, position.z],
@@ -583,9 +584,18 @@ pub fn handle_spawn_terrain_events(
     mut materials: ResMut<Assets<StandardMaterial>>,
     existing_terrain: Query<Entity, With<TerrainRoot>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<PlayModeState>>>,
 ) {
     let Some(mut notifications) = notifications else { return };
+    let play_state = play_state.map_or(PlayModeState::Editing, |s| *s.get());
     for event in spawn_events.read() {
+        // During Play a terrain request waits for Stop: it replaces the
+        // terrain the game is running on. Refused where it is read, so the
+        // request is consumed and never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "generate terrain") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         // Remove existing terrain
         for entity in existing_terrain.iter() {
             commands.entity(entity).despawn();
@@ -677,9 +687,18 @@ pub fn handle_import_terrain(
     existing_terrain: Query<Entity, With<TerrainRoot>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<PlayModeState>>>,
 ) {
     let Some(mut notifications) = notifications else { return };
+    let play_state = play_state.map_or(PlayModeState::Editing, |s| *s.get());
     for event in import_events.read() {
+        // During Play an import waits for Stop: it writes the Space's
+        // terrain files. Refused where it is read, so it never runs after
+        // Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "import a heightmap") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         let path = std::path::Path::new(&event.path);
         if !path.exists() {
             notifications.error(format!("Heightmap file not found: {}", event.path));
@@ -940,9 +959,19 @@ pub fn handle_generate_world(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<PlayModeState>>>,
+    mut commands: Commands,
 ) {
     let mut notifications = notifications;
+    let play_state = play_state.map_or(PlayModeState::Editing, |s| *s.get());
     for event in request_events.read() {
+        // During Play a generation waits for Stop: it writes the Space's
+        // terrain and replaces the terrain the game runs on. Refused where it
+        // is read, so it never runs after Stop.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "generate a world") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         // Single-flight gate: a running task, the meshing tail, OR any
         // in-flight chunk queue (spawn_terrain would clobber
         // TerrainGenerationQueue and orphan its pending chunks).
@@ -1079,11 +1108,18 @@ pub fn handle_generate_flat_terrain(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    play_state: Option<Res<State<PlayModeState>>>,
 ) {
     use eustress_common::terrain::worldgen::export::export_flat_to_space;
 
     let mut notifications = notifications;
+    let play_state = play_state.map_or(PlayModeState::Editing, |s| *s.get());
     for event in request_events.read() {
+        // During Play a flat plate waits for Stop, as a generation does.
+        if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "make a flat terrain") {
+            commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+            continue;
+        }
         // Same single-flight gate as handle_generate_world: replacing the
         // terrain while chunks are still queued would orphan them.
         let queue_busy = queue.as_deref().map(|q| q.is_generating()).unwrap_or(false);
@@ -1187,5 +1223,80 @@ impl Plugin for SpawnEventsPlugin {
                 handle_generate_flat_terrain,
                 poll_worldgen_task,
             ));
+    }
+}
+
+/// During Play the terrain requests are refused where they are read: no
+/// world is generated, no plate written, no heightmap imported and no
+/// terrain spawned, and each request is consumed.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+
+    fn terrain_app(state: PlayModeState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.add_message::<SpawnTerrainEvent>()
+            .add_message::<ImportTerrainEvent>()
+            .add_message::<GenerateWorldEvent>()
+            .add_message::<GenerateFlatTerrainEvent>();
+        app.init_resource::<WorldgenTask>();
+        app.insert_resource(State::new(state));
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.add_systems(Update, (handle_spawn_terrain_events, handle_import_terrain, handle_generate_world, handle_generate_flat_terrain));
+        app
+    }
+
+    /// The toasts and the Output panel's lines, each sorted (the readers run
+    /// in either order).
+    fn said(app: &App) -> (Vec<String>, Vec<String>) {
+        let world = app.world();
+        let mut toasts: Vec<String> = world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+        let mut output: Vec<String> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        toasts.sort();
+        output.sort();
+        (toasts, output)
+    }
+
+    #[test]
+    fn play_refuses_every_terrain_request() {
+        let mut refused: Vec<String> = ["generate terrain", "import a heightmap", "generate a world", "make a flat terrain"]
+            .iter()
+            .map(|what| format!("Stop Play to {what}."))
+            .collect();
+        refused.sort();
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut app = terrain_app(state);
+            let world = app.world_mut();
+            world.write_message(SpawnTerrainEvent::default());
+            world.write_message(ImportTerrainEvent {
+                path: "no/such/heightmap.png".to_string(),
+            });
+            world.write_message(GenerateWorldEvent { spec: Default::default() });
+            world.write_message(GenerateFlatTerrainEvent { spec: Default::default() });
+            app.update();
+            assert_eq!(said(&app), (refused.clone(), refused.clone()), "{state:?}");
+            assert!(!app.world().resource::<WorldgenTask>().is_busy(), "{state:?}: a generation started");
+            let roots = app.world_mut().query_filtered::<(), With<TerrainRoot>>().iter(app.world()).count();
+            assert_eq!(roots, 0, "{state:?}: terrain was spawned");
+        }
+        // While editing the readers run: with no open Space and no file, the
+        // requests say so.
+        let mut app = terrain_app(PlayModeState::Editing);
+        let world = app.world_mut();
+        world.write_message(ImportTerrainEvent {
+            path: "no/such/heightmap.png".to_string(),
+        });
+        world.write_message(GenerateWorldEvent { spec: Default::default() });
+        world.write_message(GenerateFlatTerrainEvent { spec: Default::default() });
+        app.update();
+        let (toasts, _) = said(&app);
+        for line in ["Flat Terrain: no open Space", "Generate World: no open Space", "Heightmap file not found: no/such/heightmap.png"] {
+            assert!(toasts.iter().any(|t| t == line), "{line:?} not in {toasts:?}");
+        }
     }
 }

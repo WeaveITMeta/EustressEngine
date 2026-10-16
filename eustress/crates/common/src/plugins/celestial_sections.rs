@@ -761,6 +761,7 @@ pub fn star_section(sun: &SunClass) -> toml::value::Table {
         ("cast_shadows", toml::Value::Boolean(sun.cast_shadows)),
         ("god_rays", float(sun.god_rays_intensity)),
         ("day_of_year", toml::Value::Integer(sun.day_of_year as i64)),
+        (SIZE_VERSION_KEY, toml::Value::Integer(SIZE_VERSION)),
     ])
 }
 
@@ -771,6 +772,7 @@ pub fn moon_section(moon: &MoonClass) -> toml::value::Table {
         ("intensity", float(moon.full_intensity)),
         ("color", color(moon.color)),
         ("angular_size", float(moon.angular_size)),
+        (SIZE_VERSION_KEY, toml::Value::Integer(SIZE_VERSION)),
         ("lunar_day", float(moon.lunar_day)),
         ("cast_shadows", toml::Value::Boolean(moon.cast_shadows)),
         ("glow", float(moon.glow_intensity)),
@@ -779,6 +781,7 @@ pub fn moon_section(moon: &MoonClass) -> toml::value::Table {
         ("ascending_node", float(moon.ascending_node)),
         ("follows_calendar", toml::Value::Boolean(moon.sync_with_sun)),
         ("placement", toml::Value::String(moon_placement_name(moon.placement).to_string())),
+        (PLACEMENT_VERSION_KEY, toml::Value::Integer(PLACEMENT_VERSION)),
     ])
 }
 
@@ -818,6 +821,7 @@ pub fn clouds_section(c: &Clouds) -> toml::value::Table {
         ("layer_type", s(cloud_layer_type_name(c.layer_type))),
         ("softness", float(c.softness)),
         ("spread", float(c.spread)),
+        ("noise_scale", float(c.noise_scale)),
         ("altitude", float(c.altitude)),
         ("thickness", float(c.thickness)),
         ("coverage_mode", s(cloud_coverage_name(c.coverage_mode))),
@@ -918,25 +922,65 @@ pub fn store_section(doc: &mut toml::Value, class: ClassName, section: toml::val
 pub const OLD_DEFAULT_STAR_COUNT: i64 = 3000;
 
 /// The Sun's and the Moon's drawn sizes before 2026-09-26, in degrees. A
-/// file still holding one never had it chosen: it becomes the current
-/// default (Sun 8, Moon 2).
+/// section from before the change that still holds one never had it chosen:
+/// it becomes the current default (Sun 8, Moon 2).
+///
+/// A section written since carries [`SIZE_VERSION_KEY`], and its size is the
+/// author's, so a deliberate 0.53 degree sun (the true disc) is kept. The
+/// panel's writers, the class schemas and the new-Space templates all write it.
 pub const OLD_DEFAULT_SUN_SIZE: f32 = 0.53;
 /// See [`OLD_DEFAULT_SUN_SIZE`].
 pub const OLD_DEFAULT_MOON_SIZE: f32 = 1.1;
 
-/// Replace an old default drawn size in `section_key`'s `angular_size`.
-/// True when it did.
+/// The key that marks a Sun's or Moon's section as written since the default
+/// sizes changed, so its size is never migrated.
+pub const SIZE_VERSION_KEY: &str = "size_version";
+/// What [`SIZE_VERSION_KEY`] is written as.
+const SIZE_VERSION: i64 = 1;
+
+/// The key that marks a Moon's section as written since its placement default
+/// became Realistic, so a placement chosen since is never migrated.
+pub const PLACEMENT_VERSION_KEY: &str = "placement_version";
+/// What [`PLACEMENT_VERSION_KEY`] is written as.
+const PLACEMENT_VERSION: i64 = 1;
+
+/// Replace an old default drawn size in `section_key`'s `angular_size`, in a
+/// section that does not carry [`SIZE_VERSION_KEY`]. True when it did.
 fn migrate_old_size(root: &mut toml::value::Table, section_key: &str, old: f32, new: f32) -> bool {
     let own = root.iter_mut().find(|(k, _)| flat(k) == section_key).map(|(_, v)| v);
-    let Some(size) = own.and_then(|s| s.as_table_mut()).and_then(|s| s.get_mut("angular_size")) else {
+    let Some(table) = own.and_then(|s| s.as_table_mut()) else { return false };
+    if table.keys().any(|k| flat(k) == flat(SIZE_VERSION_KEY)) {
         return false;
-    };
+    }
+    let Some(size) = table.get_mut("angular_size") else { return false };
     let value = size.as_float().or_else(|| size.as_integer().map(|i| i as f64));
     if value.is_some_and(|v| (v as f32 - old).abs() < 1e-4) {
         *size = float(new);
         return true;
     }
     false
+}
+
+/// Move a Moon section that predates the Realistic default to it, once. A
+/// section without [`PLACEMENT_VERSION_KEY`] was written before the default
+/// changed, so an OppositeSun it holds was the old default, not a choice: it
+/// becomes Realistic, and the marker keeps any placement chosen since. True
+/// when the section changed.
+fn migrate_old_placement(root: &mut toml::value::Table, section_key: &str) -> bool {
+    let own = root.iter_mut().find(|(k, _)| flat(k) == section_key).map(|(_, v)| v);
+    let Some(table) = own.and_then(|s| s.as_table_mut()) else { return false };
+    if table.keys().any(|k| flat(k) == flat(PLACEMENT_VERSION_KEY)) {
+        return false;
+    }
+    let saved_opposite = table
+        .iter()
+        .find(|(k, _)| flat(k) == flat("placement"))
+        .and_then(|(k, v)| v.as_str().filter(|s| flat(s) == flat("OppositeSun")).map(|_| k.clone()));
+    if let Some(key) = saved_opposite {
+        table.insert(key, toml::Value::String(moon_placement_name(MoonPlacement::Realistic).to_string()));
+    }
+    table.insert(PLACEMENT_VERSION_KEY.to_string(), toml::Value::Integer(PLACEMENT_VERSION));
+    true
 }
 
 /// Drop the old template sections from a Star, Moon, Sky or Atmosphere
@@ -961,12 +1005,17 @@ pub fn drop_legacy_template_sections(doc: &mut toml::Value) -> bool {
     let is_sky = class == Some("Sky");
     let class = class.map(str::to_owned);
     let Some(root) = doc.as_table_mut() else { return false };
-    // An untouched old default size becomes the current one.
-    let resized = match class.as_deref() {
+    // An untouched old default size becomes the current one, and a Moon
+    // placed opposite the sun before the default changed moves to Realistic.
+    let migrated = match class.as_deref() {
         Some("Star" | "Sun") => {
             migrate_old_size(root, STAR_SECTION, OLD_DEFAULT_SUN_SIZE, default_sun().angular_size)
         }
-        Some("Moon") => migrate_old_size(root, MOON_SECTION, OLD_DEFAULT_MOON_SIZE, MoonClass::default().angular_size),
+        Some("Moon") => {
+            let sized = migrate_old_size(root, MOON_SECTION, OLD_DEFAULT_MOON_SIZE, MoonClass::default().angular_size);
+            let placed = migrate_old_placement(root, MOON_SECTION);
+            sized || placed
+        }
         _ => false,
     };
     let before = root.len();
@@ -980,7 +1029,7 @@ pub fn drop_legacy_template_sections(doc: &mut toml::Value) -> bool {
             }
         }
     }
-    dropped || resized
+    dropped || migrated
 }
 
 #[cfg(test)]
@@ -1202,14 +1251,78 @@ mod tests {
     }
 
     #[test]
-    fn a_moons_placement_round_trips_and_defaults_to_opposite_the_sun() {
-        assert_eq!(MoonClass::default().placement, MoonPlacement::OppositeSun);
-        let moon = MoonClass { placement: MoonPlacement::Realistic, ..MoonClass::default() };
+    fn a_deliberate_true_size_sun_or_moon_is_never_migrated() {
+        // The panel's writers carry the marker, so a size chosen there stays.
+        let true_sun = SunClass { angular_size: 0.53, ..default_sun() };
+        let mut d = doc("[metadata]\nclass_name = \"Star\"\n");
+        assert!(store_section(&mut d, ClassName::Star, star_section(&true_sun)));
+        assert!(!drop_legacy_template_sections(&mut d), "nothing to migrate");
+        assert_eq!(sun_from_section(section_of(&d, ClassName::Star), default_sun()).angular_size, 0.53);
+        let true_moon = MoonClass { angular_size: 1.1, ..MoonClass::default() };
+        let mut d = doc("[metadata]\nclass_name = \"Moon\"\n");
+        assert!(store_section(&mut d, ClassName::Moon, moon_section(&true_moon)));
+        drop_legacy_template_sections(&mut d);
+        assert_eq!(moon_from_section(section_of(&d, ClassName::Moon), MoonClass::default()).angular_size, 1.1);
+        // A file from before the change has no marker: its old default moves up.
+        let mut old = doc("[metadata]\nclass_name = \"Star\"\n[star]\nangular_size = 0.53\n");
+        assert!(drop_legacy_template_sections(&mut old));
+        assert_eq!(sun_from_section(section_of(&old, ClassName::Star), default_sun()).angular_size, 8.0);
+        // The schemas and the new-Space templates carry the marker.
+        for (class, text) in [(ClassName::Star, STAR_SCHEMA), (ClassName::Moon, MOON_SCHEMA)] {
+            let section = schema(class, text);
+            assert_eq!(
+                section.get(SIZE_VERSION_KEY).and_then(|v| v.as_integer()),
+                Some(SIZE_VERSION),
+                "{class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_noise_scale_is_written_as_it_is_read() {
+        let c = Clouds { noise_scale: 2.5, ..Clouds::default() };
+        let back = clouds_from_section(Some(&toml::Value::Table(clouds_section(&c))), Clouds::default());
+        assert_eq!(back.noise_scale, 2.5);
+    }
+
+    #[test]
+    fn a_moons_placement_round_trips_and_defaults_to_realistic() {
+        assert_eq!(MoonClass::default().placement, MoonPlacement::Realistic);
+        let moon = MoonClass { placement: MoonPlacement::OppositeSun, ..MoonClass::default() };
         let back = moon_from_section(Some(&toml::Value::Table(moon_section(&moon))), MoonClass::default());
-        assert_eq!(back.placement, MoonPlacement::Realistic);
+        assert_eq!(back.placement, MoonPlacement::OppositeSun);
         let d = doc("[moon]\nplacement = \"oppositesun\"\n");
-        let m = moon_from_section(section_of(&d, ClassName::Moon), moon);
+        let m = moon_from_section(section_of(&d, ClassName::Moon), MoonClass::default());
         assert_eq!(m.placement, MoonPlacement::OppositeSun);
+    }
+
+    #[test]
+    fn a_moon_placed_opposite_the_sun_before_the_default_changed_moves_once() {
+        // Written before the default changed: no placement_version, so its
+        // OppositeSun was the old default and becomes Realistic.
+        let mut old = doc("[metadata]\nclass_name = \"Moon\"\n[moon]\nplacement = \"OppositeSun\"\n");
+        assert!(drop_legacy_template_sections(&mut old), "the placement moves");
+        let moon = moon_from_section(section_of(&old, ClassName::Moon), MoonClass::default());
+        assert_eq!(moon.placement, MoonPlacement::Realistic);
+        assert!(!drop_legacy_template_sections(&mut old), "it moves once");
+    }
+
+    #[test]
+    fn a_placement_chosen_since_the_change_stays() {
+        // The panel's writer carries the marker, so an OppositeSun chosen there is kept.
+        let chosen = MoonClass { placement: MoonPlacement::OppositeSun, ..MoonClass::default() };
+        let mut d = doc("[metadata]\nclass_name = \"Moon\"\n");
+        assert!(store_section(&mut d, ClassName::Moon, moon_section(&chosen)));
+        assert!(!drop_legacy_template_sections(&mut d), "nothing to migrate");
+        let moon = moon_from_section(section_of(&d, ClassName::Moon), MoonClass::default());
+        assert_eq!(moon.placement, MoonPlacement::OppositeSun);
+    }
+
+    #[test]
+    fn the_moon_schema_is_realistic_and_carries_the_placement_marker() {
+        let section = schema(ClassName::Moon, MOON_SCHEMA);
+        assert_eq!(section.get("placement").and_then(|v| v.as_str()), Some("Realistic"));
+        assert_eq!(section.get(PLACEMENT_VERSION_KEY).and_then(|v| v.as_integer()), Some(PLACEMENT_VERSION));
     }
 
     #[test]

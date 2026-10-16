@@ -70,6 +70,46 @@ pub struct VerifyChallengeRequest {
     pub public_key: String,
     pub challenge: String,
     pub signature: String,
+    /// Always [`LOGIN_FORMAT`]: the signature covers the login message, not the
+    /// bare challenge.
+    pub format: String,
+}
+
+/// What an identity signature covers (docs/architecture/STUDIO_IDENTITY_SIGNIN.md):
+/// three lines joined by newlines, no trailing newline. `origin` is the API this
+/// sign-in talks to, so a signature made for one API is no sign-in on another.
+pub const LOGIN_FORMAT: &str = "eustress-login-v1";
+
+pub fn login_message(origin: &str, challenge: &str) -> String {
+    format!("{LOGIN_FORMAT}\n{origin}\n{challenge}")
+}
+
+/// The origin of an API base address: scheme and host in lower case, the default
+/// port dropped, no path. The same rule Studio applies (`api_origin` in
+/// common/src/api_base.rs); the shared vectors in
+/// docs/architecture/login-v1-vectors.json hold both to it.
+pub fn api_origin(base: &str) -> String {
+    let base = base.trim();
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return base.to_ascii_lowercase();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, p.parse::<u32>().ok()),
+        _ => (authority, None),
+    };
+    let default = match scheme.as_str() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    };
+    let host = host.to_ascii_lowercase();
+    match port {
+        Some(p) if Some(p) != default => format!("{scheme}://{host}:{p}"),
+        _ => format!("{scheme}://{host}"),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -122,6 +162,12 @@ pub async fn refresh_token(client: &ApiClient) -> Result<RefreshResponse, ApiErr
     client.post("/api/auth/refresh", &()).await
 }
 
+/// Ends every sign-in of the account (`POST /api/auth/logout` moves the session floor past all of them), this one included.
+/// The caller clears the stored token itself once this says it worked.
+pub async fn logout_everywhere(client: &ApiClient) -> Result<(), ApiError> {
+    client.post::<serde_json::Value, _>("/api/auth/logout", &serde_json::json!({})).await.map(|_| ())
+}
+
 /// Logout (client-side only, clears token).
 pub fn logout() {
     let _ = gloo_storage::LocalStorage::delete("auth_token");
@@ -149,6 +195,7 @@ pub async fn verify_challenge(
         public_key: public_key.to_string(),
         challenge: challenge.to_string(),
         signature: signature.to_string(),
+        format: LOGIN_FORMAT.to_string(),
     };
 
     let response: AuthResponse = client.post("/api/auth/verify-challenge", &request).await?;
@@ -167,7 +214,7 @@ pub async fn verify_challenge(
 ///
 /// Skipping `serialize_if = None` so the JSON payload stays compact
 /// and the Worker's `&& email && toml_content` check is simple.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct IdentityRegisterRequest {
     pub username: String,
     pub public_key: String,
@@ -175,6 +222,10 @@ pub struct IdentityRegisterRequest {
     pub id_type: Option<String>,
     pub id_hash: Option<String>,
     pub kyc_session_id: Option<String>,
+    /// The claim secret of the KYC session (from /api/kyc/start): the proof that
+    /// this sign-up started the verification. Never printed (see Debug below).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kyc_claim_secret: Option<String>,
     /// Email address to send the identity backup to. None = no email.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -185,6 +236,18 @@ pub struct IdentityRegisterRequest {
     pub toml_content: Option<String>,
 }
 
+/// Debug without the claim secret, the private key or the email address.
+impl std::fmt::Debug for IdentityRegisterRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityRegisterRequest")
+            .field("username", &self.username)
+            .field("public_key", &self.public_key)
+            .field("kyc_session_id", &self.kyc_session_id)
+            .field("kyc_claim_secret", &self.kyc_claim_secret.as_ref().map(|_| "[redacted]"))
+            .finish_non_exhaustive()
+    }
+}
+
 pub async fn register_identity(
     client: &ApiClient,
     username: &str,
@@ -193,6 +256,7 @@ pub async fn register_identity(
     id_type: Option<&str>,
     id_hash: Option<&str>,
     kyc_session_id: Option<&str>,
+    kyc_claim_secret: Option<&str>,
     email: Option<&str>,
     toml_content: Option<&str>,
 ) -> Result<AuthResponse, ApiError> {
@@ -203,6 +267,7 @@ pub async fn register_identity(
         id_type: id_type.map(|s| s.to_string()),
         id_hash: id_hash.map(|s| s.to_string()),
         kyc_session_id: kyc_session_id.map(|s| s.to_string()),
+        kyc_claim_secret: kyc_claim_secret.map(|s| s.to_string()),
         email: email.map(|s| s.to_string()),
         toml_content: toml_content.map(|s| s.to_string()),
     };
@@ -253,6 +318,41 @@ pub async fn get_me(client: &ApiClient, token: &str) -> Result<User, ApiError> {
         _ => {
             let message = response.text().await.unwrap_or_default();
             Err(ApiError::Server { status, message })
+        }
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    /// The one file Studio's tests and the Worker's tests read too.
+    const VECTORS: &str = include_str!("../../../../../docs/architecture/login-v1-vectors.json");
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("the shared vectors are JSON")
+    }
+
+    #[test]
+    fn the_login_message_is_the_shared_one() {
+        for s in vectors()["signatures"].as_array().unwrap() {
+            let message = login_message(s["origin"].as_str().unwrap(), s["challenge"].as_str().unwrap());
+            assert_eq!(message, s["message"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn origins_are_normalised_as_in_the_shared_vectors() {
+        for o in vectors()["origins"].as_array().unwrap() {
+            let base = o["base"].as_str().unwrap();
+            assert_eq!(api_origin(base), o["origin"].as_str().unwrap(), "{base}");
+        }
+    }
+
+    #[test]
+    fn the_site_apis_are_their_own_origins() {
+        for api in ["https://api.eustress.dev", "https://api-staging.eustress.dev", "http://127.0.0.1:8787"] {
+            assert_eq!(api_origin(api), api);
         }
     }
 }

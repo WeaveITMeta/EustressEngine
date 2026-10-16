@@ -644,6 +644,13 @@ pub fn clear_space_root() {
 #[rune::function]
 fn write_space_file(relative_path: &str, content: &str) -> bool {
     if relative_path.contains("..") { return false; }
+    // A Play frame's scripts do not write the Space: Stop puts the authored
+    // scene back, and a file written now would outlive it. The script reads
+    // `false`, as for any write that fails.
+    if in_play_frame() {
+        warn!("write_space_file({relative_path:?}) refused: a script cannot write the Space during Play");
+        return false;
+    }
     SPACE_ROOT.with(|root| {
         let root = root.borrow();
         let base = match root.as_ref() {
@@ -1667,6 +1674,166 @@ thread_local! {
     static PENDING_DESTROY: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
 }
 
+/// A delete a script asked for, carried out by `rune_play::drain_script_deletes`
+/// in the frame after the script ran. The code here only queues it: it has
+/// neither `Commands` nor the file registry.
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug)]
+pub enum ScriptDelete {
+    /// Outside Play: move the instance to the Space trash through the shared
+    /// helper, as the Delete key does. `source` is the folder or file that
+    /// moves; `record` is the file the stores know the instance by.
+    Trash {
+        source: std::path::PathBuf,
+        record: std::path::PathBuf,
+    },
+    /// Play: despawn the live entity. No file moves, so the authored folder
+    /// stays exactly as it was.
+    DespawnLive { record: std::path::PathBuf },
+}
+
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static PENDING_SCRIPT_DELETES: std::cell::RefCell<Vec<ScriptDelete>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// The records a Play session has already despawned. A second delete of the same
+/// name in that session answers false, so a loop that deletes until it gets false ends.
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static PLAY_DELETED: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Take the deletes scripts asked for since the last drain.
+#[cfg(feature = "realism-scripting")]
+pub fn drain_script_deletes() -> Vec<ScriptDelete> {
+    PENDING_SCRIPT_DELETES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Drop the deletes still queued at Stop, and forget the Play deletes of the
+/// session that is ending. Stop restores the authored world, so a `DespawnLive`
+/// that `on_exit` or the last Play frame queued must not reach the Edit world.
+#[cfg(feature = "realism-scripting")]
+pub fn discard_play_script_deletes() {
+    PENDING_SCRIPT_DELETES.with(|cell| cell.borrow_mut().clear());
+    PLAY_DELETED.with(|set| set.borrow_mut().clear());
+}
+
+/// Whether a Play frame's scripts are running on this thread.
+#[cfg(feature = "realism-scripting")]
+fn play_frame_active() -> bool {
+    in_play_frame()
+}
+
+#[cfg(not(feature = "realism-scripting"))]
+fn play_frame_active() -> bool {
+    false
+}
+
+/// Whether a script may name this instance: one plain segment, with no path
+/// separator, no drive or stream colon, and not `.` or `..`. A name like
+/// `..\Outside` climbs out of the Space on Windows, so it is refused before any
+/// lookup.
+#[cfg(feature = "realism-scripting")]
+fn is_plain_instance_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(|c: char| matches!(c, '/' | '\\' | ':'))
+}
+
+/// The paths a delete of `name` covers under the Space root `base`, primary
+/// first. Each entry is `(source, record)`: the folder (folder form) or the file
+/// (flat form) that moves, and the file the stores know it by. A flat
+/// `.glb.toml` or `.part.toml` also lists the mesh it references. Empty when
+/// nothing matches.
+#[cfg(feature = "realism-scripting")]
+fn find_script_delete_targets(
+    base: &std::path::Path,
+    name: &str,
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let safe = name.replace(' ', "_");
+    let extensions = [
+        ".part.toml", ".glb.toml", ".instance.toml",
+        ".mat.toml", ".rune", ".lua", ".luau", ".soul",
+    ];
+
+    let mut search_dirs = vec![base.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !dir_name.starts_with('.') {
+                    search_dirs.push(path);
+                }
+            }
+        }
+    }
+
+    // Folder form first: dir/{name}/_instance.toml.
+    for dir in &search_dirs {
+        let folder = dir.join(&safe);
+        if folder.is_dir() && folder.join("_instance.toml").exists() {
+            let record = folder.join("_instance.toml");
+            return vec![(folder, record)];
+        }
+    }
+
+    // Legacy flat file.
+    for dir in &search_dirs {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{}{}", safe, ext));
+            if !candidate.exists() {
+                continue;
+            }
+            let fname = candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml" {
+                continue;
+            }
+            let mut targets = vec![(candidate.clone(), candidate.clone())];
+            if fname.ends_with(".glb.toml") || fname.ends_with(".part.toml") {
+                if let Ok(content) = std::fs::read_to_string(&candidate) {
+                    if let Ok(val) = toml::from_str::<toml::Value>(&content) {
+                        // Case-tolerant: handles leftover PascalCase TOMLs.
+                        use eustress_common::class_schema::get_section_insensitive as get_ci;
+                        let mesh_path = get_ci(&val, "asset")
+                            .and_then(|a| get_ci(a, "path"))
+                            .and_then(|p| p.as_str())
+                            .or_else(|| get_ci(&val, "metadata")
+                                .and_then(|m| get_ci(m, "asset"))
+                                .and_then(|a| a.as_str()));
+                        if let Some(mesh_rel) = mesh_path {
+                            let mesh_abs = candidate.parent().unwrap_or(dir).join(mesh_rel);
+                            if mesh_abs.exists() && mesh_abs.starts_with(base) {
+                                targets.push((mesh_abs.clone(), mesh_abs));
+                            }
+                        }
+                    }
+                }
+            }
+            return targets;
+        }
+    }
+    Vec::new()
+}
+
+/// Set one property on the live part named `entity_name` in the Play session's
+/// tree. False when no session tree is live or no part has that name.
+#[cfg(feature = "realism-scripting")]
+fn set_live_part(
+    entity_name: &str,
+    property: &str,
+    value: eustress_common::datamodel::DmValue,
+) -> bool {
+    with_play_tree(false, |dm| {
+        let Some(workspace) = dm.get_service("Workspace") else { return false };
+        let Some(part) = dm.find_first_child(workspace, entity_name, false) else { return false };
+        dm.set_prop(part, property, value).is_ok()
+    })
+}
+
 #[cfg(feature = "realism-scripting")]
 fn queue_live_destroy(entity_id: i64) {
     PENDING_DESTROY.with(|cell| cell.borrow_mut().push(entity_id));
@@ -2333,6 +2500,9 @@ pub fn execute_rune_oneshot(
     let created = drain_created_instances(&instance_registry);
     clear_instance_registry();
     clear_space_root();
+    // Tags on live entities stay in the map after the drain; a one-shot run
+    // leaves nothing behind for the next one.
+    clear_entity_tags();
 
     r.map(|_| created)
 }
@@ -2343,19 +2513,18 @@ pub fn execute_rune_oneshot(
 ///
 /// Shared by the command-bar one-shot path ([`execute_rune_oneshot`]) and the
 /// play-mode driver ([`crate::soul::rune_play`]) so both materialize
-/// script-created instances identically. Tags set through
-/// `CollectionService::AddTag` are drained here too and attached per instance.
+/// script-created instances identically. Tags set on the created instances
+/// through `CollectionService::AddTag` move onto them here; tags a script put
+/// on live entities stay in the session's map.
 #[cfg(feature = "realism-scripting")]
 pub fn drain_created_instances(
     instance_registry: &std::sync::Arc<std::sync::RwLock<eustress_common::scripting::InstanceRegistry>>,
 ) -> Vec<eustress_common::luau::runtime::LuauCreatedInstance> {
-    // Drain tags first so the per-instance lookup below picks them up
-    // without races against the registry clear. The map is keyed by
-    // i64 entity-id (the same value `InstanceRune.entity_id` exposes to
-    // Rune scripts), so it matches `InstanceRegistry::iter()`'s `&u64` key
-    // when the latter is cast.
-    let mut tag_map = drain_entity_tags();
-
+    // Tags are taken per created instance below ([`take_entity_tags`]), keyed
+    // by the registry id cast to i64, the value `InstanceRune.entity_id`
+    // exposes to Rune scripts. Tags a script put on LIVE entities stay in the
+    // map: it is the session's record of them, read by HasTag and GetTagged.
+    // Emptying the whole map here every frame threw those away.
     let mut created = Vec::new();
     {
         let Ok(reg) = instance_registry.read() else { return created };
@@ -2397,10 +2566,10 @@ pub fn drain_created_instances(
                 } else { None })
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
-            // Pull this instance's tags out of the drained map. We use the
-            // registry id (cast u64 → i64) which matches what Rune scripts
-            // pass via `InstanceRune.entity_id` to `CollectionService::AddTag`.
-            let tags = tag_map.remove(&(*id as i64)).unwrap_or_default();
+            // This instance's tags, by the registry id (cast u64 → i64) that
+            // Rune scripts pass via `InstanceRune.entity_id` to
+            // `CollectionService::AddTag`.
+            let tags = take_entity_tags(*id as i64);
 
             created.push(eustress_common::luau::runtime::LuauCreatedInstance {
                 class_name: inst_data.class_name.clone(),
@@ -3463,6 +3632,36 @@ pub fn drain_entity_tags() -> std::collections::HashMap<i64, Vec<String>> {
     })
 }
 
+/// Take (remove and return, sorted) the tags a script put on one entity. A
+/// script-created instance gets its tags this way; tags on live entities stay.
+#[cfg(feature = "realism-scripting")]
+pub fn take_entity_tags(entity_id: i64) -> Vec<String> {
+    ENTITY_TAGS.with(|cell| {
+        cell.borrow_mut()
+            .remove(&entity_id)
+            .map(|set| {
+                let mut tags: Vec<String> = set.into_iter().collect();
+                tags.sort();
+                tags
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Forget every script-set tag: a new session, or a finished one-shot run,
+/// starts clean.
+#[cfg(feature = "realism-scripting")]
+pub fn clear_entity_tags() {
+    ENTITY_TAGS.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Forget every script-set attribute (see `instance_set_attribute`) so one
+/// session's attributes never reach the next.
+#[cfg(feature = "realism-scripting")]
+pub fn clear_instance_attributes() {
+    INSTANCE_ATTRIBUTES.with(|attrs| attrs.borrow_mut().clear());
+}
+
 /// Seed the engine-supplied tag snapshot before a script run so
 /// `CollectionService::GetTagged` can see real ECS tags.
 #[cfg(feature = "realism-scripting")]
@@ -3503,11 +3702,12 @@ fn tag_remove(entity_id: i64, tag: &str) {
 
 #[cfg(feature = "realism-scripting")]
 fn tag_has(entity_id: i64, tag: &str) -> bool {
+    // The tags the script set, then the tags the entity already had in the
+    // live scene (the snapshot `GetTagged` also reads).
     ENTITY_TAGS.with(|cell| {
-        cell.borrow()
-            .get(&entity_id)
-            .map(|t| t.contains(tag))
-            .unwrap_or(false)
+        cell.borrow().get(&entity_id).is_some_and(|t| t.contains(tag))
+    }) || EXISTING_TAGS.with(|cell| {
+        cell.borrow().get(tag).is_some_and(|ids| ids.contains(&entity_id))
     })
 }
 
@@ -3916,6 +4116,17 @@ fn players_get_local_player() -> Option<PlayerRune> {
 #[cfg(feature = "realism-scripting")]
 pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::RuneRuntimeState) {
     let Some(dm) = eustress_common::datamodel::active() else { return };
+    // Almost every frame has no purchase waiting, or Luau answers them, so
+    // look before building a `Vm` for every script. The check under the lock
+    // that drains (below) still decides: Luau can set `ProcessReceipt`, and
+    // take the purchases, between the two locks.
+    let nothing_to_offer = {
+        let g = dm.lock();
+        g.commerce.luau_process_receipt || g.commerce.receipts.is_empty()
+    };
+    if nothing_to_offer {
+        return;
+    }
     let mut handlers: Vec<(&u32, &eustress_common::soul::rune_runtime::CompiledScript)> = runtime
         .compiled
         .iter()
@@ -3936,7 +4147,10 @@ pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::
     };
     let mut decisions = Vec::with_capacity(receipts.len());
     let mut errors = Vec::new();
+    // Each call is timed for the script profile while it is armed.
+    let profile = eustress_common::utils::script_profile::armed();
     for receipt in &receipts {
+        let started = profile.then(std::time::Instant::now);
         let mut vm = rune::Vm::new(handler.context.clone(), handler.unit.clone());
         let granted = match vm.call(["process_receipt"], (ReceiptRune::from_receipt(receipt),)) {
             Ok(answer) => rune::from_value::<bool>(answer).unwrap_or(false),
@@ -3945,6 +4159,9 @@ pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::
                 false
             }
         };
+        if let Some(started) = started {
+            eustress_common::soul::rune_runtime::profile_step(handler, "process_receipt", started);
+        }
         decisions.push(eustress_common::datamodel::ReceiptDecision { purchase_id: receipt.purchase_id.clone(), granted });
     }
     dm.lock().commerce.decisions.extend(decisions);
@@ -3988,6 +4205,11 @@ fn run_service_is_running() -> bool {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_position(entity_name: &str, x: f64, y: f64, z: f64) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Position", eustress_common::datamodel::DmValue::Vector3(
+        eustress_common::scripting::Vector3::new(x, y, z)));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
             transform.insert("position".to_string(), toml::Value::Array(vec![
@@ -4001,6 +4223,11 @@ fn part_set_position(entity_name: &str, x: f64, y: f64, z: f64) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_rotation(entity_name: &str, rx: f64, ry: f64, rz: f64) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Orientation", eustress_common::datamodel::DmValue::Vector3(
+        eustress_common::scripting::Vector3::new(rx, ry, rz)));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
             // Convert degrees to quaternion stored as [x, y, z, w]
@@ -4023,6 +4250,11 @@ fn part_set_rotation(entity_name: &str, rx: f64, ry: f64, rz: f64) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_size(entity_name: &str, x: f64, y: f64, z: f64) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Size", eustress_common::datamodel::DmValue::Vector3(
+        eustress_common::scripting::Vector3::new(x, y, z)));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
             transform.insert("scale".to_string(), toml::Value::Array(vec![
@@ -4036,6 +4268,10 @@ fn part_set_size(entity_name: &str, x: f64, y: f64, z: f64) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_anchored(entity_name: &str, anchored: bool) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Anchored", eustress_common::datamodel::DmValue::Bool(anchored));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
             props.insert("anchored".to_string(), toml::Value::Boolean(anchored));
@@ -4047,6 +4283,11 @@ fn part_set_anchored(entity_name: &str, anchored: bool) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_color(entity_name: &str, r: f64, g: f64, b: f64) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Color", eustress_common::datamodel::DmValue::Color3(
+        eustress_common::scripting::Color3::new(r, g, b)));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
             props.insert("color".to_string(), toml::Value::Array(vec![
@@ -4061,6 +4302,11 @@ fn part_set_color(entity_name: &str, r: f64, g: f64, b: f64) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_material(entity_name: &str, material: &str) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Material", eustress_common::datamodel::DmValue::String(
+        material.to_string()));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
             props.insert("material".to_string(), toml::Value::String(material.to_string()));
@@ -4072,6 +4318,10 @@ fn part_set_material(entity_name: &str, material: &str) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_transparency(entity_name: &str, transparency: f64) {
+    if play_frame_active() {
+    set_live_part(entity_name, "Transparency", eustress_common::datamodel::DmValue::Number(transparency));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
             props.insert("transparency".to_string(), toml::Value::Float(transparency));
@@ -4083,6 +4333,10 @@ fn part_set_transparency(entity_name: &str, transparency: f64) {
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn part_set_can_collide(entity_name: &str, can_collide: bool) {
+    if play_frame_active() {
+    set_live_part(entity_name, "CanCollide", eustress_common::datamodel::DmValue::Bool(can_collide));
+        return;
+    }
     update_part_toml(entity_name, |doc| {
         if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
             props.insert("can_collide".to_string(), toml::Value::Boolean(can_collide));
@@ -4390,91 +4644,67 @@ fn workspace_set_gravity(gravity: f64) {
 /// from any service directory. Searches Workspace, SoulService, MaterialService,
 /// StarterGui, and all other top-level service directories in the Space.
 /// Will not delete scaffolding files (_service.toml, _instance.toml, space.toml).
-/// If the TOML references a .glb mesh asset, that binary is also deleted.
-/// The engine despawns the entity on the next file-watcher cycle.
-/// Returns true if found and deleted, false otherwise.
+/// If the TOML references a .glb mesh asset, that binary is also moved to the trash.
+/// Returns true only on the call that queues a delete. Outside Play the instance
+/// moves to the Space trash once the frame's script work is done
+/// (`drain_script_deletes`); in Play only the live entity is despawned, and no
+/// file moves. A name already queued (or, in Play, already despawned this
+/// session) answers false, so `while instance_delete(x) {}` ends. A name with a
+/// path separator, a drive colon or a dot segment is refused.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn instance_delete(entity_name: &str) -> bool {
+    // A script names an instance, never a path.
+    if !is_plain_instance_name(entity_name) {
+        warn!("[Rune Script] instance_delete({entity_name:?}) refused: a name is one plain segment, with no path separator or colon");
+        return false;
+    }
+    let in_play = play_frame_active();
     SPACE_ROOT.with(|root| {
         let root = root.borrow();
         let Some(base) = root.as_ref() else { return false };
-        let safe = entity_name.replace(' ', "_").replace('/', "_");
-
-        let extensions = [
-            ".part.toml", ".glb.toml", ".instance.toml",
-            ".mat.toml", ".rune", ".lua", ".luau", ".soul",
-        ];
-
-        let mut search_dirs = vec![base.clone()];
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !name.starts_with('.') {
-                        search_dirs.push(path);
-                    }
-                }
-            }
+        let targets = find_script_delete_targets(base, entity_name);
+        if targets.is_empty() {
+            return false;
         }
-
-        // Try folder-based deletion first: dir/{name}/_instance.toml
-        for dir in &search_dirs {
-            let folder = dir.join(&safe);
-            if folder.is_dir() && folder.join("_instance.toml").exists() {
-                return std::fs::remove_dir_all(&folder).is_ok();
+        if in_play {
+            // Play changes the live entity only: the primary record's entity is
+            // despawned once, and the authored files stay as they are.
+            let Some((_, record)) = targets.into_iter().next() else { return false };
+            let first_this_session = PLAY_DELETED.with(|set| set.borrow_mut().insert(record.clone()));
+            if !first_this_session {
+                return false;
             }
+            PENDING_SCRIPT_DELETES
+                .with(|cell| cell.borrow_mut().push(ScriptDelete::DespawnLive { record }));
+            return true;
         }
-
-        // Legacy flat-file deletion
-        for dir in &search_dirs {
-            for ext in &extensions {
-                let candidate = dir.join(format!("{}{}", safe, ext));
-                if !candidate.exists() { continue; }
-
-                let fname = candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml" {
+        PENDING_SCRIPT_DELETES.with(|cell| {
+            let mut queue = cell.borrow_mut();
+            let mut queued = false;
+            for (source, record) in targets {
+                let already = queue.iter().any(|entry| match entry {
+                    ScriptDelete::Trash { record: queued_record, .. }
+                    | ScriptDelete::DespawnLive { record: queued_record } => queued_record == &record,
+                });
+                if already {
                     continue;
                 }
-
-                // Before deleting, check if the TOML references a mesh binary
-                if fname.ends_with(".glb.toml") || fname.ends_with(".part.toml") {
-                    if let Ok(content) = std::fs::read_to_string(&candidate) {
-                        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                            // Check [asset].path or [metadata].asset for referenced .glb,
-                            // case-tolerant (handles leftover PascalCase TOMLs).
-                            use eustress_common::class_schema::get_section_insensitive as get_ci;
-                            let mesh_path = get_ci(&val, "asset")
-                                .and_then(|a| get_ci(a, "path"))
-                                .and_then(|p| p.as_str())
-                                .or_else(|| get_ci(&val, "metadata")
-                                    .and_then(|m| get_ci(m, "asset"))
-                                    .and_then(|a| a.as_str()));
-
-                            if let Some(mesh_rel) = mesh_path {
-                                // Resolve relative to the TOML file's parent directory
-                                let mesh_abs = candidate.parent()
-                                    .unwrap_or(dir)
-                                    .join(mesh_rel);
-                                if mesh_abs.exists() && mesh_abs.starts_with(base) {
-                                    let _ = std::fs::remove_file(&mesh_abs);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                return std::fs::remove_file(&candidate).is_ok();
+                queue.push(ScriptDelete::Trash { source, record });
+                queued = true;
             }
-        }
-        false
+            queued
+        })
     })
 }
 
 /// Helper: find an entity's TOML file by name and apply a mutation.
 /// Searches Workspace/ for folder/_instance.toml first, then legacy .part.toml/.glb.toml.
 fn update_part_toml(entity_name: &str, mutate: impl FnOnce(&mut toml::Value)) {
+    // A Play session never rewrites an authored file: its changes are live only.
+    if play_frame_active() {
+        return;
+    }
     SPACE_ROOT.with(|root| {
         let root = root.borrow();
         let Some(base) = root.as_ref() else { return };
@@ -5001,8 +5231,407 @@ pub fn main() {
 }
 
 #[cfg(all(test, feature = "realism-scripting"))]
+mod live_tag_tests {
+    use super::*;
+
+    /// A tag a script puts on a live part must outlast the frame: the driver
+    /// takes only the tags of instances the script created.
+    #[test]
+    fn a_tag_on_a_live_part_survives_the_frame_drain() {
+        clear_entity_tags();
+        tag_add(7, "Enemy"); // a part already in the scene
+        tag_add(99, "Spawned"); // an instance the script created
+        assert_eq!(take_entity_tags(99), vec!["Spawned".to_string()]);
+        assert!(tag_has(7, "Enemy"), "the live part keeps its tag for the next frame");
+        assert!(!tag_has(99, "Spawned"), "the created instance's tags moved onto it");
+        clear_entity_tags();
+        assert!(!tag_has(7, "Enemy"), "a new session starts clean");
+    }
+
+    /// HasTag sees the tags a part already has in the live scene, as
+    /// GetTagged does.
+    #[test]
+    fn has_tag_sees_the_tags_already_on_a_live_part() {
+        clear_entity_tags();
+        seed_existing_tags(std::collections::HashMap::from([("Door".to_string(), vec![5_i64])]));
+        assert!(tag_has(5, "Door"));
+        assert!(!tag_has(6, "Door"));
+        clear_existing_tags();
+    }
+}
+
+/// The tests that publish a Play tree (`eustress_common::datamodel::set_active`)
+/// share one slot for the whole test process, and tests run on parallel
+/// threads: each takes this lock for as long as its tree is published.
+#[cfg(all(test, feature = "realism-scripting"))]
+static ACTIVE_TREE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`ACTIVE_TREE_TESTS`], and empties the slot when it drops, so a test
+/// that fails an assertion leaves no tree behind for the next one.
+#[cfg(all(test, feature = "realism-scripting"))]
+struct ActiveTreeSlot {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+impl ActiveTreeSlot {
+    /// Waits for the slot. A test that failed while holding it only poisoned
+    /// the lock, so the next test takes it all the same.
+    fn take() -> Self {
+        let held = ACTIVE_TREE_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self { _held: held }
+    }
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+impl Drop for ActiveTreeSlot {
+    fn drop(&mut self) {
+        eustress_common::datamodel::set_active(None);
+    }
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+mod receipt_tests {
+    use super::{process_rune_receipts, ActiveTreeSlot, ReceiptRune};
+    use eustress_common::datamodel::{self, Receipt, ReceiptDecision, SharedDataModel};
+    use eustress_common::soul::rune_runtime::{
+        compile_scripts, RuneModuleRegistry, RuneRuntimeState, ScriptError, ScriptSource,
+    };
+
+    /// A handler that grants the one purchase it expects, which it knows by
+    /// what the receipt carries.
+    const GRANTS_PUR_1: &str = r#"
+pub fn process_receipt(receipt) {
+    receipt.purchase_id == "pur_1" && receipt.product_id == 3
+}
+"#;
+
+    /// An empty Play tree, published as the active one until the slot drops.
+    fn publish() -> (ActiveTreeSlot, SharedDataModel) {
+        let slot = ActiveTreeSlot::take();
+        let tree = datamodel::new_shared();
+        datamodel::set_active(Some(tree.clone()));
+        (slot, tree)
+    }
+
+    fn receipt(purchase_id: &str) -> Receipt {
+        Receipt {
+            purchase_id: purchase_id.into(),
+            user_id: 42.0,
+            product: 3,
+            price: 50,
+            sim_id: "sim".into(),
+            space: None,
+        }
+    }
+
+    /// A runtime holding `sources` as scripts 1, 2, ..., compiled the way the
+    /// engine compiles them, with `ReceiptRune` installed as `create_ecs_module`
+    /// installs it.
+    fn runtime_of(sources: &[&str]) -> RuneRuntimeState {
+        let mut module = rune::Module::with_crate("eustress").expect("a module");
+        module.ty::<ReceiptRune>().expect("ReceiptRune installs");
+        let mut registry = RuneModuleRegistry::default();
+        registry.add_module(module);
+        let scripts: Vec<ScriptSource> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, source)| ScriptSource {
+                entity_index: i as u32 + 1,
+                name: format!("Script{}", i + 1),
+                source: source.to_string(),
+                file: None,
+            })
+            .collect();
+        let mut runtime = RuneRuntimeState::default();
+        compile_scripts(&mut runtime, &registry, &scripts);
+        assert_eq!(runtime.compiled.len(), scripts.len(), "the test scripts compile: {:?}", runtime.last_errors);
+        runtime
+    }
+
+    /// A waiting purchase is handed to the script that defines
+    /// `process_receipt`, which sees the receipt's fields, and its answer is
+    /// recorded as the decision.
+    #[test]
+    fn a_waiting_purchase_is_granted_by_the_rune_handler() {
+        let (_slot, tree) = publish();
+        let mut runtime = runtime_of(&[GRANTS_PUR_1]);
+        tree.lock().commerce.receipts.push_back(receipt("pur_1"));
+
+        process_rune_receipts(&mut runtime);
+
+        let g = tree.lock();
+        assert!(g.commerce.receipts.is_empty(), "the purchase was taken");
+        assert_eq!(g.commerce.decisions, vec![ReceiptDecision { purchase_id: "pur_1".into(), granted: true }]);
+        assert!(runtime.last_errors.is_empty(), "{:?}", runtime.last_errors);
+    }
+
+    /// With nothing waiting, the call changes nothing: not the decisions
+    /// already recorded, not the errors already reported.
+    #[test]
+    fn with_no_purchase_waiting_nothing_changes() {
+        let (_slot, tree) = publish();
+        let mut runtime = runtime_of(&[GRANTS_PUR_1]);
+        let earlier = ReceiptDecision { purchase_id: "pur_0".into(), granted: true };
+        tree.lock().commerce.decisions.push(earlier.clone());
+        runtime.last_errors.push(ScriptError::new("Earlier", "kept"));
+
+        process_rune_receipts(&mut runtime);
+
+        let g = tree.lock();
+        assert!(g.commerce.receipts.is_empty());
+        assert_eq!(g.commerce.decisions, vec![earlier], "no new decision, and the old one stays");
+        assert_eq!(runtime.last_errors.len(), 1, "no error was added");
+        assert_eq!(runtime.last_errors[0].script, "Earlier");
+    }
+
+    /// A simulation has one receipt handler: when a Luau script set
+    /// `ProcessReceipt`, the Rune handler is not called and the purchases are
+    /// Luau's to take.
+    #[test]
+    fn when_luau_answers_the_purchases_are_left_alone() {
+        let (_slot, tree) = publish();
+        let mut runtime = runtime_of(&[GRANTS_PUR_1]);
+        {
+            let mut g = tree.lock();
+            g.commerce.luau_process_receipt = true;
+            g.commerce.receipts.push_back(receipt("pur_1"));
+            g.commerce.receipts.push_back(receipt("pur_2"));
+        }
+
+        process_rune_receipts(&mut runtime);
+
+        let g = tree.lock();
+        let waiting: Vec<&str> = g.commerce.receipts.iter().map(|r| r.purchase_id.as_str()).collect();
+        assert_eq!(waiting, ["pur_1", "pur_2"], "still waiting, in order");
+        assert!(g.commerce.decisions.is_empty());
+        assert!(runtime.last_errors.is_empty(), "{:?}", runtime.last_errors);
+    }
+
+    /// With no script that defines `process_receipt` (or no script at all)
+    /// the purchases stay undrained, for a handler that comes later.
+    #[test]
+    fn with_no_rune_handler_the_purchases_keep_waiting() {
+        let (_slot, tree) = publish();
+        let mut without_handler = runtime_of(&["pub fn on_update(dt) {}"]);
+        let mut no_scripts = RuneRuntimeState::default();
+        tree.lock().commerce.receipts.push_back(receipt("pur_1"));
+
+        process_rune_receipts(&mut without_handler);
+        process_rune_receipts(&mut no_scripts);
+
+        let g = tree.lock();
+        assert_eq!(g.commerce.receipts.len(), 1, "the purchase is still waiting");
+        assert_eq!(g.commerce.receipts[0], receipt("pur_1"));
+        assert!(g.commerce.decisions.is_empty());
+        assert!(without_handler.last_errors.is_empty(), "{:?}", without_handler.last_errors);
+    }
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+mod script_delete_tests {
+    use super::*;
+    use eustress_common::datamodel::{DataModel, DmValue};
+
+    /// A scratch folder under the system temp dir, removed on drop, with the
+    /// Space root and the Play flag cleared again.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("eustress-script-delete-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Scratch(root)
+        }
+
+        fn space(&self) -> std::path::PathBuf {
+            self.0.join("Space")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            clear_space_root();
+            set_rune_play_frame(false);
+            discard_play_script_deletes();
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `Space/Workspace/Crate/_instance.toml`: a folder-form part at a known position.
+    fn crate_part(space: &std::path::Path) -> std::path::PathBuf {
+        let folder = space.join("Workspace").join("Crate");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("_instance.toml");
+        std::fs::write(
+            &file,
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [0.0, 1.0, 0.0]\n",
+        )
+        .unwrap();
+        file
+    }
+
+    /// Outside Play, a script delete moves nothing until the trash drain runs.
+    #[test]
+    fn a_command_bar_delete_moves_nothing_until_the_trash_drain_runs() {
+        let s = Scratch::new("trash");
+        let file = crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(false);
+
+        assert!(__rune_fn__instance_delete("Crate"));
+        assert!(file.parent().unwrap().is_dir(), "the folder stays until the drain moves it");
+        let queued = drain_script_deletes();
+        assert_eq!(queued.len(), 1);
+        match &queued[0] {
+            ScriptDelete::Trash { source, record } => {
+                assert_eq!(source, file.parent().unwrap());
+                assert_eq!(record, &file);
+            }
+            other => panic!("expected a trash request, got {other:?}"),
+        }
+    }
+
+    /// In Play, a script delete despawns the live part and never touches the
+    /// authored folder.
+    #[test]
+    fn a_play_delete_leaves_the_authored_folder_in_place() {
+        let s = Scratch::new("play-delete");
+        let file = crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(true);
+
+        assert!(__rune_fn__instance_delete("Crate"));
+        assert!(file.is_file(), "a Play delete never touches the authored file");
+        assert!(matches!(drain_script_deletes().as_slice(), [ScriptDelete::DespawnLive { .. }]));
+    }
+
+    /// A name with a path separator cannot reach a folder outside the Space.
+    #[test]
+    fn a_delete_name_cannot_climb_out_of_the_space() {
+        let s = Scratch::new("escape");
+        let outside = s.0.join("Outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("_instance.toml"), "[metadata]\n").unwrap();
+        std::fs::create_dir_all(s.space().join("Workspace")).unwrap();
+        set_space_root(s.space());
+        set_rune_play_frame(false);
+
+        assert!(!__rune_fn__instance_delete("..\\Outside"));
+        assert!(outside.join("_instance.toml").is_file(), "the folder outside the Space is untouched");
+        assert!(drain_script_deletes().is_empty());
+    }
+
+    /// The reported Play defect: `part_set_position` rewrote `_instance.toml`
+    /// during Play, so a Stop could not restore the authored position.
+    #[test]
+    fn a_part_set_in_play_leaves_the_authored_file_byte_identical() {
+        let s = Scratch::new("play-set");
+        let file = crate_part(&s.space());
+        let before = std::fs::read(&file).unwrap();
+        set_space_root(s.space());
+        set_rune_play_frame(true);
+
+        __rune_fn__part_set_position("Crate", 4.0, 5.0, 6.0);
+
+        assert_eq!(std::fs::read(&file).unwrap(), before, "Play never rewrites an authored part file");
+    }
+
+    /// In Play, the live part moves through the play tree.
+    #[test]
+    fn a_part_set_in_play_moves_the_live_part() {
+        let _slot = ActiveTreeSlot::take();
+        let s = Scratch::new("play-live");
+        crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(true);
+        let mut tree = DataModel::new();
+        let workspace = tree.get_service("Workspace").expect("a Workspace service");
+        let part = tree.create("Part");
+        tree.set_parent(part, Some(workspace)).unwrap();
+        tree.set_prop(part, "Name", DmValue::String("Crate".into())).unwrap();
+        let shared = std::sync::Arc::new(parking_lot::Mutex::new(tree));
+        eustress_common::datamodel::set_active(Some(shared.clone()));
+
+        __rune_fn__part_set_position("Crate", 4.0, 5.0, 6.0);
+
+        eustress_common::datamodel::set_active(None);
+        assert_eq!(
+            shared.lock().get_prop(part, "Position"),
+            Some(DmValue::Vector3(eustress_common::scripting::Vector3::new(4.0, 5.0, 6.0))),
+        );
+    }
+
+    /// Guard: the command bar still authors the file (passes on today's code too).
+    #[test]
+    fn a_part_set_outside_play_still_writes_the_authored_file() {
+        let s = Scratch::new("edit-set");
+        let file = crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(false);
+
+        __rune_fn__part_set_position("Crate", 4.0, 5.0, 6.0);
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("4.0"), "the command bar still authors the file: {text}");
+    }
+
+    /// A second delete of the same name in one Play session answers false, so a
+    /// loop that deletes until it gets false ends. On the queue-everything code the
+    /// second call answered true every time.
+    #[test]
+    fn a_second_play_delete_of_the_same_name_is_refused() {
+        let s = Scratch::new("play-twice");
+        crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(true);
+
+        let mut calls = 0;
+        while __rune_fn__instance_delete("Crate") {
+            calls += 1;
+            assert!(calls < 10, "a delete loop must end");
+        }
+        assert_eq!(calls, 1, "only the first call queues the delete");
+        assert!(matches!(drain_script_deletes().as_slice(), [ScriptDelete::DespawnLive { .. }]));
+    }
+
+    /// Outside Play, a second delete of a name already queued answers false and
+    /// queues nothing more.
+    #[test]
+    fn a_second_edit_delete_of_a_queued_name_is_refused() {
+        let s = Scratch::new("edit-twice");
+        crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(false);
+
+        assert!(__rune_fn__instance_delete("Crate"));
+        assert!(!__rune_fn__instance_delete("Crate"));
+        assert_eq!(drain_script_deletes().len(), 1);
+    }
+
+    /// Stop drops a DespawnLive that on_exit queued, so the authored part is never
+    /// despawned in the Edit world. A later Play session may delete again.
+    #[test]
+    fn stop_drops_a_play_delete_queued_by_on_exit() {
+        let s = Scratch::new("stop-drop");
+        crate_part(&s.space());
+        set_space_root(s.space());
+        set_rune_play_frame(true);
+        assert!(__rune_fn__instance_delete("Crate"));
+
+        discard_play_script_deletes();
+
+        assert!(drain_script_deletes().is_empty(), "Stop leaves no delete for the drain");
+        assert!(__rune_fn__instance_delete("Crate"), "a new Play session may delete again");
+    }
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
 mod oneshot_tests {
     use super::execute_rune_oneshot;
+    use super::set_rune_play_frame;
 
     /// A private scratch directory for one test, removed on drop.
     struct TempSpace(std::path::PathBuf);
@@ -5130,6 +5759,20 @@ mod oneshot_tests {
             !space.0.join("second.txt").exists(),
             "space root leaked across runs"
         );
+    }
+
+    /// A Play frame's scripts cannot write the Space: the write leaves no
+    /// file. Outside a Play frame the same script writes it.
+    #[test]
+    fn a_play_frame_writes_no_space_file() {
+        let space = TempSpace::new("playframe");
+        set_rune_play_frame(true);
+        let during_play = execute_rune_oneshot(r#"write_space_file("play.txt", "written during Play")"#, Some(space.0.clone()));
+        set_rune_play_frame(false);
+        during_play.expect("the script runs during Play");
+        assert!(!space.0.join("play.txt").exists(), "a Play frame wrote the Space");
+        execute_rune_oneshot(r#"write_space_file("edit.txt", "written while editing")"#, Some(space.0.clone())).expect("the script runs while editing");
+        assert!(space.0.join("edit.txt").exists(), "the same write failed outside Play");
     }
 
     /// A compile error must surface as an Err, not be swallowed.

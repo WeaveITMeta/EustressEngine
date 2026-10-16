@@ -74,6 +74,27 @@ pub struct NewPartDescriptor {
     pub material: Option<String>,
     /// True → write `anchored = true` (part doesn't fall under gravity).
     pub anchored: bool,
+    /// `[asset] scale_kind` of the part this one copies ("length" or
+    /// "multiplier"); `None` for a new part. A copy of an imported mesh has to
+    /// keep it, or the mesh reads as a multiplier and draws at the wrong size.
+    pub scale_kind: Option<String>,
+    /// The source's folded DataMesh keys (`mesh_scale`, `mesh_offset`), copied
+    /// as they are in the file's own unit; empty for a new part. They are a
+    /// visual factor on top of `size`, so a copy without them draws the mesh
+    /// stretched to the size box.
+    pub mesh_fold: Vec<(String, toml::Value)>,
+}
+
+/// What a copy keeps of how its source's mesh is drawn: the `scale_kind` and
+/// the `mesh_scale` / `mesh_offset` keys, read straight from the source's
+/// definition. Fill [`NewPartDescriptor::scale_kind`] and
+/// [`NewPartDescriptor::mesh_fold`] from it.
+pub(crate) fn mesh_carry(def: &InstanceDefinition) -> (Option<String>, Vec<(String, toml::Value)>) {
+    let fold = ["mesh_scale", "mesh_offset"]
+        .into_iter()
+        .filter_map(|key| def.extra.get(key).map(|value| (key.to_string(), value.clone())))
+        .collect();
+    (def.asset.as_ref().and_then(|a| a.scale_kind.clone()), fold)
 }
 
 impl NewPartDescriptor {
@@ -86,6 +107,7 @@ impl NewPartDescriptor {
             asset: Some(AssetReference {
                 mesh: self.mesh.clone(),
                 scene: "Scene0".to_string(),
+                scale_kind: self.scale_kind.clone(),
             }),
             transform: TransformData {
                 position: self.transform.translation.to_array(),
@@ -128,7 +150,7 @@ impl NewPartDescriptor {
             attributes: None,
             tags: None,
             parameters: None,
-            extra: std::collections::HashMap::new(),
+            extra: self.mesh_fold.iter().cloned().collect(),
         }
     }
 }
@@ -227,7 +249,7 @@ pub fn spawn_new_part_with_toml(
 /// through. Uses `World::resource_scope` nesting to lift each resource
 /// out in turn so we can hold all three `&mut` simultaneously without
 /// violating Bevy's single-mutable-borrow rule.
-fn spawn_instance_from_world(
+pub(crate) fn spawn_instance_from_world(
     world: &mut World,
     toml_path: &std::path::Path,
     instance: InstanceDefinition,
@@ -291,6 +313,9 @@ pub struct SmartToolsPlugin;
 
 impl Plugin for SmartToolsPlugin {
     fn build(&self, app: &mut App) {
+        // The look picker (I) and the Paint Bucket come with the Smart Build
+        // Tools: they register their own tool and sampling system.
+        app.add_plugins(crate::look_picker::LookPickerPlugin);
         // Run registration after ModalToolPlugin has initialized the
         // registry resource.
         app.add_systems(Startup, register_smart_tools)
@@ -456,6 +481,7 @@ fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDef
         asset: Some(AssetReference {
             mesh: "parts/block.glb".to_string(),
             scene: "Scene0".to_string(),
+            scale_kind: None,
         }),
         transform: TransformData {
             position: position.to_array(),
@@ -922,6 +948,7 @@ impl ModalTool for ModelReflect {
 
             // Write + spawn. On error, log and continue — partial success
             // beats nothing for bulk operations.
+            let (scale_kind, mesh_fold) = mesh_carry(&instance);
             let desc = NewPartDescriptor {
                 base_name: format!("{}_Reflected", base_name),
                 parent_rel,
@@ -937,6 +964,8 @@ impl ModalTool for ModelReflect {
                 color_rgba: Some(instance.properties.color),
                 material: Some(instance.properties.material.clone()),
                 anchored: instance.properties.anchored,
+                scale_kind,
+                mesh_fold,
             };
             match spawn_new_part_with_toml(world, desc) {
                 Ok(part) => {
@@ -1325,6 +1354,16 @@ fn spawn_gap_fill_4_wedges(
     spawn_wedge_batch(world, specs, color, material, parent_rel)
 }
 
+/// The turn that puts a wedge on `parts/wedge.glb` the way Gap Fill was laid
+/// out. The mesh matches Roblox's wedge: tall face at +Z, slope facing -Z and
+/// up. Gap Fill's rotations were worked out against the earlier mesh, which
+/// was that mirrored front to back (tall face at -Z). The wedge is symmetric
+/// in X, so a half turn about local Y reproduces the earlier orientation
+/// exactly, and every rotation below is composed with it.
+fn wedge_mesh_turn() -> Quat {
+    Quat::from_rotation_y(std::f32::consts::PI)
+}
+
 /// Spawn N wedges with identical color / material / parent. Returns
 /// how many succeeded. Single place that formats the NewPartDescriptor
 /// and calls `spawn_new_part_with_toml` for every Gap Fill variant.
@@ -1342,7 +1381,7 @@ fn spawn_wedge_batch(
             parent_rel: parent_rel.clone(),
             transform: Transform {
                 translation: *translation,
-                rotation:    *rotation,
+                rotation:    (*rotation * wedge_mesh_turn()).normalize(),
                 scale:       Vec3::ONE,
             },
             size: *size,
@@ -1351,6 +1390,8 @@ fn spawn_wedge_batch(
             color_rgba: Some(color),
             material: Some(material.clone()),
             anchored: true,
+            scale_kind: None,
+            mesh_fold: Vec::new(),
         };
         match spawn_new_part_with_toml(world, desc) {
             Ok(part) => {
@@ -1720,6 +1761,8 @@ fn spawn_rounded_join_connector(
         color_rgba: Some(color),
         material: Some(material_name),
         anchored: true,
+        scale_kind: None,
+        mesh_fold: Vec::new(),
     };
     if let Err(e) = spawn_new_part_with_toml(world, desc) {
         warn!("Rounded Join: spawn failed — {}", e);
@@ -1970,3 +2013,89 @@ fn persist_material_uv_op_to_toml(world: &mut World, entity: Entity, op: &str) -
     write_instance_definition_signed(&inst_path, &mut def, stamp.as_ref()).is_ok()
 }
 
+#[cfg(test)]
+mod wedge_turn_tests {
+    use super::*;
+
+    /// Face normals of the Roblox-correct wedge mesh and of the earlier one.
+    const NEW_TALL_FACE: Vec3 = Vec3::Z;
+    const OLD_TALL_FACE: Vec3 = Vec3::NEG_Z;
+
+    /// The turn restores the earlier wedge's tall face and slope under any
+    /// rotation Gap Fill composes, so its seams stay where they were tuned.
+    #[test]
+    fn the_turn_restores_the_earlier_wedge_orientation() {
+        let turn = wedge_mesh_turn();
+        let new_slope = Vec3::new(0.0, 1.0, -1.0).normalize();
+        let old_slope = Vec3::new(0.0, 1.0, 1.0).normalize();
+        for rotation in [
+            Quat::IDENTITY,
+            Quat::from_rotation_arc(Vec3::X, Vec3::new(0.3, 0.4, -0.8).normalize()),
+            Quat::from_rotation_arc(Vec3::X, -Vec3::new(1.0, 0.2, 0.1).normalize()),
+            Quat::from_axis_angle(Vec3::X, 0.7) * Quat::from_rotation_y(2.1),
+        ] {
+            let composed = rotation * turn;
+            assert!((composed * NEW_TALL_FACE - rotation * OLD_TALL_FACE).length() < 1e-5, "tall face under {rotation:?}");
+            assert!((composed * new_slope - rotation * old_slope).length() < 1e-5, "slope under {rotation:?}");
+            // The wedge is symmetric in X, so the turn's flip of X changes nothing.
+            assert!((composed * Vec3::Y - rotation * Vec3::Y).length() < 1e-5, "up under {rotation:?}");
+        }
+    }
+
+    #[test]
+    fn the_turn_is_a_unit_rotation() {
+        assert!((wedge_mesh_turn().length() - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod mesh_carry_tests {
+    use super::*;
+
+    fn descriptor(scale_kind: Option<String>, mesh_fold: Vec<(String, toml::Value)>) -> NewPartDescriptor {
+        NewPartDescriptor {
+            base_name: "Copy".to_string(),
+            parent_rel: std::path::PathBuf::from("Workspace"),
+            transform: Transform::IDENTITY,
+            size: Vec3::new(2.0, 3.0, 4.0),
+            mesh: "../../assets/meshes/rbx-1234.glb".to_string(),
+            class_name: "Part".to_string(),
+            color_rgba: None,
+            material: None,
+            anchored: true,
+            scale_kind,
+            mesh_fold,
+        }
+    }
+
+    fn vec3(x: f64, y: f64, z: f64) -> toml::Value {
+        toml::Value::Array(vec![toml::Value::Float(x), toml::Value::Float(y), toml::Value::Float(z)])
+    }
+
+    /// A copy of an imported mesh keeps its `scale_kind` and the folded
+    /// `mesh_scale` / `mesh_offset` keys, and the next copy reads them back
+    /// out of the written definition.
+    #[test]
+    fn a_copy_keeps_the_sources_scale_kind_and_folded_mesh_keys() {
+        let fold = vec![
+            ("mesh_scale".to_string(), vec3(1.0, 2.0, 0.5)),
+            ("mesh_offset".to_string(), vec3(0.0, 0.25, 0.0)),
+        ];
+        let def = descriptor(Some("length".to_string()), fold.clone()).to_definition();
+        assert_eq!(def.asset.as_ref().and_then(|a| a.scale_kind.as_deref()), Some("length"));
+        let (kind, carried) = mesh_carry(&def);
+        assert_eq!(kind.as_deref(), Some("length"));
+        assert_eq!(carried.len(), 2);
+        for (key, value) in &fold {
+            assert_eq!(carried.iter().find(|(k, _)| k == key).map(|(_, v)| v), Some(value), "{key}");
+        }
+    }
+
+    /// A part a tool makes from scratch carries nothing.
+    #[test]
+    fn a_new_part_carries_nothing() {
+        let def = descriptor(None, Vec::new()).to_definition();
+        assert!(def.asset.as_ref().is_some_and(|a| a.scale_kind.is_none()));
+        assert!(def.extra.is_empty());
+    }
+}

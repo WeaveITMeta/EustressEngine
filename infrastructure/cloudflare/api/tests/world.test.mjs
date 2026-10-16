@@ -118,7 +118,8 @@ function environment(sim = {}) {
 }
 
 const listing = (env) => JSON.parse(env.SOCIAL.m.get(`sim:${SIM}`));
-const approve = (env) => env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), moderation: { status: 'approved' } }));
+// Rated all_ages: a listing with no rating is adult content, served only with Adult content on (src/adult_content.mjs).
+const approve = (env) => env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), moderation: { status: 'approved', rating: 'all_ages' } }));
 
 async function call(env, method, path, { who, body, bytes, length } = {}) {
   const headers = new Headers();
@@ -221,7 +222,7 @@ test('a publish uploads only missing chunks, then commits', async () => {
   assert.equal(new TextDecoder().decode(env.SCENES.m.get(sim.r2_key)), text);
 });
 
-test('only the author publishes, and not under a legal hold or a freeze', async () => {
+test('only the author publishes, and not under a legal hold; a freeze from before 2026-10-15 is not read', async () => {
   const m = manifest();
   let env = environment();
   assert.equal((await call(env, 'POST', 'begin', { body: publish(m) })).status, 401);
@@ -234,7 +235,8 @@ test('only the author publishes, and not under a legal hold or a freeze', async 
 
   env = environment();
   env.USERS.m.set('publish-frozen:author', '1');
-  assert.equal((await call(env, 'POST', 'begin', { who: 'author', body: publish(m) })).status, 403);
+  // No moderation outcome restricts the account (McKale, 2026-10-15): the author publishes.
+  assert.notEqual((await call(env, 'POST', 'begin', { who: 'author', body: publish(m) })).status, 409);
 });
 
 test('an upload must be an .echk chunk under a content-hash name', async () => {
@@ -399,7 +401,7 @@ test('a source left behind on a listing that no longer shares it stays private',
   const m = await committed(env);
   await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
   assert.equal((await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { kind: 'source' }) })).status, 200);
-  env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), open_source: false, moderation: { status: 'approved' } }));
+  env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), open_source: false, moderation: { status: 'approved', rating: 'all_ages' } }));
 
   assert.equal((await call(env, 'GET', 'source')).status, 404);
   assert.equal((await call(env, 'GET', 'source', { who: 'someone' })).status, 404);
@@ -419,7 +421,7 @@ test('a new world drops the old source until Studio commits the new one', async 
 });
 
 test('a listing published as a .pak answers 409 so the Player falls back', async () => {
-  const env = environment({ r2_key: `universes/${SIM}/universe.pak`, moderation: { status: 'approved' } });
+  const env = environment({ r2_key: `universes/${SIM}/universe.pak`, moderation: { status: 'approved', rating: 'all_ages' } });
   const res = await call(env, 'GET', 'manifest');
   assert.equal(res.status, 409);
   const out = await res.json();

@@ -931,20 +931,24 @@ fn try_gui_property(
         }
     }
 
-    // `Size` / `Position` are UDim2 → two keys (scale + offset) under [gui].
+    // `Position` and `Size` are UDim2. The loader reads Position as the one
+    // 4-float `position` (`[scale_x, offset_x, scale_y, offset_y]`), and Size
+    // as the same 4-float `size` plus `size_scale` / `size_offset`, which
+    // `resolved_size` reads. `position_scale` / `position_offset` had no reader:
+    // every imported child sat at the origin.
     if key == "Position" || key == "Size" {
         if let Variant::UDim2(u) = variant {
-            let (scale_key, offset_key) = if key == "Position" {
-                ("position_scale", "position_offset")
-            } else {
-                ("size_scale", "size_offset")
-            };
             let g = bag.section_props.entry("gui".to_string()).or_default();
-            g.insert(scale_key.to_string(), f32_pair(u.x.scale, u.y.scale));
-            g.insert(
-                offset_key.to_string(),
-                f32_pair(u.x.offset as f32, u.y.offset as f32),
-            );
+            if key == "Position" {
+                g.insert("position".to_string(), udim2_to_section_value(u));
+            } else {
+                g.insert("size".to_string(), udim2_to_section_value(u));
+                g.insert("size_scale".to_string(), f32_pair(u.x.scale, u.y.scale));
+                g.insert(
+                    "size_offset".to_string(),
+                    f32_pair(u.x.offset as f32, u.y.offset as f32),
+                );
+            }
             return true;
         }
     }
@@ -1005,16 +1009,18 @@ fn try_gui_property(
             Variant::Vector2(p) => Some(("gui", "canvas_size", f32_pair(p.x, p.y))),
             _ => None,
         },
-        // Pixels per stud -> pixels per meter, the unit the loader's
-        // `pixels_per_unit` is in.
-        "PixelsPerStud" if is_surface => match variant {
-            Variant::Float32(f) => Some((
-                "gui",
-                "pixels_per_unit",
-                toml::Value::Float(*f as f64 / STUD_TO_M),
-            )),
-            _ => None,
-        },
+        // The density in studs, as Roblox has it. `pixels_per_unit` (pixels
+        // per metre of face) is worked out in the materializer from the canvas
+        // and the part's size, since it depends on SizingMode.
+        "PixelsPerStud" if is_surface => val_float(variant).map(|v| ("gui", "pixels_per_stud", v)),
+        "SizingMode" if is_surface => enum_u32(variant).map(|e| {
+            let s = if e == 1 { "PixelsPerStud" } else { "FixedSize" };
+            ("gui", "sizing_mode", toml::Value::String(s.to_string()))
+        }),
+        "ZOffset" if is_surface => val_float(variant).map(|v| ("gui", "z_offset", v)),
+        "ToolPunchThroughDistance" if is_surface => {
+            val_studs_to_m(variant).map(|v| ("gui", "tool_punch_through_distance", v))
+        }
         "ResetOnSpawn" if is_container => val_bool(variant).map(|v| ("gui", "reset_on_spawn", v)),
         "Enabled" if is_container => val_bool(variant).map(|v| ("gui", "enabled", v)),
         "ZIndexBehavior" if is_container => enum_u32(variant).map(|e| {
@@ -1918,17 +1924,17 @@ fn try_gui_leaf_property(bag: &mut PropertyBag, target_class: ClassName, key: &s
     if !(is_image || is_scroll || is_viewport) {
         return false;
     }
-    // Position / Size: canonical single 4-tuple (loader reads) + legacy split.
+    // Position: the one 4-tuple the loader reads. Size: the same 4-tuple plus
+    // the split pair `resolved_size` reads (see `try_gui_property`).
     if key == "Position" || key == "Size" {
         if let Variant::UDim2(u) = variant {
-            let (single, scale_key, offset_key) = if key == "Position" {
-                ("position", "position_scale", "position_offset")
+            if key == "Position" {
+                put_section(bag, "gui", "position", udim2_to_section_value(u));
             } else {
-                ("size", "size_scale", "size_offset")
-            };
-            put_section(bag, "gui", single, udim2_to_section_value(u));
-            put_section(bag, "gui", scale_key, f32_pair(u.x.scale, u.y.scale));
-            put_section(bag, "gui", offset_key, f32_pair(u.x.offset as f32, u.y.offset as f32));
+                put_section(bag, "gui", "size", udim2_to_section_value(u));
+                put_section(bag, "gui", "size_scale", f32_pair(u.x.scale, u.y.scale));
+                put_section(bag, "gui", "size_offset", f32_pair(u.x.offset as f32, u.y.offset as f32));
+            }
             return true;
         }
     }
@@ -4106,7 +4112,53 @@ mod tests {
         let g = section(&sg, "gui");
         assert_eq!(g.get("face").and_then(|v| v.as_str()), Some("Top"));
         assert!(g.contains_key("canvas_size"));
-        assert!((float(g.get("pixels_per_unit")) - 50.0 / STUD_TO_M).abs() < 1e-3);
+        assert!((float(g.get("pixels_per_stud")) - 50.0).abs() < 1e-6);
+        assert!(!g.contains_key("pixels_per_unit"), "the density is worked out from the part's size");
+    }
+
+    /// A GUI element's Position is the one 4-float UDim2 the loader reads, for
+    /// a Frame and a TextLabel alike. No `position_scale` / `position_offset`:
+    /// no loader reads them, so every imported child sat at the origin.
+    #[test]
+    fn gui_position_is_the_one_udim2_the_loader_reads() {
+        let u = UDim2::new(UDim::new(0.5, 10), UDim::new(0.25, -4));
+        for class in [ClassName::Frame, ClassName::TextLabel] {
+            let bag = map_properties(&props_with(vec![("Position", Variant::UDim2(u))]), class);
+            let g = section(&bag, "gui");
+            assert_eq!(
+                g.get("position"),
+                Some(&toml::Value::Array(vec![
+                    toml::Value::Float(0.5),
+                    toml::Value::Float(10.0),
+                    toml::Value::Float(0.25),
+                    toml::Value::Float(-4.0),
+                ])),
+                "{class:?}"
+            );
+            assert!(!g.contains_key("position_scale") && !g.contains_key("position_offset"), "{class:?}");
+        }
+    }
+
+    /// The SurfaceGui settings no loader reads yet are kept as their Roblox
+    /// values: SizingMode by name, PixelsPerStud in studs, ZOffset as the
+    /// layering number it is, and ToolPunchThroughDistance in metres.
+    #[test]
+    fn surface_gui_sizing_and_layering_are_kept() {
+        use rbx_dom_weak::types::Enum;
+        let bag = map_properties(
+            &props_with(vec![
+                ("SizingMode", Variant::Enum(Enum::from_u32(1))),
+                ("PixelsPerStud", Variant::Float32(70.0)),
+                ("ZOffset", Variant::Float32(2.0)),
+                ("ToolPunchThroughDistance", Variant::Float32(10.0)),
+            ]),
+            ClassName::SurfaceGui,
+        );
+        let g = section(&bag, "gui");
+        assert_eq!(g.get("sizing_mode").and_then(|v| v.as_str()), Some("PixelsPerStud"));
+        assert!((float(g.get("pixels_per_stud")) - 70.0).abs() < 1e-6);
+        assert!((float(g.get("z_offset")) - 2.0).abs() < 1e-6);
+        assert!((float(g.get("tool_punch_through_distance")) - 10.0 * STUD_TO_M).abs() < 1e-6);
     }
 
     /// Every `Enum.Material` value maps to Roblox's own name for it. The table

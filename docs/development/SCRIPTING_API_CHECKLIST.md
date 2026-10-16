@@ -288,10 +288,10 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `UserInputService.InputBegan` | ❌ | ❌ | Signal not wired |
 | `UserInputService.InputEnded` | ❌ | ❌ | |
 | `UserInputService.InputChanged` | ❌ | ❌ | |
-| `UserInputService:IsKeyDown()` | ✅ | ✅ | P1 implemented |
-| `UserInputService:IsMouseButtonPressed()` | ✅ | ✅ | |
-| `UserInputService:GetMouseLocation()` | ✅ | ✅ | Returns {X,Y} / (x,y) |
-| `UserInputService:GetMouseDelta()` | ✅ | ✅ | |
+| `UserInputService:IsKeyDown()` | ✅ | ✅ `dm::key_down("W")` | Roblox KeyCode names ("Space", "LeftShift", "One"). The older `is_key_down(i32)` is never fed and has no key-code table |
+| `UserInputService:IsMouseButtonPressed()` | ✅ | ✅ `dm::mouse_down("MouseButton1")` | |
+| `UserInputService:GetMouseLocation()` | ✅ | ✅ `dm::mouse_position()` | Viewport pixels, origin top-left |
+| `UserInputService:GetMouseDelta()` | ✅ | ❌ | The older `get_mouse_delta` is never fed |
 | `UserInputService.MouseBehavior` | ❌ | ❌ | |
 | `UserInputService.TouchEnabled` | ❌ | ❌ | |
 | `UserInputService.KeyboardEnabled` | ❌ | ❌ | |
@@ -681,14 +681,14 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Camera.CFrame` | ✅ | ✅ `camera_get_position` + `camera_get_look_vector` | Split into position + direction |
+| `Camera.CFrame` | ✅ | ❌ | The older `camera_get_position` + `camera_get_look_vector` are never fed (they return defaults), and `dm` has no camera function yet |
 | `Camera.CameraType` | ✅ | ❌ | |
 | `Camera.CameraSubject` | ✅ | ❌ | |
-| `Camera.FieldOfView` | ✅ | ✅ `camera_get_fov` / `camera_set_fov` | Degrees |
+| `Camera.FieldOfView` | ✅ | ❌ | The older `camera_get_fov` / `camera_set_fov` are never fed |
 | `Camera.Focus` | ✅ | ❌ | |
-| `Camera.ViewportSize` | ✅ | ✅ via CameraState | Width + height |
+| `Camera.ViewportSize` | ✅ | ❌ | The older CameraState is never fed |
 | `Camera:ViewportPointToRay()` | ✅ | ❌ | |
-| `Camera:ScreenPointToRay()` | ✅ | ✅ `camera_screen_point_to_ray` | Returns ((origin), (direction)) |
+| `Camera:ScreenPointToRay()` | ✅ | ❌ | The older `camera_screen_point_to_ray` is never fed |
 | `Camera:WorldToViewportPoint()` | ❌ | ❌ | |
 | `Camera:WorldToScreenPoint()` | ✅ | ❌ | |
 
@@ -698,10 +698,10 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Mouse.Hit` | ✅ | ✅ `mouse_get_hit` | (x,y,z) world position |
-| `Mouse.Target` | ✅ | ✅ `mouse_get_target` | Entity name string |
+| `Mouse.Hit` | ✅ | ✅ `dm::mouse_hit()` | A Vector3. The older `mouse_get_hit` is never fed |
+| `Mouse.Target` | ✅ | ✅ `dm::mouse_target()` | The part's id, 0 for none. The older `mouse_get_target` is never fed |
 | `Mouse.TargetSurface` | ✅ | ❌ | P3 implemented |
-| `Mouse.X / Y` | ✅ | ❌ | P3 implemented (Screen position) |
+| `Mouse.X / Y` | ✅ | ✅ `dm::mouse_position()` | Viewport pixels, origin top-left |
 | `Mouse.UnitRay` | ✅ | ❌ | P3 implemented |
 | `Mouse.Icon` | ✅ | ❌ | P3 implemented |
 | `Mouse.Button1Down` | ❌ | ❌ | Event not wired |

@@ -140,9 +140,22 @@ jobs:
         working-directory: eustress
         shell: pwsh
         run: |
-          cargo build --release --package eustress-client --bin eustress-client `
+          cargo build --release --locked --package eustress-client --bin eustress-client `
             --target x86_64-pc-windows-msvc `
             --config "target.x86_64-pc-windows-msvc.rustflags=['-C','target-feature=+crt-static']"
+
+      - name: Check the runtime is linked in
+        shell: pwsh
+        run: |
+          # The launch check below runs on windows-latest, which has the Visual C++ runtime
+          # installed, so it cannot see a dynamic link. Name the DLLs instead: a binary that
+          # imports one, or loads one by name, needs it on the user's machine.
+          $exe = "$env:BIN_DIR\eustress-client.exe"
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $named = @('VCRUNTIME140', 'MSVCP140', 'CONCRT140', 'VCOMP140') |
+            Where-Object { $text.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+          if ($named) { throw "$exe names $($named -join ', '): the Visual C++ runtime is linked dynamically, so a fresh Windows install will not start it." }
+          "OK: $exe names no Visual C++ runtime DLL"
 
       - name: Check the reported version
         shell: pwsh
@@ -246,7 +259,7 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --package eustress-client --bin eustress-client --target aarch64-apple-darwin
+        run: cargo build --release --locked --package eustress-client --bin eustress-client --target aarch64-apple-darwin
 
       - name: Check the reported version
         run: |
@@ -337,6 +350,38 @@ jobs:
           hdiutil create -volname "Eustress Player" -srcfolder dmg -ov -format UDZO \
             "dist/eustress-player-v${VERSION}-macos-arm64.dmg"
 
+      # Opens the finished image the way a user does and checks what they see:
+      # the app, a link to Applications, the assets, and this release's version.
+      - name: Verify the DMG
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          DMG="dist/eustress-player-v${VERSION}-macos-arm64.dmg"
+          [ -f "$DMG" ] || fail "$DMG was not built."
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          trap 'hdiutil detach "$MNT" -quiet -force || true' EXIT
+
+          APP="$MNT/Eustress Player.app"
+          BIN="$APP/Contents/MacOS/eustress-client"
+          [ -d "$APP" ] || fail "The image has no 'Eustress Player.app' at its root; it holds: $(ls "$MNT")"
+          [ -x "$BIN" ] || fail "$BIN is missing or not executable."
+          [ "$(readlink "$MNT/Applications")" = "/Applications" ] \
+            || fail "The image has no link to /Applications beside the app."
+          [ -d "$APP/Contents/Resources/common/assets/class_schema" ] \
+            || fail "The common assets did not reach the bundle."
+          [ -d "$APP/Contents/MacOS/common/assets" ] \
+            || fail "The link from MacOS/common to the assets does not resolve."
+          [ -f "$APP/Contents/Resources/AppIcon.icns" ] \
+            || echo "::warning::AppIcon.icns is missing; the Player app has no icon."
+          plutil -lint "$APP/Contents/Info.plist"
+          GOT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          [ "$GOT" = "$VERSION" ] || fail "Info.plist says version '${GOT}', want '${VERSION}'."
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$APP/Contents/Info.plist" \
+            | grep -qx "eustress-player" || fail "Info.plist does not register the eustress-player:// scheme."
+          ARCHS=$(lipo -archs "$BIN")
+          [ "$ARCHS" = "arm64" ] || fail "The executable is '${ARCHS}', want 'arm64'."
+          echo "OK: $(basename "$DMG") opens to the app and a link to Applications."
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -387,7 +432,7 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --package eustress-client --bin eustress-client
+        run: cargo build --release --locked --package eustress-client --bin eustress-client
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

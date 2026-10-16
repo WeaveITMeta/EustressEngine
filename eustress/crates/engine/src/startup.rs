@@ -706,7 +706,7 @@ impl Plugin for StartupPlugin {
         // main has already inserted the same root before building the core
         // plugins (so plugins that load Space files in `build` read it); this
         // keeps the override for any shell that has not.
-        if let Some(space) = args.launch_space_root() {
+        if let Some(space) = args.launch_space_root().map(crate::space::format_migration::launch_space_or_scratch) {
             info!("📁 Launch Space: {:?}", space);
             app.insert_resource(crate::space::SpaceRoot(space.clone()));
             // Keep the `space://` asset root in step with the override so the

@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadWorker, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
+import { loadWorker, mintToken, fakeEnv, ctx, testPng } from './helpers/load_worker.mjs';
 
 const worker = await loadWorker();
 
@@ -22,7 +22,7 @@ const TOKENS = { author: mintToken(AUTHOR), stranger: mintToken(STRANGER) };
 async function seed() {
   const env = fakeEnv();
   for (const [id, name] of [[AUTHOR, 'author'], [STRANGER, 'stranger']]) {
-    await env.USERS.put(`user:${id}`, JSON.stringify({ id, username: name, created_at: '2026-01-01T00:00:00.000Z' }));
+    await env.USERS.put(`user:${id}`, JSON.stringify({ kyc_verified: true, id, username: name, created_at: '2026-01-01T00:00:00.000Z' }));
   }
   const sim = (id, authorId, extra = {}) => ({
     id, name: `World ${id.slice(0, 4)}`, description: '', genre: 'all', max_players: 10,
@@ -50,7 +50,7 @@ async function call(env, method, path, who, { body, headers } = {}) {
 }
 
 const json = (v) => JSON.stringify(v);
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+const PNG = testPng();
 
 // Mutating routes: the author may use them, nobody else may.
 const MUTATIONS = [

@@ -23,6 +23,7 @@ use crate::state::JurisdictionState;
 use crate::pages::{
     about::AboutPage,
     acts::ActsPage,
+    legal_acts::LegalActPage,
     admin::AdminPage,
     admin_telemetry::AdminTelemetryPage,
     ai::AiPage,
@@ -37,7 +38,7 @@ use crate::pages::{
     community::CommunityPage,
     contact::ContactPage,
     cookies::CookiesPage,
-    creator::CreatorPage,
+    project_sell::{CreatorRedirect, ProjectSellPage},
     dashboard::DashboardPage,
     dmca::DmcaPage,
     docs_audio::DocsAudioPage,
@@ -59,17 +60,24 @@ use crate::pages::{
     docs_ui::DocsUiPage,
     docs_universes::DocsUniversesPage,
     docs_website::DocsWebsitePage,
+    currency::CurrencyPage,
+    delta::DeltaPage,
     download::DownloadPage,
     download_player::DownloadPlayerPage,
-    experience::{ExperiencesPage, ExperienceDetailPage},
+    economics::EconomicsPage,
+    EconomicsDraftPage,
     friends::FriendsPage,
     play::PlayPage,
+    delta_thanks::DeltaThanksPage,
+    email_links::{CancelEmailChangePage, UndoKeyReplacementPage, VerifyEmailPage},
+    replacement_key::ReplacementKeyPage,
     premium::PremiumPage,
     press::PressPage,
     privacy::PrivacyPage,
     projects::ProjectsPage,
     purchases::PurchasesPage,
-    gallery::GalleryPage,
+    gallery::{GalleryPage, SimulationsRedirect},
+    listing::ListingPage,
     leaderboard::LeaderboardPage,
     learn::LearnPage,
     learn_cli::LearnCliPage,
@@ -85,9 +93,17 @@ use crate::pages::{
     trust_registry::TrustRegistryPage,
     kyc::KycPage,
     verify::VerifyPage,
+    verify_account::VerifyAccountPage,
     license::LicensePage,
     support::SupportPage,
+    not_found::NotFoundPage,
 };
+use crate::components::email_banner::EmailBanner;
+use crate::components::kyc_banner::KycBanner;
+use crate::components::key_prompt::KeyPrompt;
+use crate::components::time_zone_sync::TimeZoneSync;
+use crate::components::play_chooser::PlayChooserHost;
+use crate::components::command_palette::CommandPaletteHost;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------------
@@ -240,6 +256,8 @@ pub fn App() -> impl IntoView {
     }
 
     provide_context(app_state);
+    crate::components::play_chooser::provide_play_chooser();
+    crate::components::command_palette::provide_palette();
 
     view! {
         {move || {
@@ -259,13 +277,19 @@ pub fn App() -> impl IntoView {
                     view! {
                         <Router>
             <TitleSync />
-            <Routes fallback=|| "Not found.">
+            <KeyPrompt />
+            <TimeZoneSync />
+            <PlayChooserHost />
+            <CommandPaletteHost />
+            <EmailBanner />
+            <KycBanner />
+            <Routes fallback=NotFoundPage>
                 // Public routes
                 <Route path=path!("/") view=HomePage />
                 <Route path=path!("/login") view=LoginPage />
                 <Route path=path!("/gallery") view=GalleryPage />
-                <Route path=path!("/simulations") view=ExperiencesPage />
-                <Route path=path!("/simulation/:id") view=ExperienceDetailPage />
+                <Route path=path!("/simulations") view=SimulationsRedirect />
+                <Route path=path!("/simulation/:id") view=ListingPage />
                 <Route path=path!("/play/:id") view=PlayPage />
                 <Route path=path!("/community") view=CommunityPage />
                 <Route path=path!("/leaderboard") view=LeaderboardPage />
@@ -308,11 +332,24 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/blog") view=BlogPage />
                 <Route path=path!("/blog/indie-studios") view=BlogIndieStudiosPage />
                 <Route path=path!("/premium") view=PremiumPage />
+                <Route path=path!("/currency") view=CurrencyPage />
+                <Route path=path!("/delta") view=DeltaPage />
+                <Route path=path!("/delta/thanks") view=DeltaThanksPage />
+                // The model for testing, unlisted: not in the nav, the footer or the sitemap, and `_headers` keeps it out of search.
+                <Route path=path!("/economics") view=EconomicsPage />
+                // The internal draft: a build without the `economics-draft` feature answers here as it does at any address it does not have.
+                <Route path=path!("/economics-draft") view=EconomicsDraftPage />
+                <Route path=path!("/verify-email") view=VerifyEmailPage />
+                <Route path=path!("/cancel-email-change") view=CancelEmailChangePage />
+                <Route path=path!("/replacement-key") view=ReplacementKeyPage />
+                <Route path=path!("/undo-key-replacement") view=UndoKeyReplacementPage />
                 <Route path=path!("/profile/:username") view=ProfilePage />
                 <Route path=path!("/profile") view=ProfilePage />
                 <Route path=path!("/purchases") view=PurchasesPage />
-                <Route path=path!("/creator") view=CreatorPage />
-                <Route path=path!("/creator/:sim_id") view=CreatorPage />
+                // The seller dashboard is part of Projects (/projects/:sim_id). The older creator addresses redirect there. The host
+                // redirects them too (_redirects); a link inside the app can land here first.
+                <Route path=path!("/creator") view=CreatorRedirect />
+                <Route path=path!("/creator/:sim_id") view=CreatorRedirect />
                 
                 // Legal pages
                 <Route path=path!("/terms") view=TermsPage />
@@ -320,11 +357,16 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/cookies") view=CookiesPage />
                 <Route path=path!("/dmca") view=DmcaPage />
                 <Route path=path!("/acts") view=ActsPage />
+                <Route path=path!("/legal/:act") view=LegalActPage />
                 <Route path=path!("/trust-registry") view=TrustRegistryPage />
+                <Route path=path!("/take-it-down") view=crate::pages::take_it_down::TakeItDownPage />
+                <Route path=path!("/cases/:reference") view=crate::pages::case_status::CaseStatusPage />
+                <Route path=path!("/account/cases") view=crate::pages::account_cases::AccountCasesPage />
 
                 // Protected routes
                 <Route path=path!("/dashboard") view=DashboardPage />
                 <Route path=path!("/projects") view=ProjectsPage />
+                <Route path=path!("/projects/:sim_id") view=ProjectSellPage />
                 <Route path=path!("/ai") view=AiPage />
                 <Route path=path!("/settings") view=SettingsPage />
                 <Route path=path!("/friends") view=FriendsPage />
@@ -337,6 +379,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/license") view=LicensePage />
                 <Route path=path!("/kyc") view=KycPage />
                 <Route path=path!("/verify") view=VerifyPage />
+                <Route path=path!("/verify-account") view=VerifyAccountPage />
                 <Route path=path!("/support") view=SupportPage />
             </Routes>
                         </Router>
@@ -425,6 +468,10 @@ const SITE_TITLE: &str = "Eustress Engine | Simulation & Data Platform";
 /// whenever the heading changes: a page that loads its data after navigation,
 /// such as a simulation listing, replaces its loading view's heading when the
 /// data arrives.
+///
+/// It also keeps the page's description and its canonical address (`og:url`
+/// and `twitter:url` too) in step, from `seo::head_fields`: the same table and
+/// the same fields the prerender writes into the static HTML.
 #[component]
 fn TitleSync() -> impl IntoView {
     #[cfg(not(feature = "ssr"))]
@@ -447,6 +494,15 @@ fn TitleSync() -> impl IntoView {
             };
             if doc.title() != title {
                 doc.set_title(&title);
+            }
+            // The description and the canonical address follow the page too,
+            // from the one table the prerender reads.
+            for field in crate::seo::head_fields(&pathname.get_untracked()) {
+                if let Ok(Some(el)) = doc.query_selector(&field.selector()) {
+                    if el.get_attribute(field.attr).as_deref() != Some(field.value.as_str()) {
+                        let _ = el.set_attribute(field.attr, &field.value);
+                    }
+                }
             }
         };
 

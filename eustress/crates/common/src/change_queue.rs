@@ -229,6 +229,8 @@ impl Plugin for StreamingPlugin {
                // ~50 ms/frame at idle. They are now one system that does a SINGLE
                // combined driver walk and early-returns when nothing changed.
                emit_scene_change_deltas,
+               // Every frame, never on a stagger slot: it streams each move
+               // of each part, and a slot would drop the moves in between.
                emit_transform_deltas,
            ));
     }

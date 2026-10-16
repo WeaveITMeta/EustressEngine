@@ -32,6 +32,42 @@ pub const GRANTS_FETCH_URL: &str = "https://api.grants.gov/v1/api/fetchOpportuni
 /// SAM caps a page at 1000 records and rejects anything larger.
 pub const SAM_MAX_LIMIT: u32 = 1000;
 
+/// SAM.gov opportunities search on the documented alpha (prodlike) host.
+pub const SAM_ALPHA_SEARCH_URL: &str = "https://api-alpha.sam.gov/opportunities/v2/search";
+
+/// Every URL a SAM.gov API key may be sent to: production and alpha. Nothing
+/// else, ever.
+pub const SAM_ENDPOINTS: [&str; 2] = [SAM_SEARCH_URL, SAM_ALPHA_SEARCH_URL];
+
+/// The Grants.gov search URL. Grants sends no secret, but pinning it keeps an
+/// agent-written Connector from turning the poller into a request to an
+/// arbitrary address, including services on this machine.
+pub const GRANTS_ENDPOINTS: [&str; 1] = [GRANTS_SEARCH_URL];
+
+/// Resolve a Connector's endpoint to one of `canonical`, or refuse it.
+///
+/// The endpoint comes from a Connector, and a Connector is a file any MCP agent
+/// can write. For SAM the API key travels in the query string, so an endpoint
+/// anywhere else hands the key to whoever runs that server.
+///
+/// There is no URL parsing here, on purpose. The text must equal a canonical
+/// URL, ignoring ASCII case only, and the caller builds its request from the
+/// CONSTANT this returns, never from the text it was given. So the URL that is
+/// checked is exactly the URL that is sent, and no disagreement between two
+/// parsers (userinfo, IDNA, percent-escapes, backslashes, port spellings) can
+/// open a gap between them.
+pub fn pin_endpoint(endpoint: &str, canonical: &[&'static str]) -> Result<&'static str, CaptureError> {
+    canonical.iter().copied().find(|c| c.eq_ignore_ascii_case(endpoint)).ok_or_else(|| {
+        // Echo at most a short, escaped prefix: the text is chosen by whoever
+        // wrote the Connector, and it lands in a toast.
+        let shown: String = endpoint.chars().take(80).collect();
+        CaptureError::Untrusted(format!(
+            "endpoint {shown:?} is not one this source may call; use {}",
+            canonical.join(" or ")
+        ))
+    })
+}
+
 /// Which ingest profile a Connector describes.
 ///
 /// Carried in `SourceConfig.options["profile"]` rather than as a new
@@ -64,6 +100,14 @@ impl Profile {
         match self {
             Self::SamOpportunities => NoticeSource::Sam,
             Self::GrantsSearch => NoticeSource::Grants,
+        }
+    }
+
+    /// The only URLs this profile may call. See [`pin_endpoint`].
+    pub fn canonical_endpoints(self) -> &'static [&'static str] {
+        match self {
+            Self::SamOpportunities => &SAM_ENDPOINTS,
+            Self::GrantsSearch => &GRANTS_ENDPOINTS,
         }
     }
 
@@ -117,11 +161,13 @@ impl Default for SamQuery {
 /// `api_key` is the resolved secret value, never a reference to one. It goes in
 /// the query string because that is the only place SAM accepts it.
 pub fn sam_request(q: &SamQuery, api_key: &str) -> Result<HttpRequest, CaptureError> {
+    // First, before the key is touched. The request is built from the
+    // canonical constant this returns, never from the Connector's text, so
+    // the URL that was checked is exactly the URL that is sent.
+    let base = pin_endpoint(&q.endpoint, &SAM_ENDPOINTS)?;
     if api_key.trim().is_empty() {
         return Err(CaptureError::MissingSecret(
-            "SAM.gov requires an API key; set the Connector's secret_ref to the name of an \
-             environment variable holding it"
-                .into(),
+            "SAM.gov requires an API key: Capture > Sources > API Key, paste it, Save".into(),
         ));
     }
     if q.posted_from.trim().is_empty() || q.posted_to.trim().is_empty() {
@@ -158,7 +204,7 @@ pub fn sam_request(q: &SamQuery, api_key: &str) -> Result<HttpRequest, CaptureEr
 
     let query: Vec<String> =
         params.iter().map(|(k, v)| format!("{}={}", k, urlencode(v))).collect();
-    let url = format!("{}?{}", q.endpoint.trim_end_matches('?'), query.join("&"));
+    let url = format!("{base}?{}", query.join("&"));
     Ok(HttpRequest::get(url).with_header("Accept", "application/json"))
 }
 
@@ -198,6 +244,7 @@ impl Default for GrantsQuery {
 
 /// Build the Grants.gov search request for one page. No key, no auth header.
 pub fn grants_request(q: &GrantsQuery) -> Result<HttpRequest, CaptureError> {
+    let url = pin_endpoint(&q.endpoint, &GRANTS_ENDPOINTS)?;
     if q.rows == 0 {
         return Err(CaptureError::BadQuery("Grants.gov rows must be at least 1".into()));
     }
@@ -212,7 +259,7 @@ pub fn grants_request(q: &GrantsQuery) -> Result<HttpRequest, CaptureError> {
         "rows": q.rows,
         "startRecordNum": q.start_record,
     });
-    Ok(HttpRequest::post_json(q.endpoint.clone(), body.to_string()))
+    Ok(HttpRequest::post_json(url, body.to_string()))
 }
 
 /// Request the full record for one Grants.gov opportunity.
@@ -718,6 +765,193 @@ mod tests {
 
         let empty = ParsedPage { opportunities: vec![], total_records: 500, skipped: 0 };
         assert!(!empty.has_more(0), "an empty page must terminate even against a stale total");
+    }
+
+    #[test]
+    fn the_canonical_endpoints_pin_to_themselves() {
+        assert_eq!(pin_endpoint(SAM_SEARCH_URL, &SAM_ENDPOINTS).unwrap(), SAM_SEARCH_URL);
+        assert_eq!(pin_endpoint(SAM_ALPHA_SEARCH_URL, &SAM_ENDPOINTS).unwrap(), SAM_ALPHA_SEARCH_URL);
+        assert_eq!(pin_endpoint(GRANTS_SEARCH_URL, &GRANTS_ENDPOINTS).unwrap(), GRANTS_SEARCH_URL);
+        // ASCII case is ignored, and what comes back is the CONSTANT, so the
+        // request is built from the canonical spelling, not from the input.
+        assert_eq!(
+            pin_endpoint("HTTPS://API.SAM.GOV/OPPORTUNITIES/V2/SEARCH", &SAM_ENDPOINTS).unwrap(),
+            SAM_SEARCH_URL
+        );
+    }
+
+    #[test]
+    fn every_known_spoof_is_refused() {
+        // Security's list plus the earlier one. Each is a real way to make a
+        // string read as api.sam.gov and resolve somewhere else.
+        let long_host = format!("https://{}.sam.gov/opportunities/v2/search", "a".repeat(260));
+        let mut spoofs: Vec<String> = [
+            "https://evil.example/opportunities/v2/search",
+            "http://api.sam.gov/opportunities/v2/search",
+            "ftp://api.sam.gov/opportunities/v2/search",
+            "file://api.sam.gov/opportunities/v2/search",
+            "https:/api.sam.gov/opportunities/v2/search",
+            "https:\\\\api.sam.gov/opportunities/v2/search",
+            "//api.sam.gov/opportunities/v2/search",
+            "api.sam.gov/opportunities/v2/search",
+            "https://api.sam.gov@evil.example/opportunities/v2/search",
+            "https://api.sam.gov:443@evil.example/",
+            "https://api.sam.gov#@evil.example/",
+            "https://evil.example\\@api.sam.gov/opportunities/v2/search",
+            "https://api.sam.gov.evil.example/opportunities/v2/search",
+            "https://api.sam.gov\u{3002}evil.example/opportunities/v2/search",
+            "https://ap\u{456}.sam.gov/opportunities/v2/search",
+            "https://\u{ff41}\u{ff50}\u{ff49}.sam.gov/opportunities/v2/search",
+            "https://api.sam.gov%2eevil.example/opportunities/v2/search",
+            "https://api.sam.gov%2fopportunities/v2/search",
+            "https://api.sam.gov%40evil.example/",
+            "https://api.sam.gov%5cevil.example/",
+            "https://api.sam.gov:443/opportunities/v2/search",
+            "https://api.sam.gov:0443/opportunities/v2/search",
+            "https://api.sam.gov:00443/opportunities/v2/search",
+            "https://api.sam.gov:8443/opportunities/v2/search",
+            "https://api.sam.gov:443./opportunities/v2/search",
+            "https://api.sam.gov./opportunities/v2/search",
+            " https://api.sam.gov/opportunities/v2/search",
+            "https://api.sam.gov/opportunities/v2/search ",
+            "\thttps://api.sam.gov/opportunities/v2/search",
+            "https://api.sam.gov/opportunities/v2/search\n",
+            "https://api.sam.gov/opportunities/v2/search\0",
+            "https://api.sam.gov/opportunities/v2/search/",
+            "https://api.sam.gov/opportunities/v2/search?next=https://evil.example/",
+            "https://api.sam.gov/opportunities/v2/search https://evil.example/",
+            "https://23.22.0.1/opportunities/v2/search",
+            "https://[::1]/opportunities/v2/search",
+            "https://2130706433/opportunities/v2/search",
+            "https://0x7f000001/opportunities/v2/search",
+            "https://api.grants.gov/v1/api/search2",
+            "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        spoofs.push(long_host);
+        for evil in &spoofs {
+            assert!(
+                matches!(pin_endpoint(evil, &SAM_ENDPOINTS), Err(CaptureError::Untrusted(_))),
+                "spoof accepted: {evil:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_echoes_only_a_short_escaped_prefix() {
+        let evil = format!("https://evil\n.example/{}", "x".repeat(500));
+        match pin_endpoint(&evil, &SAM_ENDPOINTS) {
+            Err(CaptureError::Untrusted(m)) => {
+                assert!(m.len() < 400, "a {}-byte message went to a toast", m.len());
+                assert!(!m.contains('\n'), "a control character reached the message: {m}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_is_built_from_the_constant_not_the_input() {
+        let q = SamQuery {
+            endpoint: "HTTPS://API.SAM.GOV/OPPORTUNITIES/V2/SEARCH".into(),
+            posted_from: "08/01/2026".into(),
+            posted_to: "08/23/2026".into(),
+            ..Default::default()
+        };
+        let r = sam_request(&q, "KEY12345678").expect("builds");
+        assert!(r.url.starts_with(&format!("{SAM_SEARCH_URL}?")), "{}", r.url);
+        let g = grants_request(&GrantsQuery {
+            endpoint: GRANTS_SEARCH_URL.to_uppercase(),
+            ..Default::default()
+        })
+        .expect("builds");
+        assert_eq!(g.url, GRANTS_SEARCH_URL);
+    }
+
+    #[test]
+    fn a_sam_request_to_another_host_is_never_built() {
+        // With the key in hand and a foreign endpoint, no request exists, so
+        // nothing can carry the key anywhere.
+        let q = SamQuery {
+            endpoint: "https://evil.example/collect".into(),
+            posted_from: "08/01/2026".into(),
+            posted_to: "08/23/2026".into(),
+            ..Default::default()
+        };
+        match sam_request(&q, "SUPERSECRET") {
+            Err(CaptureError::Untrusted(m)) => {
+                assert!(!m.contains("SUPERSECRET"), "the refusal leaked the key: {m}");
+                assert!(m.contains("api.sam.gov"), "{m}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_grants_request_to_another_host_is_never_built() {
+        let q = GrantsQuery { endpoint: "https://127.0.0.1:8080/admin".into(), ..Default::default() };
+        assert!(matches!(grants_request(&q), Err(CaptureError::Untrusted(_))));
+    }
+
+    #[test]
+    fn each_profile_is_pinned_to_its_own_endpoints_not_the_others() {
+        assert!(pin_endpoint(GRANTS_SEARCH_URL, Profile::SamOpportunities.canonical_endpoints()).is_err());
+        assert!(pin_endpoint(SAM_SEARCH_URL, Profile::GrantsSearch.canonical_endpoints()).is_err());
+        // A blank endpoint takes the profile default, so the default must pin.
+        for p in [Profile::SamOpportunities, Profile::GrantsSearch] {
+            assert!(p.canonical_endpoints().contains(&p.default_endpoint()), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn every_request_in_capture_is_built_by_a_pinned_builder() {
+        // The ratchet. sources.rs holds exactly three request constructions:
+        // sam_request and grants_request, both built from a pinned constant,
+        // and grants_detail_request, built from a fixed constant. A new
+        // construction anywhere in capture fails here until someone reviews
+        // where its URL comes from and changes this count on purpose.
+        let call = concat!("HttpRequest", "::");
+        let literal = concat!("HttpRequest", " {");
+        fn production(src: &'static str) -> &'static str {
+            src.split("#[cfg(test)]").next().unwrap_or("")
+        }
+        assert_eq!(
+            production(include_str!("sources.rs")).matches(call).count(),
+            3,
+            "a request constructor was added to or removed from sources.rs"
+        );
+        let others = [
+            ("audit.rs", include_str!("audit.rs")),
+            ("compliance.rs", include_str!("compliance.rs")),
+            ("credentials.rs", include_str!("credentials.rs")),
+            ("key_tasks.rs", include_str!("key_tasks.rs")),
+            ("layout.rs", include_str!("layout.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("model.rs", include_str!("model.rs")),
+            ("outline.rs", include_str!("outline.rs")),
+            ("poll.rs", include_str!("poll.rs")),
+            ("requirements.rs", include_str!("requirements.rs")),
+            ("ribbon.rs", include_str!("ribbon.rs")),
+            ("score.rs", include_str!("score.rs")),
+            ("screen.rs", include_str!("screen.rs")),
+            ("store.rs", include_str!("store.rs")),
+            ("transport.rs", include_str!("transport.rs")),
+        ];
+        for (name, src) in others {
+            let p = production(src);
+            assert!(
+                !p.contains(call) && !p.contains(literal),
+                "{name} builds a request outside the pinned builders"
+            );
+        }
+        // Every module is listed (sources.rs plus the 14 above, mod.rs aside),
+        // so a new file cannot slip past this check.
+        assert_eq!(
+            include_str!("mod.rs").matches("pub mod ").count(),
+            others.len(),
+            "a capture module was added or removed; update the list above"
+        );
     }
 
     #[test]

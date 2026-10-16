@@ -13,10 +13,18 @@ path = "src/bin/eustress-stream-node.rs"
 # Core streaming engine
 eustress-stream = { path = "../stream" }
 
+# Party keys (Ed25519 login signatures) and the owner-only file check.
+# default-features = false: the witness HTTP client (reqwest) is not compiled
+# into the node.
+# `private_file` (verify, verify_open, not_owner, write_private, private_dir)
+# is outside `witness`: identity/src/lib.rs compiles it on Unix and Windows.
+eustress-identity = { path = "../identity", default-features = false }
+
 # Serialization
 bincode  = "1.3"
 serde    = { version = "1", features = ["derive"] }
 bytes    = "1"
+toml     = "0.8"
 
 # Async runtime + I/O
 tokio         = { version = "1", features = ["full"] }
@@ -27,6 +35,20 @@ axum          = { version = "0.8", features = ["json", "macros"] }
 axum-extra    = { version = "0.10", features = ["typed-header"] }
 tower         = "0.5"
 tower-http    = { version = "0.6", features = ["cors", "trace"] }
+
+# TLS 1.3 on every listener (TCP, REST, QUIC) and the pinned clients.
+# ring only: every configuration names its provider explicitly.
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls  = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+sha2          = "0.10"
+rand          = "0.8"
+
+# Native REST client (`party token`)
+# VERIFY: `cargo metadata` shows no new crate versions in Cargo.lock for these
+# three (hyper 1.10.1, hyper-util 0.1.20, http-body-util 0.1.3 are locked).
+hyper          = { version = "1", features = ["client", "http1"] }
+hyper-util     = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 # Consistent hashing
 ahash         = "0.8"
@@ -55,16 +77,33 @@ serde_json    = "1"
 memmap2       = "0.9"
 
 # QUIC transport (optional — enabled by `quic` feature)
+# It uses the node's configured certificate; the node never generates one.
 quinn         = { version = "0.11", optional = true }
-rustls        = { version = "0.23", features = ["ring"], optional = true }
-rcgen         = { version = "0.13", optional = true }
 
 [features]
-quic = ["dep:quinn", "dep:rustls", "dep:rcgen"]
+quic = ["dep:quinn"]
+# The Unix socket and shared-memory transports have no login. They compile
+# only under this feature, which exists for the benches; no shipped build
+# enables it, and lib.rs refuses to compile it without `bench-harness`.
+bench-transports = []
+# Only the two benches below ask for it, through `required-features`.
+bench-harness = []
+# Test-only hooks, run with `--features test-hooks`: a pause point in the
+# subscription forwarders (tests/auth_revocation.rs) and a count of the dummy
+# signature checks that reach the verify (tests/auth_login.rs). No shipped
+# build enables it.
+test-hooks = []
 
 [dev-dependencies]
 criterion  = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tempfile   = "3"
+# Tests generate their certificates. Production code never does.
+rcgen      = "0.13"
+# tls12 only so the transport tests can build a TLS 1.2 client to prove the
+# node refuses it.
+rustls     = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Paused clock for the deadline, revocation, retry and token-expiry tests.
+tokio      = { version = "1", features = ["full", "test-util"] }
 
 [[bench]]
 name             = "network_throughput"
@@ -74,7 +113,9 @@ required-features = ["quic"]
 [[bench]]
 name    = "uds_throughput"
 harness = false
+required-features = ["bench-transports", "bench-harness"]
 
 [[bench]]
 name    = "shm_throughput"
 harness = false
+required-features = ["bench-transports", "bench-harness"]

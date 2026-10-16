@@ -1,124 +1,50 @@
+// =============================================================================
+// Eustress Web - /play/:id
+// =============================================================================
+// The address people already have for "play this Space". The page itself is gone: a Space's page is /simulation/:id, and every Play
+// button there opens the Play chooser in place (components/play_chooser.rs). This route sends the visitor to that page with `?play=1`,
+// which opens the chooser once the Space has loaded, so an old link still lands on Play. An id that is not an id goes to the Gallery.
+// =============================================================================
+
 use leptos::prelude::*;
-use crate::components::{CentralNav, Footer};
-use crate::state::AppState;
-use crate::api::ApiClient;
+use leptos_router::components::Redirect;
+use leptos_router::NavigateOptions;
 
-/// `POST /api/simulations/{id}/play`: counts the visit and says how to open
-/// the simulation. A published simulation plays solo in the Eustress Player,
-/// which downloads its world once and keeps it cached.
-#[derive(Clone, Debug, serde::Deserialize)]
-struct PlayResponse {
-    status: String,
-    #[serde(default)]
-    launch: Option<LaunchInfo>,
-    #[serde(default)]
-    simulation: Option<SimInfo>,
+/// Where `/play/<id>` goes: the Space's page with the chooser asked for, or the Gallery when `id` is not one the Worker issues
+/// (letters, digits and hyphens only), so nothing typed in the address can reach the redirect target.
+pub fn play_redirect(id: &str) -> String {
+    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if ok { format!("/simulation/{id}?play=1") } else { "/gallery".to_string() }
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct LaunchInfo {
-    /// `eustress-player://play/<id>`, which opens the Player where it is installed.
-    #[serde(default)]
-    link: Option<String>,
-    command: String,
-    args: Vec<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-struct SimInfo {
-    name: String,
+/// The address does not stay in the history: Back from the Space's page goes to where the visitor came from.
+fn replace() -> NavigateOptions {
+    NavigateOptions { replace: true, ..Default::default() }
 }
 
 #[component]
 pub fn PlayPage() -> impl IntoView {
-    let app_state = expect_context::<AppState>();
     let params = leptos_router::hooks::use_params_map();
-    let id = move || params.read().get("id").unwrap_or_default();
+    move || {
+        let path = play_redirect(&params.read().get("id").unwrap_or_default());
+        view! { <Redirect path=path options=replace() /> }
+    }
+}
 
-    let play_status = RwSignal::new("Preparing...".to_string());
-    let launch = RwSignal::new(None::<LaunchInfo>);
-    let sim_name = RwSignal::new(String::new());
-    let loading = RwSignal::new(true);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Call play API on mount
-    {
-        let api_url = app_state.api_url.clone();
-        let sim_id = id();
-        wasm_bindgen_futures::spawn_local(async move {
-            let client = ApiClient::new(&api_url);
-            let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            let answer = client.post::<PlayResponse, _>(&format!("/api/simulations/{}/play", sim_id), &empty).await;
-            loading.set(false);
-            match answer {
-                Ok(resp) => {
-                    if let Some(sim) = &resp.simulation {
-                        sim_name.set(sim.name.clone());
-                    }
-                    match (resp.status.as_str(), resp.launch) {
-                        ("solo", Some(info)) => {
-                            play_status.set("Plays in the Eustress Player on your computer.".to_string());
-                            launch.set(Some(info));
-                        }
-                        (status, _) => play_status.set(format!("Status: {}", status)),
-                    }
-                }
-                Err(e) => {
-                    play_status.set(format!("This simulation could not be opened: {}", e));
-                }
-            }
-        });
+    #[test]
+    fn an_old_play_link_lands_on_the_space_with_the_chooser_asked_for() {
+        assert_eq!(play_redirect("07d084d8-9098-4192-bb48-84d2c428db36"), "/simulation/07d084d8-9098-4192-bb48-84d2c428db36?play=1");
     }
 
-    view! {
-        <div class="page page-play">
-            <CentralNav active="".to_string() />
-
-            <main class="play-page">
-                <div class="play-content">
-                    <div class="play-header">
-                        <h1>{move || {
-                            let name = sim_name.get();
-                            if name.is_empty() { "Launching...".to_string() } else { name }
-                        }}</h1>
-                        <p class="play-subtitle">{move || play_status.get()}</p>
-                    </div>
-
-                    {move || {
-                        if let Some(info) = launch.get() {
-                            let command = format!("{} {}", info.command, info.args.join(" "));
-                            let link = info.link.clone().unwrap_or_default();
-                            view! {
-                                <div class="play-not-installed">
-                                    <h2>"Play on your computer"</h2>
-                                    <p class="play-subtitle">
-                                        "The Eustress Player downloads this world once, keeps it cached, and runs it locally."
-                                    </p>
-                                    <div class="play-actions">
-                                        <a href=link class="btn-download-player">"Open in Eustress Player"</a>
-                                    </div>
-                                    <p class="play-subtitle">"Or run it from a terminal:"</p>
-                                    <code class="play-id">{command}</code>
-                                </div>
-                            }.into_any()
-                        } else if loading.get() {
-                            view! {
-                                <div class="play-status">
-                                    <div class="play-spinner"></div>
-                                </div>
-                            }.into_any()
-                        } else {
-                            ().into_any()
-                        }
-                    }}
-
-                    <div class="play-actions">
-                        <a href="/downloads/player" class="play-download-btn">"Download Eustress Player"</a>
-                        <a href={move || format!("/simulation/{}", id())} class="play-back-btn">"Back to Details"</a>
-                    </div>
-                </div>
-            </main>
-
-            <Footer />
-        </div>
+    #[test]
+    fn an_id_that_is_not_an_id_never_reaches_the_redirect() {
+        for bad in ["", "a/b", "a?x=1", "a b", "..", "a%2Fb", "<script>", "//evil.example"] {
+            assert_eq!(play_redirect(bad), "/gallery", "{bad:?}");
+        }
+        assert_eq!(play_redirect(&"a".repeat(65)), "/gallery");
     }
 }

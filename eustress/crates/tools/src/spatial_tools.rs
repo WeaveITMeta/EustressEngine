@@ -312,19 +312,21 @@ fn scan_entities_in_dir(dir: &std::path::Path) -> Vec<(String, [f64; 3], String,
 /// to the Space root. Used when Claude knows which container it wants
 /// to inspect so we don't dump the entire scene into context.
 fn list_container_children(rel_path: &str, ctx: &ToolContext) -> ToolResult {
-    // Guard against `..` path traversal so a malformed tool call can't
-    // wander outside the Space root.
-    if rel_path.contains("..") {
-        return ToolResult {
-            tool_name: "list_space_contents".to_string(),
-            tool_use_id: String::new(),
-            success: false,
-            content: format!("Invalid path \"{}\" — `..` is not allowed.", rel_path),
-            structured_data: None,
-            stream_topic: None,
-        };
-    }
-    let target = ctx.space_root.join(rel_path.replace('\\', "/"));
+    // Contained by the shared rules (`crate::sandbox`), so a malformed tool
+    // call can't wander outside the Space root.
+    let target = match crate::sandbox::resolve(&ctx.space_root, rel_path) {
+        Ok(target) => target,
+        Err(why) => {
+            return ToolResult {
+                tool_name: "list_space_contents".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: format!("Invalid path: {why}"),
+                structured_data: None,
+                stream_topic: None,
+            };
+        }
+    };
     if !target.exists() || !target.is_dir() {
         return ToolResult {
             tool_name: "list_space_contents".to_string(),

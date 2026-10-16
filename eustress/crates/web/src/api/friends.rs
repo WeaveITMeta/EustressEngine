@@ -86,19 +86,6 @@ pub async fn get_friend_requests(client: &ApiClient) -> Result<Vec<FriendRequest
     client.get("/api/friends/requests").await
 }
 
-/// Send a friend request.
-pub async fn send_friend_request(
-    client: &ApiClient,
-    user_id: &str,
-) -> Result<(), ApiError> {
-    #[derive(Serialize)]
-    struct SendRequest<'a> {
-        user_id: &'a str,
-    }
-    client.post::<serde_json::Value, _>("/api/friends/request", &SendRequest { user_id }).await?;
-    Ok(())
-}
-
 /// Accept a friend request.
 pub async fn accept_friend_request(
     client: &ApiClient,

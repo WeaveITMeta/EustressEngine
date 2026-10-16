@@ -378,6 +378,10 @@ export component Ribbon inherits Rectangle {
     in property <string> total-hours: "0h";
     in property <[SavedIdentityData]> saved-identities: [];
     callback on-sign-out();
+    // Sign out of every device (`AuthState::sign_out_everywhere`).
+    callback on-sign-out-everywhere();
+    // The account menu's "Sign out of all devices" asks once more.
+    property <bool> confirm-sign-out-everywhere: false;
     callback on-switch-identity(string);    // username to switch to
     callback on-remove-identity(string);    // username to remove from saved list
 
@@ -393,7 +397,8 @@ export component Ribbon inherits Rectangle {
     // Update system
     in property <bool> update-available: false;
     in property <string> update-version: "";
-    in property <string> update-status: "";  // "", "downloading", "ready"
+    in property <string> update-status: "";  // "", "downloading", "ready", "error"
+    in property <string> update-error: "";  // the reason, shown when update-status is "error"
     in property <int> update-progress: 0;    // 0-100 download progress
     callback on-update-clicked();
 
@@ -476,6 +481,8 @@ export component Ribbon inherits Rectangle {
     callback on-import-asset();
     callback on-import-roblox-place();
     callback on-publish-universe();
+    // Publish the Universe to a listing of your choosing.
+    callback on-publish-as();
     callback on-publish-space();
     callback on-show-insert-object();
     // The Insert menu is opening: Rust rebuilds the catalog from disk and
@@ -1056,6 +1063,7 @@ export component Ribbon inherits Rectangle {
                                 if root.snapshot-status != "": DropdownHeader { label: root.snapshot-status; }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Publish Universe"; shortcut: root.shortcut-publish-universe; clicked => { root.on-publish-universe(); } }
+                                DropdownItem { label: "Publish As..."; clicked => { root.on-publish-as(); } }
                                 DropdownItem { label: "Publish Space"; shortcut: root.shortcut-publish-space; clicked => { root.on-publish-space(); } }
                                 DropdownItem { label: "Close Space"; clicked => { root.on-close-space(); } }
                                 DropdownSeparator {}
@@ -1752,7 +1760,7 @@ export component Ribbon inherits Rectangle {
 
                 // Update badge (only visible when update available)
                 if root.update-available: Rectangle { width: 8px; }
-                if root.update-available: Rectangle {
+                if root.update-available && root.update-status != "error": Rectangle {
                     width: root.update-status == "downloading" ? 160px : (root.update-status == "ready" ? 150px : 120px);
                     height: 20px;
                     background: root.update-status == "ready" ? #1a3a1a : (root.update-status == "downloading" ? #2a2a3a : #1a2a3a);  // theme-exempt: update-badge tinted surfaces (ready/downloading/pending), no matching token
@@ -1788,6 +1796,41 @@ export component Ribbon inherits Rectangle {
                                     ? "Downloading " + root.update-progress + "%"
                                     : "Update to " + root.update-version);
                             color: root.update-status == "ready" ? Theme.cat-structure : #4a9eff;  // theme-exempt: downloading-state blue accent, no near token (see border-color above)
+                            font-size: 10px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                // Update failed. The reason, in words, in place of the offer. Nothing to
+                // click: the reason itself says what to do.
+                if root.update-available && root.update-status == "error": Rectangle {
+                    width: 200px;
+                    height: 20px;
+                    background: Theme.error-surface;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.error-surface-border;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        Text {
+                            text: "!";
+                            color: Theme.text-error;
+                            font-size: 10px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.update-error;
+                            color: Theme.text-primary;
                             font-size: 10px;
                             font-weight: 500;
                             vertical-alignment: center;
@@ -2063,7 +2106,10 @@ export component Ribbon inherits Rectangle {
 
                     account-touch := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { account-popup.show(); }
+                        clicked => {
+                            root.confirm-sign-out-everywhere = false;
+                            account-popup.show();
+                        }
                     }
 
                     HorizontalLayout {
@@ -2097,6 +2143,9 @@ export component Ribbon inherits Rectangle {
                         x: -80px;
                         y: parent.height + 2px;
                         width: 200px;
+                        // A click inside keeps it open (the sign-out
+                        // confirm needs two); each item closes it.
+                        close-policy: close-on-click-outside;
 
                         Rectangle {
                             background: Theme.dialog-background;
@@ -2230,6 +2279,7 @@ export component Ribbon inherits Rectangle {
                                                 mouse-cursor: pointer;
                                                 clicked => {
                                                     if !identity.active {
+                                                        account-popup.close();
                                                         root.on-switch-identity(identity.username);
                                                     }
                                                 }
@@ -2286,7 +2336,10 @@ export component Ribbon inherits Rectangle {
 
                                     sign-out-touch := TouchArea {
                                         mouse-cursor: pointer;
-                                        clicked => { root.on-sign-out(); }
+                                        clicked => {
+                                            account-popup.close();
+                                            root.on-sign-out();
+                                        }
                                     }
 
                                     Text {
@@ -2295,6 +2348,37 @@ export component Ribbon inherits Rectangle {
                                         font-size: 11px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
+                                    }
+                                }
+
+                                // Sign out of every device: the API ends the
+                                // account's tokens everywhere. The second
+                                // click confirms.
+                                Rectangle {
+                                    height: 28px;
+                                    background: everywhere-touch.has-hover ? Theme.button-hover : transparent;
+                                    border-radius: 4px;
+
+                                    everywhere-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            if root.confirm-sign-out-everywhere {
+                                                root.confirm-sign-out-everywhere = false;
+                                                account-popup.close();
+                                                root.on-sign-out-everywhere();
+                                            } else {
+                                                root.confirm-sign-out-everywhere = true;
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: root.confirm-sign-out-everywhere ? "Click again to sign out everywhere" : "Sign out of all devices";
+                                        color: Theme.text-error;
+                                        font-size: 11px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        overflow: elide;
                                     }
                                 }
                             }
@@ -2676,6 +2760,14 @@ export component Ribbon inherits Rectangle {
                         tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "model_reflect";
                         clicked => { root.on-activate-modal-tool("model_reflect"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/palette.svg");
+                        label: "Bucket"; shortcut: "";
+                        tooltip: "Paint Bucket (Ctrl+Alt+B): paint parts with the look sampled by I";
+                        tint: Theme.accent-cyan;
+                        selected: root.active-modal-tool-id == "paint_bucket";
+                        clicked => { root.on-activate-modal-tool("paint_bucket"); }
                     }
                 }
                 GroupDivider {}

@@ -41,18 +41,23 @@ impl KeyBinding {
         self
     }
     
-    pub fn matches(&self, keys: &ButtonInput<KeyCode>) -> bool {
-        // Check modifiers
+    /// True when the held modifiers are exactly this chord's.
+    fn modifiers_match(&self, keys: &ButtonInput<KeyCode>) -> bool {
         let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        
-        if self.ctrl != ctrl_pressed || self.alt != alt_pressed || self.shift != shift_pressed {
-            return false;
-        }
-        
-        // Check key
-        keys.just_pressed(self.key)
+        self.ctrl == ctrl_pressed && self.alt == alt_pressed && self.shift == shift_pressed
+    }
+
+    /// The chord went down this frame.
+    pub fn matches(&self, keys: &ButtonInput<KeyCode>) -> bool {
+        self.modifiers_match(keys) && keys.just_pressed(self.key)
+    }
+
+    /// The chord is down now: what an auto-repeating action follows after
+    /// the press that [`KeyBinding::matches`] reports.
+    pub fn held(&self, keys: &ButtonInput<KeyCode>) -> bool {
+        self.modifiers_match(keys) && keys.pressed(self.key)
     }
     
     pub fn to_string_rep(&self) -> String {
@@ -209,6 +214,10 @@ impl Default for KeyBindings {
         bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl().with_shift());
         bindings.insert(Action::InsertObject, KeyBinding::new(KeyCode::KeyI).with_ctrl());
         bindings.insert(Action::FindReplace, KeyBinding::new(KeyCode::KeyF).with_ctrl());
+        // Ctrl+Shift+F searches the text of every script in the Space, as Roblox
+        // Studio's Find All does. The Assets panel sat on this chord until it
+        // moved to Ctrl+4.
+        bindings.insert(Action::FindInScripts, KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift());
         bindings.insert(Action::PasteInto, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
         bindings.insert(Action::FocusExplorerSearch, KeyBinding::new(KeyCode::KeyX).with_ctrl().with_shift());
         // Roblox uses Ctrl+Shift+P here, which Eustress gives to Publish Space;
@@ -240,6 +249,11 @@ impl Default for KeyBindings {
         bindings.insert(Action::ToolRadialArray, KeyBinding::new(KeyCode::KeyR).with_ctrl().with_alt());
         bindings.insert(Action::ToolGridArray,   KeyBinding::new(KeyCode::KeyK).with_ctrl().with_alt());
         bindings.insert(Action::ToolPathArray,   KeyBinding::new(KeyCode::KeyH).with_ctrl().with_alt());
+        // Look picker: bare I samples the look under the cursor in any tool
+        // (the terrain tools keep their own I, which does the same); the
+        // bucket paints parts with it.
+        bindings.insert(Action::SampleLook, KeyBinding::new(KeyCode::KeyI));
+        bindings.insert(Action::ToolPaintBucket, KeyBinding::new(KeyCode::KeyB).with_ctrl().with_alt());
         
         // View shortcuts
         bindings.insert(Action::ToggleExplorer, KeyBinding::new(KeyCode::Digit1).with_ctrl());
@@ -248,7 +262,11 @@ impl Default for KeyBindings {
         
         // Window shortcuts
         bindings.insert(Action::ToggleCommandBar, KeyBinding::new(KeyCode::KeyK).with_ctrl());
-        bindings.insert(Action::ToggleAssets, KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift()); // Changed from A to avoid conflict
+        // Ctrl+4 completes the Ctrl+1/2/3 panel row and is what the View menu
+        // prints next to Assets. Assets sat on Ctrl+Shift+F until that chord
+        // became Find in Scripts; a keybindings.ron saved with the old chord is
+        // brought forward in `KeyBindings::retire_old_defaults`.
+        bindings.insert(Action::ToggleAssets, KeyBinding::new(KeyCode::Digit4).with_ctrl());
         bindings.insert(Action::ToggleCollaboration, KeyBinding::new(KeyCode::KeyL).with_ctrl().with_shift()); // Changed from C to avoid conflict
         
         // Transform shortcuts
@@ -277,6 +295,9 @@ impl Default for KeyBindings {
         bindings.insert(Action::SnapModeOff, KeyBinding::new(KeyCode::Digit3));  // 3 for no snapping
         bindings.insert(Action::LiftSelection,   KeyBinding::new(KeyCode::Minus));  // - key
         bindings.insert(Action::SettleSelection, KeyBinding::new(KeyCode::Equal));  // +/= key
+        // "+" is Shift+= on most layouts; the old raw key read accepted it.
+        alternates.entry(Action::SettleSelection).or_default()
+            .push(KeyBinding::new(KeyCode::Equal).with_shift());
 
         // Quick rotation shortcuts
         bindings.insert(Action::RotateY90, KeyBinding::new(KeyCode::KeyR).with_ctrl()); // Ctrl+R to rotate 90° on Y
@@ -504,6 +525,16 @@ impl KeyBindings {
         self.alternates(action).iter().any(|binding| binding.matches(keys))
     }
 
+    /// True while `action`'s primary binding OR any alternate is held down.
+    /// [`KeyBindings::check`] is the one-frame press; this is what an
+    /// auto-repeating action (Lift, Settle) follows after it.
+    pub fn held(&self, action: Action, keys: &ButtonInput<KeyCode>) -> bool {
+        if self.get(action).map(|binding| binding.held(keys)).unwrap_or(false) {
+            return true;
+        }
+        self.alternates(action).iter().any(|binding| binding.held(keys))
+    }
+
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let serialized = ron::to_string(&self)?;
         let path = Self::config_path()
@@ -524,7 +555,14 @@ impl KeyBindings {
             .filter(|p| p.exists())
             .map(std::fs::read_to_string)
             .unwrap_or_else(|| std::fs::read_to_string(LEGACY_BINDINGS_FILE))?;
-        let mut bindings: Self = ron::from_str(&contents)?;
+        Self::from_saved(&contents)
+    }
+
+    /// A saved map as this build reads it: parsed, brought forward from the
+    /// defaults it was saved under, then topped up with the actions it predates.
+    fn from_saved(contents: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut bindings: Self = ron::from_str(contents)?;
+        bindings.retire_old_defaults();
 
         // Merge in any action the saved file predates. Without this, every
         // new shortcut ships dead for existing users — their `keybindings.ron`
@@ -540,6 +578,27 @@ impl KeyBindings {
             bindings.alternates.entry(action).or_insert(alts);
         }
         Ok(bindings)
+    }
+}
+
+impl KeyBindings {
+    /// Drops a chord a saved map holds only because it was once the default.
+    ///
+    /// A saved `keybindings.ron` is a whole snapshot of the map, so it keeps the
+    /// default of the day for every action. When a default chord is given to
+    /// another action, the saved map would put both on it, and whichever the
+    /// dispatch reaches first would answer. Ctrl+Shift+F was the Assets toggle's
+    /// default and is Find in Scripts now: a saved map that still has Assets on
+    /// it loses that entry, and the defaults merged in afterwards give Assets
+    /// Ctrl+4. A map that moved Assets to another chord keeps its choice.
+    fn retire_old_defaults(&mut self) {
+        let old_assets = KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift();
+        if self.bindings.get(&Action::ToggleAssets) == Some(&old_assets) {
+            self.bindings.remove(&Action::ToggleAssets);
+        }
+        if let Some(alternates) = self.alternates.get_mut(&Action::ToggleAssets) {
+            alternates.retain(|chord| *chord != old_assets);
+        }
     }
 }
 
@@ -604,21 +663,102 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::ToolResizeAlign, Action::ToolMaterialFlip,
     Action::ToolLinearArray, Action::ToolRadialArray, Action::ToolGridArray,
     Action::ToolPathArray,
-    Action::InsertObject, Action::PasteInto, Action::FindReplace,
+    Action::SampleLook, Action::ToolPaintBucket,
+    Action::InsertObject, Action::PasteInto, Action::FindReplace, Action::FindInScripts,
     Action::FocusExplorerSearch, Action::FocusPropertiesFilter,
     Action::TerrainTools,
 ];
 
-/// The shortcuts that stay live during a Play session: the session controls
-/// and the panel toggles. Everything else in [`DISPATCHED_ACTIONS`] edits or
-/// persists the scene, so it waits for Stop, and its keys belong to the
-/// running game: F, Delete, the tool keys and the rest reach the game's
-/// input unprocessed, as in Roblox Studio (`play_allowlist_tests`).
+/// The actions that stay live during a Play session, the only ones
+/// [`play_refusal`] lets through: the session controls, the panel toggles,
+/// Find in Scripts, and the actions that only read the scene. Copy fills the
+/// clipboard, the selection commands change the selection, and the Explorer
+/// search, the Properties filter and the World/Local toggle change Studio's
+/// own state; none of them writes the scene or the Space's files. Everything
+/// else in [`DISPATCHED_ACTIONS`] edits or persists the scene, so it waits for
+/// Stop, and its keys belong to the running game: F, Delete, the tool keys and
+/// the rest reach the game's input unprocessed, as in Roblox Studio
+/// (`play_allowlist_tests`).
 const PLAY_SESSION_ACTIONS: &[Action] = &[
     Action::PlayWithCharacter, Action::PauseResume, Action::PlaySolo, Action::StopPlay,
     Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
-    Action::ToggleCommandBar,
+    Action::ToggleCommandBar, Action::ToggleAssets, Action::FindInScripts,
+    Action::Copy,
+    Action::SelectAll,
+    Action::SelectChildren,
+    Action::SelectDescendants,
+    Action::SelectParent,
+    Action::SelectSiblings,
+    Action::InvertSelection,
+    Action::FocusExplorerSearch,
+    Action::FocusPropertiesFilter,
+    Action::ToggleTransformSpace,
 ];
+
+/// What a Play session answers when `action` is asked for: `None` to run it,
+/// or the notice that says it waits for Stop. The one rule for every path
+/// that can run an action: the keyboard dispatcher, the menu and button
+/// handler, Save, Save As, Publish and the History handlers all ask it, so a
+/// key, a menu item and a button give the same answer. While editing
+/// everything runs; during Play and Pause only [`PLAY_SESSION_ACTIONS`] does,
+/// because anything else would edit or persist the scene the game is running
+/// in, and Stop puts the authored scene back. A reader of `MenuActionEvent`
+/// that runs an action itself asks it too, or runs outside Play only.
+pub(crate) fn play_refusal(state: crate::play_mode::PlayModeState, action: Action) -> Option<String> {
+    if state == crate::play_mode::PlayModeState::Editing || PLAY_SESSION_ACTIONS.contains(&action) {
+        return None;
+    }
+    let notice = match action {
+        Action::SaveScene => "Stop Play to save the Space. Saving during Play would write the running scene to disk.",
+        Action::SaveSceneAs => "Stop Play to save the Space under a new name. Saving during Play would write the running scene to disk.",
+        Action::PublishUniverse | Action::PublishSpace => "Stop Play to publish. Publishing during Play would publish the running scene.",
+        Action::Undo => "Stop Play to undo. Undo works on the authored scene.",
+        Action::Redo => "Stop Play to redo. Redo works on the authored scene.",
+        Action::Cut => "Stop Play to cut.",
+        Action::Paste | Action::PasteInto => "Stop Play to paste.",
+        Action::Duplicate => "Stop Play to duplicate.",
+        Action::Delete => "Stop Play to delete.",
+        Action::Group => "Stop Play to group.",
+        Action::Ungroup => "Stop Play to ungroup.",
+        other => return play_refusal_to(state, &format!("use {}", other.name())),
+    };
+    Some(notice.to_string())
+}
+
+/// [`play_refusal`] for a request that is not an editor [`Action`]: a Studio
+/// plugin's button, an Explorer insert or rename, a viewpoint delete. Like
+/// every action outside [`PLAY_SESSION_ACTIONS`] it waits for Stop, and its
+/// notice reads "Stop Play to `what`.".
+pub(crate) fn play_refusal_to(state: crate::play_mode::PlayModeState, what: &str) -> Option<String> {
+    (state != crate::play_mode::PlayModeState::Editing).then(|| format!("Stop Play to {what}."))
+}
+
+/// [`play_refusal`] for code that holds the `World`: Save, Save As, Publish,
+/// the History handlers and the Delete that Remove Road runs. A refusal is
+/// said ([`say_play_refusal`]) and returns `true`, and the caller returns
+/// before it writes anything.
+pub(crate) fn refuse_during_play(world: &mut World, action: Action) -> bool {
+    let state = world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
+    let Some(notice) = play_refusal(state, action) else { return false };
+    info!("{} refused during Play", action.name());
+    say_play_refusal(world, notice);
+    true
+}
+
+/// Say a Play refusal where the user sees it: a warning toast, and the same
+/// line as a warning in the Output panel, which keeps it after the toast has
+/// gone. Every refusal of the Play gate is said here; a system queues it with
+/// its commands.
+pub(crate) fn say_play_refusal(world: &mut World, notice: String) {
+    if let Some(mut output) = world.get_resource_mut::<crate::ui::OutputConsole>() {
+        output.warn(notice.clone());
+    }
+    if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+        notifications.warning(notice);
+    }
+}
 
 /// Actions that are dispatched but deliberately have NO default chord.
 ///
@@ -685,13 +825,16 @@ fn dispatch_keyboard_shortcuts(
     let Some(mut studio_state) = studio_state else { return };
     let Some(bindings) = bindings else { return };
 
-    // While a Play session runs, the keyboard belongs to the game: only the
-    // session controls and the panel toggles stay live. Delete, Undo, tool
+    // While a Play session runs, the keyboard belongs to the game: only what
+    // `play_refusal` lets through stays live (the session controls, the panel
+    // toggles and the actions that only read the scene). Delete, Undo, tool
     // switching, snap modes, Save and the rest would edit (or persist) the
-    // scene the game is playing in.
-    if !crate::play_mode::editor_input_enabled(play_state) {
-        for action in PLAY_SESSION_ACTIONS.iter().copied() {
-            if bindings.check(action, &keys) {
+    // scene the game is playing in, so their keys go to the game, with no
+    // notice: the game may use them.
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
+    if play_state != crate::play_mode::PlayModeState::Editing {
+        for action in DISPATCHED_ACTIONS.iter().copied() {
+            if bindings.check(action, &keys) && play_refusal(play_state, action).is_none() {
                 info!("⌨️ Shortcut (Play): {:?}", action);
                 menu_events.write(crate::ui::MenuActionEvent::new(action));
                 return;
@@ -855,26 +998,6 @@ fn parse_synthetic_bin_path(toml_path: &std::path::Path) -> Option<(u64, String)
     Some((stored_id, class.to_string()))
 }
 
-/// Walk up from an instance path to the Space root that owns it.
-///
-/// Trash belongs at `<space>/.eustress/trash`. Both delete branches used to
-/// anchor it relative to the deleted item's own folder — "one level up from the
-/// part's containing folder", which is only the right answer for a flat
-/// `Workspace/Thing/` layout. Anything nested deeper (a column, inside a
-/// rotunda, inside a wing) scattered `.eustress/trash` directories through the
-/// authored tree at arbitrary depth, where they are invisible to the user and
-/// get wiped by anything that rewrites a parent folder.
-fn space_root_for(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut cur = path;
-    while let Some(parent) = cur.parent() {
-        if crate::space::looks_like_space_root(parent) {
-            return Some(parent.to_path_buf());
-        }
-        cur = parent;
-    }
-    None
-}
-
 /// The name the Insert Object dialog shows as its destination: the primary
 /// selection, else the Workspace root the insert handler falls back to.
 fn insert_target_label(
@@ -888,6 +1011,75 @@ fn insert_target_label(
         })
         .and_then(|e| instances.get(e).ok().map(|i| i.name.clone()))
         .unwrap_or_else(|| "Workspace".to_string())
+}
+
+/// Whether [`handle_menu_action_events`] states the Play refusal of `action`:
+/// for the actions it runs itself (keep this in step with its arms), and for
+/// Group and Ungroup, whose handler (`grouping.rs`) runs outside Play only.
+/// Either way the action does not run during Play, so the notice is true.
+/// Every other action is answered by its own reader of the same event, which
+/// states its own refusal (the CSG and mesh split readers do) or decides what
+/// Play means for it (the server, publish, view and terrain readers); a
+/// notice from here would speak for them.
+fn play_refusal_said_here(action: Action) -> bool {
+    matches!(
+        action,
+        Action::SelectTool
+            | Action::MoveTool
+            | Action::ScaleTool
+            | Action::RotateTool
+            | Action::ToggleTransformSpace
+            | Action::SaveScene
+            | Action::NewSpace
+            | Action::NewUniverse
+            | Action::OpenFile
+            | Action::SaveSceneAs
+            | Action::Undo
+            | Action::Redo
+            | Action::ToggleExplorer
+            | Action::ToggleProperties
+            | Action::ToggleOutput
+            | Action::ToggleAssets
+            | Action::Copy
+            | Action::Cut
+            | Action::Paste
+            | Action::ToggleCommandBar
+            | Action::FocusSelection
+            | Action::SnapMode1
+            | Action::SnapMode2
+            | Action::SnapModeOff
+            | Action::Delete
+            | Action::SelectAll
+            | Action::Duplicate
+            | Action::SelectChildren
+            | Action::SelectDescendants
+            | Action::SelectParent
+            | Action::SelectSiblings
+            | Action::InvertSelection
+            | Action::InsertObject
+            | Action::PasteInto
+            | Action::FindReplace
+            | Action::FindInScripts
+            | Action::FocusExplorerSearch
+            | Action::FocusPropertiesFilter
+            | Action::ToggleCollisions
+            | Action::ToggleAnchor
+            | Action::LockSelection
+            | Action::UnlockSelection
+            | Action::ToolPartSwap
+            | Action::ToolEdgeAlign
+            | Action::ToolModelReflect
+            | Action::ToolGapFill
+            | Action::ToolResizeAlign
+            | Action::ToolMaterialFlip
+            | Action::ToolLinearArray
+            | Action::ToolRadialArray
+            | Action::ToolGridArray
+            | Action::ToolPathArray
+            | Action::ToolPaintBucket
+            | Action::Group
+            | Action::Ungroup
+    )
 }
 
 fn handle_menu_action_events(
@@ -912,8 +1104,11 @@ fn handle_menu_action_events(
     // It has to be THIS query rather than a second `Query<&mut BasePart>`:
     // two queries in one system where one writes a component the other
     // reads is a hard Bevy access conflict (B0001) at system-init time.
-    mut entity_query: Query<(Entity, Option<&GlobalTransform>, Option<&mut eustress_common::classes::BasePart>),
-        Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
+    // Declared as `DeletableQuery`, the type the Delete takes
+    // (`delete_selected`): written out here with elided lifetimes, its item
+    // references would borrow for this function's own lifetimes, and `Query`
+    // is invariant, so it could not be passed as one (E0521).
+    mut entity_query: DeletableQuery,
     instance_query: Query<&eustress_common::classes::Instance>,
     instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
     loaded_from_file_query: Query<&crate::space::LoadedFromFile>,
@@ -933,13 +1128,15 @@ fn handle_menu_action_events(
     ),
     // Modal-tool activation events (fired by the Ctrl+Alt+<Letter> Smart
     // Build Tool shortcuts) bundled with the signing identity the
-    // Anchor / Lock / Unlock arms stamp their TOML writes with. Bundled
+    // Anchor / Lock / Unlock arms stamp their TOML writes with, and the
+    // Play state every action is checked against (`play_refusal`). Bundled
     // for the same reason the two tuples above are: this system already
     // sits on Bevy's 16-parameter ceiling, so a 17th argument does not
     // compile.
     mut modal_and_auth: (
         MessageWriter<crate::modal_tool::ActivateModalToolEvent>,
         Option<Res<crate::auth::AuthState>>,
+        Option<Res<State<crate::play_mode::PlayModeState>>>,
     ),
 ) {
     let (
@@ -953,10 +1150,25 @@ fn handle_menu_action_events(
         ref mut redo_action_events,
         ref mut file_events,
     ) = event_writers;
-    let (ref mut activate_modal_tool, ref auth) = modal_and_auth;
+    let (ref mut activate_modal_tool, ref auth, ref play_state) = modal_and_auth;
+    let play_state = play_state.as_ref().map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     let Some(mut studio_state) = studio_state else { return };
 
+    // The Play refusals stated this frame, each once.
+    let mut refusals: Vec<String> = Vec::new();
     for event in events.read() {
+        // During Play only what `play_refusal` allows runs here. The notice is
+        // stated for the actions this handler runs, and for Group and
+        // Ungroup, whose own handler runs outside Play only, so the refusal it
+        // states is real. Every other action has its own reader of this
+        // event, which answers for it during Play.
+        if let Some(notice) = play_refusal(play_state, event.action) {
+            if play_refusal_said_here(event.action) && !refusals.contains(&notice) {
+                info!("{} refused during Play", event.action.name());
+                refusals.push(notice);
+            }
+            continue;
+        }
         match event.action {
             // Tool switching (also reachable via MenuActionEvent from Slint)
             Action::SelectTool => { studio_state.current_tool = crate::ui::Tool::Select; }
@@ -1014,6 +1226,11 @@ fn handle_menu_action_events(
             Action::ToggleExplorer   => { studio_state.show_explorer = !studio_state.show_explorer; }
             Action::ToggleProperties => { studio_state.show_properties = !studio_state.show_properties; }
             Action::ToggleOutput     => { studio_state.show_output = !studio_state.show_output; }
+            // Assets has no StudioState flag (its visibility lives in Slint
+            // only), so the toggle is a pulse `sync_bevy_to_slint` applies.
+            Action::ToggleAssets => {
+                studio_state.toggle_assets_pulse = studio_state.toggle_assets_pulse.wrapping_add(1);
+            }
 
             // Copy / Paste
             Action::Copy => { copy_events.write(crate::clipboard::CopyEvent { is_cut: false }); }
@@ -1113,529 +1330,18 @@ fn handle_menu_action_events(
                 if selected_ids.is_empty() {
                     info!("🗑️ Delete: nothing selected");
                 } else {
-                    let mut camera_deleted = false;
-                    let mut trashed_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-                    let mut skipped_services = 0u32;
-
-                    for (entity, gtransform, _) in entity_query.iter() {
-                        let id = format!("{}v{}", entity.index(), entity.generation());
-                        if !selected_ids.contains(&id) { continue; }
-                        // Watermark so the end of the loop can tell whether any
-                        // branch actually trashed a file for THIS entity.
-                        let trashed_before = trashed_paths.len();
-
-                        // Core-service guard: Workspace, Lighting, SoulService,
-                        // ReplicatedStorage, etc. are scaffolding for the entire
-                        // Space — deleting one orphans every child and breaks the
-                        // file watcher. Refuse silently-counted so a multi-select
-                        // delete still removes the non-service items and the user
-                        // gets a single explanatory toast at the end.
-                        let path_for_protection = instance_file_query.get(entity)
-                            .map(|inst| inst.toml_path.clone())
-                            .ok()
-                            .or_else(|| loaded_from_file_query.get(entity)
-                                .ok().map(|l| l.path.clone()));
-                        if let Some(ref p) = path_for_protection {
-                            if crate::space::is_protected_service_path(p) {
-                                skipped_services += 1;
-                                info!("🔒 Skipping delete on protected service: {:?}", p);
-                                continue;
-                            }
-                        }
-
-                        if instance_query.get(entity)
-                            .map(|inst| inst.class_name == eustress_common::classes::ClassName::Camera)
-                            .unwrap_or(false)
-                        {
-                            camera_deleted = true;
-                        }
-
-                        // Binary-ECS entities (scalable Insert default, C1):
-                        // their authoritative state is a rkyv core in Fjall
-                        // (Morton + identity indices), reachable only by their
-                        // synthetic `__bin_{class}_{id}` path — NOT a disk
-                        // folder. The file-trash branch below would fail to
-                        // trash a non-existent folder AND leave the core
-                        // behind, so it resurrects on the next boot-load.
-                        // Detect + purge all five stores here, then despawn.
-                        if let Ok(inst_file) = instance_file_query.get(entity) {
-                            if let Some((stored_id, class_name)) =
-                                parse_synthetic_bin_path(&inst_file.toml_path)
-                            {
-                                let uuid_hex = instance_query
-                                    .get(entity)
-                                    .map(|i| i.uuid.clone())
-                                    .unwrap_or_default();
-                                let uuid_bytes =
-                                    eustress_common::instance_create::uuid_hex_to_bytes(&uuid_hex)
-                                        .unwrap_or([0u8; 16]);
-                                // Morton key is position-derived; the live
-                                // (global) translation matches the persisted
-                                // position within the 256-unit Morton cell for
-                                // any settled part.
-                                let pos = gtransform
-                                    .map(|g| {
-                                        let t = g.translation();
-                                        [t.x, t.y, t.z]
-                                    })
-                                    .unwrap_or([0.0, 0.0, 0.0]);
-                                let synthetic_rel = format!(
-                                    "Workspace/__bin_{}_{:016x}/_instance.toml",
-                                    class_name, stored_id
-                                );
-                                crate::space::active_db::delete_binary_instance(
-                                    stored_id,
-                                    &uuid_bytes,
-                                    &class_name,
-                                    pos,
-                                    &synthetic_rel,
-                                );
-                                commands.entity(entity).despawn();
-                                info!(
-                                    "🗑️ Deleted binary-ECS entity stored_id={:016x} (purged Fjall core + identity indices)",
-                                    stored_id
-                                );
-                                continue;
-                            }
-                        }
-
-                        // Move TOML (or the whole folder, for folder-based
-                        // entities) to .eustress/trash/ so Ctrl+Z can restore.
-                        if let Ok(inst_file) = instance_file_query.get(entity) {
-                            let toml_path = inst_file.toml_path.clone();
-                            // Non-removable folders: the Workshop folder
-                            // under SoulService is the engine's chat
-                            // history root — deleting it would scramble
-                            // session persistence + trap the Workshop
-                            // panel in a "no Space bound" state. Skip
-                            // silently (match OS convention for
-                            // system-protected paths) and continue so
-                            // the rest of the multi-select delete still
-                            // works.
-                            let is_workshop_root = toml_path
-                                .components()
-                                .rev()
-                                .take(3)
-                                .collect::<Vec<_>>()
-                                .iter()
-                                .rev()
-                                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-                                .collect::<Vec<_>>()
-                                .ends_with(&["soulservice".to_string(), "workshop".to_string(), "_instance.toml".to_string()]);
-                            if is_workshop_root {
-                                info!("🔒 Skipping delete on protected Workshop folder");
-                                continue;
-                            }
-                            // Folder-based entities live in `Foo/_instance.toml`;
-                            // trashing only the TOML leaves an empty folder on disk
-                            // AND orphans sibling files (Summary.md, child instances).
-                            // Trash the containing folder instead.
-                            let is_folder_instance = toml_path
-                                .file_name()
-                                .map(|n| n.to_string_lossy() == "_instance.toml")
-                                .unwrap_or(false);
-                            let source_path = if is_folder_instance {
-                                toml_path.parent().unwrap_or(toml_path.as_path()).to_path_buf()
-                            } else {
-                                toml_path.clone()
-                            };
-
-                            if source_path.exists() {
-                                // Trash lives at the SPACE ROOT, never beside the
-                                // deleted item — see `space_root_for`.
-                                let trash_anchor = if is_folder_instance {
-                                    source_path.parent()
-                                } else {
-                                    toml_path.parent()
-                                };
-                                let trash_dir = space_root_for(&source_path)
-                                    .or_else(|| trash_anchor
-                                        .and_then(|p| p.parent())
-                                        .map(|p| p.to_path_buf()))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                    .join(".eustress").join("trash");
-                                let _ = std::fs::create_dir_all(&trash_dir);
-
-                                // De-collide the trash name. Two deletes of the
-                                // same `Block` folder would otherwise see the
-                                // second rename fail ("target exists") on
-                                // Windows, the fallback `remove_dir_all` might
-                                // also fail (open handles), the error is
-                                // swallowed via `let _`, and the on-disk
-                                // folder stays while the entity despawns —
-                                // the Explorer/file-system desync the user
-                                // hit. Appending a monotonic timestamp
-                                // guarantees a unique trash path every time.
-                                let trash_stem = source_path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("entity");
-                                let ts_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
-                                let trash_path = {
-                                    let base = trash_dir.join(trash_stem);
-                                    if base.exists() {
-                                        trash_dir.join(format!("{}-{:x}", trash_stem, ts_ms))
-                                    } else {
-                                        base
-                                    }
-                                };
-
-                                // Tell file-watcher to ignore the impending delete
-                                // so it doesn't try to despawn an already-gone entity.
-                                if let Some(ref mut registry) = file_registry {
-                                    registry.rename_in_progress.insert(toml_path.clone());
-                                    registry.rename_in_progress.insert(source_path.clone());
-                                }
-
-                                // Rename-to-trash is the ONLY allowed path —
-                                // we deliberately do *not* fall back to
-                                // `remove_dir_all` / `remove_file`. Earlier
-                                // versions did, but Windows transiently locks
-                                // a part folder for ~50–200 ms after Bevy's
-                                // asset server drops a `.glb` handle; during
-                                // that window `rename` returns `Os { code:
-                                // 5, kind: PermissionDenied }`, the fallback
-                                // `remove_dir_all` succeeds against the
-                                // already-gone-from-Bevy handle, and the
-                                // entity vanishes WITHOUT a trash entry —
-                                // which means undo has nothing to restore.
-                                // Both user reports ("delete doesn't go to
-                                // trash" + "undo doesn't bring it back")
-                                // were the same bug: the fallback path.
-                                //
-                                // Now: retry rename a few times with a short
-                                // sleep so transient handle holds clear, and
-                                // if it still fails after the retries, log
-                                // loudly and SKIP the despawn. The file
-                                // stays on disk, the entity stays in ECS,
-                                // and the user can retry — better than
-                                // silent permanent loss.
-                                // Before renaming, gather every descendant
-                                // entity registered under this folder. The
-                                // rename moves the whole subtree on disk, but
-                                // descendant ECS entities (e.g. a child
-                                // BillboardGui Label under the deleted Part)
-                                // would otherwise survive and their queued
-                                // save-on-Changed writes flush AFTER the
-                                // rename — failing because the parent dir is
-                                // gone, occasionally racing the save into a
-                                // resurrected file. Despawn them explicitly
-                                // and add their paths to `rename_in_progress`
-                                // so the watcher swallows the cascade of
-                                // delete events without firing redundant
-                                // despawns. The orphan
-                                // `Workspace/Part-aaXX/Label/_instance.toml`
-                                // user-bug 2026-05-13 was this race.
-                                let descendant_paths: Vec<(std::path::PathBuf, Entity)> =
-                                    if is_folder_instance {
-                                        file_registry.as_ref()
-                                            .map(|r| r.descendants_of(&source_path))
-                                            .unwrap_or_default()
-                                    } else {
-                                        Vec::new()
-                                    };
-                                if let Some(ref mut registry) = file_registry {
-                                    for (path, _) in &descendant_paths {
-                                        registry.rename_in_progress.insert(path.clone());
-                                    }
-                                }
-
-                                let moved = (|| {
-                                    let attempts = 5u32;
-                                    let mut last_err: Option<std::io::Error> = None;
-                                    for i in 0..attempts {
-                                        match std::fs::rename(&source_path, &trash_path) {
-                                            Ok(_) => {
-                                                // Store (source_path, trash_path) — NOT
-                                                // toml_path. The rename moved `source_path`
-                                                // (the folder) so undo must rename back to
-                                                // `source_path`, not to `_instance.toml`.
-                                                trashed_paths.push((source_path.clone(), trash_path.clone()));
-                                                info!(
-                                                    "🗑️ Moved {:?} to trash{}{}",
-                                                    source_path.file_name().unwrap_or_default(),
-                                                    if i > 0 { format!(" (after {} retr{})", i, if i == 1 { "y" } else { "ies" }) } else { String::new() },
-                                                    if descendant_paths.len() > 1 {
-                                                        format!(" + {} descendant{}", descendant_paths.len() - 1,
-                                                            if descendant_paths.len() == 2 { "" } else { "s" })
-                                                    } else { String::new() },
-                                                );
-                                                return true;
-                                            }
-                                            Err(e) => {
-                                                last_err = Some(e);
-                                                if i + 1 < attempts {
-                                                    std::thread::sleep(std::time::Duration::from_millis(60));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    warn!(
-                                        "❌ Could not move {:?} to trash after {} attempts ({}). \
-                                         Leaving file on disk + entity in ECS — retry the delete.",
-                                        source_path,
-                                        attempts,
-                                        last_err
-                                            .map(|e| e.to_string())
-                                            .unwrap_or_else(|| "<unknown>".to_string()),
-                                    );
-                                    if let Some(ref mut registry) = file_registry {
-                                        registry.rename_in_progress.remove(&toml_path);
-                                        registry.rename_in_progress.remove(&source_path);
-                                        // Roll back the descendant gating we
-                                        // staged above so the watcher resumes
-                                        // tracking them.
-                                        for (path, _) in &descendant_paths {
-                                            registry.rename_in_progress.remove(path);
-                                        }
-                                    }
-                                    false
-                                })();
-                                if !moved {
-                                    // Skip ECS despawn so Explorer stays
-                                    // in sync with the still-present file.
-                                    continue;
-                                }
-                                // Rename succeeded — despawn every descendant
-                                // entity and clean its registry entry so the
-                                // ECS matches the on-disk subtree we just
-                                // moved to trash. The parent entity itself
-                                // gets despawned below (after the if-let-ok
-                                // closure) via `commands.entity(entity)
-                                // .despawn()`.
-                                for (path, desc_entity) in &descendant_paths {
-                                    if *desc_entity == entity { continue; }
-                                    // Capture identity BEFORE despawn so we can
-                                    // purge every store keyed on its UUID.
-                                    let (d_uuid, d_class) = instance_query
-                                        .get(*desc_entity)
-                                        .map(|i| (i.uuid.clone(), i.class_name.as_str().to_string()))
-                                        .unwrap_or_default();
-                                    commands.entity(*desc_entity).despawn();
-                                    // DB-primary: purge the descendant from ALL
-                                    // stores (tree + uuid core + indices), or it
-                                    // resurrects from world.fjalldb next session.
-                                    crate::space::active_db::purge_path_all_stores(path, &d_uuid, &d_class);
-                                    if let Some(ref mut registry) = file_registry {
-                                        registry.unregister_file(path);
-                                    }
-                                }
-                            }
-                            if let Some(ref mut registry) = file_registry {
-                                registry.unregister_file(&toml_path);
-                            }
-                            // DB-primary: purge the entity from EVERY Fjall store —
-                            // the `tree` TOML + `#bin` twin AND the uuid-keyed core
-                            // + identity indices `migrate_identity` wrote. Clearing
-                            // only the tree records (old `delete_path`) left the
-                            // `entities_uuid` core behind, which a reconcile/rebuild
-                            // re-materialised → the "deleted CAD/GS objects come back
-                            // / delete one of a twin pair and it resurrects" bug.
-                            let (uuid_hex, class_str) = instance_query
-                                .get(entity)
-                                .map(|i| (i.uuid.clone(), i.class_name.as_str().to_string()))
-                                .unwrap_or_default();
-                            crate::space::active_db::purge_path_all_stores(&toml_path, &uuid_hex, &class_str);
-                        }
-                        // Fallback: entities loaded via file_loader (soul scripts,
-                        // Rune/Luau files) have LoadedFromFile but no InstanceFile.
-                        // Without this branch the ECS entity despawns but the file
-                        // stays on disk, so the file watcher re-creates the entity
-                        // on the next scan — making delete appear broken.
-                        else if let Ok(loaded) = loaded_from_file_query.get(entity) {
-                            let source_path = loaded.path.clone();
-                            if source_path.exists() {
-                                // Space root, not the item's parent — see
-                                // `space_root_for`.
-                                let trash_dir = space_root_for(&source_path)
-                                    .or_else(|| source_path.parent().map(|p| p.to_path_buf()))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                    .join(".eustress").join("trash");
-                                let _ = std::fs::create_dir_all(&trash_dir);
-
-                                let trash_stem = source_path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("entity");
-                                let ts_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
-                                let trash_path = {
-                                    let base = trash_dir.join(trash_stem);
-                                    if base.exists() {
-                                        trash_dir.join(format!("{}-{:x}", trash_stem, ts_ms))
-                                    } else {
-                                        base
-                                    }
-                                };
-
-                                if let Some(ref mut registry) = file_registry {
-                                    registry.rename_in_progress.insert(source_path.clone());
-                                }
-
-                                let moved = (|| {
-                                    let attempts = 5u32;
-                                    let mut last_err: Option<std::io::Error> = None;
-                                    for i in 0..attempts {
-                                        match std::fs::rename(&source_path, &trash_path) {
-                                            Ok(_) => {
-                                                trashed_paths.push((source_path.clone(), trash_path.clone()));
-                                                info!(
-                                                    "🗑️ Moved script {:?} to trash{}",
-                                                    source_path.file_name().unwrap_or_default(),
-                                                    if i > 0 { format!(" (after {} retr{})", i, if i == 1 { "y" } else { "ies" }) } else { String::new() },
-                                                );
-                                                return true;
-                                            }
-                                            Err(e) => {
-                                                last_err = Some(e);
-                                                if i + 1 < attempts {
-                                                    std::thread::sleep(std::time::Duration::from_millis(60));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    warn!(
-                                        "❌ Could not move {:?} to trash after {} attempts ({}). \
-                                         Leaving file on disk + entity in ECS — retry the delete.",
-                                        source_path,
-                                        attempts,
-                                        last_err
-                                            .map(|e| e.to_string())
-                                            .unwrap_or_else(|| "<unknown>".to_string()),
-                                    );
-                                    if let Some(ref mut registry) = file_registry {
-                                        registry.rename_in_progress.remove(&source_path);
-                                    }
-                                    false
-                                })();
-                                if !moved {
-                                    continue;
-                                }
-                            }
-                            if let Some(ref mut registry) = file_registry {
-                                registry.unregister_file(&source_path);
-                            }
-                            // DB-primary: drop the DB record for file-backed
-                            // entities (scripts, etc.) so they don't resurrect.
-                            crate::space::active_db::delete_path(&source_path);
-                        }
-                        // Fall-through: entities with NEITHER InstanceFile NOR
-                        // LoadedFromFile. A bulk in-memory import writes binary
-                        // cores for `node_is_binary_eligible` classes (Folder /
-                        // Model) straight into the worlddb `entities` partition +
-                        // identity indices — the live entity carries no disk path,
-                        // so neither source branch above fires. Without purging the
-                        // core here, the bare despawn below removes only the ECS
-                        // entity and the core resurrects on the next Space open
-                        // (the reported "delete doesn't stick" bug). Derive the
-                        // persistence `stored_id` from the entity's identity UUID
-                        // exactly as the importer does (roblox-import/src/sink.rs
-                        // and world_db_binary.rs: first 8 bytes of the UUID,
-                        // big-endian) and purge the binary core + identity indices
-                        // via the same synthetic path shape the importer mints. A
-                        // harmless no-op if no such core exists (delete of a missing
-                        // key is best-effort). ECS descendants are removed by the
-                        // recursive `despawn()` below (Bevy 0.18 recursive despawn).
-                        else {
-                            if let Ok(inst) = instance_query.get(entity) {
-                                if let Some(uuid_bytes) =
-                                    eustress_common::instance_create::uuid_hex_to_bytes(&inst.uuid)
-                                {
-                                    let stored_id = u64::from_be_bytes(
-                                        uuid_bytes[0..8]
-                                            .try_into()
-                                            .expect("uuid_bytes is 16 long; [0..8] is 8"),
-                                    );
-                                    let class_name = inst.class_name.as_str().to_string();
-                                    let pos = gtransform
-                                        .map(|g| {
-                                            let t = g.translation();
-                                            [t.x, t.y, t.z]
-                                        })
-                                        .unwrap_or([0.0, 0.0, 0.0]);
-                                    let synthetic_rel = format!(
-                                        "Workspace/__bin_{}_{:016x}/_instance.toml",
-                                        class_name, stored_id
-                                    );
-                                    let purged = crate::space::active_db::delete_binary_instance(
-                                        stored_id,
-                                        &uuid_bytes,
-                                        &class_name,
-                                        pos,
-                                        &synthetic_rel,
-                                    );
-                                    if purged {
-                                        info!(
-                                            "🗑️ Purged source-less binary core stored_id={:016x} ({}) on delete",
-                                            stored_id, class_name
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Did anything actually get trashed for this entity? If
-                        // no branch above resolved a real on-disk source, the
-                        // despawn is COSMETIC: nothing moved, so Ctrl+Z has
-                        // nothing to restore (the `TrashEntities` push below is
-                        // gated on a non-empty `trashed_paths`) and the file is
-                        // still there to respawn on the next load. That read to
-                        // the user as "delete is broken" with no clue why, so
-                        // say it out loud instead of failing silently.
-                        if trashed_paths.len() == trashed_before {
-                            warn!(
-                                "🗑️ Deleted entity {:?} ({}) from the scene ONLY — no on-disk \
-                                 source could be resolved, so this is NOT undoable and it will \
-                                 come back when the Space reloads. Usually means the entity is \
-                                 stale: its folder was removed out from under the running engine.",
-                                entity, id
-                            );
-                        }
-                        commands.entity(entity).despawn();
-                        info!("🗑️ Deleted entity {:?} ({})", entity, id);
-                    }
-
-                    // Push to undo stack so Ctrl+Z can restore
-                    if !trashed_paths.is_empty() {
-                        undo_stack.push(crate::undo::Action::TrashEntities { paths: trashed_paths });
-                    }
-
-                    // Clear selection after delete
-                    if let Some(ref sm) = selection_manager {
-                        sm.0.write().clear();
-                    }
-
-                    // Force Explorer re-sync next frame so the deleted entities
-                    // disappear from the tree without waiting for the 30-frame
-                    // throttle — avoids the "deleted but still shown" UX.
-                    if let Some(ref mut es) = explorer_state {
-                        es.needs_immediate_sync = true;
-                    }
-                    // No respawn here: `camera_controller::ensure_camera_exists`
-                    // is the one place an editor camera comes back, built the
-                    // way startup builds it, as soon as no window camera is left.
-                    if camera_deleted {
-                        info!("📷 Camera deleted — a new editor camera spawns at the origin");
-                    }
-                    if skipped_services > 0 {
-                        warn!(
-                            "🔒 Refused to delete {} protected item{}: Workspace, Lighting, SoulService, etc. are protected scaffolding, and so is a terrain's data folder.",
-                            skipped_services, if skipped_services == 1 { "" } else { "s" },
-                        );
-                        commands.queue(|world: &mut World| {
-                            if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
-                                notifications.warning(
-                                    "Delete refused: services (Workspace, Lighting, ...) and a terrain's data folder \
-                                     (Workspace/Terrain) cannot be deleted. Use Clear Terrain in the Terrain ribbon to remove \
-                                     a terrain, or delete its layers one by one.",
-                                );
-                            }
-                        });
-                    }
+                    delete_selected(
+                        &selected_ids,
+                        &mut commands,
+                        &entity_query,
+                        &instance_query,
+                        &instance_file_query,
+                        &loaded_from_file_query,
+                        file_registry.as_deref_mut(),
+                        &mut undo_stack,
+                        selection_manager.as_deref(),
+                        explorer_state.as_deref_mut(),
+                    );
                 }
             }
 
@@ -1748,6 +1454,12 @@ fn handle_menu_action_events(
             Action::PasteInto => { studio_state.pending_paste_into = true; }
             Action::FindReplace => {
                 studio_state.open_find_pulse = studio_state.open_find_pulse.wrapping_add(1);
+            }
+            // Find in Scripts only reads: the modal searches the scripts' text
+            // and opens a tab, and the only thing this arm writes is the pulse
+            // that opens it. That is why it is live during a Play session too.
+            Action::FindInScripts => {
+                studio_state.open_script_search_pulse = studio_state.open_script_search_pulse.wrapping_add(1);
             }
             Action::FocusExplorerSearch => {
                 studio_state.show_explorer = true;
@@ -1933,6 +1645,13 @@ fn handle_menu_action_events(
                     tool_id: "path_array".to_string(),
                 });
             }
+            Action::ToolPaintBucket => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "paint_bucket".to_string(),
+                });
+            }
+            // `SampleLook` is answered by `look_picker::sample_look_on_action`,
+            // which reads the same event; an arm here would double-fire.
 
             // Boolean (CSG) ribbon group — handled by `csg::CsgPlugin`
             // (MenuActionEvent reader). Leave these arms empty so we
@@ -1959,6 +1678,446 @@ fn handle_menu_action_events(
             _ => {}
         }
     }
+
+    if !refusals.is_empty() {
+        commands.queue(move |world: &mut World| {
+            for notice in refusals {
+                say_play_refusal(world, notice);
+            }
+        });
+    }
+}
+
+/// What a Delete did, for a caller that tells the user what happened: Remove
+/// Road, through [`delete_entities_now`].
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct DeleteOutcome {
+    /// Refused during Play: nothing was deleted, and the refusal was said.
+    pub refused: bool,
+    /// The entities it despawned.
+    pub removed: Vec<Entity>,
+    /// Whether it pushed an undo entry, which it does when anything went to
+    /// the trash.
+    pub undoable: bool,
+}
+
+/// Every object a Delete can reach: the parts and the instances.
+type DeletableQuery<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, Option<&'static GlobalTransform>, Option<&'static mut eustress_common::classes::BasePart>),
+    Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>,
+>;
+
+/// Delete the objects `selected_ids` names, as the selection names them
+/// ("<index>v<generation>"): each one's folder or file goes to the Space's
+/// trash, every store forgets it, and its entity is despawned, as one undo
+/// entry. Services and the Workshop folder are skipped. The Delete action
+/// runs it on the selection, and Remove Road on its road
+/// ([`delete_entities_now`]).
+#[allow(clippy::too_many_arguments)]
+fn delete_selected(
+    selected_ids: &std::collections::HashSet<String>,
+    commands: &mut Commands,
+    entity_query: &DeletableQuery,
+    instance_query: &Query<&eustress_common::classes::Instance>,
+    instance_file_query: &Query<&crate::space::instance_loader::InstanceFile>,
+    loaded_from_file_query: &Query<&crate::space::LoadedFromFile>,
+    mut file_registry: Option<&mut crate::space::SpaceFileRegistry>,
+    undo_stack: &mut crate::undo::UndoStack,
+    selection_manager: Option<&crate::selection_sync::SelectionSyncManager>,
+    mut explorer_state: Option<&mut crate::ui::slint_ui::UnifiedExplorerState>,
+) -> DeleteOutcome {
+    let mut outcome = DeleteOutcome::default();
+    let mut camera_deleted = false;
+    let mut trashed_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut skipped_services = 0u32;
+
+    for (entity, gtransform, _) in entity_query.iter() {
+        let id = format!("{}v{}", entity.index(), entity.generation());
+        if !selected_ids.contains(&id) { continue; }
+        // Watermark so the end of the loop can tell whether any
+        // branch actually trashed a file for THIS entity.
+        let trashed_before = trashed_paths.len();
+
+        // Core-service guard: Workspace, Lighting, SoulService,
+        // ReplicatedStorage, etc. are scaffolding for the entire
+        // Space — deleting one orphans every child and breaks the
+        // file watcher. Refuse silently-counted so a multi-select
+        // delete still removes the non-service items and the user
+        // gets a single explanatory toast at the end.
+        let path_for_protection = instance_file_query.get(entity)
+            .map(|inst| inst.toml_path.clone())
+            .ok()
+            .or_else(|| loaded_from_file_query.get(entity)
+                .ok().map(|l| l.path.clone()));
+        if let Some(ref p) = path_for_protection {
+            if crate::space::is_protected_service_path(p) {
+                skipped_services += 1;
+                info!("🔒 Skipping delete on protected service: {:?}", p);
+                continue;
+            }
+        }
+
+        if instance_query.get(entity)
+            .map(|inst| inst.class_name == eustress_common::classes::ClassName::Camera)
+            .unwrap_or(false)
+        {
+            camera_deleted = true;
+        }
+
+        // Binary-ECS entities (scalable Insert default, C1):
+        // their authoritative state is a rkyv core in Fjall
+        // (Morton + identity indices), reachable only by their
+        // synthetic `__bin_{class}_{id}` path — NOT a disk
+        // folder. The file-trash branch below would fail to
+        // trash a non-existent folder AND leave the core
+        // behind, so it resurrects on the next boot-load.
+        // Detect + purge all five stores here, then despawn.
+        if let Ok(inst_file) = instance_file_query.get(entity) {
+            if let Some((stored_id, class_name)) =
+                parse_synthetic_bin_path(&inst_file.toml_path)
+            {
+                let uuid_hex = instance_query
+                    .get(entity)
+                    .map(|i| i.uuid.clone())
+                    .unwrap_or_default();
+                let uuid_bytes =
+                    eustress_common::instance_create::uuid_hex_to_bytes(&uuid_hex)
+                        .unwrap_or([0u8; 16]);
+                // Morton key is position-derived; the live
+                // (global) translation matches the persisted
+                // position within the 256-unit Morton cell for
+                // any settled part.
+                let pos = gtransform
+                    .map(|g| {
+                        let t = g.translation();
+                        [t.x, t.y, t.z]
+                    })
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                let synthetic_rel = format!(
+                    "Workspace/__bin_{}_{:016x}/_instance.toml",
+                    class_name, stored_id
+                );
+                crate::space::active_db::delete_binary_instance(
+                    stored_id,
+                    &uuid_bytes,
+                    &class_name,
+                    pos,
+                    &synthetic_rel,
+                );
+                commands.entity(entity).despawn();
+                outcome.removed.push(entity);
+                info!(
+                    "🗑️ Deleted binary-ECS entity stored_id={:016x} (purged Fjall core + identity indices)",
+                    stored_id
+                );
+                continue;
+            }
+        }
+
+        // Move TOML (or the whole folder, for folder-based
+        // entities) to .eustress/trash/ so Ctrl+Z can restore.
+        if let Ok(inst_file) = instance_file_query.get(entity) {
+            let toml_path = inst_file.toml_path.clone();
+            // Non-removable folders: the Workshop folder
+            // under SoulService is the engine's chat
+            // history root — deleting it would scramble
+            // session persistence + trap the Workshop
+            // panel in a "no Space bound" state. Skip
+            // silently (match OS convention for
+            // system-protected paths) and continue so
+            // the rest of the multi-select delete still
+            // works.
+            let is_workshop_root = toml_path
+                .components()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .iter()
+                .rev()
+                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>()
+                .ends_with(&["soulservice".to_string(), "workshop".to_string(), "_instance.toml".to_string()]);
+            if is_workshop_root {
+                info!("🔒 Skipping delete on protected Workshop folder");
+                continue;
+            }
+            // Folder-based entities live in `Foo/_instance.toml`;
+            // trashing only the TOML leaves an empty folder on disk
+            // AND orphans sibling files (Summary.md, child instances).
+            // Trash the containing folder instead.
+            let is_folder_instance = toml_path
+                .file_name()
+                .map(|n| n.to_string_lossy() == "_instance.toml")
+                .unwrap_or(false);
+            let source_path = if is_folder_instance {
+                toml_path.parent().unwrap_or(toml_path.as_path()).to_path_buf()
+            } else {
+                toml_path.clone()
+            };
+
+            if source_path.exists() {
+                // The trash is at the Space root, never beside the deleted
+                // item; a taken name gets a timestamp suffix.
+                let trash_path = crate::space::trash::trash_destination(&source_path);
+
+                // One shared move (space::trash): guard the watcher, retry
+                // the rename, then despawn, purge and unregister every
+                // descendant and this record. Rename-to-trash is the ONLY
+                // allowed path: there is deliberately no `remove_dir_all`
+                // fallback, because a transient handle lock would then
+                // delete the folder without a trash entry and undo would
+                // have nothing to restore. On failure nothing changed, so
+                // the entity stays beside its file and the delete can be
+                // retried.
+                let request = crate::space::trash::TrashRequest {
+                    entity,
+                    source: &source_path,
+                    record: &toml_path,
+                    destination: &trash_path,
+                };
+                match crate::space::trash::trash_instance(&request, commands, file_registry.as_deref_mut()) {
+                    Ok(trashed) => {
+                        // Store (source_path, trash_path), NOT toml_path: the
+                        // rename moved `source_path` (the folder), so undo must
+                        // rename back to `source_path`, not to `_instance.toml`.
+                        trashed_paths.push((source_path.clone(), trash_path.clone()));
+                        info!(
+                            "🗑️ Moved {:?} to trash{}{}",
+                            source_path.file_name().unwrap_or_default(),
+                            if trashed.retries > 0 { format!(" (after {} retr{})", trashed.retries, if trashed.retries == 1 { "y" } else { "ies" }) } else { String::new() },
+                            if trashed.descendants > 0 {
+                                format!(" + {} descendant{}", trashed.descendants, if trashed.descendants == 1 { "" } else { "s" })
+                            } else { String::new() },
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "❌ Could not move {:?} to trash: {}. Leaving file on disk + entity in ECS, retry the delete.",
+                            source_path, e
+                        );
+                        // Skip the ECS despawn so Explorer stays in sync with
+                        // the still-present file.
+                        continue;
+                    }
+                }
+            }
+            if let Some(ref mut registry) = file_registry {
+                registry.unregister_file(&toml_path);
+            }
+            // DB-primary: purge the entity from EVERY Fjall store —
+            // the `tree` TOML + `#bin` twin AND the uuid-keyed core
+            // + identity indices `migrate_identity` wrote. Clearing
+            // only the tree records (old `delete_path`) left the
+            // `entities_uuid` core behind, which a reconcile/rebuild
+            // re-materialised → the "deleted CAD/GS objects come back
+            // / delete one of a twin pair and it resurrects" bug.
+            let (uuid_hex, class_str) = instance_query
+                .get(entity)
+                .map(|i| (i.uuid.clone(), i.class_name.as_str().to_string()))
+                .unwrap_or_default();
+            crate::space::active_db::purge_path_all_stores(&toml_path, &uuid_hex, &class_str);
+        }
+        // Fallback: entities loaded via file_loader (soul scripts,
+        // Rune/Luau files) have LoadedFromFile but no InstanceFile.
+        // Without this branch the ECS entity despawns but the file
+        // stays on disk, so the file watcher re-creates the entity
+        // on the next scan — making delete appear broken.
+        else if let Ok(loaded) = loaded_from_file_query.get(entity) {
+            let source_path = loaded.path.clone();
+            if source_path.exists() {
+                // The trash is at the Space root, never beside the item.
+                let trash_path = crate::space::trash::trash_destination(&source_path);
+
+                // The file is its own record. Same shared move as above.
+                let request = crate::space::trash::TrashRequest {
+                    entity,
+                    source: &source_path,
+                    record: &source_path,
+                    destination: &trash_path,
+                };
+                match crate::space::trash::trash_instance(&request, commands, file_registry.as_deref_mut()) {
+                    Ok(trashed) => {
+                        trashed_paths.push((source_path.clone(), trash_path.clone()));
+                        info!(
+                            "🗑️ Moved script {:?} to trash{}",
+                            source_path.file_name().unwrap_or_default(),
+                            if trashed.retries > 0 { format!(" (after {} retr{})", trashed.retries, if trashed.retries == 1 { "y" } else { "ies" }) } else { String::new() },
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "❌ Could not move {:?} to trash: {}. Leaving file on disk + entity in ECS, retry the delete.",
+                            source_path, e
+                        );
+                        continue;
+                    }
+                }
+            }
+            if let Some(ref mut registry) = file_registry {
+                registry.unregister_file(&source_path);
+            }
+            // DB-primary: drop the DB record for file-backed
+            // entities (scripts, etc.) so they don't resurrect.
+            crate::space::active_db::delete_path(&source_path);
+        }
+        // Fall-through: entities with NEITHER InstanceFile NOR
+        // LoadedFromFile. A bulk in-memory import writes binary
+        // cores for `node_is_binary_eligible` classes (Folder /
+        // Model) straight into the worlddb `entities` partition +
+        // identity indices — the live entity carries no disk path,
+        // so neither source branch above fires. Without purging the
+        // core here, the bare despawn below removes only the ECS
+        // entity and the core resurrects on the next Space open
+        // (the reported "delete doesn't stick" bug). Derive the
+        // persistence `stored_id` from the entity's identity UUID
+        // exactly as the importer does (roblox-import/src/sink.rs
+        // and world_db_binary.rs: first 8 bytes of the UUID,
+        // big-endian) and purge the binary core + identity indices
+        // via the same synthetic path shape the importer mints. A
+        // harmless no-op if no such core exists (delete of a missing
+        // key is best-effort). ECS descendants are removed by the
+        // recursive `despawn()` below (Bevy 0.18 recursive despawn).
+        else {
+            if let Ok(inst) = instance_query.get(entity) {
+                if let Some(uuid_bytes) =
+                    eustress_common::instance_create::uuid_hex_to_bytes(&inst.uuid)
+                {
+                    let stored_id = u64::from_be_bytes(
+                        uuid_bytes[0..8]
+                            .try_into()
+                            .expect("uuid_bytes is 16 long; [0..8] is 8"),
+                    );
+                    let class_name = inst.class_name.as_str().to_string();
+                    let pos = gtransform
+                        .map(|g| {
+                            let t = g.translation();
+                            [t.x, t.y, t.z]
+                        })
+                        .unwrap_or([0.0, 0.0, 0.0]);
+                    let synthetic_rel = format!(
+                        "Workspace/__bin_{}_{:016x}/_instance.toml",
+                        class_name, stored_id
+                    );
+                    let purged = crate::space::active_db::delete_binary_instance(
+                        stored_id,
+                        &uuid_bytes,
+                        &class_name,
+                        pos,
+                        &synthetic_rel,
+                    );
+                    if purged {
+                        info!(
+                            "🗑️ Purged source-less binary core stored_id={:016x} ({}) on delete",
+                            stored_id, class_name
+                        );
+                    }
+                }
+            }
+        }
+        // Did anything actually get trashed for this entity? If
+        // no branch above resolved a real on-disk source, the
+        // despawn is COSMETIC: nothing moved, so Ctrl+Z has
+        // nothing to restore (the `TrashEntities` push below is
+        // gated on a non-empty `trashed_paths`) and the file is
+        // still there to respawn on the next load. That read to
+        // the user as "delete is broken" with no clue why, so
+        // say it out loud instead of failing silently.
+        if trashed_paths.len() == trashed_before {
+            warn!(
+                "🗑️ Deleted entity {:?} ({}) from the scene ONLY — no on-disk \
+                 source could be resolved, so this is NOT undoable and it will \
+                 come back when the Space reloads. Usually means the entity is \
+                 stale: its folder was removed out from under the running engine.",
+                entity, id
+            );
+        }
+        commands.entity(entity).despawn();
+        outcome.removed.push(entity);
+        info!("🗑️ Deleted entity {:?} ({})", entity, id);
+    }
+
+    // Push to undo stack so Ctrl+Z can restore
+    outcome.undoable = !trashed_paths.is_empty();
+    if outcome.undoable {
+        undo_stack.push(crate::undo::Action::TrashEntities { paths: trashed_paths });
+    }
+
+    // Clear selection after delete
+    if let Some(ref sm) = selection_manager {
+        sm.0.write().clear();
+    }
+
+    // Force Explorer re-sync next frame so the deleted entities
+    // disappear from the tree without waiting for the 30-frame
+    // throttle — avoids the "deleted but still shown" UX.
+    if let Some(ref mut es) = explorer_state {
+        es.needs_immediate_sync = true;
+    }
+    // No respawn here: `camera_controller::ensure_camera_exists`
+    // is the one place an editor camera comes back, built the
+    // way startup builds it, as soon as no window camera is left.
+    if camera_deleted {
+        info!("📷 Camera deleted — a new editor camera spawns at the origin");
+    }
+    if skipped_services > 0 {
+        warn!(
+            "🔒 Refused to delete {} protected item{}: Workspace, Lighting, SoulService, etc. are protected scaffolding, and so is a terrain's data folder.",
+            skipped_services, if skipped_services == 1 { "" } else { "s" },
+        );
+        commands.queue(|world: &mut World| {
+            if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+                notifications.warning(
+                    "Delete refused: services (Workspace, Lighting, ...) and a terrain's data folder \
+                     (Workspace/Terrain) cannot be deleted. Use Clear Terrain in the Terrain ribbon to remove \
+                     a terrain, or delete its layers one by one.",
+                );
+            }
+        });
+    }
+    outcome
+}
+
+/// Delete `entities` now, with the world, and say what the Delete did: the
+/// Delete action's own work ([`delete_selected`]), for a caller that tells
+/// the user at once, Remove Road. Refused during Play, as the Delete key is.
+pub(crate) fn delete_entities_now(world: &mut World, entities: &[Entity]) -> DeleteOutcome {
+    if refuse_during_play(world, Action::Delete) {
+        return DeleteOutcome { refused: true, ..Default::default() };
+    }
+    let selected_ids: std::collections::HashSet<String> = entities.iter().map(|entity| format!("{}v{}", entity.index(), entity.generation())).collect();
+    let mut state: bevy::ecs::system::SystemState<(
+        Commands,
+        DeletableQuery,
+        Query<&eustress_common::classes::Instance>,
+        Query<&crate::space::instance_loader::InstanceFile>,
+        Query<&crate::space::LoadedFromFile>,
+        Option<ResMut<crate::space::SpaceFileRegistry>>,
+        ResMut<crate::undo::UndoStack>,
+        Option<Res<crate::selection_sync::SelectionSyncManager>>,
+        Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    )> = bevy::ecs::system::SystemState::new(world);
+    let outcome = match state.get_mut(world) {
+        Ok((mut commands, entity_query, instance_query, instance_file_query, loaded_from_file_query, mut file_registry, mut undo_stack, selection_manager, mut explorer_state)) => delete_selected(
+            &selected_ids,
+            &mut commands,
+            &entity_query,
+            &instance_query,
+            &instance_file_query,
+            &loaded_from_file_query,
+            file_registry.as_deref_mut(),
+            &mut undo_stack,
+            selection_manager.as_deref(),
+            explorer_state.as_deref_mut(),
+        ),
+        Err(e) => {
+            warn!("Delete could not run: {e}");
+            return DeleteOutcome::default();
+        }
+    };
+    state.apply(world);
+    outcome
 }
 
 /// Which `BasePart` boolean the Anchor / Lock / Unlock arms operate on.
@@ -2045,9 +2204,10 @@ fn persist_part_flag(
 // The two keys are NOT symmetric and the action names say so
 // ([`Action::LiftSelection`] / [`Action::SettleSelection`]): `-` is a plain
 // +Y step, `+` steps down and flushes onto the first support surface it
-// reaches. They are read as raw KeyCodes here rather than through
-// `bindings.check()` because they need press-and-hold auto-repeat, which the
-// one-shot `just_pressed` dispatch loop deliberately does not do.
+// reaches. They follow their bindings (`check` for the press, `held` for the
+// repeat), so rebinding either action moves the key. The repeat timer lives
+// here because the one-shot `just_pressed` dispatch loop deliberately does
+// not repeat.
 
 /// State for the lift/settle keys — tracks hold time and whether the initial
 /// press was consumed.
@@ -2100,11 +2260,13 @@ fn handle_nudge_keys(
     mut timer: ResMut<NudgeTimer>,
     settings: Option<Res<crate::editor_settings::EditorSettings>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    bindings: Option<Res<KeyBindings>>,
     mut ctx: NudgeContext,
 ) {
     // Block when text input focused or overlay has focus
     if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) { return; }
     if crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) { return; }
+    let Some(bindings) = bindings else { return };
 
     let snap = settings.as_ref().map(|s| if s.snap_enabled { s.snap_size } else { 1.0 }).unwrap_or(1.0);
 
@@ -2119,11 +2281,15 @@ fn handle_nudge_keys(
     // `pressed` + a boolean gate which silently produced no fire on some
     // platforms when `pressed` and `just_pressed` raced inside the same frame.
     let lift_fire = nudge_should_fire(
-        &keys, KeyCode::Minus, &time,
+        bindings.check(Action::LiftSelection, &keys),
+        bindings.held(Action::LiftSelection, &keys),
+        &time,
         &mut timer.lift_held, &mut timer.lift_timer,
     );
     let settle_fire = nudge_should_fire(
-        &keys, KeyCode::Equal, &time,
+        bindings.check(Action::SettleSelection, &keys),
+        bindings.held(Action::SettleSelection, &keys),
+        &time,
         &mut timer.settle_held, &mut timer.settle_timer,
     );
 
@@ -2203,18 +2369,18 @@ fn place_world(ctx: &mut NudgeContext, entity: Entity, world_pos: Vec3, world_ro
 /// every [`NUDGE_REPEAT_SECS`] after [`NUDGE_DELAY_SECS`] of being held.
 /// Resets when the key is released.
 fn nudge_should_fire(
-    keys: &ButtonInput<KeyCode>,
-    key: KeyCode,
+    just_pressed: bool,
+    pressed: bool,
     time: &Time,
     held: &mut bool,
     timer: &mut f32,
 ) -> bool {
-    if keys.just_pressed(key) {
+    if just_pressed {
         *held = true;
         *timer = 0.0;
         return true;
     }
-    if !keys.pressed(key) {
+    if !pressed {
         *held = false;
         *timer = 0.0;
         return false;
@@ -2493,6 +2659,68 @@ mod tests {
             .expect_err("Ctrl+Shift+Z is Redo's alternate — rebinding onto it must fail");
         assert!(err.contains("Redo"), "expected the Redo alternate to be reported, got: {err}");
     }
+
+    /// A keybindings.ron saved while Assets sat on Ctrl+Shift+F would keep it
+    /// there, on the same chord as Find in Scripts, and the dispatch loop would
+    /// answer with whichever comes first. Loading it hands the chord to Find in
+    /// Scripts and gives Assets its Ctrl+4 default.
+    #[test]
+    fn a_saved_map_with_assets_on_ctrl_shift_f_hands_the_chord_to_find_in_scripts() {
+        let ctrl_shift_f = KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift();
+        let ctrl_4 = KeyBinding::new(KeyCode::Digit4).with_ctrl();
+
+        // The map as the build before this one saved it: Assets on the old
+        // chord with Ctrl+4 as an alternate, and nothing for Find in Scripts.
+        let mut old = KeyBindings::default();
+        old.bindings.remove(&Action::FindInScripts);
+        old.bindings.insert(Action::ToggleAssets, ctrl_shift_f.clone());
+        old.alternates.insert(Action::ToggleAssets, vec![ctrl_4.clone()]);
+        let saved = ron::to_string(&old).expect("a map serializes");
+
+        let kb = KeyBindings::from_saved(&saved).expect("a saved map loads");
+        assert_eq!(kb.get(Action::FindInScripts), Some(&ctrl_shift_f));
+        assert_eq!(kb.get(Action::ToggleAssets), Some(&ctrl_4));
+
+        let mut input = ButtonInput::<KeyCode>::default();
+        for key in [KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::KeyF] {
+            input.press(key);
+        }
+        assert!(kb.check(Action::FindInScripts, &input));
+        assert!(!kb.check(Action::ToggleAssets, &input), "Assets still answers to Ctrl+Shift+F");
+
+        // No chord is left on two actions.
+        let chords = kb.all_chords();
+        for (i, (a, chord)) in chords.iter().enumerate() {
+            for (b, other) in chords.iter().skip(i + 1) {
+                assert!(!(chord == other && a != b && a.context() == b.context()), "{} is bound to both {a:?} and {b:?}", chord.display());
+            }
+        }
+    }
+
+    /// A saved map that moved Assets to a chord of its own keeps it.
+    #[test]
+    fn a_saved_remap_of_assets_survives_the_move() {
+        let moved = KeyBinding::new(KeyCode::KeyJ).with_ctrl().with_alt();
+        let mut old = KeyBindings::default();
+        old.bindings.remove(&Action::FindInScripts);
+        old.bindings.insert(Action::ToggleAssets, moved.clone());
+        let saved = ron::to_string(&old).expect("a map serializes");
+
+        let kb = KeyBindings::from_saved(&saved).expect("a saved map loads");
+        assert_eq!(kb.get(Action::ToggleAssets), Some(&moved));
+        assert_eq!(kb.get(Action::FindInScripts), Some(&KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift()));
+    }
+
+    /// The defaults themselves: Find in Scripts on Ctrl+Shift+F, Assets on Ctrl+4.
+    #[test]
+    fn the_defaults_put_find_in_scripts_on_ctrl_shift_f_and_assets_on_ctrl_4() {
+        let kb = KeyBindings::default();
+        assert_eq!(kb.get(Action::FindInScripts), Some(&KeyBinding::new(KeyCode::KeyF).with_ctrl().with_shift()));
+        assert_eq!(kb.get(Action::ToggleAssets), Some(&KeyBinding::new(KeyCode::Digit4).with_ctrl()));
+        assert!(DISPATCHED_ACTIONS.contains(&Action::FindInScripts));
+        assert!(PLAY_SESSION_ACTIONS.contains(&Action::FindInScripts));
+        assert!(kb.alternates(Action::ToggleAssets).is_empty(), "Assets has one chord now");
+    }
 }
 
 #[cfg(test)]
@@ -2588,6 +2816,277 @@ mod play_allowlist_tests {
         (sent, tool)
     }
 
+    /// Every `Action` variant, in declaration order. serde reads a unit
+    /// variant from its index, so the list grows with the enum.
+    fn every_action() -> Vec<Action> {
+        use serde::de::value::{Error, U32Deserializer};
+        let all: Vec<Action> = (0u32..).map_while(|i| <Action as serde::Deserialize>::deserialize(U32Deserializer::<Error>::new(i)).ok()).collect();
+        // A list that came back short would let the tests pass on nothing.
+        assert_eq!(all.first(), Some(&Action::SelectTool));
+        assert!(all.len() > 100 && all.contains(&Action::TerrainRegionDelete), "{} actions", all.len());
+        all
+    }
+
+    /// The writes every path asks about: each waits for Stop during Play and
+    /// Pause.
+    const WRITE_ACTIONS: [Action; 11] = [
+        Action::SaveScene,
+        Action::SaveSceneAs,
+        Action::Undo,
+        Action::Redo,
+        Action::Delete,
+        Action::Paste,
+        Action::Duplicate,
+        Action::Group,
+        Action::Ungroup,
+        Action::PublishUniverse,
+        Action::PublishSpace,
+    ];
+
+    /// The actions that only read the scene, live during Play.
+    const READ_ONLY_IN_PLAY: [Action; 10] = [
+        Action::Copy,
+        Action::FocusExplorerSearch,
+        Action::FocusPropertiesFilter,
+        Action::SelectAll,
+        Action::SelectChildren,
+        Action::SelectDescendants,
+        Action::SelectParent,
+        Action::SelectSiblings,
+        Action::InvertSelection,
+        Action::ToggleTransformSpace,
+    ];
+
+    #[test]
+    fn editing_refuses_nothing() {
+        for action in every_action() {
+            assert_eq!(play_refusal(PlayModeState::Editing, action), None, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn play_and_pause_refuse_every_write() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for action in WRITE_ACTIONS {
+                let notice = play_refusal(state, action).unwrap_or_else(|| panic!("{state:?} ran {action:?}"));
+                assert!(notice.starts_with("Stop Play to "), "{action:?}: {notice}");
+            }
+        }
+    }
+
+    /// The allow-list runs during Play and Pause, the read-only additions
+    /// among it, and every other action is refused.
+    #[test]
+    fn play_runs_the_allow_list_and_refuses_the_rest() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for action in READ_ONLY_IN_PLAY {
+                assert_eq!(play_refusal(state, action), None, "{state:?} refused {action:?}");
+            }
+            for action in every_action() {
+                let runs = play_refusal(state, action).is_none();
+                assert_eq!(runs, PLAY_SESSION_ACTIONS.contains(&action), "{state:?} {action:?}");
+            }
+        }
+        // Kept out on purpose: Replace writes, Start Server is the multiplayer
+        // owner's call, and these two panels are not this list's to open.
+        for action in [Action::FindReplace, Action::StartServer, Action::ToggleCollaboration, Action::ToggleNetworkPanel] {
+            assert!(play_refusal(PlayModeState::Playing, action).is_some(), "{action:?}");
+        }
+    }
+
+    /// A notice names what waits for Stop.
+    #[test]
+    fn the_notices_say_what_waits_for_stop() {
+        let say = |action| play_refusal(PlayModeState::Playing, action).unwrap();
+        assert_eq!(say(Action::SaveScene), "Stop Play to save the Space. Saving during Play would write the running scene to disk.");
+        assert_eq!(say(Action::Undo), "Stop Play to undo. Undo works on the authored scene.");
+        assert_eq!(say(Action::Delete), "Stop Play to delete.");
+        assert_eq!(say(Action::ToolGapFill), "Stop Play to use Gap Fill.");
+    }
+
+    /// A request that is not an editor action gets the same rule, and the
+    /// same sentence as an action's notice.
+    #[test]
+    fn a_tool_request_waits_for_stop_like_an_action() {
+        assert_eq!(play_refusal_to(PlayModeState::Editing, "insert"), None);
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            assert_eq!(play_refusal_to(state, "insert").as_deref(), Some("Stop Play to insert."));
+            assert_eq!(play_refusal_to(state, "use the Road Builder").as_deref(), Some("Stop Play to use the Road Builder."));
+            assert_eq!(play_refusal(state, Action::ToolGapFill), play_refusal_to(state, "use Gap Fill"));
+        }
+    }
+
+    /// The menu handler states a refusal only for what it runs, and for Group
+    /// and Ungroup, refused by their own handler. Start Server, CSG, mesh
+    /// splits, the publish dialogs, the views and the terrain tools are
+    /// answered by their own readers.
+    #[test]
+    fn the_menu_states_only_its_own_refusals() {
+        for action in WRITE_ACTIONS {
+            let publish = matches!(action, Action::PublishUniverse | Action::PublishSpace);
+            assert_eq!(play_refusal_said_here(action), !publish, "{action:?}");
+        }
+        for action in [
+            Action::StartServer,
+            Action::StopServer,
+            Action::CSGUnion,
+            Action::MeshSplitParts,
+            Action::ViewTop,
+            Action::TerrainTools,
+            Action::SampleLook,
+        ] {
+            assert!(!play_refusal_said_here(action), "{action:?}");
+        }
+    }
+
+    /// The keyboard reaches every allowed action during Play: its default
+    /// chord, pressed while Play runs, sends exactly that action through the
+    /// dispatcher's Play path.
+    #[test]
+    fn every_play_action_has_a_key_path() {
+        let bindings = KeyBindings::default();
+        for &action in PLAY_SESSION_ACTIONS {
+            assert!(DISPATCHED_ACTIONS.contains(&action), "{action:?}");
+            let chord = bindings.get(action).unwrap_or_else(|| panic!("{action:?} has no default chord")).clone();
+            let mut keys = vec![chord.key];
+            if chord.ctrl {
+                keys.push(KeyCode::ControlLeft);
+            }
+            if chord.alt {
+                keys.push(KeyCode::AltLeft);
+            }
+            if chord.shift {
+                keys.push(KeyCode::ShiftLeft);
+            }
+            let (sent, _) = dispatch(PlayModeState::Playing, &keys);
+            assert_eq!(sent, vec![action], "{} ({}) during Play", action.name(), chord.display());
+        }
+    }
+
+    /// During Play the read-only chords run and the writing ones go to the
+    /// game: Ctrl+C copies and Ctrl+A selects all, while Ctrl+S, Ctrl+Z,
+    /// Ctrl+D and Ctrl+V send nothing (each sends its action while editing).
+    #[test]
+    fn play_keys_copy_and_select_but_never_write() {
+        let ctrl = KeyCode::ControlLeft;
+        assert_eq!(dispatch(PlayModeState::Playing, &[ctrl, KeyCode::KeyC]).0, vec![Action::Copy]);
+        assert_eq!(dispatch(PlayModeState::Playing, &[ctrl, KeyCode::KeyA]).0, vec![Action::SelectAll]);
+        for key in [KeyCode::KeyS, KeyCode::KeyZ, KeyCode::KeyD, KeyCode::KeyV] {
+            let (sent, _) = dispatch(PlayModeState::Playing, &[ctrl, key]);
+            assert!(sent.is_empty(), "Ctrl+{key:?} sent {sent:?} during Play");
+            let (sent, _) = dispatch(PlayModeState::Editing, &[ctrl, key]);
+            assert_eq!(sent.len(), 1, "Ctrl+{key:?} sent {sent:?} while editing");
+        }
+    }
+
+    /// What the menu handler sent for one action.
+    #[derive(Debug, Default, PartialEq)]
+    struct Sent {
+        files: usize,
+        undos: usize,
+        redos: usize,
+        copies: usize,
+        duplicates: usize,
+        paste: bool,
+    }
+
+    /// Run the menu handler once in `state` on `action`, and return what it
+    /// sent and the warnings it left. Each warning is also in the Output
+    /// panel.
+    fn menu(state: PlayModeState, action: Action) -> (Sent, Vec<String>) {
+        let mut app = App::new();
+        app.add_message::<crate::ui::MenuActionEvent>()
+            .add_message::<crate::commands::UndoCommandEvent>()
+            .add_message::<crate::commands::RedoCommandEvent>()
+            .add_message::<crate::camera_controller::FrameSelectionEvent>()
+            .add_message::<crate::camera_controller::GoToCameraEvent>()
+            .add_message::<crate::clipboard::CopyEvent>()
+            .add_message::<crate::clipboard::DuplicateEvent>()
+            .add_message::<crate::undo::UndoEvent>()
+            .add_message::<crate::undo::RedoEvent>()
+            .add_message::<crate::ui::FileEvent>()
+            .add_message::<crate::selection_sync::SelectChildrenEvent>()
+            .add_message::<crate::selection_sync::SelectDescendantsEvent>()
+            .add_message::<crate::selection_sync::SelectParentEvent>()
+            .add_message::<crate::selection_sync::SelectSiblingsEvent>()
+            .add_message::<crate::selection_sync::InvertSelectionEvent>()
+            .add_message::<crate::modal_tool::ActivateModalToolEvent>();
+        app.insert_resource(State::new(state));
+        app.insert_resource(crate::ui::StudioState::default());
+        app.init_resource::<crate::undo::UndoStack>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.add_systems(Update, handle_menu_action_events);
+        app.world_mut().write_message(crate::ui::MenuActionEvent::new(action));
+        app.update();
+        let world = app.world_mut();
+        let studio = world.resource::<crate::ui::StudioState>();
+        let paste = studio.pending_paste || studio.pending_paste_into;
+        let sent = Sent {
+            files: world.resource_mut::<Messages<crate::ui::FileEvent>>().drain().count(),
+            undos: world.resource_mut::<Messages<crate::undo::UndoEvent>>().drain().count(),
+            redos: world.resource_mut::<Messages<crate::undo::RedoEvent>>().drain().count(),
+            copies: world.resource_mut::<Messages<crate::clipboard::CopyEvent>>().drain().count(),
+            duplicates: world.resource_mut::<Messages<crate::clipboard::DuplicateEvent>>().drain().count(),
+            paste,
+        };
+        let warnings: Vec<String> = world
+            .resource::<crate::notifications::NotificationManager>()
+            .notifications
+            .iter()
+            .filter(|n| n.level == crate::notifications::NotificationLevel::Warning)
+            .map(|n| n.message.clone())
+            .collect();
+        let output: Vec<String> = world
+            .resource::<crate::ui::OutputConsole>()
+            .entries
+            .iter()
+            .filter(|e| e.level == crate::ui::LogLevel::Warn)
+            .map(|e| e.message.clone())
+            .collect();
+        assert_eq!(output, warnings, "{action:?}: the Output panel and the toasts disagree");
+        (sent, warnings)
+    }
+
+    /// The menu and the buttons get the keyboard's answer. During Play each
+    /// write sends nothing and says why; while editing each sends its event.
+    #[test]
+    fn the_menu_refuses_writes_during_play_and_says_why() {
+        let writes = [
+            Action::SaveScene,
+            Action::SaveSceneAs,
+            Action::Undo,
+            Action::Redo,
+            Action::Cut,
+            Action::Paste,
+            Action::PasteInto,
+            Action::Duplicate,
+            Action::Delete,
+            Action::Group,
+            Action::Ungroup,
+        ];
+        for action in writes {
+            let (sent, warnings) = menu(PlayModeState::Playing, action);
+            assert_eq!(sent, Sent::default(), "{action:?} ran during Play");
+            assert_eq!(warnings, [play_refusal(PlayModeState::Playing, action).unwrap()], "{action:?}");
+            // Delete with nothing selected, and Group and Ungroup (run by
+            // their own handler), send nothing from here while editing either.
+            if !matches!(action, Action::Delete | Action::Group | Action::Ungroup) {
+                let (sent, warnings) = menu(PlayModeState::Editing, action);
+                assert_ne!(sent, Sent::default(), "{action:?} sent nothing while editing");
+                assert!(warnings.is_empty(), "{action:?}: {warnings:?}");
+            }
+        }
+        // Copy only reads the scene: it runs during Play, with no notice.
+        let (sent, warnings) = menu(PlayModeState::Playing, Action::Copy);
+        assert_eq!(sent.copies, 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Start Server is the multiplayer reader's to answer: no notice here.
+        let (_, warnings) = menu(PlayModeState::Playing, Action::StartServer);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
     /// The editor keys a game commonly binds reach the game: during Play
     /// Studio acts on none of them.
     #[test]
@@ -2623,5 +3122,215 @@ mod play_allowlist_tests {
         assert!(PLAY_SESSION_ACTIONS.contains(&Action::StopPlay));
         assert!(!PLAY_SESSION_ACTIONS.contains(&Action::FocusSelection));
         assert!(!PLAY_SESSION_ACTIONS.contains(&Action::Delete));
+    }
+
+    /// The View menu prints Ctrl+4 next to Assets. The chord reaches the
+    /// toggle, which stays live during Play like the other panel toggles.
+    #[test]
+    fn ctrl_4_toggles_assets_in_edit_and_in_play() {
+        for state in [PlayModeState::Editing, PlayModeState::Playing] {
+            let (sent, _) = dispatch(state, &[KeyCode::ControlLeft, KeyCode::Digit4]);
+            assert_eq!(sent, vec![Action::ToggleAssets], "{state:?} did not reach the Assets toggle");
+        }
+    }
+
+    /// Ctrl+Shift+F is Find in Scripts, and the Assets toggle does not answer
+    /// to it any more. Searching only reads, so it stays live during Play.
+    #[test]
+    fn ctrl_shift_f_finds_in_scripts_in_edit_and_in_play() {
+        for state in [PlayModeState::Editing, PlayModeState::Playing] {
+            let (sent, _) = dispatch(state, &[KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::KeyF]);
+            assert_eq!(sent, vec![Action::FindInScripts], "{state:?} did not reach Find in Scripts");
+        }
+        assert!(PLAY_SESSION_ACTIONS.contains(&Action::FindInScripts));
+    }
+}
+
+#[cfg(test)]
+mod look_picker_key_tests {
+    use super::*;
+
+    /// I samples in every tool; the terrain tools keep their own I.
+    #[test]
+    fn i_samples_everywhere_and_the_terrain_tools_keep_their_own_i() {
+        let bindings = KeyBindings::default();
+        let i = KeyBinding::new(KeyCode::KeyI);
+        assert_eq!(bindings.get(Action::SampleLook), Some(&i));
+        assert_eq!(bindings.get(Action::TerrainSampleMaterial), Some(&i));
+        assert_eq!(Action::SampleLook.context(), ActionContext::Global);
+        assert_eq!(Action::TerrainSampleMaterial.context(), ActionContext::Terrain);
+        assert!(DISPATCHED_ACTIONS.contains(&Action::SampleLook));
+        assert!(!PLAY_SESSION_ACTIONS.contains(&Action::SampleLook), "the game keeps I during Play");
+    }
+
+    #[test]
+    fn the_paint_bucket_has_a_chord_and_an_activation() {
+        let bindings = KeyBindings::default();
+        assert_eq!(
+            bindings.get(Action::ToolPaintBucket),
+            Some(&KeyBinding::new(KeyCode::KeyB).with_ctrl().with_alt())
+        );
+        assert!(DISPATCHED_ACTIONS.contains(&Action::ToolPaintBucket));
+    }
+}
+
+/// The Delete reports what it did, so Remove Road can say it, and refuses
+/// during Play wherever it is asked.
+#[cfg(test)]
+mod delete_outcome_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    fn world_in(state: PlayModeState) -> World {
+        let mut world = World::new();
+        world.insert_resource(State::new(state));
+        world.init_resource::<crate::undo::UndoStack>();
+        // `new()`, not the derived default, which keeps no notice.
+        world.insert_resource(crate::notifications::NotificationManager::new());
+        world.init_resource::<crate::ui::OutputConsole>();
+        world
+    }
+
+    /// A folder-backed instance goes to the Space's trash with an undo
+    /// entry; one with no file is removed from the scene only, with none.
+    #[test]
+    fn the_delete_says_what_it_removed_and_whether_undo_brings_it_back() {
+        let space = std::env::temp_dir().join(format!("eustress_delete_outcome_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        let folder = space.join("Workspace").join("Road");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("_instance.toml"), "[metadata]\nclass_name = \"TerrainSpline\"\n").unwrap();
+        let mut world = world_in(PlayModeState::Editing);
+        let road = world
+            .spawn((
+                eustress_common::classes::Instance::default(),
+                crate::space::instance_loader::InstanceFile {
+                    toml_path: folder.join("_instance.toml"),
+                    mesh_path: std::path::PathBuf::new(),
+                    name: "Road".to_string(),
+                },
+            ))
+            .id();
+        let outcome = delete_entities_now(&mut world, &[road]);
+        assert_eq!(
+            outcome,
+            DeleteOutcome {
+                refused: false,
+                removed: vec![road],
+                undoable: true
+            }
+        );
+        assert!(world.get_entity(road).is_err(), "the road's entity is still there");
+        assert!(!folder.exists(), "the road's folder is still in Workspace");
+        assert!(
+            space.join(".eustress").join("trash").join("Road").join("_instance.toml").is_file(),
+            "the road's folder is not in the trash"
+        );
+        assert!(world.resource::<crate::undo::UndoStack>().can_undo(), "the Delete pushed no undo entry");
+
+        let loose = world.spawn(eustress_common::classes::Instance::default()).id();
+        let outcome = delete_entities_now(&mut world, &[loose]);
+        assert_eq!(
+            outcome,
+            DeleteOutcome {
+                refused: false,
+                removed: vec![loose],
+                undoable: false
+            }
+        );
+        assert!(world.get_entity(loose).is_err(), "the loose entity is still there");
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// During Play the Delete is refused and said, and nothing is removed.
+    #[test]
+    fn the_delete_refuses_during_play() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut world = world_in(state);
+            let part = world.spawn(eustress_common::classes::Instance::default()).id();
+            let outcome = delete_entities_now(&mut world, &[part]);
+            assert_eq!(
+                outcome,
+                DeleteOutcome {
+                    refused: true,
+                    removed: Vec::new(),
+                    undoable: false
+                }
+            );
+            assert!(world.get_entity(part).is_ok(), "{state:?}: the part was deleted");
+            let toasts: Vec<String> = world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect();
+            let output: Vec<String> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+            assert_eq!(toasts, ["Stop Play to delete."], "{state:?}");
+            assert_eq!(output, ["Stop Play to delete."], "{state:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod chord_hold_tests {
+    use super::*;
+
+    fn pressed(keys: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut input = ButtonInput::<KeyCode>::default();
+        for key in keys {
+            input.press(*key);
+        }
+        input
+    }
+
+    /// Lift and Settle follow their bindings: rebinding Lift moves the key
+    /// (`-` no longer lifts), "+" (Shift+=) still settles, and a modifier the
+    /// chord does not name (Ctrl+=) is not Settle.
+    #[test]
+    fn lift_and_settle_follow_their_bindings() {
+        let mut kb = KeyBindings::default();
+        let minus = pressed(&[KeyCode::Minus]);
+        assert!(kb.check(Action::LiftSelection, &minus));
+        assert!(kb.held(Action::LiftSelection, &minus));
+
+        // In memory only: `rebind` would write the user's keybindings.ron.
+        kb.bindings.insert(Action::LiftSelection, KeyBinding::new(KeyCode::KeyL).with_alt());
+        assert!(!kb.held(Action::LiftSelection, &minus), "`-` still lifts after Lift was rebound");
+        assert!(kb.held(Action::LiftSelection, &pressed(&[KeyCode::AltLeft, KeyCode::KeyL])));
+
+        assert!(kb.check(Action::SettleSelection, &pressed(&[KeyCode::Equal])));
+        assert!(kb.check(Action::SettleSelection, &pressed(&[KeyCode::ShiftLeft, KeyCode::Equal])));
+        assert!(!kb.held(Action::SettleSelection, &pressed(&[KeyCode::ControlLeft, KeyCode::Equal])));
+    }
+
+    /// A nudge fires on the press, stays quiet through the repeat delay,
+    /// repeats after it, and stops when the chord is released.
+    #[test]
+    fn a_held_nudge_repeats_only_after_the_delay() {
+        let mut time = Time::default();
+        let (mut held, mut timer) = (false, 0.0f32);
+        assert!(nudge_should_fire(true, true, &time, &mut held, &mut timer), "the press fires");
+
+        time.advance_by(std::time::Duration::from_secs_f32(NUDGE_DELAY_SECS * 0.5));
+        assert!(!nudge_should_fire(false, true, &time, &mut held, &mut timer), "no repeat inside the delay");
+
+        time.advance_by(std::time::Duration::from_secs_f32(NUDGE_DELAY_SECS));
+        assert!(nudge_should_fire(false, true, &time, &mut held, &mut timer), "repeats after the delay");
+
+        assert!(!nudge_should_fire(false, false, &time, &mut held, &mut timer), "a released chord does not fire");
+        assert!(!held);
+    }
+
+    /// The View menu prints Ctrl+1 to Ctrl+4 for the four panels; each is bound.
+    #[test]
+    fn the_view_menu_panel_chords_are_bound() {
+        let kb = KeyBindings::default();
+        for (action, key) in [
+            (Action::ToggleExplorer, KeyCode::Digit1),
+            (Action::ToggleProperties, KeyCode::Digit2),
+            (Action::ToggleOutput, KeyCode::Digit3),
+        ] {
+            assert_eq!(kb.get(action), Some(&KeyBinding::new(key).with_ctrl()), "{action:?}");
+        }
+        assert_eq!(
+            kb.get(Action::ToggleAssets),
+            Some(&KeyBinding::new(KeyCode::Digit4).with_ctrl()),
+            "Ctrl+4 is printed next to Assets in the View menu but is not its chord",
+        );
     }
 }

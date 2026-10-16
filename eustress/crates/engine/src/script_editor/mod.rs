@@ -39,6 +39,7 @@ pub mod luau_parse;
 pub mod plugin;
 pub mod rune_service;
 pub mod runtime_snapshot;
+pub mod script_search;
 pub mod theme;
 pub mod workspace;
 #[cfg(feature = "lsp")]

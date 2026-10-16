@@ -31,6 +31,18 @@ pub mod light_panel;
 pub mod celestial_panel;
 /// Sound rows and edits, from its own `[sound]` section.
 pub mod sound_panel;
+/// The choices every enum Properties row offers, by class and row.
+pub mod property_enums;
+/// Dock layouts per mode and discipline, remembered user layouts and pins.
+pub mod layout_tables;
+/// How much of an outside string a Text draws (the renderer's i16 limit).
+pub mod display_text;
+/// The Publish dialog's "Publish to" picker (Publish As...).
+pub mod publish_targets;
+/// The Publish dialog's change logs.
+pub mod publish_changelog;
+/// The Publish dialog's optional cover.
+pub mod publish_cover;
 /// GUI class components snapshotted at Play and restored at Stop.
 pub mod gui_play_snapshot;
 /// The editor camera's Perspective (2D/3D, projection, axis view) into the
@@ -63,6 +75,10 @@ pub mod highlight;
 pub mod output_rows;
 #[path = "notifications.rs"]
 pub mod notifications_impl;
+
+/// Find in Scripts (Ctrl+Shift+F): gathers every script, searches, opens a
+/// result at its line and fills the modal.
+pub mod script_search_ui;
 
 // Re-exports
 pub use file_dialogs::{SceneFile, FileEvent, pick_open_file, pick_save_file};
@@ -333,14 +349,26 @@ pub struct StudioState {
     /// Bumped by Ctrl+K; `sync_bevy_to_slint` flips the command bar once
     /// per bump.
     pub toggle_command_bar_pulse: u32,
+    /// Bumped by Ctrl+4; `sync_bevy_to_slint` flips the Assets
+    /// panel once per bump (its visibility lives in Slint only).
+    pub toggle_assets_pulse: u32,
     /// Bumped by Ctrl+F; `sync_bevy_to_slint` opens Find & Replace.
     pub open_find_pulse: u32,
+    /// Bumped by Ctrl+Shift+F (and by the editor when a script holds the
+    /// keyboard); `script_search_ui::sync_script_search` opens Find in Scripts.
+    pub open_script_search_pulse: u32,
+    /// The Find in Scripts modal: its query, matches, highlighted row and the
+    /// requests it makes of the engine.
+    pub script_search: crate::script_editor::script_search::SearchState,
     pub script_editor_content: String,
     pub script_content_dirty: bool,
     /// Bumped when an editor text change is applied. The analyzer compares
     /// against it rather than consuming `script_content_dirty`, which belongs
     /// to the highlighter.
     pub script_content_revision: u64,
+    /// Bumped when a script's summary file is written, so the Soul Panel
+    /// refreshes its summary indicator (a disk stat its change hash cannot see).
+    pub soul_panel_revision: u32,
     /// Highlight language for the active script tab, resolved from its
     /// source file. A script folder's tab title has no extension, so the
     /// title cannot say whether the script is Rune or Luau.
@@ -498,10 +526,14 @@ impl Default for StudioState {
             pending_reorder: None,
             pending_script_jump_line: None,
             toggle_command_bar_pulse: 0,
+            toggle_assets_pulse: 0,
             open_find_pulse: 0,
+            open_script_search_pulse: 0,
+            script_search: Default::default(),
             script_editor_content: String::new(),
             script_content_dirty: false,
             script_content_revision: 0,
+            soul_panel_revision: 0,
             script_language: String::new(),
             script_source_path: None,
             script_spans_all: Vec::new(),
@@ -1117,8 +1149,4 @@ impl Plugin for StudioUiPlugin {
         app.init_resource::<StudioState>();
         warn!("StudioUiPlugin is deprecated - use SlintUiPlugin");
     }
-}
-
-fn try_restore_auth_session(mut auth_state: ResMut<crate::auth::AuthState>) {
-    auth_state.try_restore_session();
 }

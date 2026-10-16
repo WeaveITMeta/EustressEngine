@@ -1,3 +1,5 @@
 # Wrangler local secrets (JEV_API_KEY, GROK_API_KEY, ...) for `wrangler dev`. Never committed.
 .dev.vars
 .dev.vars.*
+# The Worker's source copied for a test (tests/helpers/load_worker.mjs); removed when the test exits.
+.test-worker-*/

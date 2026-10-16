@@ -12,6 +12,9 @@ eustress-avatar-schema = { path = "../avatar-schema", features = ["bevy"] }
 # The particle solver behind `realism::particle_sim`, which re-exports it. A
 # crate of its own so dev builds compile it optimised (.cargo/config.toml).
 eustress-particle-sim = { path = "../particle-sim" }
+# The ocean solver behind `realism::ocean` (the Terrain's moving sea), also
+# compiled optimised in dev builds.
+eustress-ocean = { path = "../ocean" }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }
@@ -30,6 +33,10 @@ mime_guess = "2.0"
 parking_lot = "0.12"
 serde_json = "1.0"
 toml = "0.8"
+# NFKC for listing tags, as the Worker normalizes them (listing_tags)
+unicode-normalization = "0.1.25"
+# The API's origin, by the same rules the API uses (api_base::api_origin)
+url = "2"
 
 # Compression for asset bundles
 flate2 = "1.0"
@@ -185,3 +192,6 @@ gui = ["dep:slint"]
 # 0-11 shipped. When OFF the engine reads values verbatim (legacy
 # behaviour preserved as an escape hatch for diagnosing regressions).
 units_v1 = []
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native", "apple-native", "async-secret-service", "crypto-rust", "async-io"] }

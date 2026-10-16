@@ -34,7 +34,10 @@ import { Theme, PanelHeader } from "theme.slint";
 // One line on an order. `display-type` mirrors Odoo: a "section" or "note"
 // line is presentational and contributes nothing to the totals.
 export struct PurchaseOrderLineRow {
+    // Whole: the editable LineEdit saves it back on every keystroke.
     description: string,
+    // Bounded copy for read-only display (display_text::shown_line).
+    description-shown: string,
     product-id: string,
     quantity: string,
     uom: string,
@@ -286,7 +289,7 @@ component OrderLinesTable inherits VerticalLayout {
             // A section or note line spans the full width and carries no money,
             // exactly as in Odoo.
             if line.display-type != "product": Text {
-                text: line.display-type == "section" ? line.description : "// " + line.description;
+                text: line.display-type == "section" ? line.description-shown : "// " + line.description-shown;
                 color: line.display-type == "section" ? Theme.text-primary : Theme.text-secondary;
                 font-size: 11px;
                 font-weight: line.display-type == "section" ? 600 : 400;
@@ -304,7 +307,7 @@ component OrderLinesTable inherits VerticalLayout {
                     edited(t) => { root.line-changed(root.order.reference, idx, "description", t); }
                 }
                 if !root.editable: Text {
-                    text: line.description;
+                    text: line.description-shown;
                     color: Theme.text-primary;
                     font-size: 11px;
                     width: 34%;

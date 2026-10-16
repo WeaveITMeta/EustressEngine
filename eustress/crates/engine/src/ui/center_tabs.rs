@@ -253,6 +253,36 @@ pub struct CenterTabManager {
     pub pending_close: Option<TabCloseRequest>,
 }
 
+impl CenterTabEntry {
+    /// Re-read a text tab's buffer from its file. Returns false when the file
+    /// is gone (the tab has nothing left to show). Tabs without a text buffer
+    /// (image, video, web) are untouched.
+    fn reload_buffer_from_disk(&mut self) -> bool {
+        let Some(path) = self.file_path.clone() else { return true };
+        let reload_summary = matches!(self.tab_type, CenterTabType::SoulScript { .. });
+        match &self.tab_type {
+            CenterTabType::CodeEditor { .. } | CenterTabType::SoulScript { .. } => {
+                match resolve_script_source(&path) {
+                    Some(src) => self.content = src,
+                    None => return false,
+                }
+            }
+            CenterTabType::Document { doc_type: DocumentType::Text | DocumentType::Markdown } => {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => self.content = text,
+                    Err(_) => return false,
+                }
+            }
+            _ => return true,
+        }
+        if reload_summary {
+            self.summary_content = resolve_script_summary(&path).unwrap_or_default();
+        }
+        self.dirty = false;
+        true
+    }
+}
+
 impl Default for CenterTabManager {
     fn default() -> Self {
         // Scene tab is always present and pinned
@@ -335,6 +365,13 @@ impl CenterTabManager {
             // Entity must re-resolve it from `file_path` on first paint.
             let mut restored = tab;
             restored.entity = None;
+            // The buffer is from the moment the Space was left. The file may
+            // have changed since: a Restore Points revert rewrites it, and git
+            // or an agent can edit it while another Space is open. Keeping the
+            // old text would show it as clean, and the next keystroke and Save
+            // would write it back over the newer file. Dirty tabs were saved
+            // before the snapshot, so the disk is the truth for every tab here.
+            if !restored.reload_buffer_from_disk() { continue; }
             // Re-stamp the id from this manager's counter so it doesn't
             // collide with the rebuilt Scene tab (id=0).
             restored.id = self.next_id();
@@ -1028,28 +1065,60 @@ pub fn code_save_target(tab: &CenterTabEntry, entity_source: Option<&Path>) -> O
     if is_code { code_source_file(tab, entity_source) } else { None }
 }
 
-/// Write a script's text to `path`, keeping the line endings the file already
-/// uses, then put the same bytes into the Space's Fjall `tree`.
+/// Write `bytes` to `path` so the file is never seen empty or half written:
+/// the bytes go to a sibling temp file, which then replaces `path` in one
+/// rename. A crash, a hang or a locked target leaves the old file as it was.
+/// `durable` flushes the temp file to disk first (a Save); the per-keystroke
+/// writes of a script's Summary skip it, since the flush would stall typing.
 ///
-/// The write is an ordinary edit as far as the file watcher is concerned:
-/// no `RecentlyWrittenFiles` mark. A marked path is skipped entirely, which
-/// would leave the running `SoulScriptData` on the old source and skip the
-/// watcher's disk-to-tree mirror. The direct `put_tree_file` makes the save
-/// durable even when the watcher drops the event (its start-up grace period
-/// after a Space opens); it is a no-op when no database is active.
-pub fn write_script_file(path: &Path, text: &str) -> std::io::Result<()> {
+/// The temp file's name ends in `.tmp`, a type the file watcher ignores.
+pub fn write_file_atomic(path: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
     use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temp = path.with_file_name(format!(".{name}.tmp"));
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        if durable {
+            file.sync_all()?;
+        }
+    }
+    // A scanner or indexer can hold the target for a moment: retry the
+    // rename a couple of times before giving up.
+    let mut result = std::fs::rename(&temp, path);
+    for pause_ms in [20u64, 60] {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+        result = std::fs::rename(&temp, path);
+    }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Write a script's text to `path`, keeping the line endings the file already
+/// uses, atomically ([`write_file_atomic`]), then put the same bytes into the
+/// Space's Fjall `tree`.
+///
+/// No `RecentlyWrittenFiles` mark, so the watcher may still see the change
+/// (its disk-to-tree mirror, hot reload). Nothing depends on it: an atomic
+/// replace can be reported against the temp file's name, so the caller gives
+/// the running `SoulScriptData` the saved text itself, and `put_tree_file`
+/// makes the save durable even when the watcher drops the event (its start-up
+/// grace period after a Space opens). It is a no-op when no database is active.
+pub fn write_script_file(path: &Path, text: &str) -> std::io::Result<()> {
     let crlf = std::fs::read(path)
         .map(|b| b.windows(2).any(|w| w == b"\r\n"))
         .unwrap_or(false);
     let lf = text.replace("\r\n", "\n");
     let out = if crlf { lf.replace('\n', "\r\n") } else { lf };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(out.as_bytes())?;
-    file.sync_all()?;
+    write_file_atomic(path, out.as_bytes(), true)?;
     crate::space::active_db::put_tree_file(path, out.as_bytes());
     Ok(())
 }
@@ -1336,6 +1405,46 @@ mod tests {
         assert_eq!(saved, named);
         assert_eq!(std::fs::read_to_string(&named).unwrap(), "-- new\n");
         assert_eq!(std::fs::read_to_string(folder.join("Other.luau")).unwrap(), "-- other\n");
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_no_temp() {
+        let s = Scratch::new("atomic");
+        let file = s.0.join("sub").join("a.rune");
+        write_file_atomic(&file, b"one", true).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"one");
+        write_file_atomic(&file, b"two", false).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"two");
+        let names: Vec<String> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a.rune"], "the temp file is gone");
+    }
+
+    #[test]
+    fn a_failed_replace_leaves_the_target_alone_and_no_temp() {
+        // The target is a non-empty directory, which a rename cannot replace.
+        let s = Scratch::new("atomic-fail");
+        let target = s.0.join("a.rune");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        assert!(write_file_atomic(&target, b"x", false).is_err());
+        assert!(target.join("inner").is_dir(), "the target is untouched");
+        assert!(!s.0.join(".a.rune.tmp").exists(), "the temp file is removed");
+    }
+
+    /// The case the in-place write destroyed: the new bytes cannot be written,
+    /// and the existing file must keep its old content. The temp name is
+    /// occupied by a directory, so the temp write fails before the target is
+    /// touched.
+    #[test]
+    fn a_failed_temp_write_leaves_the_old_content() {
+        let s = Scratch::new("atomic-temp-fail");
+        let target = s.0.join("a.rune");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::create_dir_all(s.0.join(".a.rune.tmp")).unwrap();
+        assert!(write_file_atomic(&target, b"new", true).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old", "the old file is untouched");
     }
 
     #[test]

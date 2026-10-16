@@ -539,6 +539,10 @@ struct PartSave {
     translation: Vec3,
     rotation: Quat,
     size: Vec3,
+    /// The live `Transform.scale` without a folded mesh scale: what a
+    /// multiplier-kind custom mesh saves as its `scale` (a ratio on the
+    /// mesh's own size). A length part saves `size` instead.
+    scale: Vec3,
     color: [f32; 4],
     material: String,
     transparency: f32,
@@ -622,6 +626,7 @@ fn part_save_for(
     local_tf: &Transform,
     instance_file: Option<&crate::space::instance_loader::InstanceFile>,
     part: Option<&eustress_common::classes::Part>,
+    fold: Option<&crate::space::instance_loader::MeshFold>,
     workspace_dir: &Path,
 ) -> Option<PartSave> {
     use eustress_common::classes::ClassName;
@@ -686,11 +691,14 @@ fn part_save_for(
         name: instance.name.clone(),
         toml_path,
         has_file: instance_file.is_some(),
-        translation: local_tf.translation,
+        // The file's position: the render translation without the fold's
+        // offset, or every save would move the part by it again.
+        translation: crate::space::instance_loader::file_position(local_tf.translation, local_tf.rotation, fold),
         rotation: local_tf.rotation,
         // TOML scale = BasePart.size (correct in both scale-tool
         // branches; Transform.scale alone pinned legacy parts at 1x1x1).
         size: base_part.size,
+        scale: local_tf.scale / fold.map_or(Vec3::ONE, |fold| fold.scale),
         color,
         material,
         transparency: base_part.transparency,
@@ -708,9 +716,9 @@ fn part_save_for(
     })
 }
 
-/// Save one part: the file's definition with the live values merged in,
-/// written only when they differ from what the file holds. `Ok(true)` when
-/// written, `Ok(false)` when the file already matched. Runs on a worker
+/// Save one part: its record with the live values merged in, written only
+/// when they differ from what the record holds. `Ok(true)` when written,
+/// `Ok(false)` when the record already matched or is gone. Runs on a worker
 /// thread.
 fn save_part(
     p: &PartSave,
@@ -728,11 +736,24 @@ fn save_part(
     // as the loader does. The disk heal (`load_instance_definition_with_extras`)
     // wrote the file back whenever its canonical form differed, so a save
     // with no edits rewrote every file before comparing anything.
-    // A part that had a file whose file is gone was trashed, moved or
-    // renamed after its values were gathered. Writing now would bring the
-    // old file back, so the write is dropped.
+    // A part with no loose file has its record in the Space database alone
+    // (a migrated Space, or a part loaded from the tree), and is saved there.
+    // One that neither holds was trashed, cut, moved or renamed after its
+    // values were gathered: writing now would bring it back, so the write is
+    // dropped. The read and the write hold the lock a trash and a move take.
     if p.has_file && !p.toml_path.is_file() {
-        return Ok(false);
+        return crate::space::active_db::update_instance_text(&p.toml_path, |text| {
+            let mut def = match crate::space::instance_loader::load_instance_definition_from_str(text) {
+                Ok(mut d) => {
+                    if !merge_live_values(&mut d, p, now) {
+                        return Ok(None);
+                    }
+                    d
+                }
+                Err(_) => fresh_definition(p, now),
+            };
+            crate::space::instance_loader::signed_write_text(Some(text), &mut def, stamp)
+        });
     }
     let existing = if p.has_file {
         std::fs::read_to_string(&p.toml_path)
@@ -742,89 +763,16 @@ fn save_part(
         None
     };
 
-    let mut def = if let Some(mut d) = existing {
-        let before = d.clone();
-        // SCALE GUARD: for a CUSTOM-mesh part (mesh not under "parts/") the
-        // TOML `scale` is the user's MULTIPLIER, while `BasePart.size` is the
-        // mesh-AABB-derived world size; writing size into scale stretches the
-        // mesh on reload. Custom meshes keep the on-disk scale. Mirrors the
-        // guard in `write_instance_changes_system` (instance_loader.rs).
-        let is_custom_mesh = d.asset.as_ref()
-            .map(|a| crate::space::representation::mesh_requires_filesystem(&a.mesh))
-            .unwrap_or(false);
-        // The live pose and, for a primitive, its size, in the file's own
-        // unit (`set_authored_transform`): a Space imported in feet stays in
-        // feet.
-        crate::space::instance_loader::set_authored_transform(
-            &mut d,
-            p.translation,
-            p.rotation,
-            (!is_custom_mesh).then_some(p.size),
-        );
-        d.properties.color = p.color;
-        d.properties.transparency = p.transparency;
-        d.properties.anchored = p.anchored;
-        d.properties.can_collide = p.can_collide;
-        d.properties.cast_shadow = p.cast_shadow;
-        d.properties.reflectance = p.reflectance;
-        d.properties.locked = p.locked;
-        d.properties.material = p.material.clone();
-        // A file that still names the part keeps its own `name` entry; only a
-        // name that differs from the one the file gives is written.
-        if d.metadata.name.as_deref().or(p.stem.as_deref()) != Some(p.name.as_str()) {
-            d.metadata.name = p.name_override.clone();
+    let mut def = match existing {
+        Some(mut d) => {
+            if !merge_live_values(&mut d, p, now) {
+                return Ok(false);
+            }
+            d
         }
-        if saved_fields_match(&before, &d) {
-            return Ok(false);
-        }
-        d.metadata.last_modified = now.to_string();
-        d
-    } else {
         // New entity (no on-disk TOML) or unreadable file: build from
         // components.
-        InstanceDefinition {
-            plasma: None,
-            asset: Some(AssetReference {
-                mesh: p.mesh.to_string(),
-                scene: "Scene0".to_string(),
-            }),
-            transform: TransformData {
-                position: p.translation.to_array(),
-                rotation: p.rotation.to_array(),
-                scale: p.size.to_array(),
-            },
-            properties: InstanceProperties {
-                color: p.color,
-                material: p.material.clone(),
-                transparency: p.transparency,
-                anchored: p.anchored,
-                can_collide: p.can_collide,
-                cast_shadow: p.cast_shadow,
-                reflectance: p.reflectance,
-                locked: p.locked,
-                physics: None,
-                respect_gltf_materials: false,
-                // Persist the destructible opt-in so a part authored as
-                // destructible stays destructible across a save/load.
-                destructible: p.destructible,
-            },
-            metadata: InstanceMetadata {
-                class_name: p.class_name.clone(),
-                archivable: p.archivable,
-                name: p.name_override.clone(),
-                created: String::new(),
-                last_modified: now.to_string(),
-                ..Default::default()
-            },
-            material: None,
-            thermodynamic: None,
-            electrochemical: None,
-            ui: None,
-            attributes: None,
-            tags: None,
-            parameters: None,
-            extra: std::collections::HashMap::new(),
-        }
+        None => fresh_definition(p, now),
     };
 
     // Only a new part gets a folder made for it.
@@ -835,6 +783,100 @@ fn save_part(
     }
     crate::space::instance_loader::write_instance_definition_signed(&p.toml_path, &mut def, stamp)?;
     Ok(true)
+}
+
+/// `d` with the live values in `p` merged in: `false` when the record
+/// already held them.
+fn merge_live_values(d: &mut InstanceDefinition, p: &PartSave, now: &str) -> bool {
+    let before = d.clone();
+    // SCALE GUARD: the size is saved as the scale only when the scale is a
+    // length: a primitive's, or a custom mesh that says so (`scale_kind`, a
+    // Roblox import's unit-sized mesh). A multiplier mesh's `scale` is the
+    // user's ratio on the mesh's own size, while `BasePart.size` is that
+    // size times the ratio; writing size into scale would stretch the mesh
+    // on reload, so it keeps the on-disk scale.
+    let scale_is_length = d.asset.as_ref()
+        .map_or(true, |a| eustress_common::scale_kind::is_length_of(Some(&a.mesh), a.scale_kind.as_deref()));
+    // The live pose and, for a length, its size, in the file's own unit
+    // (`set_authored_transform`): a Space imported in feet stays in feet.
+    crate::space::instance_loader::set_authored_transform(
+        d,
+        p.translation,
+        p.rotation,
+        scale_is_length.then_some(p.size),
+    );
+    // A multiplier mesh's scale is the live ratio, as it is, in no unit: the
+    // scale tool and undo resize it, and without this the resize was lost on
+    // reload. A degenerate scale keeps the file's.
+    if !scale_is_length && p.scale.is_finite() && p.scale.min_element() > 0.0 {
+        d.transform.scale = p.scale.to_array();
+    }
+    d.properties.color = p.color;
+    d.properties.transparency = p.transparency;
+    d.properties.anchored = p.anchored;
+    d.properties.can_collide = p.can_collide;
+    d.properties.cast_shadow = p.cast_shadow;
+    d.properties.reflectance = p.reflectance;
+    d.properties.locked = p.locked;
+    d.properties.material = p.material.clone();
+    // A file that still names the part keeps its own `name` entry; only a
+    // name that differs from the one the file gives is written.
+    if d.metadata.name.as_deref().or(p.stem.as_deref()) != Some(p.name.as_str()) {
+        d.metadata.name = p.name_override.clone();
+    }
+    if saved_fields_match(&before, d) {
+        return false;
+    }
+    d.metadata.last_modified = now.to_string();
+    true
+}
+
+/// A new part's whole record, from its components.
+fn fresh_definition(p: &PartSave, now: &str) -> InstanceDefinition {
+    InstanceDefinition {
+        plasma: None,
+        asset: Some(AssetReference {
+            mesh: p.mesh.to_string(),
+            scene: "Scene0".to_string(),
+            scale_kind: None,
+        }),
+        transform: TransformData {
+            position: p.translation.to_array(),
+            rotation: p.rotation.to_array(),
+            scale: p.size.to_array(),
+        },
+        properties: InstanceProperties {
+            color: p.color,
+            material: p.material.clone(),
+            transparency: p.transparency,
+            anchored: p.anchored,
+            can_collide: p.can_collide,
+            cast_shadow: p.cast_shadow,
+            reflectance: p.reflectance,
+            locked: p.locked,
+            physics: None,
+            respect_gltf_materials: false,
+            // Persist the destructible opt-in so a part authored as
+            // destructible stays destructible across a save/load.
+            destructible: p.destructible,
+        },
+        metadata: InstanceMetadata {
+            class_name: p.class_name.clone(),
+            archivable: p.archivable,
+            name: p.name_override.clone(),
+            created: String::new(),
+            last_modified: now.to_string(),
+            ..Default::default()
+        },
+        material: None,
+        thermodynamic: None,
+        electrochemical: None,
+        ui: None,
+        attributes: None,
+        tags: None,
+        parameters: None,
+        extra: std::collections::HashMap::new(),
+    }
 }
 
 // ============================================================================
@@ -1073,11 +1115,14 @@ fn run_persist_job(job: &PersistJob) -> PersistOutcome {
     out
 }
 
-/// Patch a file's tags and attributes. A file that is gone (trashed, moved,
-/// renamed) is left gone: `Ok(false)`.
+/// Patch a record's tags and attributes: its loose file, else the Space
+/// database's copy (`save_part`'s rule). A record neither holds (trashed,
+/// cut, moved, renamed) is left gone: `Ok(false)`.
 fn save_attributes(a: &AttrSave) -> Result<bool, String> {
     if !a.toml_path.is_file() {
-        return Ok(false);
+        return crate::space::active_db::update_instance_text(&a.toml_path, |text| {
+            crate::space::instance_loader::patch_tags_attributes_text(text, a.tags.clone(), a.attrs.clone()).map(Some)
+        });
     }
     crate::space::instance_loader::patch_tags_attributes_toml(&a.toml_path, a.tags.clone(), a.attrs.clone())?;
     Ok(true)
@@ -1122,6 +1167,7 @@ impl PartSave {
             .into_iter()
             .chain(self.rotation.to_array())
             .chain(self.size.to_array())
+            .chain(self.scale.to_array())
             .chain(self.color)
             .chain([self.transparency, self.reflectance]);
         for v in floats {
@@ -1159,6 +1205,7 @@ pub fn persist_edits(
         &Transform,
         Option<&crate::space::instance_loader::InstanceFile>,
         Option<&eustress_common::classes::Part>,
+        Option<&crate::space::instance_loader::MeshFold>,
     )>,
     attributes: Query<(
         Entity,
@@ -1210,8 +1257,8 @@ pub fn persist_edits(
 
     let mut job_parts = Vec::new();
     for entity in d.entities.drain() {
-        let Ok((entity, instance, base_part, transform, file, part)) = parts.get(entity) else { continue };
-        let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, &workspace_dir) else {
+        let Ok((entity, instance, base_part, transform, file, part, fold)) = parts.get(entity) else { continue };
+        let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, fold, &workspace_dir) else {
             continue;
         };
         let fingerprint = save.fingerprint();
@@ -1287,12 +1334,13 @@ pub fn persist_pending_edits(world: &mut World) -> PersistOutcome {
             &Transform,
             Option<&crate::space::instance_loader::InstanceFile>,
             Option<&eustress_common::classes::Part>,
+            Option<&crate::space::instance_loader::MeshFold>,
         )>();
-        for (entity, instance, base_part, transform, file, part) in query.iter(world) {
+        for (entity, instance, base_part, transform, file, part, fold) in query.iter(world) {
             if dirty.as_ref().is_some_and(|d| !d.contains(&entity)) {
                 continue;
             }
-            if let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, &workspace_dir) {
+            if let Some(save) = part_save_for(entity, instance, base_part, transform, file, part, fold, &workspace_dir) {
                 parts.push(save);
             }
         }
@@ -1340,6 +1388,7 @@ pub fn persist_edits_on_exit(world: &mut World) {
         if outcome.written > 0 || outcome.errors > 0 {
             info!("💾 Wrote {} pending edits before exit ({} errors)", outcome.written, outcome.errors);
         }
+        crate::space::active_db::flush_on_exit();
     }
 }
 
@@ -1363,6 +1412,28 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         error!("❌ Not a valid Space directory: {:?}", space_path);
         if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
             notifs.error(format!("Not a valid Space directory: {}", space_path.display()));
+        }
+        return;
+    }
+
+    // Never during Play: Play's snapshot and its script hosts belong to the
+    // outgoing Space, and Stop would restore that Space's scene into this
+    // one. Restore Points refuses to revert in Play for the same reason.
+    if open_space_refused_in_play(world) {
+        warn!("Not opening {:?} during Play; stop Play first", space_path);
+        if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+            notifs.warning("Stop Play before opening a Space.".to_string());
+        }
+        return;
+    }
+
+    // A Space a newer build made is not opened: this build would read it by
+    // rules it does not know, and write it back wrong. Refused before anything
+    // is written to it (the manifest and integrity repair below both write).
+    if let Some(format) = super::format_migration::newer_than_build(space_path) {
+        warn!("Not opening {:?}: it is format {}, and this build opens format {} and older", space_path, format, eustress_common::space_format::CURRENT);
+        if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+            notifs.warning(super::format_migration::newer_space_message(format));
         }
         return;
     }
@@ -1482,6 +1553,33 @@ pub fn open_space(world: &mut World, space_path: &Path) {
 
     if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
         *registry = crate::space::SpaceFileRegistry::default();
+    }
+
+    // Terrain roots are not instances, so the despawn above leaves them, and
+    // the disk loader keeps a root that exists: a reopen of the same Space
+    // kept the outgoing terrain, a revert its pre-revert heights, and the
+    // next Save wrote them back. The loaders spawn the incoming terrain.
+    let terrain_roots: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<eustress_common::terrain::TerrainRoot>>();
+        q.iter(world).collect()
+    };
+    for root in terrain_roots {
+        world.despawn(root);
+    }
+
+    // Custom meshes are cached by their Space-relative path, so a Space with
+    // the same `meshes/Foo.glb` (or a revert that changed it) drew the
+    // outgoing Space's mesh.
+    if let Some(mut mesh_cache) = world.get_resource_mut::<crate::space::instance_loader::PrimitiveMeshCache>() {
+        *mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
+    }
+
+    // A cut waiting to be pasted names the outgoing Space's folders, whose
+    // entities are gone; pasting it would move what it can no longer find.
+    if let Some(mut clipboard) = world.get_resource_mut::<crate::clipboard::EditorClipboard>() {
+        if clipboard.is_cut {
+            clipboard.clear();
+        }
     }
 
     // Reset the MaterialRegistry. Without this, the previous space's
@@ -1937,9 +2035,10 @@ fn scaffold_space(space_root: &Path) {
         .unwrap_or("Space1");
 
     let space_toml = format!(
-        "[space]\nname = \"{}\"\nversion = \"0.1.0\"\ncreated = \"{}\"\n",
+        "[space]\nname = \"{}\"\nversion = \"0.1.0\"\ncreated = \"{}\"\nformat = {}\n",
         space_name,
         chrono::Utc::now().to_rfc3339(),
+        eustress_common::space_format::CURRENT,
     );
     let _ = std::fs::write(space_root.join("space.toml"), space_toml);
 
@@ -2320,6 +2419,7 @@ name = "{space_name}"
 author = "{author}"
 version = "0.1.0"
 created_with = "Eustress Engine"
+format = {format}
 
 [metadata]
 created = "{now}"
@@ -2328,6 +2428,7 @@ last_modified = "{now}"
         space_name = space_name,
         author = author,
         now = now,
+        format = eustress_common::space_format::CURRENT,
     )
 }
 
@@ -2420,6 +2521,9 @@ const GITIGNORE: &str = r#"# Eustress — gitignore
 # User-local state — not committed
 .eustress/local/
 
+# Deleted parts: kept on disk, recoverable by hand, never committed
+.eustress/trash/
+
 # OS artifacts
 .DS_Store
 Thumbs.db
@@ -2472,6 +2576,13 @@ fn is_synthetic_core_path(toml_path: &Path) -> bool {
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with("__bin_"))
+}
+
+/// Whether `open_space` must refuse now: a Play session is running.
+fn open_space_refused_in_play(world: &World) -> bool {
+    world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .is_some_and(|s| *s.get() != crate::play_mode::PlayModeState::Editing)
 }
 
 /// Strip characters that are illegal in file system names.
@@ -2568,6 +2679,7 @@ mod tests {
             translation: Vec3::new(x, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             size: Vec3::ONE,
+            scale: Vec3::ONE,
             color: [0.5, 0.5, 0.5, 1.0],
             material: "Plastic".to_string(),
             transparency: 0.0,
@@ -2601,6 +2713,75 @@ mod tests {
         assert_eq!(save_part(&part, None, "2026-09-25T00:00:00Z"), Ok(false));
         assert!(!folder.exists(), "the trashed folder came back");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mesh part's size is saved as its scale only when its scale is a
+    /// length (`scale_kind`); a multiplier's scale stays as the file has it.
+    #[test]
+    fn a_mesh_parts_scale_is_saved_by_its_kind() {
+        for (kind, saved) in [("length", [2.0, 3.0, 4.0]), ("multiplier", [1.0, 1.0, 1.0])] {
+            let (root, file) = persist_test_file(&format!("kind_{kind}"));
+            std::fs::write(
+                &file,
+                format!("[metadata]\nclass_name = \"Part\"\n\n[asset]\nmesh = \"meshes/m.glb\"\nscale_kind = \"{kind}\"\n\n[transform]\nposition = [0.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n"),
+            )
+            .unwrap();
+            let mut part = persist_test_part(&file, 5.0);
+            part.size = Vec3::new(2.0, 3.0, 4.0);
+            assert_eq!(save_part(&part, None, "2026-10-02T00:00:00Z"), Ok(true));
+            let text = std::fs::read_to_string(&file).unwrap();
+            let def = crate::space::instance_loader::load_instance_definition_from_str(&text).unwrap();
+            assert_eq!(def.transform.scale, saved, "{kind}: {text}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A multiplier-kind custom mesh saves its live ratio as `scale`; a length
+    /// mesh keeps saving its size; a degenerate ratio leaves the file's.
+    #[test]
+    fn a_multiplier_mesh_saves_its_ratio_and_a_length_mesh_its_size() {
+        let load = |kind: &str| {
+            crate::space::instance_loader::load_instance_definition_from_str(&format!(
+                "[metadata]\nclass_name = \"Part\"\n\n[asset]\nmesh = \"assets/meshes/m.glb\"\n{kind}\n[transform]\nposition = [0.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [2.0, 2.0, 2.0]\n"
+            ))
+            .unwrap()
+        };
+        let mut part = persist_test_part(Path::new("Workspace/Brick/_instance.toml"), 0.0);
+        part.size = Vec3::new(8.0, 6.0, 4.0);
+        part.scale = Vec3::new(4.0, 2.0, 1.0);
+
+        let mut ratio = load("");
+        assert!(merge_live_values(&mut ratio, &part, "now"));
+        assert_eq!(ratio.transform.scale, [4.0, 2.0, 1.0], "a multiplier mesh saves its ratio");
+
+        let mut length = load("scale_kind = \"length\"\n");
+        assert!(merge_live_values(&mut length, &part, "now"));
+        assert_eq!(length.transform.scale, [8.0, 6.0, 4.0], "a length mesh saves its size");
+
+        part.scale = Vec3::ZERO;
+        let mut degenerate = load("scale_kind = \"multiplier\"\n");
+        merge_live_values(&mut degenerate, &part, "now");
+        assert_eq!(degenerate.transform.scale, [2.0, 2.0, 2.0], "a degenerate ratio keeps the file's scale");
+    }
+
+    /// A fold part is saved at its file's position, not its drawn one.
+    #[test]
+    fn a_fold_part_saves_its_files_position() {
+        use eustress_common::classes::{BasePart, ClassName, Instance};
+        let rotation = Quat::from_rotation_y(0.5);
+        let fold = crate::space::instance_loader::MeshFold { scale: Vec3::ONE, offset: Vec3::new(0.0, 0.0, 1.0) };
+        let drawn = Transform { translation: Vec3::new(1.0, 2.0, 3.0) + rotation * fold.offset, rotation, scale: Vec3::ONE };
+        let file = crate::space::instance_loader::InstanceFile {
+            toml_path: std::env::temp_dir().join("eustress_fold_save").join("Workspace").join("Hat").join("_instance.toml"),
+            mesh_path: std::path::PathBuf::new(),
+            name: "Hat".to_string(),
+        };
+        let instance = Instance { name: "Hat".to_string(), class_name: ClassName::Part, ..Default::default() };
+        let base = BasePart::default();
+        let saved = part_save_for(Entity::PLACEHOLDER, &instance, &base, &drawn, Some(&file), None, Some(&fold), Path::new("Workspace")).unwrap();
+        assert!(saved.translation.abs_diff_eq(Vec3::new(1.0, 2.0, 3.0), 1e-5), "{:?}", saved.translation);
+        let plain = part_save_for(Entity::PLACEHOLDER, &instance, &base, &drawn, Some(&file), None, None, Path::new("Workspace")).unwrap();
+        assert_eq!(plain.translation, drawn.translation, "no fold, the drawn position");
     }
 
     /// A write replaces the file whole: no temporary file is left beside it,
@@ -2726,6 +2907,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A reopen of the Space that is already open re-arms every once-per-open
+    /// load (the generation moves), and clears what belonged to the outgoing
+    /// open: its terrain roots, the custom-mesh cache and a waiting cut.
+    #[test]
+    fn a_reopen_of_the_same_space_starts_every_load_again() {
+        let root = std::env::temp_dir().join(format!("eustress_reopen_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Workspace")).unwrap();
+        let mut world = World::new();
+        world.insert_resource(crate::space::SpaceRoot(root.clone()));
+        world.insert_resource(crate::space::file_loader::SpaceLoadGeneration(3));
+        world.insert_resource(crate::space::instance_loader::PrimitiveMeshCache::default());
+        let mut clipboard = crate::clipboard::EditorClipboard::default();
+        clipboard.is_cut = true;
+        clipboard.copied_entity_ids.push("a".to_string());
+        world.insert_resource(clipboard);
+        let terrain = world.spawn(eustress_common::terrain::TerrainRoot::default()).id();
+
+        open_space(&mut world, &root);
+
+        assert_eq!(world.resource::<crate::space::file_loader::SpaceLoadGeneration>().0, 4);
+        assert!(world.get_entity(terrain).is_err(), "the outgoing terrain root is gone");
+        let clipboard = world.resource::<crate::clipboard::EditorClipboard>();
+        assert!(!clipboard.is_cut && clipboard.copied_entity_ids.is_empty(), "the cut is dropped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// During Play, open_space leaves everything as it was.
+    #[test]
+    fn open_space_refuses_during_play() {
+        let root = std::env::temp_dir().join(format!("eustress_reopen_play_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Workspace")).unwrap();
+        let mut world = World::new();
+        world.insert_resource(crate::space::file_loader::SpaceLoadGeneration(3));
+        world.insert_resource(State::new(crate::play_mode::PlayModeState::Playing));
+        open_space(&mut world, &root);
+        assert_eq!(world.resource::<crate::space::file_loader::SpaceLoadGeneration>().0, 3);
+        assert!(world.get_resource::<crate::space::SpaceRoot>().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_loaders_fallback_name_and_the_synthetic_core_path() {
         assert_eq!(loader_fallback_name(Path::new("W/Brick/_instance.toml")).as_deref(), Some("Brick"));
@@ -2813,6 +3036,68 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&after[0]), String::from_utf8_lossy(&before[0]), "Brick was rewritten");
         assert_eq!(String::from_utf8_lossy(&after[1]), String::from_utf8_lossy(&before[1]), "Crate was rewritten");
         assert!(!synthetic.parent().unwrap().exists(), "a baked part got a folder on disk");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A new Space starts at the current format, so its first open moves
+    /// nothing drawn with this build's meshes.
+    #[test]
+    fn a_new_space_starts_at_the_current_format() {
+        let parent = std::env::temp_dir().join(format!("eustress_new_space_format_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        scaffold_new_space(&parent, "Fresh", "Tester").unwrap();
+        let text = std::fs::read_to_string(parent.join("Fresh").join("space.toml")).unwrap();
+        assert_eq!(eustress_common::space_format::of_space_text(Some(&text)), eustress_common::space_format::CURRENT, "{text}");
+        assert!(text.contains("name = \"Fresh\""), "the rest of space.toml is kept:\n{text}");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A migrated Space holds a part in its database alone. A typed save and
+    /// a tag edit of it change the tree's text and leave no loose file; once
+    /// a trash purges the record, a queued save is dropped and nothing comes
+    /// back.
+    #[cfg(feature = "world-db")]
+    #[test]
+    #[ignore = "opens a Fjall keyspace and sets the process-wide active DB; run with --ignored --test-threads=1"]
+    fn a_tree_only_part_saves_into_the_tree() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("eustress_tree_save_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(root.join("world.fjalldb")).unwrap();
+        let db = eustress_worlddb::backend::open(&root.join("world.fjalldb")).unwrap();
+        let rel = "Workspace/Brick/_instance.toml";
+        db.put_file(
+            rel,
+            b"[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [0.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+        )
+        .unwrap();
+        let file = root.join("Workspace").join("Brick").join("_instance.toml");
+        let tags = AttrSave {
+            entity: Entity::PLACEHOLDER,
+            toml_path: file.clone(),
+            tags: Some(vec!["Enemy".to_string()]),
+            attrs: None,
+        };
+
+        crate::space::active_db::set(db.clone(), root.clone());
+        let moved = save_part(&persist_test_part(&file, 7.0), None, "2026-10-01T00:00:00Z");
+        let tagged = save_attributes(&tags);
+        let text = String::from_utf8(db.get_file(rel).unwrap().unwrap()).unwrap();
+        crate::space::active_db::purge_subtree(file.parent().unwrap());
+        let after_trash = save_part(&persist_test_part(&file, 9.0), None, "2026-10-01T00:00:01Z");
+        let tagged_after_trash = save_attributes(&tags);
+        crate::space::active_db::clear();
+
+        assert_eq!(moved, Ok(true));
+        assert_eq!(tagged, Ok(true));
+        let def = crate::space::instance_loader::load_instance_definition_from_str(&text).unwrap();
+        assert!((def.transform.position[0] - 7.0).abs() < 1e-4, "the move is in the tree:\n{text}");
+        let doc: toml::Value = text.parse().unwrap();
+        assert_eq!(doc["tags"][0].as_str(), Some("Enemy"), "the tag is in the tree:\n{text}");
+        assert_eq!((after_trash, tagged_after_trash), (Ok(false), Ok(false)), "a trashed record is left gone");
+        assert!(db.get_file(rel).unwrap().is_none(), "the trashed record came back into the tree");
+        assert!(!file.parent().unwrap().exists(), "a loose file appeared");
+        drop(db);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

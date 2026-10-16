@@ -26,6 +26,7 @@ shadow_color = [102, 102, 128]
 layer_type = "Cumulus"
 softness = 0.6
 spread = 1.0
+noise_scale = 1.0
 altitude = 1400.0
 thickness = 900.0
 coverage_mode = "Full"

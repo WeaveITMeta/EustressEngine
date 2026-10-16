@@ -13,6 +13,7 @@ pub mod parts;
 pub mod rendering;
 pub mod camera;
 pub mod commands;
+pub mod marketing;
 pub mod scenes;
 pub mod classes;
 pub mod properties;
@@ -35,6 +36,7 @@ pub mod billboard_gui;
 pub mod billboard_pipeline;
 pub mod light_cookies;
 pub mod csg;
+pub mod mesh_split;
 pub mod attachments;
 pub mod motor6d;
 pub mod humanoid;
@@ -65,6 +67,8 @@ pub mod usage_telemetry;
 pub mod undo;
 /// Dead zones, drag-start offset and mid-drag cancel shared by the viewport tools.
 pub mod drag_guard;
+/// The universal look picker (`I`) and the paint bucket.
+pub mod look_picker;
 pub mod camera_controller;
 pub mod view_grid;
 // Government opportunity capture (SAM.gov + Grants.gov). Gated with the
@@ -88,6 +92,11 @@ pub mod gizmo_tools;
 pub mod move_tool;
 pub mod rotate_tool;
 pub mod scale_tool;
+/// An instance's properties for callers other than the Properties panel.
+pub mod property_service;
+pub mod private_file;
+/// A key in the system credential store, with a private fallback file.
+pub mod key_fallback;
 pub mod select_tool;
 pub mod space;
 pub mod toolbox;
@@ -233,8 +242,8 @@ pub mod physics;         // Wave 6.B — mover runtime systems (MoversPlugin)
 pub mod interaction;     // Wave 6.D — interaction runtime systems (InteractionPlugin)
 pub mod txt_to_toml_watcher;
 // Network exposure of the in-process stream. Gated on `stream-node` (opt-in,
-// not in `core`) because the node is unauthenticated — see the feature comment
-// in Cargo.toml.
+// not in `core`). Every connection logs in over TLS 1.3, and the plugin starts
+// no node until it is configured; see the feature comment in Cargo.toml.
 #[cfg(feature = "stream-node")]
 pub mod stream_node_plugin;
 pub mod updater;
@@ -268,6 +277,11 @@ pub mod engine_bridge;
 pub mod history_stream;
 pub mod light_sync;
 pub mod photoreal;
+// Hardware ray-traced lighting (Bevy Solari), Auto by default: the switch and
+// its production guards, the GPU gate, the Solari wiring, the mesh copies
+// Solari traces, and the traced sky, light and surface proxies. See its
+// module docs.
+pub mod raytracing;
 // Free-camera Space↔Space teleport, driven by `[attributes]` on ordinary
 // instances — no new class, no revival of the dead `scene::PortalData`.
 pub mod portal;

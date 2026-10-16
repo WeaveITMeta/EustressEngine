@@ -185,19 +185,30 @@ fn handle_road_tool_actions(
     splines: RoadSplines,
     points: RoadPoints,
     registry: Option<Res<crate::space::SpaceFileRegistry>>,
-    // The selection the Studio's Delete reads, which Remove Road hands the
-    // road to.
+    // The selection: a selected road is the one Add Node extends and Remove
+    // Road removes.
     selection: Option<Res<crate::selection_sync::SelectionSyncManager>>,
     mut pending_select: Option<ResMut<crate::ui::slint_ui::PendingInsertSelection>>,
-    mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
+    let play_state = play_state.map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
     // The road being laid out counts only inside the open Space (see
     // `place_road_node`): its folder outlives a Space switch on disk. Resolved
     // per use, since the fallback root reads the editor settings file.
     let in_open_space = |dir: &PathBuf| dir.starts_with(space_root_of(space_root.as_deref()));
     for event in events.read() {
+        // During Play the Road Builder waits for Stop: it writes road folders
+        // and deletes them, and the scene is the running game. It is refused
+        // where it is read, so the request is consumed and never runs after
+        // Stop.
+        if event.action_id.starts_with("road:") {
+            if let Some(notice) = crate::keybindings::play_refusal_to(play_state, "use the Road Builder") {
+                commands.queue(move |world: &mut World| crate::keybindings::say_play_refusal(world, notice));
+                continue;
+            }
+        }
         match event.action_id.as_str() {
             "road:add_node" => {
                 // Terrain presence is checked HERE only so the user gets a
@@ -276,10 +287,6 @@ fn handle_road_tool_actions(
                     notifications.warning("The road is still loading. Try Remove Road again in a moment.");
                     continue;
                 };
-                let Some(sm) = selection.as_deref() else {
-                    notifications.error("Remove Road needs the selection, which is not available");
-                    continue;
-                };
                 if active_modal_tool.id() == Some(PLACE_TOOL_ID) {
                     active_modal_tool.cancel(&mut commands);
                 }
@@ -290,13 +297,53 @@ fn handle_road_tool_actions(
                 // road's folder with its nodes, purges them from the WorldDb
                 // and records the delete for undo, exactly as the Delete key
                 // would. The bake then drops the layer, which puts the
-                // terrain under it back.
-                sm.0.write().select(entity_to_id_string(entity));
-                menu_events.write(crate::ui::MenuActionEvent::new(crate::keybindings::Action::Delete));
-                notifications.success("Road removed and the terrain under it restored. Undo brings the road back.");
+                // terrain under it back. It runs with the world, right after
+                // this system, so what Remove Road says is what the Delete
+                // did.
+                commands.queue(move |world: &mut World| {
+                    let outcome = crate::keybindings::delete_entities_now(world, &[entity]);
+                    let Some((removed, notice)) = remove_road_notice(&outcome, entity) else { return };
+                    say_road_notice(world, removed, notice);
+                });
             }
 
             _ => {}
+        }
+    }
+}
+
+/// What Remove Road says once the Delete has run, and whether it is good
+/// news: removed, naming undo only when the Delete pushed an undo entry; or
+/// kept, when the Delete skipped the road or could not move it to the trash.
+/// `None` after a Play refusal, which said its own notice.
+fn remove_road_notice(outcome: &crate::keybindings::DeleteOutcome, road: Entity) -> Option<(bool, &'static str)> {
+    if outcome.refused {
+        return None;
+    }
+    Some(match (outcome.removed.contains(&road), outcome.undoable) {
+        (true, true) => (true, "Road removed and the terrain under it restored. Undo brings the road back."),
+        (true, false) => (true, "Road removed and the terrain under it restored, but nothing went to the trash, so undo cannot bring it back."),
+        (false, _) => (false, "The road was not removed. Try Remove Road again."),
+    })
+}
+
+/// Say what Remove Road did, where a Play refusal is said
+/// ([`crate::keybindings::say_play_refusal`]): a line in the Output panel,
+/// which keeps it, and a toast. A removed road is an info line and a success
+/// toast; a road that stayed is a warning in both.
+fn say_road_notice(world: &mut World, removed: bool, notice: &str) {
+    if let Some(mut output) = world.get_resource_mut::<crate::ui::OutputConsole>() {
+        if removed {
+            output.info(notice);
+        } else {
+            output.warn(notice);
+        }
+    }
+    if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+        if removed {
+            notifications.success(notice);
+        } else {
+            notifications.warning(notice);
         }
     }
 }
@@ -577,4 +624,153 @@ fn spline_pose(world: &World, spline_dir: &Path) -> Transform {
         .and_then(|text| parse_layer_instance(&text, ROAD_NAME).ok().flatten())
         .map(|(spline, _)| spline.transform)
         .unwrap_or_default()
+}
+
+/// During Play the Road Builder is refused where its buttons are read, and
+/// Remove Road says what the Delete it runs did.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// Press one Road Builder button in `state`, and return the toasts and
+    /// the Output panel's lines the press left.
+    fn press(state: PlayModeState, action_id: &str) -> (Vec<String>, Vec<String>) {
+        let mut app = App::new();
+        app.add_message::<PluginActionEvent>();
+        app.insert_resource(State::new(state));
+        app.init_resource::<ActiveRoad>();
+        app.init_resource::<ActiveModalTool>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.add_systems(Update, handle_road_tool_actions);
+        app.world_mut().write_message(PluginActionEvent::new(action_id));
+        app.update();
+        let world = app.world();
+        (
+            world.resource::<crate::notifications::NotificationManager>().notifications.iter().map(|n| n.message.clone()).collect(),
+            world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn play_refuses_every_road_button() {
+        let refused = vec!["Stop Play to use the Road Builder.".to_string()];
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            for action_id in ["road:add_node", "road:finish_road", "road:remove_road"] {
+                assert_eq!(press(state, action_id), (refused.clone(), refused.clone()), "{state:?} {action_id}");
+            }
+        }
+        // While editing the same press runs, and with no road says so.
+        let (notices, _) = press(PlayModeState::Editing, "road:remove_road");
+        assert_eq!(notices, ["No road to remove. Select a road, or lay one out with Add Node."]);
+    }
+
+    /// Remove Road names undo only when the Delete pushed an undo entry, says
+    /// the road stayed when the Delete did not remove it, and adds nothing to
+    /// a Play refusal, which said its own notice.
+    #[test]
+    fn remove_road_says_what_the_delete_did() {
+        use crate::keybindings::DeleteOutcome;
+        let mut world = World::new();
+        let (road, other) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let said = |refused, removed: Vec<Entity>, undoable| remove_road_notice(&DeleteOutcome { refused, removed, undoable }, road);
+        assert_eq!(
+            said(false, vec![road], true),
+            Some((true, "Road removed and the terrain under it restored. Undo brings the road back."))
+        );
+        assert_eq!(
+            said(false, vec![road], false),
+            Some((true, "Road removed and the terrain under it restored, but nothing went to the trash, so undo cannot bring it back."))
+        );
+        assert_eq!(said(false, Vec::new(), false), Some((false, "The road was not removed. Try Remove Road again.")));
+        assert_eq!(said(false, vec![other], true), Some((false, "The road was not removed. Try Remove Road again.")));
+        assert_eq!(said(true, Vec::new(), false), None);
+    }
+
+    /// What Remove Road says reaches the Output panel, which keeps it, as
+    /// well as the toast: a removed road as an info line and a success toast,
+    /// a road that stayed as a warning in both.
+    #[test]
+    fn remove_road_says_it_in_the_output_panel() {
+        use crate::notifications::NotificationLevel;
+        use crate::ui::LogLevel;
+        let mut world = World::new();
+        // `new()`, not the derived default, which keeps no notice.
+        world.insert_resource(crate::notifications::NotificationManager::new());
+        world.init_resource::<crate::ui::OutputConsole>();
+        let removed = "Road removed and the terrain under it restored. Undo brings the road back.";
+        let kept = "The road was not removed. Try Remove Road again.";
+        say_road_notice(&mut world, true, removed);
+        say_road_notice(&mut world, false, kept);
+        let output: Vec<(LogLevel, String)> = world.resource::<crate::ui::OutputConsole>().entries.iter().map(|e| (e.level, e.message.clone())).collect();
+        assert_eq!(output, [(LogLevel::Info, removed.to_string()), (LogLevel::Warn, kept.to_string())]);
+        let toasts: Vec<(NotificationLevel, String)> = world
+            .resource::<crate::notifications::NotificationManager>()
+            .notifications
+            .iter()
+            .map(|n| (n.level, n.message.clone()))
+            .collect();
+        assert_eq!(toasts, [(NotificationLevel::Success, removed.to_string()), (NotificationLevel::Warning, kept.to_string())]);
+    }
+
+    /// Remove Road runs the Studio's Delete on the road, with the world, in
+    /// the same frame: the road's folder is in the trash, its entity is gone,
+    /// undo can bring it back, and the Output panel and the toast say so.
+    #[test]
+    fn remove_road_deletes_the_road_and_says_so() {
+        let space = std::env::temp_dir().join(format!("eustress_remove_road_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        let folder = space.join("Workspace").join("Terrain").join("Layers").join("Road");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("_instance.toml"), "[metadata]\nclass_name = \"TerrainSpline\"\n").unwrap();
+        let mut app = App::new();
+        app.add_message::<PluginActionEvent>();
+        app.insert_resource(State::new(PlayModeState::Editing));
+        app.init_resource::<ActiveRoad>();
+        app.init_resource::<ActiveModalTool>();
+        app.init_resource::<crate::undo::UndoStack>();
+        // `new()`, not the derived default, which keeps no notice.
+        app.insert_resource(crate::notifications::NotificationManager::new());
+        app.init_resource::<crate::ui::OutputConsole>();
+        app.insert_resource(crate::space::SpaceRoot(space.clone()));
+        let road = app
+            .world_mut()
+            .spawn((
+                eustress_common::classes::Instance::default(),
+                InstanceFile {
+                    toml_path: folder.join("_instance.toml"),
+                    mesh_path: PathBuf::new(),
+                    name: "Road".to_string(),
+                },
+                TerrainSpline::default(),
+            ))
+            .id();
+        let selection = crate::selection_sync::SelectionSyncManager(std::sync::Arc::new(parking_lot::RwLock::new(crate::commands::SelectionManager::default())));
+        selection.0.read().select(entity_to_id_string(road));
+        app.insert_resource(selection);
+        app.add_systems(Update, handle_road_tool_actions);
+        app.world_mut().write_message(PluginActionEvent::new("road:remove_road"));
+        app.update();
+        assert!(app.world().get_entity(road).is_err(), "the road's entity is still there");
+        assert!(!folder.exists(), "the road's folder is still in Layers");
+        assert!(
+            space.join(".eustress").join("trash").join("Road").join("_instance.toml").is_file(),
+            "the road's folder is not in the trash"
+        );
+        assert!(app.world().resource::<crate::undo::UndoStack>().can_undo(), "the Delete pushed no undo entry");
+        let toasts: Vec<String> = app
+            .world()
+            .resource::<crate::notifications::NotificationManager>()
+            .notifications
+            .iter()
+            .map(|n| n.message.clone())
+            .collect();
+        let output: Vec<String> = app.world().resource::<crate::ui::OutputConsole>().entries.iter().map(|e| e.message.clone()).collect();
+        let said = ["Road removed and the terrain under it restored. Undo brings the road back."];
+        assert_eq!(toasts, said);
+        assert_eq!(output, said);
+        let _ = std::fs::remove_dir_all(&space);
+    }
 }

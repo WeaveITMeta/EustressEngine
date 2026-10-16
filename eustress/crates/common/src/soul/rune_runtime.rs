@@ -710,6 +710,19 @@ fn vm_error(e: &rune::runtime::VmError, compiled: &CompiledScript, during: &str)
     error
 }
 
+/// Adds one script call to the script profile
+/// (`crate::utils::script_profile`), timed from `started`, under the label
+/// `script_profile::file_label` gives the script. Callers take `started`
+/// before building the call's `Vm`, and only when the profile is armed: the
+/// callback drivers below, and the engine's other Rune callers (button
+/// clicks, purchase receipts).
+#[cfg(feature = "realism-scripting")]
+pub fn profile_step(compiled: &CompiledScript, step: &str, started: std::time::Instant) {
+    let elapsed = started.elapsed();
+    let label = crate::utils::script_profile::file_label(&compiled.name, compiled.file.as_deref());
+    crate::utils::script_profile::record("rune", label, step, elapsed);
+}
+
 // ── Plain-Rust callback drivers ──────────────────────────────────────────────
 //
 // These are the real implementations. They take `&mut RuneRuntimeState`
@@ -726,12 +739,17 @@ fn vm_error(e: &rune::runtime::VmError, compiled: &CompiledScript, during: &str)
 pub fn call_script_init(runtime: &mut RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
+        // The script profile times each script's whole call, its fresh `Vm`
+        // included, and only while it is armed (see `profile_step`). The
+        // other drivers below do the same.
+        let profile = crate::utils::script_profile::armed();
         let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
         for idx in keys {
             if runtime.initialized.get(&idx).copied().unwrap_or(false) {
                 continue;
             }
             runtime.initialized.insert(idx, true);
+            let started = profile.then(std::time::Instant::now);
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
@@ -753,6 +771,9 @@ pub fn call_script_init(runtime: &mut RuneRuntimeState) {
                     }
                 }
             }
+            if let Some(started) = started {
+                profile_step(compiled, "on_init", started);
+            }
         }
     }
     let _ = runtime;
@@ -762,6 +783,7 @@ pub fn call_script_init(runtime: &mut RuneRuntimeState) {
 pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
+        let profile = crate::utils::script_profile::armed();
         let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
         for idx in keys {
             let init_done = runtime.initialized.get(&idx).copied().unwrap_or(false);
@@ -771,6 +793,7 @@ pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
                 continue;
             }
             runtime.initialized.insert(ready_key, true);
+            let started = profile.then(std::time::Instant::now);
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
@@ -786,6 +809,9 @@ pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
                     }
                 }
             }
+            if let Some(started) = started {
+                profile_step(compiled, "on_ready", started);
+            }
         }
     }
     let _ = runtime;
@@ -797,8 +823,10 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
     {
         // Collect errors separately to avoid borrowing `runtime` twice.
         let mut errors = Vec::new();
+        let profile = crate::utils::script_profile::armed();
 
         for (_idx, compiled) in runtime.compiled.iter() {
+            let started = profile.then(std::time::Instant::now);
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
             let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             if let Err(e) = vm.call(["on_update"], (dt,)) {
@@ -806,6 +834,9 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
                 if !is_missing_callback(&msg) {
                     errors.push(vm_error(&e, compiled, "on_update"));
                 }
+            }
+            if let Some(started) = started {
+                profile_step(compiled, "on_update", started);
             }
         }
 
@@ -822,7 +853,9 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
 pub fn call_script_exit(runtime: &RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
+        let profile = crate::utils::script_profile::armed();
         for (_idx, compiled) in runtime.compiled.iter() {
+            let started = profile.then(std::time::Instant::now);
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
             let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             match vm.call(["on_exit"], ()) {
@@ -833,6 +866,9 @@ pub fn call_script_exit(runtime: &RuneRuntimeState) {
                         warn!("⚠ on_exit() error in '{}': {}", compiled.name, msg);
                     }
                 }
+            }
+            if let Some(started) = started {
+                profile_step(compiled, "on_exit", started);
             }
         }
     }
@@ -941,4 +977,65 @@ pub fn cleanup_scripts(
     runtime.initialized.clear();
     runtime.last_errors.clear();
     info!("⏹ Rune script runtime cleaned up");
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+mod profile_tests {
+    use super::*;
+    use crate::utils::script_profile::{self, Record};
+
+    const SCRIPT: &str = "pub fn on_init() {}\n\
+                          pub fn on_ready() {}\n\
+                          pub fn on_update(dt) { let twice = dt * 2.0; }\n\
+                          pub fn on_exit() {}\n";
+
+    /// A runtime holding one compiled script, `Driver`, read from `file`.
+    fn compiled(file: Option<&str>) -> RuneRuntimeState {
+        let mut runtime = RuneRuntimeState::default();
+        let script = ScriptSource {
+            entity_index: 7,
+            name: "Driver".to_string(),
+            source: SCRIPT.to_string(),
+            file: file.map(str::to_string),
+        };
+        compile_scripts(&mut runtime, &RuneModuleRegistry::default(), &[script]);
+        assert_eq!(runtime.compiled.len(), 1, "the test script compiles: {:?}", runtime.last_errors);
+        runtime
+    }
+
+    fn steps(records: &[Record]) -> Vec<(&'static str, &str, &str)> {
+        records.iter().map(|r| (r.runtime, r.script.as_str(), r.step.as_str())).collect()
+    }
+
+    /// A script outside the open Space is named by its file name alone, so
+    /// the folders above it (a user name, say) never reach the profile.
+    #[test]
+    fn each_callback_is_profiled_under_the_scripts_file_name() {
+        let mut runtime = compiled(Some(r"C:\Users\someone\Projects\Car\Driver.rune"));
+        let ((), captured) = script_profile::capture(|| {
+            call_script_init(&mut runtime);
+            call_script_ready(&mut runtime);
+            call_script_update(&mut runtime, 0.016);
+            call_script_exit(&runtime);
+        });
+        assert_eq!(
+            steps(&captured.records),
+            vec![
+                ("rune", "Driver.rune", "on_init"),
+                ("rune", "Driver.rune", "on_ready"),
+                ("rune", "Driver.rune", "on_update"),
+                ("rune", "Driver.rune", "on_exit"),
+            ]
+        );
+        let total: std::time::Duration = captured.records.iter().map(|r| r.elapsed).sum();
+        assert!(total > std::time::Duration::ZERO, "the calls were timed");
+        assert!(runtime.last_errors.is_empty(), "{:?}", runtime.last_errors);
+    }
+
+    #[test]
+    fn a_script_without_a_file_is_profiled_under_its_name() {
+        let mut runtime = compiled(None);
+        let ((), captured) = script_profile::capture(|| call_script_update(&mut runtime, 0.016));
+        assert_eq!(steps(&captured.records), vec![("rune", "Driver", "on_update")]);
+    }
 }

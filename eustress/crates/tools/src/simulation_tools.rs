@@ -554,7 +554,7 @@ impl ToolHandler for HttpRequestTool {
                 let status = resp.status();
                 let body_text = resp.into_string().unwrap_or_default();
                 let truncated = if body_text.len() > 8000 {
-                    format!("{}...\n[truncated — {} bytes total]", &body_text[..8000], body_text.len())
+                    format!("{}...\n[truncated — {} bytes total]", crate::file_tools::utf8_prefix(&body_text, 8000), body_text.len())
                 } else {
                     body_text
                 };
@@ -838,15 +838,18 @@ fn toggle_tag(
         return Err("entity_id and tag must both be provided (as strings)".to_string());
     }
     let workspace = space_root.join("Workspace");
+    // Every candidate is contained by the shared rules (`crate::sandbox`):
+    // the name may be a path inside Workspace, never out of it.
+    let inside = |rel: String| crate::sandbox::resolve(&workspace, &rel).map_err(|why| why.to_string());
 
     // Folder-style entity: Workspace/<name>/_instance.toml
-    let folder_toml = workspace.join(entity_name).join("_instance.toml");
+    let folder_toml = inside(format!("{entity_name}/_instance.toml"))?;
     // Flat-file styles: .part.toml / .glb.toml / .instance.toml
     let candidates = [
         folder_toml.clone(),
-        workspace.join(format!("{}.part.toml", entity_name)),
-        workspace.join(format!("{}.glb.toml", entity_name)),
-        workspace.join(format!("{}.instance.toml", entity_name)),
+        inside(format!("{entity_name}.part.toml"))?,
+        inside(format!("{entity_name}.glb.toml"))?,
+        inside(format!("{entity_name}.instance.toml"))?,
     ];
     let path = candidates.into_iter().find(|p| p.exists())
         .ok_or_else(|| format!("entity '{}' not found under Workspace", entity_name))?;
@@ -1144,7 +1147,7 @@ impl ToolHandler for QueryAuditLogTool {
             if include_prompt {
                 let prompt = doc.get("prompt").and_then(|p| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
                 let truncated = if prompt.len() > 2000 {
-                    format!("{}...[truncated, {} chars total]", &prompt[..2000], prompt.len())
+                    format!("{}...[truncated, {} chars total]", crate::file_tools::utf8_prefix(&prompt, 2000), prompt.len())
                 } else {
                     prompt.to_string()
                 };
@@ -1153,7 +1156,7 @@ impl ToolHandler for QueryAuditLogTool {
             if include_response {
                 let response = doc.get("response").and_then(|p| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
                 let truncated = if response.len() > 2000 {
-                    format!("{}...[truncated, {} chars total]", &response[..2000], response.len())
+                    format!("{}...[truncated, {} chars total]", crate::file_tools::utf8_prefix(&response, 2000), response.len())
                 } else {
                     response.to_string()
                 };
@@ -1580,6 +1583,10 @@ impl ToolHandler for RunExperimentTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("experiment").to_string();
+        // The name becomes a file name and part of a branch name.
+        if let Err(why) = crate::sandbox::plain_name(&name) {
+            return fail("run_experiment", format!("Invalid experiment name: {why}"));
+        }
         let description = input.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let duration_s = match num_arg(&input, "duration_s") {
             Some(d) => d,
@@ -1606,7 +1613,10 @@ impl ToolHandler for RunExperimentTool {
         // Space may belong to a different one).
         let git_root = route.space.clone().unwrap_or_else(|| ctx.space_root.clone());
         let branch_created = if create_branch {
-            match run_git_in_universe(&git_root, &["checkout", "-b", &branch_name]) {
+            if let Err(e) = crate::sandbox::git_branch_name(&branch_name) {
+                return fail("run_experiment", e);
+            }
+            match run_git_in_universe(&git_root, &route.universe, &["checkout", "-b", &branch_name]) {
                 Ok(_) => Some(branch_name.clone()),
                 Err(e) => {
                     return fail(
@@ -1947,7 +1957,7 @@ impl ToolHandler for ListExperimentsTool {
 // Shared helpers for experiment tools
 // ---------------------------------------------------------------------------
 
-fn run_git_in_universe(start_root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+fn run_git_in_universe(start_root: &std::path::Path, universe: &std::path::Path, args: &[&str]) -> Result<String, String> {
     // `start_root` is the active Space root (Spaces/<Space>/), whose `.git`
     // lives BELOW the Universe root — so walk up from here, not the Universe
     // root, to find the experiment's repo (Gap 9).
@@ -1956,7 +1966,16 @@ fn run_git_in_universe(start_root: &std::path::Path, args: &[&str]) -> Result<St
         if cur.join(".git").exists() { break cur.clone(); }
         if !cur.pop() { break start_root.to_path_buf(); }
     };
-    let out = std::process::Command::new("git").args(args).current_dir(&cwd)
+    // It makes and switches a branch, so only in a repository inside the
+    // Universe (as `git_tools::git_write`): never one that holds it.
+    if !crate::sandbox::is_within(&cwd, universe) {
+        return Err(format!(
+            "the repository at {} holds the Universe rather than sitting inside it; an experiment branch is made only in a repository inside the Universe",
+            cwd.display()
+        ));
+    }
+    // Hooks off, as for every git command a tool runs (`crate::sandbox`).
+    let out = crate::sandbox::git_command(&cwd).args(args)
         .output().map_err(|e| format!("git: {}", e))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -2098,7 +2117,10 @@ fn resolve_experiment_path(exp_dir: &std::path::Path, name: &str)
         entries.get(offset).map(|(_, p)| p.clone())
             .ok_or_else(|| format!("No experiment at offset {}", offset))
     } else {
-        let p = if name.ends_with(".json") { exp_dir.join(name) } else { exp_dir.join(format!("{}.json", name)) };
+        let file = if name.ends_with(".json") { name.to_string() } else { format!("{}.json", name) };
+        // One file in the experiments folder, never a path out of it.
+        let file = crate::sandbox::plain_name(&file).map_err(|why| format!("Invalid experiment name: {why}"))?;
+        let p = exp_dir.join(file);
         if p.exists() { Ok(p) } else { Err(format!("Experiment file not found: {}", p.display())) }
     }
 }

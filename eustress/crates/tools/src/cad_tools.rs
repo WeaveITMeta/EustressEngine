@@ -29,30 +29,14 @@ fn err(name: &str, msg: impl Into<String>) -> ToolResult {
     }
 }
 
-/// Resolve a user-supplied path against the Space sandbox (the same
-/// contract as `file_tools::resolve_sandboxed_path`, but rooted at
-/// `space_root` since CadParts live inside the current Space).
-///
-/// `PathBuf::join` REPLACES the base when handed an absolute or rooted
-/// path, so absolute inputs must be rejected before joining — and `..`
-/// must be rejected separately because `starts_with` is lexical and
-/// would accept `<root>/../elsewhere`.
+/// Resolve a user-supplied path inside the Space: the shared rules in
+/// [`crate::sandbox`], rooted at `space_root` since CadParts live inside the
+/// current Space.
 fn resolve_space_path(
     ctx: &ToolContext,
     raw: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let cleaned = raw.trim().replace('\\', "/");
-    if cleaned.contains("..") {
-        return Err(format!("path must not contain '..' (got '{raw}')"));
-    }
-    let resolved = ctx.space_root.join(&cleaned);
-    if resolved.starts_with(&ctx.space_root) {
-        Ok(resolved)
-    } else {
-        Err(format!(
-            "path must be relative to the Space, not absolute (got '{raw}')"
-        ))
-    }
+    crate::sandbox::resolve(&ctx.space_root, raw).map_err(|why| why.to_string())
 }
 
 pub struct CadCreatePartTool;
@@ -97,10 +81,14 @@ impl ToolHandler for CadCreatePartTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let name = input
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("CadPart");
+        // One plain name: it becomes a folder beside the part's siblings and
+        // the `name` in its _instance.toml, so it can neither leave the
+        // folder (`..`, a drive, a separator) nor break the TOML.
+        let name = match crate::sandbox::plain_name(input.get("name").and_then(|v| v.as_str()).unwrap_or("CadPart")) {
+            Ok(name) => name,
+            Err(why) => return err("cad_create_part", format!("invalid name: {why}")),
+        };
+        let name = name.as_str();
         let template = input
             .get("template")
             .and_then(|v| v.as_str())
@@ -3033,6 +3021,11 @@ impl ToolHandler for CadPublishPartTool {
             .get("overwrite")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // It names a folder under assets/cad: never `.git` or a Windows
+        // device name, which is_valid_library_id lets through.
+        if let Err(why) = crate::sandbox::plain_name(&id) {
+            return err(TOOL, format!("'{id}' is not a valid library id: {why}"));
+        }
         if !eustress_cad::is_valid_library_id(&id) {
             return err(
                 TOOL,

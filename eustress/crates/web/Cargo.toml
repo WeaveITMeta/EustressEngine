@@ -147,6 +147,9 @@ ssr = [
     "dep:hydration_context",
     "dep:any_spawner",
 ]
+# The internal draft of the full economics model (a cash-out reserve, Treasury investments, costs and tax), not for publication. It is compiled
+# only on request, so no shipped bundle holds its words: `cargo test -p eustress-web --features economics-draft` runs its tests.
+economics-draft = []
 
 # =============================================================================
 # 3. Build Configuration

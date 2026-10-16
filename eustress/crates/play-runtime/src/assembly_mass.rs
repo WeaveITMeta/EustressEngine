@@ -1,6 +1,8 @@
 //! `AssemblyMass` in a session's tree: every part of a rigid body reads the
 //! body's mass, kg, from Avian's `ComputedMass`; an anchored assembly reads
-//! `math.huge`. Written when a body's mass or kind changes, never every frame,
+//! `math.huge`. A part merged into its weld group's body (`assemblies`) is one
+//! of that body's colliders and reads the group's mass; its own disabled body
+//! writes nothing. Written when a body's mass or kind changes, never every frame,
 //! and for every body once when a session's tree is new (a fresh tree holds
 //! no masses, though the bodies may not have changed since the last session).
 
@@ -16,15 +18,15 @@ type Body = (Entity, &'static ComputedMass, &'static RigidBody, Option<&'static 
 #[allow(clippy::type_complexity)]
 pub fn pull_assembly_mass(
     dm: Option<Res<PlayDataModel>>,
-    all: Query<Body>,
-    changed: Query<Body, Or<(Changed<ComputedMass>, Changed<RigidBody>)>>,
-    mut session: Local<usize>,
+    all: Query<Body, Without<crate::assemblies::AssemblyMember>>,
+    changed: Query<Body, (Or<(Changed<ComputedMass>, Changed<RigidBody>)>, Without<crate::assemblies::AssemblyMember>)>,
+    mut session: Local<u64>,
 ) {
     let Some(dm) = dm else {
         *session = 0;
         return;
     };
-    let tree = std::sync::Arc::as_ptr(&dm.dm) as usize;
+    let tree = eustress_common::datamodel::session_of(&dm.dm);
     let fresh = *session != tree;
     *session = tree;
     if !fresh && changed.is_empty() {
@@ -60,6 +62,42 @@ pub fn assembly_mass(kind: &RigidBody, inverse: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new Play session's tree gets every body's mass, though nothing about
+    /// the bodies changed: it is a new session, whatever memory its tree got.
+    #[test]
+    fn a_new_session_never_keeps_the_old_sessions_state() {
+        let mut world = World::new();
+        let body = world.spawn((RigidBody::Dynamic, ComputedMass::new(2.0))).id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pull_assembly_mass);
+        let session = |world: &mut World| {
+            let dm = eustress_common::datamodel::new_shared();
+            let part = {
+                let mut g = dm.lock();
+                let part = g.create("Part");
+                g.bind_entity(part, body.to_bits());
+                part
+            };
+            world.insert_resource(PlayDataModel { dm: dm.clone() });
+            (dm, part)
+        };
+        let mass = |dm: &eustress_common::datamodel::SharedDataModel, part| {
+            dm.lock().get_prop(part, "AssemblyMass").and_then(|v| v.as_number())
+        };
+
+        let (first, part) = session(&mut world);
+        schedule.run(&mut world);
+        assert_eq!(mass(&first, part), Some(2.0));
+        world.remove_resource::<PlayDataModel>();
+        drop(first);
+        schedule.run(&mut world);
+
+        // The body is untouched; only the session is new.
+        let (second, part) = session(&mut world);
+        schedule.run(&mut world);
+        assert_eq!(mass(&second, part), Some(2.0), "the new session's tree got the mass");
+    }
 
     #[test]
     fn an_anchored_assembly_is_infinitely_heavy() {

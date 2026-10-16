@@ -45,6 +45,12 @@ export struct OutputRow {
     // Stack frames, one per line; "" when none.
     stack: string,
     expanded: bool,
+    // The message has lines after its first (the row shows the first).
+    more: bool,
+    // While open: one page of the rest, which page (from 0), and how many.
+    body: string,
+    page: int,
+    pages: int,
 }
 
 // The bottom dock's panel switcher: Output, Timeline and Data Grid. The
@@ -207,12 +213,40 @@ component DockIconButton inherits Rectangle {
     }
 }
 
+// A small arrow for an open row's pages.
+component PageArrow inherits Rectangle {
+    in property <image> icon;
+    in property <string> hint;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 18px;
+    border-radius: 3px;
+    background: arrow-touch.has-hover && root.enabled ? Theme.button-hover : transparent;
+    arrow-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 9px;
+        height: 9px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.enabled ? Theme.text-secondary : Theme.text-disabled;
+    }
+    DockTip { text: root.hint; }
+}
+
 // One Output row: a log line, or a Play divider.
 component OutputLine inherits Rectangle {
     in property <OutputRow> item;
     callback jump(string, int);
     callback copy(int);
     callback toggle-stack(int);
+    // Show another page of an open row's message (id, page from 0).
+    callback turn-page(int, int);
 
     property <bool> is-divider: root.item.kind == "divider";
     property <color> level-color: root.item.level == 2 ? Theme.text-error
@@ -236,11 +270,11 @@ component OutputLine inherits Rectangle {
     // stack shows or hides it.
     property <bool> goes-to-script: (root.item.level == 1 || root.item.level == 2) && root.item.file != "";
     row-touch := TouchArea {
-        mouse-cursor: root.goes-to-script || root.item.stack != "" ? pointer : default;
+        mouse-cursor: root.goes-to-script || root.item.stack != "" || root.item.more ? pointer : default;
         clicked => {
             if root.goes-to-script {
                 root.jump(root.item.file, root.item.line);
-            } else if root.item.stack != "" {
+            } else if root.item.stack != "" || root.item.more {
                 root.toggle-stack(root.item.id);
             }
         }
@@ -379,7 +413,7 @@ component OutputLine inherits Rectangle {
 
             // An error's stack: its own button, so a click on the row can
             // go to the script while this shows or hides the stack.
-            if root.item.stack != "": Rectangle {
+            if root.item.stack != "" || root.item.more: Rectangle {
                 width: 18px;
                 border-radius: 3px;
                 background: stack-touch.has-hover ? Theme.button-hover : transparent;
@@ -418,6 +452,45 @@ component OutputLine inherits Rectangle {
                     image-fit: contain;
                     colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-secondary;
                 }
+            }
+        }
+
+        // The rest of the message, a page at a time.
+        if root.item.expanded && root.item.body != "": HorizontalLayout {
+            padding-left: 8px + 50px + 6px + 11px + 6px;
+            padding-right: 8px;
+            padding-bottom: 4px;
+            Text {
+                text: root.item.body;
+                color: root.level-color;
+                font-size: 11px;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+        if root.item.expanded && root.item.pages > 1: HorizontalLayout {
+            height: 20px;
+            padding-left: 8px + 50px + 6px + 11px + 6px;
+            padding-bottom: 4px;
+            spacing: 4px;
+            alignment: start;
+            PageArrow {
+                icon: @image-url("../../assets/icons/ui/arrow-left.svg");
+                hint: "Previous page";
+                enabled: root.item.page > 0;
+                clicked => { root.turn-page(root.item.id, root.item.page - 1); }
+            }
+            Text {
+                text: "Page " + (root.item.page + 1) + " of " + root.item.pages;
+                color: Theme.text-secondary;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+            PageArrow {
+                icon: @image-url("../../assets/icons/ui/arrow-right.svg");
+                hint: "Next page";
+                enabled: root.item.page + 1 < root.item.pages;
+                clicked => { root.turn-page(root.item.id, root.item.page + 1); }
             }
         }
 
@@ -477,6 +550,8 @@ export component OutputConsole inherits Rectangle {
     callback on-jump(string, int);
     // Show or hide a row's stack (by id).
     callback on-toggle-stack(int);
+    // Show another page of an open row's message (id, page from 0).
+    callback on-turn-page(int, int);
 
     // At the bottom of the list, so new output follows. Scrolling up clears
     // it and pauses the following; scrolling back down or "Jump to latest"
@@ -667,6 +742,7 @@ export component OutputConsole inherits Rectangle {
                     jump(file, line) => { root.on-jump(file, line); }
                     copy(id) => { root.on-copy-log(id); }
                     toggle-stack(id) => { root.on-toggle-stack(id); }
+                    turn-page(id, page) => { root.on-turn-page(id, page); }
                 }
             }
 

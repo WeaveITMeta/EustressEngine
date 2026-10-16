@@ -269,7 +269,7 @@ fn main() {
 
     // Point the Space loader at the requested Space (mirrors the editor's
     // --space override; init_resource inside the core is then a no-op).
-    app.insert_resource(space::SpaceRoot(args.space.clone()));
+    app.insert_resource(space::SpaceRoot(space::format_migration::launch_space_or_scratch(args.space.clone())));
 
     // Report as `headless` in the instance registry
     // (`<workspace>/.eustress/instances/<pid>.json`) so `eustress instances`

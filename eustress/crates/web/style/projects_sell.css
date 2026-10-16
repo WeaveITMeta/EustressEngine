@@ -1,0 +1,64 @@
+/* =============================================================================
+   Projects and selling
+   =============================================================================
+   Selling lives on the projects page (/projects) and on one project's Sell
+   page (/projects/:sim_id, styled by creator.css). This file holds what the
+   consolidation added: the line under the projects heading, and the sell chip
+   and Sell button on a project's card. The top bar is in topbar.css.
+   ============================================================================= */
+
+/* The line under the projects heading that points to selling */
+.projects-sell-note {
+    max-width: 62ch;
+    margin: 0 auto var(--space-xl);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    color: var(--color-text-muted);
+}
+
+.projects-subtitle + .projects-sell-note {
+    margin-top: calc(var(--space-md) * -1);
+}
+
+.projects-sell-note a {
+    color: #3cba54;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.projects-sell-note a:hover {
+    text-decoration: underline;
+}
+
+/* A card's line about selling */
+.place-card .sell-chip {
+    align-self: flex-start;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0;
+    padding: 3px 10px;
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    border-radius: var(--radius-full, 999px);
+    border: 1px solid rgba(128, 144, 160, 0.25);
+    color: var(--color-text-muted);
+}
+
+.place-card .sell-chip.is-ok {
+    border-color: rgba(60, 186, 84, 0.35);
+    color: #3cba54;
+}
+
+.place-card .sell-chip.is-held {
+    border-color: rgba(240, 163, 58, 0.4);
+    color: #f0a33a;
+}
+
+/* Four buttons (Play, Edit, Review, Sell) wrap instead of squeezing */
+.place-card .card-actions {
+    flex-wrap: wrap;
+}
+
+.place-card .card-actions .action-btn {
+    min-width: 84px;
+}

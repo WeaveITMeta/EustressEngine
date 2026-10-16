@@ -160,6 +160,20 @@ pub fn pick_under_cursor(
     aabb_q: &Query<&bevy::camera::primitives::Aabb>,
     fallback: ObbFallback,
 ) -> Option<PickHit> {
+    pick_under_cursor_filtered(ray, parts, parent_query, spatial_query, aabb_q, fallback, false)
+}
+
+/// [`pick_under_cursor`] that can also hit locked parts. The look picker
+/// samples them too: matching the colour of locked scenery is the common case.
+pub fn pick_under_cursor_filtered(
+    ray: &Ray3d,
+    parts: &PickQuery,
+    parent_query: &Query<&Instance>,
+    spatial_query: &avian3d::prelude::SpatialQuery,
+    aabb_q: &Query<&bevy::camera::primitives::Aabb>,
+    fallback: ObbFallback,
+    include_locked: bool,
+) -> Option<PickHit> {
     use avian3d::prelude::SpatialQueryFilter;
 
     // entity -> the Model a plain click resolves it to
@@ -183,7 +197,7 @@ pub fn pick_under_cursor(
             continue;
         }
         if let Some(bp) = basepart {
-            if bp.locked {
+            if bp.locked && !include_locked {
                 continue;
             }
         }

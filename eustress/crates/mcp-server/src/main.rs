@@ -493,7 +493,7 @@ async fn dispatch(
             // bridge-tool awareness: live-engine tools target the running
             // engine's Universe (via its port file), everything else uses the
             // explicit `universe` arg or the server default.
-            let universe = resolve_shared_universe(name, &args, state);
+            let universe = resolve_shared_universe(name, &args, state).map_err(|e| RpcError::invalid(e))?;
             // Gap 7 — shared-registry tools are synchronous and some BLOCK for a
             // long time (`await_simulation` / `run_experiment` poll with
             // `std::thread::sleep` until the run ends or `timeout_s`). Run them on
@@ -706,8 +706,11 @@ fn resolve_shared_universe(
     name: &str,
     args: &Value,
     state: &Arc<Mutex<ServerState>>,
-) -> Option<PathBuf> {
-    // Only an absolute path names the Universe here. Tools such as
+) -> Result<Option<PathBuf>, String> {
+    // Only an absolute path names the Universe here, and only a real one: a
+    // folder holding `Spaces/` ([`explicit_universe`]). Every shared tool's
+    // file access is contained by this root, so a bare folder (C:/, a home
+    // folder) would hand them all of it. Tools such as
     // `new_space` and `list_spaces` also accept a bare Universe name, which
     // they resolve against the current Universe's parent themselves; taken
     // as a path, a name is relative to this process's working directory, and
@@ -716,19 +719,33 @@ fn resolve_shared_universe(
     if let Some(u) = args.get("universe").and_then(|v| v.as_str()) {
         let t = u.trim();
         if !t.is_empty() && std::path::Path::new(t).is_absolute() {
-            return Some(PathBuf::from(t));
+            return explicit_universe(t).map(Some);
         }
     }
     if shared_registry::is_bridge_tool(name) {
         let roots = state.lock().unwrap().search_roots.clone();
         if let Some(live) = crate::universe::find_live_engine_universe(&roots) {
-            return Some(live);
+            return Ok(Some(live));
         }
     }
     if let Some(u) = state.lock().unwrap().current_universe.clone() {
-        return Some(u);
+        return Ok(Some(u));
     }
-    find_universe_root(&std::env::current_dir().ok()?)
+    Ok(std::env::current_dir().ok().and_then(|cwd| find_universe_root(&cwd)))
+}
+
+/// An absolute `universe` argument, accepted when it is a Universe: a folder
+/// holding `Spaces/`, the rule `set_active_universe` applies.
+fn explicit_universe(path: &str) -> Result<PathBuf, String> {
+    let universe = PathBuf::from(path);
+    if universe.join("Spaces").is_dir() {
+        Ok(universe)
+    } else {
+        Err(format!(
+            "'{path}' is not a Universe (no Spaces/ folder in it). Pass a Universe's absolute path, \
+             or leave `universe` out to use the active one."
+        ))
+    }
 }
 
 async fn write_response(
@@ -746,6 +763,18 @@ async fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_universe_must_hold_spaces() {
+        let dir = std::env::temp_dir().join(format!("eus_mcp_universe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        assert!(explicit_universe(&path).is_err(), "a bare folder is not a Universe");
+        std::fs::create_dir_all(dir.join("Spaces")).unwrap();
+        assert_eq!(explicit_universe(&path).unwrap(), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn echoes_a_supported_client_version() {

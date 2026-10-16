@@ -208,29 +208,13 @@ pub const FACES: [&str; 6] = ["Top", "Bottom", "Front", "Back", "Left", "Right"]
 /// 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front). Anything else is Front, the
 /// default face.
 pub fn normalize_face(raw: &str) -> &'static str {
-    let s = raw.trim();
-    let s = s.rsplit('.').next().unwrap_or(s);
-    match s.to_ascii_lowercase().as_str() {
-        "top" | "1" => "Top",
-        "bottom" | "4" => "Bottom",
-        "back" | "2" => "Back",
-        "left" | "3" => "Left",
-        "right" | "0" => "Right",
-        _ => "Front",
-    }
+    crate::classes::NormalId::parse(raw).unwrap_or_default().as_str()
 }
 
 /// A face's outward normal in the part's frame: Front is -Z, Back +Z, Top
 /// +Y, Bottom -Y, Right +X, Left -X.
 pub fn face_normal(face: &str) -> Vec3 {
-    match normalize_face(face) {
-        "Top" => Vec3::Y,
-        "Bottom" => Vec3::NEG_Y,
-        "Back" => Vec3::Z,
-        "Right" => Vec3::X,
-        "Left" => Vec3::NEG_X,
-        _ => Vec3::NEG_Z,
-    }
+    crate::classes::NormalId::parse(face).unwrap_or_default().to_normal()
 }
 
 /// The rotation that turns a spot light's axis (-Z) onto a face normal.
@@ -1379,6 +1363,26 @@ mod tests {
         assert_eq!(normalize_face("0"), "Right");
         assert_eq!(normalize_face("5"), "Front");
         assert_eq!(normalize_face("diagonal"), "Front");
+    }
+
+    #[test]
+    fn every_face_mapping_agrees_with_normal_id() {
+        use crate::classes::{Face, NormalId};
+        assert_eq!(NormalId::Front.to_normal(), Vec3::NEG_Z, "Front is the look direction, as in Roblox");
+        for (number, face) in NormalId::ALL.iter().enumerate() {
+            assert_eq!(NormalId::parse(&number.to_string()), Some(*face), "Roblox number {number}");
+            assert_eq!(NormalId::parse(&format!("Enum.NormalId.{}", face.as_str())), Some(*face));
+            assert_eq!(NormalId::parse(&face.as_str().to_ascii_uppercase()), Some(*face));
+            assert_eq!(face_normal(face.as_str()), face.to_normal(), "{face:?}");
+            assert_eq!(normalize_face(face.as_str()), face.as_str());
+        }
+        for face in [Face::Top, Face::Bottom, Face::Front, Face::Back, Face::Left, Face::Right] {
+            let id = NormalId::from(face);
+            assert_eq!(id.as_str(), face.as_str());
+            assert_eq!(face.to_normal(), id.to_normal());
+        }
+        assert_eq!(NormalId::parse("Sideways"), None);
+        assert_eq!(face_normal("Sideways"), Vec3::NEG_Z, "an unknown face is Front");
     }
 
     #[test]

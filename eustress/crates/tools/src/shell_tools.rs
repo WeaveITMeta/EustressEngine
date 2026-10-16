@@ -15,13 +15,17 @@
 
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT_S: u64 = 300;
 const MAX_TIMEOUT_S: u64 = 3000;
 const MAX_OUTPUT_BYTES: usize = 16_384;
+/// How long a pipe may stay open once the command has exited.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 fn err_result(msg: String) -> ToolResult {
     ToolResult {
@@ -34,26 +38,81 @@ fn err_result(msg: String) -> ToolResult {
     }
 }
 
+/// The working directory: a folder inside the Universe, by the shared rules
+/// in [`crate::sandbox`]. Empty is the Universe root.
 fn resolve_cwd(ctx: &ToolContext, rel: &str) -> Option<PathBuf> {
-    if rel.trim().is_empty() { return Some(ctx.universe_root.clone()); }
-    let cleaned = rel.replace('\\', "/");
-    if cleaned.contains("..") { return None; }
-    let resolved = ctx.universe_root.join(&cleaned);
-    if resolved.starts_with(&ctx.universe_root) && resolved.exists() && resolved.is_dir() {
-        Some(resolved)
-    } else {
-        None
+    crate::sandbox::resolve(&ctx.universe_root, rel).ok().filter(|p| p.is_dir())
+}
+
+/// What one pipe has given so far: the first bytes, up to a cap, the total,
+/// and whether the pipe has closed.
+#[derive(Default)]
+struct Captured {
+    kept: Vec<u8>,
+    total: usize,
+    closed: bool,
+}
+
+/// Read `pipe` to its end on a thread of its own, so the command never
+/// blocks on a full pipe. Keeps the first [`MAX_OUTPUT_BYTES`] (and a few
+/// more, so the cut can land on a character boundary) and counts the rest.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Arc<Mutex<Captured>> {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let Some(mut pipe) = pipe else {
+        captured.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
+        return captured;
+    };
+    let shared = Arc::clone(&captured);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = match pipe.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => 0,
+            };
+            let mut c = shared.lock().unwrap_or_else(|p| p.into_inner());
+            if n == 0 {
+                c.closed = true;
+                break;
+            }
+            c.total += n;
+            let room = (MAX_OUTPUT_BYTES + 4).saturating_sub(c.kept.len());
+            c.kept.extend_from_slice(&buf[..n.min(room)]);
+        }
+    });
+    captured
+}
+
+/// The text a pipe gave, after waiting up to [`PIPE_GRACE`] for it to close,
+/// and whether it is still open: a process the command started in the
+/// background can hold it after the command exits.
+fn collect(captured: &Mutex<Captured>) -> (String, bool) {
+    let until = Instant::now() + PIPE_GRACE;
+    loop {
+        {
+            let c = captured.lock().unwrap_or_else(|p| p.into_inner());
+            if c.closed || Instant::now() >= until {
+                return (shown(&c.kept, c.total), !c.closed);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn truncate_utf8(mut s: String) -> String {
-    if s.len() <= MAX_OUTPUT_BYTES { return s; }
-    // Walk back to a UTF-8 boundary so we don't slice through a codepoint.
-    let mut cut = MAX_OUTPUT_BYTES;
-    while cut > 0 && !s.is_char_boundary(cut) { cut -= 1; }
-    let tail = format!("\n… [truncated — {} bytes total]", s.len());
+/// The kept bytes as text, cut at [`MAX_OUTPUT_BYTES`] on a character
+/// boundary, with the total when there was more.
+fn shown(kept: &[u8], total: usize) -> String {
+    let mut s = String::from_utf8_lossy(kept).into_owned();
+    if total <= MAX_OUTPUT_BYTES {
+        return s;
+    }
+    let mut cut = MAX_OUTPUT_BYTES.min(s.len());
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
     s.truncate(cut);
-    s.push_str(&tail);
+    s.push_str(&format!("\n… [truncated, {} bytes total]", total));
     s
 }
 
@@ -63,7 +122,7 @@ impl ToolHandler for RunBashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "run_bash",
-            description: "Execute a bash command. The default working directory is the Universe root. Captures combined stdout+stderr and returns the exit code. REQUIRES USER APPROVAL for every call. Default timeout is 300s (5 min), max 900s (15 min).\n\nGradio API pattern (Hugging Face Spaces, etc.) — TWO-STEP async, NEVER combine into one command:\n  Step 1 — Submit: POST to the Gradio endpoint with JSON payload. Use timeout_seconds=60.\n           Returns JSON with an event_id.\n  Step 2 — Poll: GET the event_id URL. Use timeout_seconds=600 (generation can take minutes).\n           Streams SSE; extract the result URL from the last `data:` line.\n  Step 3 — Download: curl -L -o to save the artifact. Use timeout_seconds=180.\n  RULES: Always use --connect-timeout 15 --max-time <appropriate> on every curl. Extract event_id between steps — never pipe step 1 into step 2.\n\nUse this tool whenever there's no first-class wrapper for the operation. Prefer dedicated tools (read_file, write_file, list_directory, etc.) when they fit — they don't require approval.",
+            description: "Execute a bash command. The default working directory is the Universe root. Captures combined stdout+stderr and returns the exit code. REQUIRES USER APPROVAL for every call. Default timeout is 300s (5 min), max 3000s (50 min).\n\nGradio API pattern (Hugging Face Spaces, etc.) — TWO-STEP async, NEVER combine into one command:\n  Step 1 — Submit: POST to the Gradio endpoint with JSON payload. Use timeout_seconds=60.\n           Returns JSON with an event_id.\n  Step 2 — Poll: GET the event_id URL. Use timeout_seconds=600 (generation can take minutes).\n           Streams SSE; extract the result URL from the last `data:` line.\n  Step 3 — Download: curl -L -o to save the artifact. Use timeout_seconds=180.\n  RULES: Always use --connect-timeout 15 --max-time <appropriate> on every curl. Extract event_id between steps — never pipe step 1 into step 2.\n\nUse this tool whenever there's no first-class wrapper for the operation. Prefer dedicated tools (read_file, write_file, list_directory, etc.) when they fit — they don't require approval.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -153,23 +212,25 @@ impl ToolHandler for RunBashTool {
             }
         };
 
-        // Poll wait with timeout. `std::process::Child::wait_with_output`
-        // would be cleaner but offers no timeout; we loop on try_wait
-        // and kill the process if we exceed the limit. Output is
-        // collected after the wait loop so we don't deadlock on a
-        // full stdout pipe — capacity of the OS pipe is large enough
-        // for short-lived commands, which is the design target here.
+        // Each pipe drains on its own thread while the command runs. A
+        // command that prints more than the OS pipe holds (4 KB on Windows)
+        // waits for a reader, so reading only after it exits would wait out
+        // the whole timeout.
+        let stdout_pipe = drain(child.stdout.take());
+        let stderr_pipe = drain(child.stderr.take());
+
+        // Poll wait with timeout: `wait` offers none, so loop on try_wait
+        // and kill the process past the limit.
         let deadline = start + Duration::from_secs(timeout);
         let mut timed_out = false;
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(status)) => break Some(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
-                        let _ = child.wait();
                         timed_out = true;
-                        break;
+                        break child.wait().ok();
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -177,19 +238,14 @@ impl ToolHandler for RunBashTool {
                     return err_result(format!("wait on child failed: {}", e));
                 }
             }
-        }
-
-        // Collect output. `wait_with_output` consumes the child; that's
-        // fine — we already waited above.
-        let output = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => return err_result(format!("wait_with_output failed: {}", e)),
         };
+
+        let (stdout, stdout_open) = collect(&stdout_pipe);
+        let (stderr, stderr_open) = collect(&stderr_pipe);
+        let output_still_open = stdout_open || stderr_open;
         let elapsed_ms = start.elapsed().as_millis();
-        let stdout = truncate_utf8(String::from_utf8_lossy(&output.stdout).into_owned());
-        let stderr = truncate_utf8(String::from_utf8_lossy(&output.stderr).into_owned());
-        let exit_code = output.status.code();
-        let success = !timed_out && output.status.success();
+        let exit_code = status.and_then(|s| s.code());
+        let success = !timed_out && status.map(|s| s.success()).unwrap_or(false);
 
         // Shape the text body so the LLM reads stdout first (usually
         // the useful payload), then stderr, with a clear exit-status
@@ -203,6 +259,9 @@ impl ToolHandler for RunBashTool {
         ));
         if timed_out {
             body.push_str(&format!("\nTIMEOUT after {}s — process killed.\n", timeout));
+        }
+        if output_still_open {
+            body.push_str("\nA process the command started is still running and holds its output open; this is what it printed so far.\n");
         }
         if !stdout.is_empty() {
             body.push_str("\n── stdout ──\n");
@@ -229,6 +288,7 @@ impl ToolHandler for RunBashTool {
                 "cwd": cwd.to_string_lossy(),
                 "exit_code": exit_code,
                 "timed_out": timed_out,
+                "output_still_open": output_still_open,
                 "elapsed_ms": elapsed_ms,
                 "stdout": stdout,
                 "stderr": stderr,

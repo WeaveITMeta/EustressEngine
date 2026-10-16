@@ -20,7 +20,8 @@ function environment({ listed = true, binding = true } = {}) {
   const env = { SOCIAL: kv(), LIVE_HOSTS: binding ? namespace() : undefined };
   env.SOCIAL.store.set(`sim:${SIM}`, JSON.stringify({
     id: SIM, name: 'Pong', author_id: 'mckale', is_public: true,
-    moderation: { status: listed ? 'approved' : 'pending' },
+    // Rated all_ages: a listing with no rating is adult content, shown only with Adult content on (src/adult_content.mjs).
+    moderation: { status: listed ? 'approved' : 'pending', rating: 'all_ages' },
   }));
   return env;
 }

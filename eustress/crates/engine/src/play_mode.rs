@@ -1650,8 +1650,13 @@ fn play_mode_shortcuts(
         }
     }
 
+    // The save-point chords are raw reads as well, so they take the gate the
+    // shortcut dispatcher uses: a chord typed into a field or an overlay
+    // makes and restores no save point.
+    let typing = text_focused || crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed);
+
     // Ctrl+Shift+S: Create save point
-    if ctrl && shift && keyboard.just_pressed(KeyCode::KeyS) {
+    if ctrl && shift && keyboard.just_pressed(KeyCode::KeyS) && !typing {
         match current_state.get() {
             PlayModeState::Playing | PlayModeState::Paused => {
                 let name = format!("Save Point {}", snapshot_stack.len());
@@ -1662,7 +1667,7 @@ fn play_mode_shortcuts(
     }
     
     // Ctrl+Shift+R: Restore to last save point
-    if ctrl && shift && keyboard.just_pressed(KeyCode::KeyR) {
+    if ctrl && shift && keyboard.just_pressed(KeyCode::KeyR) && !typing {
         match current_state.get() {
             PlayModeState::Playing | PlayModeState::Paused => {
                 restore_events.write(RestoreToSavePointEvent { index: None });
@@ -1932,6 +1937,9 @@ impl Plugin for PlayModeCorePlugin {
                     .after(crate::soul::rune_play::drive_rune_frame),
             ).in_set(crate::play_datamodel::PlayScriptSet::Scripts).run_if(in_state(PlayModeState::Playing)))
 
+            // Script deletes (`instance_delete`) reach the Space trash or the live
+            // world in every state, so the drain is not gated on Playing.
+            .add_systems(Update, crate::soul::rune_play::drain_script_deletes)
             // Real-time anchored state sync during play mode
             .add_systems(Update, sync_anchored_to_rigidbody.run_if(in_state(PlayModeState::Playing)));
 
@@ -2569,8 +2577,19 @@ fn dispatch_gui_button_clicks(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     spatial: Option<Res<crate::spatial_query_bridge::ScriptSpatialQuery>>,
     ecs_bindings: Option<Res<crate::ui::rune_ecs_bindings::ECSBindings>>,
+    // The handler fills thread-local queues (destroys, property writes, ...)
+    // that `drive_rune_frame` drains, so both run on the main thread.
+    _main_thread: bevy::ecs::system::NonSendMarker,
 ) {
     let Some(ref button_name) = ui_focus.gui_clicked_button else { return };
+
+    // The script profile (`eustress_common::utils::script_profile`), only
+    // while it is armed: the click's whole dispatch is Rune driver time, like
+    // a frame of `drive_rune_frame`, and each handler's call is a step.
+    #[cfg(feature = "realism-scripting")]
+    let profile_start = eustress_common::utils::script_profile::armed().then(std::time::Instant::now);
+    #[cfg(feature = "realism-scripting")]
+    let _profile_scope = eustress_common::utils::script_profile::scope();
 
     #[cfg(feature = "realism-scripting")]
     crate::soul::rune_play::with_bridges_installed(
@@ -2581,6 +2600,7 @@ fn dispatch_gui_button_clicks(
         Some(&sim_values.0),
         || {
             for (_idx, compiled) in runtime.compiled.iter() {
+                let started = profile_start.is_some().then(std::time::Instant::now);
                 let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
                 match vm.call(["on_button_click"], (button_name.clone(),)) {
                     Ok(_) => {
@@ -2595,6 +2615,9 @@ fn dispatch_gui_button_clicks(
                         }
                     }
                 }
+                if let Some(started) = started {
+                    eustress_common::soul::rune_runtime::profile_step(compiled, "on_button_click", started);
+                }
             }
         },
     );
@@ -2606,6 +2629,10 @@ fn dispatch_gui_button_clicks(
     for (key, value) in crate::soul::rune_ecs_module::drain_script_sim_writes() {
         sim_values.0.insert(key.clone(), value);
         script_writes.0.insert(key, value);
+    }
+    #[cfg(feature = "realism-scripting")]
+    if let Some(start) = profile_start {
+        eustress_common::utils::script_profile::record_driver("rune", start.elapsed());
     }
 
     #[cfg(not(feature = "realism-scripting"))]
@@ -2744,6 +2771,40 @@ mod session_start_tests {
         go(&mut app, PlayModeState::Editing);
         go(&mut app, PlayModeState::Playing);
         assert_eq!(app.world().resource::<Starts>().0, 2, "Play again after Stop starts a new session");
+    }
+}
+
+#[cfg(test)]
+mod rune_thread_tests {
+    use bevy::ecs::system::{IntoSystem, System};
+    use bevy::prelude::*;
+
+    /// Whether Bevy pins `system` to the main thread once it is set up.
+    fn pinned_to_main_thread<M>(system: impl IntoSystem<(), (), M>) -> bool {
+        let mut world = World::new();
+        let mut system = IntoSystem::into_system(system);
+        system.initialize(&mut world);
+        !system.is_send()
+    }
+
+    /// Rune keeps per-script state in thread-locals: attributes, tags, and the
+    /// queues a button handler fills for the frame driver to drain. A system
+    /// that runs the VM on a different worker each frame loses that state, so
+    /// each system that runs or clears it is pinned to the main thread.
+    #[cfg(feature = "realism-scripting")]
+    #[test]
+    fn the_systems_that_run_rune_are_pinned_to_the_main_thread() {
+        assert!(pinned_to_main_thread(crate::soul::rune_play::drive_rune_frame), "drive_rune_frame");
+        assert!(pinned_to_main_thread(crate::soul::rune_play::start_rune_session), "start_rune_session");
+        assert!(pinned_to_main_thread(crate::soul::rune_play::stop_rune_session), "stop_rune_session");
+        assert!(pinned_to_main_thread(super::dispatch_gui_button_clicks), "dispatch_gui_button_clicks");
+    }
+
+    /// The check is meaningful: an ordinary system is not pinned.
+    #[test]
+    fn an_ordinary_system_is_not_pinned() {
+        fn ordinary(_commands: Commands) {}
+        assert!(!pinned_to_main_thread(ordinary));
     }
 }
 

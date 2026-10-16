@@ -199,6 +199,15 @@ fn index(lua: &Lua, id: InstanceId, key: &str) -> LuaResult<Value> {
         let m = with_dm(lua, |dm| if key == "Mass" { part_mass(dm, id) } else { assembly_mass(dm, id) })?;
         return Ok(Value::Number(m));
     }
+    // A part's drawn pose (read-only): where its body is drawn this frame, in
+    // the running script's units.
+    if is_base_part(&class) && key == "DrawnCFrame" {
+        let drawn = with_dm(lua, |dm| drawn_cframe(dm, id))?;
+        if super::studs::converts(&class, key) && super::studs::running_in_studs(&host_table(lua)?)? {
+            return to_lua(lua, &super::studs::read_value_in_studs(&class, key, &drawn));
+        }
+        return to_lua(lua, &drawn);
+    }
 
     // 4. Properties: a Sound's state as its player reports it, then what the
     // tree holds.
@@ -273,6 +282,33 @@ fn assembly_mass(dm: &DataModel, id: InstanceId) -> f64 {
     part_mass(dm, id)
 }
 
+/// The hidden properties behind a part's `DrawnCFrame`, which the engine's pull
+/// keeps for a part drawn apart from its CFrame (eased between physics steps,
+/// or merged into a weld group): the pose its body is drawn at, and the CFrame
+/// the part had when that pose was taken (`Nil` once it is drawn at its CFrame
+/// again). Neither replicates, and neither change is one a script sees.
+pub const DRAWN_CFRAME: &str = "__DrawnCFrame";
+pub const DRAWN_FROM_CFRAME: &str = "__DrawnFromCFrame";
+
+/// A part's `DrawnCFrame`: the drawn pose the engine last took, while the
+/// part's CFrame is still the one it was taken with; otherwise its CFrame. A
+/// part no ECS entity holds is not drawn, so it has no drawn pose: a clone not
+/// spawned yet reads its CFrame, though it copied its source's pose. So does a
+/// part with no pose taken yet, one a script moved since, and one drawn at its
+/// CFrame again.
+fn drawn_cframe(dm: &DataModel, id: InstanceId) -> DmValue {
+    let Some(cframe) = dm.get_prop(id, "CFrame") else {
+        return DmValue::CFrame(CFrame::default());
+    };
+    if dm.entity_of(id).is_none() {
+        return cframe;
+    }
+    match (dm.get_prop(id, DRAWN_FROM_CFRAME), dm.get_prop(id, DRAWN_CFRAME)) {
+        (Some(from), Some(drawn)) if from == cframe && !from.is_nil() => drawn,
+        _ => cframe,
+    }
+}
+
 /// The Humanoid property behind `SetStateEnabled(state, ...)`: Jumping and
 /// Climbing are the engine's JumpEnabled and ClimbingEnabled; any other state
 /// is remembered under a hidden name that nothing applies.
@@ -285,6 +321,11 @@ fn state_enabled_prop(state: &str) -> String {
 }
 
 fn newindex(lua: &Lua, id: InstanceId, key: &str, value: Value) -> LuaResult<()> {
+    // The hidden properties behind DrawnCFrame are the engine's to write, on
+    // any instance, as DrawnCFrame itself is read-only.
+    if key == DRAWN_CFRAME || key == DRAWN_FROM_CFRAME {
+        return Err(mlua::Error::RuntimeError(format!("{key} is read-only")));
+    }
     // Callback-valued members live Lua-side (BindableFunction.OnInvoke ...).
     if let Value::Function(f) = &value {
         let host = host_table(lua)?;
@@ -310,7 +351,7 @@ fn newindex(lua: &Lua, id: InstanceId, key: &str, value: Value) -> LuaResult<()>
             }
         }
     }
-    if is_base_part(&class) && matches!(key, "Mass" | "AssemblyMass") {
+    if is_base_part(&class) && matches!(key, "Mass" | "AssemblyMass" | "DrawnCFrame") {
         return Err(mlua::Error::RuntimeError(format!("{key} is read-only")));
     }
     if class == "UserInputService" && key == "MouseIconEnabled" {

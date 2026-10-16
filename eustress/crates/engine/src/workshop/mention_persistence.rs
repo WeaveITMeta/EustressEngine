@@ -133,7 +133,7 @@ pub fn save_meta(
     // Only persist static entries (Toml + Filesystem). Live ECS entries
     // are session-scoped and re-derived every launch.
     let mut vec: Vec<&MentionEntry> = entries.values()
-        .filter(|e| !matches!(e.source, crate::workshop::mention::MentionSource::Ecs))
+        .filter(|e| e.is_persisted())
         .collect();
     vec.sort_by_key(|e| e.id);
 
@@ -225,7 +225,13 @@ pub fn hydrate_from_disk(universe_root: &Path, index: &mut MentionIndex) -> bool
 /// periodic autosave.
 pub fn persist_all(universe_root: &Path, index: &MentionIndex) -> std::io::Result<()> {
     save_meta(universe_root, index.entries())?;
-    save_manifest(universe_root, &KnowledgeManifest::current(index.len() as u64))?;
+    // The count of rows `save_meta` just wrote, which `hydrate_from_disk`
+    // checks the file against. `index.len()` also counted the live Ecs
+    // entries `save_meta` leaves out, so a cache saved mid-session failed
+    // that check, and the manifest changed with the live mirror, which
+    // autosave does not track.
+    let written = index.entries().values().filter(|e| e.is_persisted()).count();
+    save_manifest(universe_root, &KnowledgeManifest::current(written as u64))?;
     for (user, mru) in index.mru_snapshot() {
         save_user_mru(universe_root, &user, &mru)?;
     }
@@ -242,8 +248,11 @@ pub fn autosave_index(
     const MIN_INTERVAL_SECS: u64 = 30;
     let Some(universe_root) = index.universe_root() else { return };
 
-    // Only write when something actually changed.
-    if index.generation() == *last_generation { return; }
+    // Only write when something `persist_all` writes changed. The live ECS
+    // mirror moves `generation()` alone: in Play it upserts every changed
+    // Instance, and rewriting the whole catalogue (130K entries on a big
+    // Universe) every 30 s for that stalled Play by up to 3.6 s a write.
+    if index.persisted_generation() == *last_generation { return; }
 
     // Debounce.
     let now = std::time::Instant::now();
@@ -251,14 +260,100 @@ pub fn autosave_index(
         if now.duration_since(last).as_secs() < MIN_INTERVAL_SECS { return; }
     }
 
+    // A failed write waits out the interval too: retrying on the next frame
+    // serialised the whole catalogue every frame for as long as it failed.
+    *last_save = Some(now);
     if let Err(e) = persist_all(universe_root, &index) {
         bevy::prelude::warn!("mention-persistence: autosave failed: {}", e);
     } else {
-        *last_save = Some(now);
-        *last_generation = index.generation();
+        *last_generation = index.persisted_generation();
     }
 }
 
 // Bring `info!` into scope for this module without pulling the prelude
 // into every file.
 use bevy::prelude::info;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::mention::{MentionKind, MentionSource};
+    use bevy::prelude::World;
+
+    /// A scratch Universe root, removed again when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("eustress-mention-persist-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Scratch(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entry(id: u64, source: MentionSource) -> MentionEntry {
+        MentionEntry {
+            id: MentionId(id),
+            kind: MentionKind::Entity,
+            name: format!("Part{id}"),
+            qualifier: "Part".to_string(),
+            canonical_path: format!("entity:Space1/Workspace/Part{id}"),
+            space: "Space1".to_string(),
+            rel_path: format!("Workspace/Part{id}"),
+            icon_hint: "part".to_string(),
+            source,
+            entity: None,
+        }
+    }
+
+    /// A failed save waits out the interval like a good one, instead of
+    /// serialising the whole catalogue again on the very next frame.
+    #[test]
+    fn a_failed_autosave_waits_out_the_interval() {
+        let s = Scratch::new("failed");
+        // A file where the .eustress folder goes makes every write fail.
+        std::fs::write(s.0.join(".eustress"), b"").unwrap();
+        let mut index = MentionIndex::default();
+        index.set_universe_root(Some(s.0.clone()));
+        index.upsert(entry(1, MentionSource::Toml));
+        let mut world = World::new();
+        world.insert_resource(index);
+        let autosave = world.register_system(autosave_index);
+        world.run_system(autosave).unwrap();
+        assert!(!meta_path(&s.0).exists());
+
+        // The cause clears, and the next frame comes well inside the interval.
+        std::fs::remove_file(s.0.join(".eustress")).unwrap();
+        world.run_system(autosave).unwrap();
+        assert!(!meta_path(&s.0).exists(), "a failed save was retried on the next frame");
+
+        // Control: an autosave with no save behind it writes in this rig.
+        let fresh = world.register_system(autosave_index);
+        world.run_system(fresh).unwrap();
+        assert!(meta_path(&s.0).exists());
+    }
+
+    /// The manifest counts the rows `save_meta` writes, not the live Ecs
+    /// entries beside them, so a cache saved mid-session loads back.
+    #[test]
+    fn the_manifest_counts_the_rows_written() {
+        let s = Scratch::new("manifest");
+        let mut index = MentionIndex::default();
+        index.upsert(entry(1, MentionSource::Toml));
+        index.upsert(entry(2, MentionSource::Filesystem));
+        index.upsert(entry(3, MentionSource::Ecs));
+        persist_all(&s.0, &index).unwrap();
+        assert_eq!(load_meta(&s.0).map(|rows| rows.len()), Some(2));
+        assert_eq!(load_manifest(&s.0).map(|m| m.entry_count), Some(2));
+        let mut loaded = MentionIndex::default();
+        assert!(hydrate_from_disk(&s.0, &mut loaded), "a cache saved with a live entry present must load back");
+        assert_eq!(loaded.len(), 2);
+    }
+}

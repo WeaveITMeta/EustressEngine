@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use super::{
     IdeationPipeline, IdeationState, ClaudeResponseEvent, ClaudeErrorEvent,
-    McpCommandStatus, MessageRole, normalizer,
+    McpCommandStatus, MessageRole, normalizer, tool_dispatch, approval_policy, card_review,
 };
 use super::tools::ToolRegistry;
 use eustress_tools::registry::{LuauCreatedEntity, LuauExecutionResult, LuauExecutor};
@@ -132,11 +132,18 @@ pub fn request_stop() {
 /// keeps the loop stopped: `ready_to_dispatch` treats it as a finished turn,
 /// where the freshly written tool results alone would read as "continue".
 ///
+/// Tool calls already running are told to stop through their
+/// `ToolContext::cancelled` flag (a tool that polls, like `await_simulation` or
+/// a camera capture waiting for frames, returns early), and a call the worker
+/// has not started yet never starts. A tool in the middle of a single
+/// uninterruptible step still finishes it; its late answer is discarded.
+///
 /// Queued messages are left alone and go out on the next frame, which makes
 /// Stop double as "stop and do this instead".
 pub fn apply_workshop_stop(
     mut pipeline: ResMut<IdeationPipeline>,
     mut tasks: ResMut<WorkshopClaudeTasks>,
+    mut tool_tasks: Option<ResMut<super::ToolDispatchTasks>>,
 ) {
     if !STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -147,6 +154,10 @@ pub fn apply_workshop_stop(
     tasks.advisor_in_flight.clear();
     tasks.chat_pending = false;
 
+    // Before the cards are closed, so a call that is about to start sees the
+    // flag instead of racing the notice.
+    let cancelled_calls = tool_tasks.as_deref_mut().map(|t| t.cancel_all()).unwrap_or(0);
+
     let closed = pipeline.skip_unanswered_tool_calls(
         &[McpCommandStatus::Pending, McpCommandStatus::Approved, McpCommandStatus::Running],
         "Stopped by the user before this finished.",
@@ -155,7 +166,9 @@ pub fn apply_workshop_stop(
 
     if was_thinking || closed > 0 {
         pipeline.add_notice_message("Stopped".to_string());
-        info!("Workshop: stopped by the user ({closed} open tool calls closed)");
+        info!(
+            "Workshop: stopped by the user ({closed} open tool calls closed, {cancelled_calls} running calls told to stop)"
+        );
     }
 }
 
@@ -246,10 +259,15 @@ pub fn dispatch_chat_request(
         .map(|g| g.effective_workshop_model())
         .unwrap_or_default();
 
-    // Anthropic keeps its per-space override; the other providers are
-    // global-only, so they resolve straight off the global settings. Both
-    // arms report the provider by name, because with three vendors in the
-    // picker "no API key configured" no longer says which field to fill in.
+    // A key still being looked up in the credential store: wait for it
+    // rather than report it missing. This system runs again next frame.
+    if global_settings.as_ref().is_some_and(|g| g.key_pending(model.provider())) {
+        return;
+    }
+
+    // One global key per provider. Both arms report the provider by name,
+    // because with three vendors in the picker "no API key configured" no
+    // longer says which field to fill in.
     let api_key = match model.provider() {
         Provider::Anthropic => match (&global_settings, &space_settings) {
             (Some(global), Some(space)) => {
@@ -277,7 +295,7 @@ pub fn dispatch_chat_request(
     };
 
     // Assemble Claude-API-shaped messages from the pipeline's chat log.
-    let mut messages = build_anthropic_messages(&pipeline);
+    let mut messages = build_anthropic_messages(&pipeline, model.vision());
     if messages.is_empty() {
         return;
     }
@@ -676,11 +694,15 @@ fn build_system_prompt(
 ///   System messages without a user preceding them are treated as context.
 /// * `Mcp` with `tool_use_id` + `tool_input` → tool_use block under "assistant".
 ///   If the same message also has `tool_result` → emits a paired tool_result
-///   block under the next "user" message.
+///   block under the next "user" message. A result that carries an image (a
+///   camera capture) becomes text plus an image block, when the model can see
+///   images; see `tool_dispatch::tool_result_content`.
 /// * `Approval`, `Error`, `Artifact` → skipped (UI-only).
 /// * System mode-badge messages (role=System, content starts with an emoji
 ///   mode icon) are also elided so they don't pollute the Claude context.
-pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value> {
+///
+/// `vision` is whether the model that will read this history can see images.
+pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline, vision: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut current_role: Option<&'static str> = None;
     let mut buffer: Vec<Value> = Vec::new();
@@ -755,7 +777,11 @@ pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value
                     buffer.push(json!({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
-                        "content": result.clone(),
+                        "content": tool_dispatch::tool_result_content(
+                            result,
+                            msg.tool_result_image.as_ref(),
+                            vision,
+                        ),
                     }));
                 }
             }
@@ -957,6 +983,11 @@ pub fn poll_agentic_responses(
     display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    // Where tools that run without asking are tracked. Optional so a missing
+    // resource fails the tool cards visibly instead of Bevy skipping this whole
+    // system, which would silently stop every reply from being read.
+    mut tool_tasks: Option<ResMut<super::ToolDispatchTasks>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
     let mut completed_indices = Vec::new();
 
@@ -1000,8 +1031,44 @@ pub fn poll_agentic_responses(
                 //    the registered definition doesn't require approval.
                 let tool_context = build_tool_context(&space_root, &auth, &display_unit);
                 let mut any_awaiting_approval = false;
+                // Calls that run without asking, in the order the model gave
+                // them. They go to ONE worker thread after this loop, so a
+                // tool that waits (a camera capture, await_simulation) cannot
+                // freeze the frame, and a Model is still made before its
+                // child Parts.
+                let mut auto_calls: Vec<tool_dispatch::PendingCall> = Vec::new();
 
                 for tool_use in &agentic.tool_uses {
+                    // The advisor and the critic are answered by the bridge,
+                    // outside the tool registry, so neither a card nor a grant
+                    // stands in front of them. A cap does: in auto mode a model
+                    // could otherwise call one in a loop on the person's key.
+                    // Each use is counted in the log.
+                    if let Some(bridge) = approval_policy::BridgeCall::from_tool_name(&tool_use.name) {
+                        let used = approval_policy::bridge_use(&pipeline.messages, bridge);
+                        match approval_policy::bridge_call_allowed(used, bridge) {
+                            Ok(()) => info!(
+                                "Workshop: {} call {} of {} for this message, {} of {} in this conversation",
+                                tool_use.name,
+                                used.this_turn + 1,
+                                bridge.per_turn(),
+                                used.this_session + 1,
+                                bridge.per_session(),
+                            ),
+                            Err(refusal) => {
+                                warn!("Workshop: {} refused: {}", tool_use.name, refusal);
+                                refuse_bridge_call(
+                                    &mut pipeline,
+                                    &tool_use.name,
+                                    &tool_use.id,
+                                    &tool_use.input,
+                                    &refusal,
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
                     // `consult_advisor` is intercepted here, before the
                     // registry lookup below — it's bridge-local (see
                     // `consult_advisor_tool`), not in `ToolRegistry`, so
@@ -1125,18 +1192,25 @@ pub fn poll_agentic_responses(
                         .map(|d| d.requires_approval)
                         .unwrap_or(false);
 
-                    // Auto mode drops the confirmation prompt for the whole
-                    // session. It bypasses the PROMPT and nothing else: the tool
-                    // still goes through `ToolRegistry::dispatch`, which calls
-                    // `capability::authorize` and refuses anything unclassified
-                    // or outside the grant. So this changes how often Workshop
-                    // stops to ask, never what it is allowed to do.
+                    // Auto mode drops the confirmation prompt for tools that
+                    // work inside the Space (read and write). It never drops it
+                    // for a tool that runs commands or code, deletes, or goes
+                    // online: those show the card whatever the switch says
+                    // (`approval_policy`). The class is read from this call,
+                    // arguments included. A call that runs without a card also
+                    // runs under a Read and Write grant only (`build_tool_context`),
+                    // so dispatch refuses a sensitive one that slipped past.
                     let auto_approve = global_settings
                         .as_ref()
                         .map(|g| g.workshop_auto_approve)
                         .unwrap_or(false);
-                    let requires_approval = declared_approval && !auto_approve;
-                    if declared_approval && auto_approve {
+                    let class = eustress_tools::capability::capability_of_call(
+                        &tool_use.name,
+                        &tool_use.input,
+                    );
+                    let requires_approval =
+                        approval_policy::needs_approval_card(declared_approval, class, auto_approve);
+                    if declared_approval && !requires_approval {
                         info!(
                             "Workshop: auto mode approved '{}' without prompting",
                             tool_use.name
@@ -1153,47 +1227,81 @@ pub fn poll_agentic_responses(
                         0.0,
                     );
                     // Stash the tool_use metadata on the card for later reconstruction.
+                    // The fingerprint is taken now: Run is refused for an input that
+                    // is no longer the one the card showed (`card_review`).
                     if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
                         msg.tool_use_id = Some(tool_use.id.clone());
                         msg.tool_input = Some(tool_use.input.clone());
+                        msg.input_digest = Some(card_review::input_digest(&tool_use.input));
                         msg.is_assistant_turn = true;
                     }
 
                     if !requires_approval {
-                        // Execute immediately and attach result.
-                        if let (Some(registry), Some(ref ctx)) = (&tool_registry, &tool_context) {
-                            let result = registry.dispatch(
-                                &tool_use.name,
-                                &tool_use.id,
-                                tool_use.input.clone(),
-                                ctx,
-                            );
-                            let status = if result.success {
-                                McpCommandStatus::Done
-                            } else {
-                                McpCommandStatus::Error
-                            };
-                            pipeline.update_mcp_status(msg_id, status);
+                        // During Play a tool that changes the Space waits for
+                        // Stop (`tool_play_refusal`): its card says why, and
+                        // the turn goes on without it.
+                        if let Some(reason) = super::tool_play_refusal(play_state.as_deref(), &tool_use.name, class) {
                             if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
-                                msg.tool_result = Some(result.content.clone());
-                            }
-                            info!("Workshop: auto-executed '{}' → success={}", tool_use.name, result.success);
-                        } else {
-                            // Tool context missing — can't execute, mark as needing approval so
-                            // something shows in the UI instead of silently failing.
-                            if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
-                                msg.tool_result = Some(
-                                    "Workshop: no SpaceRoot resource — tool cannot execute.".to_string()
-                                );
+                                msg.tool_result = Some(reason);
                             }
                             pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+                            continue;
+                        }
+                        // Runs on the worker once this loop is done. The card
+                        // shows Running until `poll_tool_dispatches` delivers
+                        // the result, a frame or two later for a quick tool.
+                        match (&tool_context, tool_tasks.as_deref_mut()) {
+                            (Some(_), Some(tasks)) => {
+                                pipeline.update_mcp_status(msg_id, McpCommandStatus::Running);
+                                let (call, in_flight) = tool_dispatch::PendingCall::new(
+                                    msg_id,
+                                    tool_use.name.clone(),
+                                    tool_use.id.clone(),
+                                    tool_use.input.clone(),
+                                );
+                                tasks.in_flight.push(in_flight);
+                                auto_calls.push(call);
+                            }
+                            _ => {
+                                // Tool context missing — can't execute, mark as needing approval so
+                                // something shows in the UI instead of silently failing.
+                                if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                                    msg.tool_result = Some(
+                                        "Workshop: no SpaceRoot resource — tool cannot execute.".to_string()
+                                    );
+                                }
+                                pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+                            }
                         }
                     } else {
                         any_awaiting_approval = true;
                     }
                 }
 
-                pipeline.awaiting_tool_approval = any_awaiting_approval;
+                // Hand the auto-run calls to the worker, in order. The
+                // conversation stays on hold until every card has a result
+                // (`poll_tool_dispatches` lifts the hold), so the next model
+                // request goes out carrying all of this turn's results at once.
+                let running_async = !auto_calls.is_empty();
+                if running_async {
+                    if let Some(base_ctx) = tool_context {
+                        tool_dispatch::spawn_batch(auto_calls, move || {
+                            let registry = super::build_tool_registry();
+                            move |pending: &tool_dispatch::PendingCall| {
+                                // Each call carries its own cancel flag, so Stop reaches it.
+                                let mut call_ctx = base_ctx.clone();
+                                call_ctx.cancelled = Some(pending.cancel.clone());
+                                registry.dispatch(
+                                    &pending.tool_name,
+                                    &pending.tool_use_id,
+                                    pending.input.clone(),
+                                    &call_ctx,
+                                )
+                            }
+                        });
+                    }
+                }
+                pipeline.awaiting_tool_approval = any_awaiting_approval || running_async;
             }
             Err(err) => {
                 // Name the model that actually failed. This said "Claude"
@@ -1390,6 +1498,33 @@ pub fn poll_advisor_responses(
     }
 }
 
+/// Answer an advisor or critic call that is over its cap. The provider rejects
+/// a `tool_use` that never gets a `tool_result`, so the call still gets a card:
+/// closed as an Error, holding the reason as the tool's result, with a line in
+/// the chat so the person can see the model was stopped.
+fn refuse_bridge_call(
+    pipeline: &mut IdeationPipeline,
+    tool_name: &str,
+    tool_use_id: &str,
+    input: &Value,
+    reason: &str,
+) {
+    let msg_id = pipeline.add_mcp_command(
+        format!("{}({})", tool_name, compact_input_preview(input)),
+        tool_name.to_string(),
+        "tool_use".to_string(),
+        0.0,
+    );
+    if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+        msg.tool_use_id = Some(tool_use_id.to_string());
+        msg.tool_input = Some(input.clone());
+        msg.is_assistant_turn = true;
+        msg.tool_result = Some(reason.to_string());
+    }
+    pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+    pipeline.add_notice_message(reason.to_string());
+}
+
 /// Build a `ToolContext` from Bevy resources. Returns `None` when Space isn't
 /// loaded (early startup / between spaces).
 fn build_tool_context(
@@ -1473,12 +1608,13 @@ fn build_tool_context(
         // Workshop tool calls aren't cancellable out of band today; wiring
         // the stop button through to here is the natural next step.
         cancelled: None,
-        // The local Workshop session: the user is present, and every tool
-        // whose definition sets `requires_approval` still stops at a card
-        // they must click. Full capability here, with that human gate, is
-        // the intended posture — the CMMC AC.L1-3.1.2 concern is unattended
-        // transports, not the operator's own session.
-        permissions: eustress_tools::Permissions::full().for_principal("workshop-session"),
+        // What a call may do WITHOUT waiting for a click: read and write inside
+        // the Space. A tool that runs commands or code, deletes or goes online
+        // always stops at a card (`approval_policy::needs_approval_card`), and the
+        // call the person approves runs under its own full grant (see
+        // `ToolDispatchTasks`). So this context cannot carry such a call even if
+        // one reached the worker without its card.
+        permissions: approval_policy::auto_run_permissions(),
     })
 }
 
@@ -1676,7 +1812,7 @@ mod tests {
         let mut pipeline = IdeationPipeline::default();
         pipeline.add_user_message("hello".to_string());
         pipeline.add_notice_message("Stopped".to_string());
-        let request = serde_json::to_string(&build_anthropic_messages(&pipeline)).unwrap();
+        let request = serde_json::to_string(&build_anthropic_messages(&pipeline, true)).unwrap();
         assert!(!request.contains("Stopped"), "a notice leaked into the request: {request}");
     }
 
@@ -1741,5 +1877,104 @@ mod tests {
             let preview = compact_input_preview(&serde_json::json!({ "note": note }));
             assert!(preview.ends_with('…'), "pad {pad}: {preview}");
         }
+    }
+
+    // ---- tool results that carry an image (a camera capture) ----------------
+
+    /// A conversation where the model asked for a capture and got a result.
+    fn pipeline_with_capture(image: Option<tool_dispatch::ToolImage>) -> IdeationPipeline {
+        let mut pipeline = IdeationPipeline::default();
+        pipeline.add_user_message("What does the cabin look like?".to_string());
+        pipeline.messages.push(ChatMessage {
+            tool_result: Some("Screenshot captured.".to_string()),
+            tool_result_image: image,
+            ..open_tool_call("toolu_cap", McpCommandStatus::Done)
+        });
+        pipeline
+    }
+
+    /// The `content` of the one tool_result block in a built history.
+    fn tool_result_content_of(history: &[Value]) -> Value {
+        history
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .find(|b| b["type"] == "tool_result")
+            .map(|b| b["content"].clone())
+            .expect("the history should hold a tool_result")
+    }
+
+    #[test]
+    fn a_capture_reaches_the_model_as_text_then_image() {
+        let image = tool_dispatch::ToolImage::new("image/png", "QUJD", 3);
+        let history = build_anthropic_messages(&pipeline_with_capture(Some(image)), true);
+        assert_eq!(
+            tool_result_content_of(&history),
+            json!([
+                { "type": "text", "text": "Screenshot captured." },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "QUJD" } },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_text_only_result_keeps_its_plain_string_content() {
+        // Every ordinary tool result: the shape must not change for them.
+        let history = build_anthropic_messages(&pipeline_with_capture(None), true);
+        assert_eq!(tool_result_content_of(&history), json!("Screenshot captured."));
+    }
+
+    #[test]
+    fn a_model_that_cannot_see_images_gets_the_text_and_a_note() {
+        let image = tool_dispatch::ToolImage::new("image/png", "QUJD", 3);
+        let history = build_anthropic_messages(&pipeline_with_capture(Some(image)), false);
+        let content = tool_result_content_of(&history);
+        let text = content.as_str().expect("a plain string for a model without vision");
+        assert!(text.starts_with("Screenshot captured.") && text.contains("cannot see images"), "{text}");
+        assert!(!serde_json::to_string(&history).unwrap().contains("QUJD"), "pixels must not be sent");
+    }
+
+    #[test]
+    fn an_evicted_capture_is_noted_not_silently_dropped() {
+        let mut image = tool_dispatch::ToolImage::new("image/png", "QUJD", 3);
+        image.evict();
+        let history = build_anthropic_messages(&pipeline_with_capture(Some(image)), true);
+        let content = tool_result_content_of(&history);
+        assert!(content.as_str().is_some_and(|t| t.contains("no longer attached")), "{content}");
+    }
+
+    #[test]
+    fn a_capture_stays_paired_with_its_tool_use() {
+        // The provider rejects a tool_result whose id has no tool_use before it.
+        let image = tool_dispatch::ToolImage::new("image/png", "QUJD", 3);
+        let history = build_anthropic_messages(&pipeline_with_capture(Some(image)), true);
+        let blocks: Vec<&Value> = history.iter().filter_map(|m| m["content"].as_array()).flatten().collect();
+        let use_at = blocks.iter().position(|b| b["type"] == "tool_use" && b["id"] == "toolu_cap");
+        let result_at = blocks.iter().position(|b| b["type"] == "tool_result" && b["tool_use_id"] == "toolu_cap");
+        assert!(use_at.is_some() && result_at.is_some() && use_at < result_at);
+    }
+
+    #[test]
+    fn an_advisor_call_over_its_cap_is_answered_and_counted() {
+        // A refused call still gets a closed card holding the reason, because the
+        // provider rejects a tool_use that never gets a tool_result; and that card
+        // counts, so once over the cap the next call is refused as well.
+        let mut pipeline = IdeationPipeline::default();
+        pipeline.messages.push(ChatMessage { role: MessageRole::User, ..Default::default() });
+        let call = approval_policy::BridgeCall::Advisor;
+        let reason = "Not run: consult_advisor was already used 3 times for this message (limit 3).";
+        for n in 0..approval_policy::ADVISOR_PER_TURN {
+            refuse_bridge_call(&mut pipeline, "consult_advisor", &format!("toolu_{n}"), &json!({ "question": "q" }), reason);
+        }
+
+        let used = approval_policy::bridge_use(&pipeline.messages, call);
+        assert_eq!(used.this_turn, approval_policy::ADVISOR_PER_TURN);
+        assert!(approval_policy::bridge_call_allowed(used, call).is_err());
+
+        let card = pipeline.messages.iter().find(|m| m.tool_use_id.as_deref() == Some("toolu_0")).unwrap();
+        assert_eq!(card.mcp_status, Some(McpCommandStatus::Error));
+        assert_eq!(card.tool_result.as_deref(), Some(reason));
+        assert!(card.is_assistant_turn, "history groups the card with the assistant's tool_use");
+        assert!(pipeline.messages.iter().any(|m| m.role == MessageRole::Notice));
     }
 }

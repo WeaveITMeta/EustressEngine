@@ -543,6 +543,20 @@ pub fn ui_click(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
 // publish.status / publish.submit
 // ---------------------------------------------------------------------------
 
+/// Why a publish is refused during Play, the answer `do_publish` gives
+/// (`keybindings::play_refusal`): `None` while editing.
+fn publish_play_refusal(world: &World, space_only: bool) -> Option<String> {
+    let state = world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .map_or(crate::play_mode::PlayModeState::Editing, |s| *s.get());
+    let action = if space_only {
+        crate::keybindings::Action::PublishSpace
+    } else {
+        crate::keybindings::Action::PublishUniverse
+    };
+    crate::keybindings::play_refusal(state, action)
+}
+
 /// Report whether this session could publish right now, without publishing.
 ///
 /// Publishing is outward-facing and creates a listing other people can see, so
@@ -574,6 +588,10 @@ pub fn publish_status(world: &mut World, req: &BridgeRequest) -> BridgeResponse 
         if !complete {
             blockers.push("a publish is already in flight".into());
         }
+    }
+    // The answer publish.submit gives during Play.
+    if let Some(refusal) = publish_play_refusal(world, false) {
+        blockers.push(refusal);
     }
 
     BridgeResponse::ok(
@@ -609,6 +627,12 @@ pub fn publish_submit(world: &mut World, req: &BridgeRequest) -> BridgeResponse 
         );
     }
 
+    // Refused during Play before anything is queued: `do_publish` would
+    // refuse it there too, and the caller must not be told it was queued.
+    if let Some(refusal) = publish_play_refusal(world, param_bool(req, "space_only").unwrap_or(false)) {
+        return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(format!("refused: {refusal}")));
+    }
+
     // Re-check the preconditions here rather than trusting an earlier
     // publish.status: the two calls are separate round-trips and the session
     // can sign out between them.
@@ -637,6 +661,10 @@ pub fn publish_submit(world: &mut World, req: &BridgeRequest) -> BridgeResponse 
         open_source: param_bool(req, "open_source").unwrap_or(false),
         studio_editable: param_bool(req, "studio_editable").unwrap_or(false),
         space_only: param_bool(req, "space_only").unwrap_or(false),
+        max_players: None,
+        cover: Default::default(),
+        target: Default::default(),
+        tags: None,
     };
     let is_public = request.is_public;
 
@@ -659,4 +687,49 @@ pub fn publish_submit(world: &mut World, req: &BridgeRequest) -> BridgeResponse 
                      public listing is gated on moderation approval.",
         }),
     )
+}
+
+/// During Play publish.submit refuses with its reason and queues nothing,
+/// and publish.status names the same blocker.
+#[cfg(test)]
+mod play_refusal_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+    use crate::ui::file_event_handler::PendingFileActions;
+
+    fn request(method: &str, params: Value) -> BridgeRequest {
+        serde_json::from_value(json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params })).unwrap()
+    }
+
+    /// A world ready to publish but for its Play state.
+    fn world_in(state: PlayModeState) -> World {
+        let mut world = World::new();
+        world.insert_resource(State::new(state));
+        world.insert_resource(crate::space::SpaceRoot(std::env::temp_dir()));
+        let mut auth = crate::auth::AuthState::default();
+        auth.token = Some("not-a-real-token".into());
+        world.insert_resource(auth);
+        world.init_resource::<PendingFileActions>();
+        world
+    }
+
+    #[test]
+    fn a_publish_during_play_is_refused_with_its_reason_and_never_queued() {
+        let refusal = "Stop Play to publish. Publishing during Play would publish the running scene.";
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut world = world_in(state);
+            let reply = publish_submit(&mut world, &request("publish.submit", json!({ "experience_name": "Demo" })));
+            assert!(reply.result.is_none(), "{state:?}: a refusal carried a result");
+            assert_eq!(reply.error.expect("refused").message, format!("refused: {refusal}"));
+            assert!(world.resource::<PendingFileActions>().actions.is_empty(), "{state:?}: queued anyway");
+            let status = publish_status(&mut world, &request("publish.status", json!({}))).result.expect("status answers");
+            assert_eq!(status["ready"], false, "{state:?}");
+            assert_eq!(status["blockers"], json!([refusal]), "{state:?}");
+        }
+        // While editing the same request is queued.
+        let mut world = world_in(PlayModeState::Editing);
+        let reply = publish_submit(&mut world, &request("publish.submit", json!({ "experience_name": "Demo" })));
+        assert_eq!(reply.result.expect("queued")["queued"], true);
+        assert_eq!(world.resource::<PendingFileActions>().actions.len(), 1);
+    }
 }

@@ -25,8 +25,8 @@ const SLOW_NOTICE: std::time::Duration = std::time::Duration::from_secs(10);
 const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// Connect to `127.0.0.1:<port>`, send one `ping`, await the response.
-pub(crate) async fn run(port: u16) {
-    let mut roundtrip = std::pin::pin!(ping_roundtrip(port));
+pub(crate) async fn run(port: u16, token: std::sync::Arc<str>) {
+    let mut roundtrip = std::pin::pin!(ping_roundtrip(port, token));
     let result = match tokio::time::timeout(SLOW_NOTICE, roundtrip.as_mut()).await {
         Ok(r) => Some(r),
         Err(_) => {
@@ -58,14 +58,15 @@ pub(crate) async fn run(port: u16) {
     }
 }
 
-async fn ping_roundtrip(port: u16) -> std::io::Result<()> {
+async fn ping_roundtrip(port: u16, token: std::sync::Arc<str>) -> std::io::Result<()> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     // Newline-delimited JSON-RPC, exactly as `handle_connection` expects.
-    let req = br#"{"jsonrpc":"2.0","id":"__self_test__","method":"ping"}"#;
-    writer.write_all(req).await?;
+    // With this launch's token, as every client sends it.
+    let req = serde_json::json!({ "jsonrpc": "2.0", "id": "__self_test__", "method": "ping", "auth": &*token }).to_string();
+    writer.write_all(req.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;
 

@@ -265,6 +265,141 @@ fn insert_service_property(
 /// places a file keeps them ([`merged_service_properties`]). Both spawn paths
 /// build it here, and the writer compares with it, so a save sees exactly
 /// what the file loaded as.
+/// SoulService properties that once carried a Soul API key into a Space
+/// file. No Space keeps a key now: the loader drops them, the writer never
+/// writes them, and opening a Space removes them from its file and its
+/// database record.
+pub const LEGACY_SOUL_PROPERTIES: &[&str] = &["api_key", "use_global_key"];
+
+fn is_legacy_soul_property(key: &str) -> bool {
+    LEGACY_SOUL_PROPERTIES.iter().any(|legacy| crate::space::instance_loader::same_key(key, legacy))
+}
+
+/// Marks a SoulService that loaded with a legacy key property. Holds the
+/// removed key only until the on-open cleanup compares it with the saved
+/// key; it is never used, stored or set.
+#[derive(Component)]
+pub struct SoulServiceLegacyKey {
+    pub api_key: Option<String>,
+    /// The file half and the notice are done; the database half may wait
+    /// for the Space's database to open.
+    pub file_done: bool,
+    /// Frames spent waiting for that open.
+    pub frames_waited: u32,
+}
+
+impl std::fmt::Debug for SoulServiceLegacyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.api_key.is_some() { "SoulServiceLegacyKey(<key>)" } else { "SoulServiceLegacyKey(none)" })
+    }
+}
+
+/// Drop the legacy key properties from a SoulService component. `Some`
+/// when it had any, with the key it held, for the on-open cleanup.
+pub fn take_legacy_soul_properties(service: &mut ServiceComponent) -> Option<SoulServiceLegacyKey> {
+    if service.class_name != "SoulService" {
+        return None;
+    }
+    let mut found = false;
+    let mut api_key = None;
+    service.properties.retain(|key, value| {
+        if !is_legacy_soul_property(key) {
+            return true;
+        }
+        found = true;
+        if crate::space::instance_loader::same_key(key, "api_key") {
+            if let PropertyValue::String(s) = value {
+                if !s.trim().is_empty() {
+                    api_key = Some(s.trim().to_string());
+                }
+            }
+        }
+        false
+    });
+    found.then_some(SoulServiceLegacyKey { api_key, file_done: false, frames_waited: 0 })
+}
+
+/// The component a service's file spawns as: [`service_component`]
+/// without the legacy key properties, and the marker when it had them.
+pub(crate) fn spawned_service_component(
+    path: std::path::PathBuf,
+    definition: &ServiceDefinition,
+) -> (ServiceComponent, Option<SoulServiceLegacyKey>) {
+    let mut service = service_component(path, definition);
+    let mut legacy = take_legacy_soul_properties(&mut service);
+    if service.class_name == "SoulService" {
+        if let Ok(document) = toml::Value::try_from(definition) {
+            let (mut found, mut api_key) = (false, None);
+            find_legacy_soul_keys(&document, &mut found, &mut api_key);
+            if found {
+                let marker = legacy.get_or_insert(SoulServiceLegacyKey { api_key: None, file_done: false, frames_waited: 0 });
+                if marker.api_key.is_none() {
+                    marker.api_key = api_key;
+                }
+            }
+        }
+    }
+    (service, legacy)
+}
+
+/// Legacy key properties at any depth of a SoulService document, exact
+/// names (`api_key`, `use_global_key`): whether any is there, and the first
+/// key found.
+fn find_legacy_soul_keys(value: &toml::Value, found: &mut bool, api_key: &mut Option<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (name, inner) in table {
+                if LEGACY_SOUL_PROPERTIES.contains(&name.as_str()) {
+                    *found = true;
+                    if name == "api_key" && api_key.is_none() {
+                        *api_key = inner.as_str().map(str::trim).filter(|k| !k.is_empty()).map(str::to_string);
+                    }
+                }
+                find_legacy_soul_keys(inner, found, api_key);
+            }
+        }
+        toml::Value::Array(items) => items.iter().for_each(|item| find_legacy_soul_keys(item, found, api_key)),
+        _ => {}
+    }
+}
+
+/// Delete the legacy key properties at any depth of a SoulService
+/// document, exact names only (the export strip uses the same rule).
+/// Whether anything was deleted.
+pub(crate) fn strip_legacy_soul_keys(doc: &mut toml_edit::DocumentMut) -> bool {
+    fn table(t: &mut dyn toml_edit::TableLike) -> bool {
+        let mut removed = false;
+        for name in LEGACY_SOUL_PROPERTIES {
+            removed |= t.remove(name).is_some();
+        }
+        for (_, inner) in t.iter_mut() {
+            removed |= item(inner);
+        }
+        removed
+    }
+    fn item(i: &mut toml_edit::Item) -> bool {
+        match i {
+            toml_edit::Item::Table(t) => table(t),
+            toml_edit::Item::ArrayOfTables(list) => list.iter_mut().fold(false, |acc, t| table(t) | acc),
+            toml_edit::Item::Value(v) => value(v),
+            toml_edit::Item::None => false,
+        }
+    }
+    fn value(v: &mut toml_edit::Value) -> bool {
+        match v {
+            toml_edit::Value::InlineTable(t) => table(t),
+            toml_edit::Value::Array(items) => items.iter_mut().fold(false, |acc, v| value(v) | acc),
+            _ => false,
+        }
+    }
+    table(doc.as_table_mut())
+}
+
+/// Whether `text` still holds a legacy key property at any depth.
+pub fn text_holds_legacy_soul_keys(text: &str) -> bool {
+    text.parse::<toml_edit::DocumentMut>().is_ok_and(|mut doc| strip_legacy_soul_keys(&mut doc))
+}
+
 pub(crate) fn service_component(path: std::path::PathBuf, definition: &ServiceDefinition) -> ServiceComponent {
     let props = &definition.service;
     ServiceComponent {
@@ -310,7 +445,7 @@ pub fn spawn_service(
         _ => eustress_common::classes::ClassName::Folder,
     };
     
-    let service_component = service_component(path.clone(), &definition);
+    let (service_component, legacy_soul_key) = spawned_service_component(path.clone(), &definition);
 
     let entity = commands.spawn((
         eustress_common::classes::Instance {
@@ -334,6 +469,9 @@ pub fn spawn_service(
     if !class_props.is_empty() {
         commands.entity(entity).insert(eustress_common::datamodel::record::RecordClassProps(class_props));
     }
+    if let Some(marker) = legacy_soul_key {
+        commands.entity(entity).insert(marker);
+    }
     
     info!("🏛️ Spawned service entity from {:?}", path);
     entity
@@ -349,7 +487,7 @@ pub fn spawn_service_as_ui_root(
 ) -> Entity {
     let class_name = definition.service.class_name.clone();
     let class_props = service_class_props(&definition);
-    let service_component = service_component(path.clone(), &definition);
+    let (service_component, legacy_soul_key) = spawned_service_component(path.clone(), &definition);
 
     let entity = commands.spawn((
         eustress_common::classes::Instance {
@@ -379,6 +517,9 @@ pub fn spawn_service_as_ui_root(
     )).id();
     if !class_props.is_empty() {
         commands.entity(entity).insert(eustress_common::datamodel::record::RecordClassProps(class_props));
+    }
+    if let Some(marker) = legacy_soul_key {
+        commands.entity(entity).insert(marker);
     }
 
     info!("🏛️ Spawned UI service entity (StarterGui) from {:?}", path);
@@ -431,13 +572,38 @@ fn planned_service_write(
     service: &ServiceComponent,
     stamp: Option<&crate::space::instance_loader::CreatorStamp>,
 ) -> Result<Option<String>, String> {
+    let current = std::fs::read_to_string(&service.toml_path).ok();
+    planned_service_edit(service, stamp, current.as_deref())
+}
+
+/// [`planned_service_write`] against `current`, the file's text as it is
+/// now (`None`: no readable file). A SoulService never takes a legacy key
+/// property into its file, and one the file holds is deleted.
+fn planned_service_edit(
+    service: &ServiceComponent,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+    current: Option<&str>,
+) -> Result<Option<String>, String> {
+    let without_legacy;
+    let service = if service.class_name == "SoulService" && service.properties.keys().any(|k| is_legacy_soul_property(k)) {
+        let mut clean = service.clone();
+        take_legacy_soul_properties(&mut clean);
+        without_legacy = clean;
+        &without_legacy
+    } else {
+        service
+    };
     let now = chrono::Utc::now().to_rfc3339();
-    if let Ok(text) = std::fs::read_to_string(&service.toml_path) {
+    if let Some(text) = current {
         if let (Ok(definition), Ok(mut doc)) =
-            (load_service_definition_from_str(&text), text.parse::<toml_edit::DocumentMut>())
+            (load_service_definition_from_str(text), text.parse::<toml_edit::DocumentMut>())
         {
             let loaded = service_component(service.toml_path.clone(), &definition);
-            if !edit_service(&mut doc, &loaded, service) {
+            let changed = edit_service(&mut doc, &loaded, service);
+            // A SoulService file loses every legacy key property, at any
+            // depth, on every save. This cannot fail the save.
+            let stripped = service.class_name == "SoulService" && strip_legacy_soul_keys(&mut doc);
+            if !changed && !stripped {
                 return Ok(None);
             }
             stamp_service(&mut doc, &definition.metadata, stamp, &now, &service.class_name);
@@ -445,6 +611,101 @@ fn planned_service_write(
         }
     }
     fresh_service_text(service, stamp, &now).map(Some)
+}
+
+/// Opening a Space, the file half: delete the legacy key properties, at any
+/// depth, from its SoulService file through the usual writer
+/// ([`save_service_to_file_signed`], so the save is stamped in `[metadata]`
+/// like any other). A file without them is not touched.
+pub fn remove_legacy_from_file(
+    path: &Path,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+) -> Result<(), String> {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(clean) = legacy_cleanup(path, &text)? {
+            save_service_to_file_signed(&clean, stamp)?;
+        }
+    }
+    Ok(())
+}
+
+/// Opening a Space, the database half: the same deletion in the Space
+/// database's record of the file. `Ok(false)` when no database is active or
+/// the record holds nothing to delete; see [`record_cleanup_step`].
+pub fn remove_legacy_from_record(
+    path: &Path,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+) -> Result<bool, String> {
+    crate::space::active_db::update_instance_text(path, |text| legacy_record_edit(path, text, stamp))
+}
+
+/// A record's text without its legacy key properties (stamped like a file
+/// save), or `None` when it holds none.
+pub(crate) fn legacy_record_edit(
+    path: &Path,
+    text: &str,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+) -> Result<Option<String>, String> {
+    match legacy_cleanup(path, text)? {
+        Some(clean) => planned_service_edit(&clean, stamp, Some(text)),
+        None => Ok(None),
+    }
+}
+
+/// The component `text` loads as, without its legacy key properties;
+/// `None` when it holds none at any depth.
+fn legacy_cleanup(path: &Path, text: &str) -> Result<Option<ServiceComponent>, String> {
+    let definition = load_service_definition_from_str(text)?;
+    if definition.service.class_name != "SoulService" {
+        return Ok(None);
+    }
+    let mut service = service_component(path.to_path_buf(), &definition);
+    let in_component = take_legacy_soul_properties(&mut service).is_some();
+    Ok((in_component || text_holds_legacy_soul_keys(text)).then_some(service))
+}
+
+/// What the database half of the on-open cleanup does this frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordStep {
+    /// A database open is still in flight: try again next frame.
+    Wait,
+    /// Cleared, nothing to clear, or a file-only Space: finished, silently.
+    Done,
+    /// A database-backed Space whose record could not be cleared: say so.
+    Warn(String),
+}
+
+/// Frames the cleanup waits for a database open before it warns.
+pub const RECORD_WAIT_FRAMES: u32 = 3600;
+
+/// The database half's decision. `open_settled`: no database open is in
+/// flight. `db_active`: a database is installed. `attempt`: the record clear.
+/// `still_holds`: whether the record still holds a legacy key property.
+/// `Ok(false)` is the normal answer for a file-only Space and for a clean
+/// record; it is never taken as success while the record still holds one.
+pub fn record_cleanup_step(
+    open_settled: bool,
+    db_active: bool,
+    frames_waited: u32,
+    attempt: impl FnOnce() -> Result<bool, String>,
+    still_holds: impl FnOnce() -> bool,
+) -> RecordStep {
+    if !open_settled {
+        return if frames_waited >= RECORD_WAIT_FRAMES {
+            RecordStep::Warn("the Space's database did not finish opening".to_string())
+        } else {
+            RecordStep::Wait
+        };
+    }
+    if !db_active {
+        return RecordStep::Done;
+    }
+    match attempt() {
+        Ok(true) => RecordStep::Done,
+        Ok(false) if still_holds() => RecordStep::Warn("its database record could not be updated".to_string()),
+        Ok(false) => RecordStep::Done,
+        Err(e) => RecordStep::Warn(e),
+    }
 }
 
 /// Writes into `doc` every property and header value where `service` differs
@@ -632,6 +893,124 @@ fn fresh_service_text(
         properties: HashMap::new(),
     };
     toml::to_string(&definition).map_err(|e| format!("Failed to serialize service: {}", e))
+}
+
+#[cfg(test)]
+mod soul_key_tests {
+    //! A Space never carries a Soul key: the loader drops it, the writer never
+    //! writes it, and opening the Space removes it from the file and from the
+    //! database record, at any depth. Synthetic keys only.
+    use super::*;
+
+    const KEY: &str = concat!("sk-ant-", "TEST0000", "a1b2c3d4e5f6");
+    const LEGACY: &str = concat!(
+        "[service]\nclass_name = \"SoulService\"\napi_key = \"sk-ant-", "TEST0000", "a1b2c3d4e5f6",
+        "\"\nuse_global_key = true\n\n[properties]\nother = 1\n\n[properties.extras]\napi_key = \"sk-ant-", "TEST0000", "a1b2c3d4e5f6",
+        "\"\nuse_global_key = false\nkept = 2\n"
+    );
+    const NESTED_ONLY: &str = concat!(
+        "[service]\nclass_name = \"SoulService\"\n\n[properties]\nother = 1\n\n[properties.extras]\napi_key = \"sk-ant-", "TEST0000", "a1b2c3d4e5f6",
+        "\"\nkept = 2\n"
+    );
+
+    fn scratch_file(tag: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("eus_soul_service_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("SoulService")).unwrap();
+        let path = dir.join("SoulService").join("_service.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn holds_any(text: &str) -> bool {
+        text.contains("api_key") || text.contains("use_global_key") || text.contains(KEY)
+    }
+
+    /// T5: the spawned component never holds a legacy property; the marker
+    /// holds the key for the check, and its Debug shows none.
+    #[test]
+    fn t5_a_soul_service_spawns_without_its_key() {
+        for text in [LEGACY, NESTED_ONLY] {
+            let definition = load_service_definition_from_str(text).unwrap();
+            let (component, marker) =
+                spawned_service_component(std::path::PathBuf::from("SoulService/_service.toml"), &definition);
+            assert!(!component.properties.keys().any(|k| is_legacy_soul_property(k)), "a legacy property spawned");
+            assert!(!format!("{:?}", component.properties).contains(KEY), "the key spawned");
+            let marker = marker.expect("a legacy property marks the service");
+            assert_eq!(marker.api_key.as_deref(), Some(KEY));
+            assert!(!format!("{marker:?}").contains(KEY), "the marker's Debug shows the key");
+        }
+    }
+
+    /// T8: opening removes them from the file at any depth and keeps the
+    /// rest; [properties.extras] included.
+    #[test]
+    fn t8_open_removes_the_key_from_the_file_at_any_depth() {
+        for (tag, text) in [("t8", LEGACY), ("t8nested", NESTED_ONLY)] {
+            let path = scratch_file(tag, text);
+            remove_legacy_from_file(&path, None).unwrap();
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(!holds_any(&after), "{tag}: {after}");
+            assert!(after.contains("kept = 2") && after.contains("other = 1"), "{tag}: {after}");
+        }
+    }
+
+    /// T8: a file without them is not touched.
+    #[test]
+    fn t8_a_clean_file_is_not_touched() {
+        let clean = "[service]\nclass_name = \"SoulService\"\n\n[properties]\nother = 1\n";
+        let path = scratch_file("t8clean", clean);
+        remove_legacy_from_file(&path, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), clean);
+    }
+
+    /// The writer filter on the file path: an ordinary SoulService save drops
+    /// them at any depth, whatever the component carried.
+    #[test]
+    fn writer_filter_file_path() {
+        let path = scratch_file("wf", LEGACY);
+        let definition = load_service_definition_from_str(LEGACY).unwrap();
+        let mut service = service_component(path.clone(), &definition);
+        service.properties.insert("other".to_string(), PropertyValue::Int(5));
+        save_service_to_file_signed(&service, None).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!holds_any(&after), "{after}");
+        assert!(after.contains("other = 5"), "{after}");
+    }
+
+    /// The writer filter on the database path: the record's edit drops them
+    /// at any depth; a clean record is left.
+    #[test]
+    fn writer_filter_database_path() {
+        let path = std::path::PathBuf::from("Space/SoulService/_service.toml");
+        for text in [LEGACY, NESTED_ONLY] {
+            let edited = legacy_record_edit(&path, text, None).unwrap().expect("a record with them is rewritten");
+            assert!(!holds_any(&edited), "{edited}");
+            assert!(edited.contains("kept = 2"), "{edited}");
+        }
+        let clean = "[service]\nclass_name = \"SoulService\"\n";
+        assert_eq!(legacy_record_edit(&path, clean, None).unwrap(), None, "a clean record is left");
+    }
+
+    /// (a) A database-backed Space whose record is stale: the clear waits for
+    /// the open, then runs; it is cleared or warned, never silent.
+    #[test]
+    fn record_clear_waits_for_the_database_then_clears_or_warns() {
+        assert_eq!(record_cleanup_step(false, false, 0, || panic!("no attempt before the open settles"), || true), RecordStep::Wait);
+        let mut cleared = false;
+        assert_eq!(record_cleanup_step(true, true, 5, || { cleared = true; Ok(true) }, || false), RecordStep::Done);
+        assert!(cleared, "the record clear ran once the database was active");
+        assert!(matches!(record_cleanup_step(true, true, 5, || Err("the write failed".into()), || true), RecordStep::Warn(_)));
+        assert!(matches!(record_cleanup_step(true, true, 5, || Ok(false), || true), RecordStep::Warn(_)), "Ok(false) on a stale record is not success");
+        assert_eq!(record_cleanup_step(true, true, 5, || Ok(false), || false), RecordStep::Done, "a clean record in an open database is not a warning");
+        assert!(matches!(record_cleanup_step(false, false, RECORD_WAIT_FRAMES, || Ok(false), || true), RecordStep::Warn(_)));
+    }
+
+    /// (b) A file-only Space opens with no warning.
+    #[test]
+    fn a_file_only_space_opens_without_a_warning() {
+        assert_eq!(record_cleanup_step(true, false, 0, || Ok(false), || false), RecordStep::Done);
+    }
 }
 
 #[cfg(test)]

@@ -988,11 +988,17 @@ pub fn read_vec3<R: Read>(reader: &mut R) -> Result<Vec3> {
 
 /// Write a Quat compactly (smallest-three encoding)
 pub fn write_quat<W: Write>(writer: &mut W, q: Quat) -> Result<()> {
+    // A non-finite rotation (a physics blow-up, a script-written orientation,
+    // a `nan` in a file) is written as the identity. Pressing Play saves every
+    // rotation through here, and `partial_cmp(..).unwrap()` below used to
+    // panic on a NaN component and take the editor, with its unsaved edits,
+    // down with it.
+    let q = if q.is_finite() { q } else { Quat::IDENTITY };
     // Find largest component
     let abs = [q.x.abs(), q.y.abs(), q.z.abs(), q.w.abs()];
     let max_idx = abs.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i)
         .unwrap_or(3);
     

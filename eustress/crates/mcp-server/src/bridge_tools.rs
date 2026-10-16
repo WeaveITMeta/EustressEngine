@@ -53,121 +53,6 @@ fn ok(tool_name: &str, content: String, data: Value) -> ToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// Screenshot delivery
-// ---------------------------------------------------------------------------
-
-/// How long to wait for a capture PNG to finish landing on disk.
-///
-/// Sized for a SLOW scene, not a fast one. The AI camera holds a fixed frame
-/// budget either side of its readback (warm up, queue, cool down), so the wall
-/// time to produce a PNG is that frame count divided by the engine's current
-/// framerate — on a heavy Space running at ~2 FPS that is several seconds, and
-/// the atmosphere pass this camera now runs makes those frames dearer still.
-/// A tight bound here turns "the engine is busy" into a spurious "the capture
-/// failed", so the cap is generous and the timeout message says what to check.
-const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Largest PNG we inline as base64. Bigger frames stay path-only: a 4K
-/// screenshot base64s to well past what a client will accept in one message,
-/// and silently blowing the reader's context is worse than one extra read.
-const MAX_INLINE_PNG_BYTES: u64 = 2_800_000;
-
-/// Block until `path` holds a complete PNG, then return its bytes.
-///
-/// The engine answers `viewport.capture` before the render graph has written
-/// the file, so the path it returns points at a file that does not exist yet
-/// (or is half-written). The old contract pushed that race onto the caller —
-/// "allow ~1 frame for the PNG to land" — which fails whenever the engine is
-/// mid-hitch. Waiting for the IEND terminator is a definitive done signal.
-fn wait_for_png(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    const IEND: &[u8] = b"\x00\x00\x00\x00IEND\xaeB\x60\x82";
-    let start = std::time::Instant::now();
-    let mut last_err = String::from("capture file never appeared");
-    while start.elapsed() < CAPTURE_WAIT {
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() > IEND.len() && bytes.ends_with(IEND) => return Ok(bytes),
-            Ok(_) => last_err = "capture file is still being written".into(),
-            Err(e) => last_err = e.to_string(),
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    Err(format!(
-        "timed out after {}s waiting for {} ({last_err}) — if the engine is running at a very          low framerate the capture may simply need longer than this",
-        CAPTURE_WAIT.as_secs(),
-        path.display()
-    ))
-}
-
-/// Turn a capture bridge response into a `ToolResult` carrying the actual
-/// pixels.
-///
-/// Returning only a path assumes the reader can open local files. MCP clients
-/// generally cannot, so the AI's "eyes" were blind everywhere except a
-/// filesystem-capable host. Embedding the PNG (via the `_mcp_image_*` keys
-/// that `shared_registry::to_mcp_json` lifts into an MCP image block) makes
-/// the same tool work in every client, and the path is still reported for
-/// hosts that would rather open the file themselves.
-fn capture_result(tool_name: &str, mut result: Value) -> ToolResult {
-    use base64::Engine as _;
-
-    let path = match result.get("path").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
-        // No path at all — engine answered but wrote nothing useful.
-        _ => {
-            return ok(
-                tool_name,
-                "Capture succeeded but the engine returned no file path.".to_string(),
-                result,
-            )
-        }
-    };
-
-    let bytes = match wait_for_png(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            return fail(
-                tool_name,
-                format!("Capture was requested but the PNG never completed: {e}"),
-            )
-        }
-    };
-
-    let size = bytes.len() as u64;
-    if size > MAX_INLINE_PNG_BYTES {
-        return ok(
-            tool_name,
-            format!(
-                "Screenshot saved to {} ({size} bytes — too large to inline; \
-                 read the file path to view it).",
-                path.display()
-            ),
-            result,
-        );
-    }
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    if let Some(map) = result.as_object_mut() {
-        map.insert(
-            crate::shared_registry::IMAGE_B64_KEY.to_string(),
-            Value::String(b64),
-        );
-        map.insert(
-            crate::shared_registry::IMAGE_MIME_KEY.to_string(),
-            Value::String("image/png".to_string()),
-        );
-        map.insert("bytes".to_string(), Value::from(size));
-    }
-    ok(
-        tool_name,
-        format!(
-            "Screenshot captured ({size} bytes) and attached below. Saved to {}.",
-            path.display()
-        ),
-        result,
-    )
-}
-
-// ---------------------------------------------------------------------------
 // inspect_scene  ->  ecs.inspect
 // ---------------------------------------------------------------------------
 
@@ -1292,6 +1177,16 @@ impl ToolHandler for UiSequenceTool {
             };
 
             match call_engine(&ctx.universe_root, method, params) {
+                // An action the engine refused (it wrote an error to Output)
+                // fails its step, like any other error.
+                Ok(v) if v.get("outcome").and_then(|o| o.as_str()) == Some("refused") => {
+                    let error = format!("the action was refused:{}", output_lines(&v));
+                    results.push(serde_json::json!({ "step": i, "op": op, "ok": false, "error": error, "result": v }));
+                    failed_at = Some(i);
+                    if stop_on_error {
+                        break;
+                    }
+                }
                 Ok(v) => {
                     results.push(serde_json::json!({ "step": i, "op": op, "ok": true, "result": v }));
                     ok_count += 1;
@@ -1755,6 +1650,743 @@ impl ToolHandler for CancelPendingRevertTool {
 }
 
 // ---------------------------------------------------------------------------
+// Parameters: parameters_get / parameters_set  ->  parameters.*
+// ---------------------------------------------------------------------------
+
+const TARGET_PROPS: &[&str] = &["path", "uuid", "name", "selected"];
+
+fn target_schema(extra: Value) -> Value {
+    let mut props = serde_json::json!({
+        "path": { "type": "string", "description": "The instance, relative to the Space: its folder (Workspace/Tower) or its record (Workspace/Base.part.toml). The surest way to name one." },
+        "uuid": { "type": "string", "description": "The instance's uuid." },
+        "name": { "type": "string", "description": "The instance's name. Refused, listing the matches, when more than one instance has it." },
+        "selected": { "type": "boolean", "description": "true: the instance selected in the Explorer." }
+    });
+    if let (Some(map), Some(more)) = (props.as_object_mut(), extra.as_object()) {
+        for (k, v) in more {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::json!({ "type": "object", "properties": props })
+}
+
+fn summary_line(p: &Value) -> String {
+    let label = p.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+    let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+    let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let bound = match p.get("binding").filter(|b| !b.is_null()) {
+        Some(b) => format!(
+            "  [{}]",
+            b.get("description").and_then(|d| d.as_str()).unwrap_or("bound")
+        ),
+        None => String::new(),
+    };
+    format!("  {label} ({ty}) = {text}{bound}")
+}
+
+fn instance_line(result: &Value) -> String {
+    let i = result.get("instance");
+    let name = i.and_then(|i| i.get("name")).and_then(|v| v.as_str()).unwrap_or("?");
+    let class = i.and_then(|i| i.get("class")).and_then(|v| v.as_str()).unwrap_or("?");
+    match i.and_then(|i| i.get("path")).and_then(|v| v.as_str()) {
+        Some(path) => format!("{name} ({class}) at {path}"),
+        None => format!("{name} ({class})"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attributes: attribute_get / attribute_set  ->  attribute.*
+// ---------------------------------------------------------------------------
+
+pub struct AttributeGetTool;
+
+impl ToolHandler for AttributeGetTool {
+    /// Read-only: lists attributes, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "attribute_get",
+            description: "List an instance's Attributes in the LIVE engine, typed: Number, Int, Bool and String as values, Color3 as [r, g, b] in 0-1, Vector3 as [x, y, z]; other kinds as {type, display}. Works in Play too, so a Play copy's tuned values can be read (for example a car under Workspace.PlayerCars). Name the instance with `path` (relative to the Space), `uuid`, `name`, or `selected: true`. A String over 4 KB comes back cut and marked truncated. Changes nothing. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({})),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let keys: Vec<&str> = TARGET_PROPS.to_vec();
+        match call_engine(&ctx.universe_root, "attribute.get", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let lines: Vec<String> = result
+                    .get("attributes")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .map(|(name, v)| {
+                                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                                let shown = v.get("value").or_else(|| v.get("display")).map(|x| x.to_string()).unwrap_or_default();
+                                format!("  {name} ({ty}) = {shown}")
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let summary = if lines.is_empty() {
+                    format!("{} has no Attributes.", instance_line(&result))
+                } else {
+                    format!("{} has {} Attribute(s):\n{}", instance_line(&result), lines.len(), lines.join("\n"))
+                };
+                ok("attribute_get", summary, result)
+            }
+            Err(e) => fail("attribute_get", e),
+        }
+    }
+}
+
+pub struct AttributeSetTool;
+
+impl ToolHandler for AttributeSetTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "attribute_set",
+            description: "Set or remove Attributes on one instance in the LIVE engine, in Edit mode only (refused during Play and while the Space loads; Stop first). Name the instance by `uuid` (attribute_get or get_properties shows it). `values` is {Name: value}: a number, true/false, a string (at most 1 KB), or a Color3 [r, g, b] in 0-1; a whole number given for an Int attribute stays an Int. `remove` is a list of names. Names are letters, digits and _, 1 to 64 characters; at most 32 changes a call. An attribute keeps its type unless you pass replace_type: true. All or nothing, and the whole call is ONE undo step. The change is saved into the instance's own record on disk, so the next Play and the next load start from it. Only instances under a content service (Workspace, ReplicatedStorage, ReplicatedFirst, ServerStorage, ServerScriptService, StarterGui, StarterPack, StarterPlayer, Lighting, SoundService, Teams) with a record of their own are accepted: a service itself, an instance stored in the world database, or one with no record on disk is refused rather than changed in memory only. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "uuid": { "type": "string", "description": "The instance's uuid." },
+                    "values": { "type": "object", "description": "{Name: value} to set." },
+                    "remove": { "type": "array", "items": { "type": "string" }, "description": "Names to remove." },
+                    "replace_type": { "type": "boolean", "description": "Allow a value of another type to replace an attribute." }
+                },
+                "required": ["uuid"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let keys = ["uuid", "values", "remove", "replace_type"];
+        match call_engine(&ctx.universe_root, "attribute.set", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let set: Vec<String> = result
+                    .get("set")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|r| {
+                                format!(
+                                    "{} ({})",
+                                    r.get("name").and_then(|x| x.as_str()).unwrap_or("?"),
+                                    r.get("type").and_then(|x| x.as_str()).unwrap_or("?")
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let removed: Vec<&str> = result
+                    .get("removed")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                let mut summary = format!("{}, as one undo step:", instance_line(&result));
+                if !set.is_empty() {
+                    summary.push_str(&format!("\n  set {}", set.join(", ")));
+                }
+                if !removed.is_empty() {
+                    summary.push_str(&format!("\n  removed {}", removed.join(", ")));
+                }
+                if let Some(record) = result.get("saved_to").and_then(|v| v.as_str()) {
+                    summary.push_str(&format!("\n  saved to {record}"));
+                }
+                ok("attribute_set", summary, result)
+            }
+            Err(e) => fail("attribute_set", e),
+        }
+    }
+}
+
+pub struct ParametersGetTool;
+
+impl ToolHandler for ParametersGetTool {
+    /// Read-only: lists Parameters, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "parameters_get",
+            description: "List an instance's Parameters in the LIVE engine: each one's label (`key`, or `domain.key` outside the default domain), type, value, and binding. A bound Parameter is read from a Connector, which owns its value. Parameters are the named values the Properties panel shows under Parameters and scripts read through DataService. Name the instance with `path` (relative to the Space), `uuid`, `name`, or `selected: true`. Pass `domain` to list one domain. Changes nothing. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({
+                "domain": { "type": "string", "description": "Only this domain's Parameters (the default domain is \"instance\")." }
+            })),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut keys: Vec<&str> = TARGET_PROPS.to_vec();
+        keys.push("domain");
+        match call_engine(&ctx.universe_root, "parameters.get", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let list: Vec<String> = result
+                    .get("parameters")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().map(summary_line).collect())
+                    .unwrap_or_default();
+                let summary = if list.is_empty() {
+                    format!("{} has no Parameters.", instance_line(&result))
+                } else {
+                    format!("{} has {} Parameter(s):\n{}", instance_line(&result), list.len(), list.join("\n"))
+                };
+                ok("parameters_get", summary, result)
+            }
+            Err(e) => fail("parameters_get", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Play DataModel: list_play_instances  ->  datamodel.list
+// ---------------------------------------------------------------------------
+
+pub struct ListPlayInstancesTool;
+
+impl ToolHandler for ListPlayInstancesTool {
+    /// Read-only: lists the Play session's instances, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_play_instances",
+            description: "List the instances of the RUNNING Play session under a root, on command: by default only the ones scripts made (Instance.new, Clone, and the players and characters Play adds), which the Explorer does not show. Each row has id, name, class, parent id and origin (\"script\" or \"scene\"); a joint also names the two bodies it holds as body0 and body1: Part0/Part1 for a weld or no-collision constraint, the parents of Attachment0/Attachment1 for a hinge, prismatic, spring or other attachment constraint. `root` is a dotted path from game (default \"Workspace\", e.g. \"Workspace.PlayerCars\"); `origin` \"script\" (default) or \"all\"; `class` keeps instances that are that class or inherit it (e.g. \"Constraint\", \"BasePart\"); `limit` (default 2000, at most 20000) and `offset` page through `total`. structure_version changes whenever the tree changes, so an unchanged value means the same rows. Outside Play it answers playing: false. Changes nothing and costs nothing between calls. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root": { "type": "string", "description": "Dotted path from game, default \"Workspace\"." },
+                    "origin": { "type": "string", "enum": ["script", "all"], "description": "\"script\" (default): script-made only." },
+                    "class": { "type": "string", "description": "Only this class and classes that inherit it." },
+                    "limit": { "type": "integer", "description": "Rows to return, default 2000, at most 20000." },
+                    "offset": { "type": "integer", "description": "Rows to skip." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let keys = ["root", "origin", "class", "limit", "offset"];
+        match call_engine(&ctx.universe_root, "datamodel.list", copy_params(&input, &keys)) {
+            Ok(result) => {
+                if result.get("playing").and_then(|v| v.as_bool()) == Some(false) {
+                    return ok("list_play_instances", "Not in Play: script-made instances exist only while Play runs.".to_string(), result);
+                }
+                let lines: Vec<String> = result
+                    .get("rows")
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        rows.iter()
+                            .take(50)
+                            .map(|r| {
+                                let s = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                let mut line = format!("  {} ({}) id {}", s("name"), s("class"), s("id"));
+                                let body = |k: &str| r.get(k).and_then(|b| b.get("name")).and_then(|n| n.as_str()).map(str::to_string);
+                                if r.get("body0").is_some() || r.get("body1").is_some() {
+                                    line.push_str(&format!(
+                                        " joins {} and {}",
+                                        body("body0").unwrap_or_else(|| "nothing".into()),
+                                        body("body1").unwrap_or_else(|| "nothing".into())
+                                    ));
+                                }
+                                line
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut summary = format!(
+                    "{} instance(s) under {}{}",
+                    total,
+                    result.get("root").and_then(|v| v.as_str()).unwrap_or("Workspace"),
+                    if lines.is_empty() { "." } else { ":" }
+                );
+                if !lines.is_empty() {
+                    summary.push('\n');
+                    summary.push_str(&lines.join("\n"));
+                }
+                if total as usize > lines.len() {
+                    summary.push_str("\n  (more in the rows; page with offset and limit)");
+                }
+                ok("list_play_instances", summary, result)
+            }
+            Err(e) => fail("list_play_instances", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-instance edits: transform_subtree  ->  instance.transform_subtree
+// ---------------------------------------------------------------------------
+
+pub struct TransformSubtreeTool;
+
+impl ToolHandler for TransformSubtreeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "transform_subtree",
+            description: "Move and/or turn an instance and everything under it in the LIVE engine, in Edit mode only (refused during Play and while the Space loads), as ONE undo step, saved into each moved instance's record. Name it by `uuid`. `translate` [x, y, z] is in metres, world axes; `rotate_degrees` [x, y, z] is Euler XYZ in degrees about world axes; `pivot` is \"root\" (default: the instance's own position) or a world point [x, y, z]. The turn is applied about the pivot, then the move. Use it to rebase a whole car or building template instead of rewriting each part. A Model or Folder with no record of its own (one the Studio spawned from a folder) is moved by moving its parts; an instance that has no record and nothing saved under it is refused rather than moved in memory only. Only instances under a content service are accepted. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "uuid": { "type": "string", "description": "The instance's uuid." },
+                    "translate": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "World-space move, metres." },
+                    "rotate_degrees": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "Euler XYZ, degrees, world axes." },
+                    "pivot": { "description": "\"root\" or a world point [x, y, z]." }
+                },
+                "required": ["uuid"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let keys = ["uuid", "translate", "rotate_degrees", "pivot"];
+        match call_engine(&ctx.universe_root, "instance.transform_subtree", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let moved = result.get("moved").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+                let summary = format!(
+                    "{}: moved {} saved instance{} as one undo step.",
+                    instance_line(&result),
+                    moved,
+                    if moved == 1 { "" } else { "s" }
+                );
+                ok("transform_subtree", summary, result)
+            }
+            Err(e) => fail("transform_subtree", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tree edits: rename_instance / reparent_instance / clone_instance /
+// create_instance  ->  instance.rename / reparent / clone / create
+// ---------------------------------------------------------------------------
+
+/// The part of every tree tool's description that says what they share.
+macro_rules! tree_rules {
+    () => {
+        "Edit mode only (refused during Play and while the Space loads); ONE undo step; only under a content service (Workspace, ReplicatedStorage, ReplicatedFirst, ServerStorage, ServerScriptService, StarterGui, StarterPack, StarterPlayer, Lighting, SoundService, Teams). Moving or copying from ServerStorage or ServerScriptService into a service players receive is refused unless you pass expose_to_clients: true, since it would publish server code or server-only data to every player. Requires the engine running."
+    };
+}
+
+fn tree_tool(name: &'static str, description: &'static str, schema: Value) -> ToolDefinition {
+    ToolDefinition {
+        name,
+        description,
+        input_schema: schema,
+        modes: &[WorkshopMode::General],
+        requires_approval: false,
+        stream_topics: &[],
+    }
+}
+
+fn tree_call(tool: &str, method: &str, input: &Value, keys: &[&str], ctx: &ToolContext) -> ToolResult {
+    match call_engine(&ctx.universe_root, method, copy_params(input, keys)) {
+        Ok(result) => {
+            let what = result.get("instance").or_else(|| result.get("source")).map(|_| instance_line(&result)).unwrap_or_default();
+            let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let summary = format!("{tool}: {what} {path} (one undo step)").replace("  ", " ");
+            ok(tool, summary, result)
+        }
+        Err(e) => fail(tool, e),
+    }
+}
+
+pub struct RenameInstanceTool;
+
+impl ToolHandler for RenameInstanceTool {
+    fn definition(&self) -> ToolDefinition {
+        tree_tool(
+            "rename_instance",
+            concat!("Rename an instance in the LIVE engine, by `uuid`, to `name` (one plain name: no '/', '\\', ':', Windows device names or trailing dot; at most 100 characters). Its folder (or file) on disk is renamed with it, and everything under it follows; refused if the name is taken beside it. Undo renames it back, and never overwrites something that has taken the old name since. ", tree_rules!()),
+            serde_json::json!({ "type": "object", "properties": { "uuid": { "type": "string" }, "name": { "type": "string" } }, "required": ["uuid", "name"] }),
+        )
+    }
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        tree_call("rename_instance", "instance.rename", &input, &["uuid", "name"], ctx)
+    }
+}
+
+pub struct ReparentInstanceTool;
+
+impl ToolHandler for ReparentInstanceTool {
+    fn definition(&self) -> ToolDefinition {
+        tree_tool(
+            "reparent_instance",
+            concat!("Move an instance (by `uuid`) and everything under it to a new parent: `new_parent_uuid`, or `new_parent_service` for a service's root. It keeps its place in the world (its local pose is rewritten for the new parent) and its folder moves on disk; refused if the name is taken there or the target is inside it. ", tree_rules!()),
+            serde_json::json!({ "type": "object", "properties": {
+                "uuid": { "type": "string" }, "new_parent_uuid": { "type": "string" }, "new_parent_service": { "type": "string" },
+                "expose_to_clients": { "type": "boolean" } }, "required": ["uuid"] }),
+        )
+    }
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        tree_call("reparent_instance", "instance.reparent", &input, &["uuid", "new_parent_uuid", "new_parent_service", "expose_to_clients"], ctx)
+    }
+}
+
+pub struct CloneInstanceTool;
+
+impl ToolHandler for CloneInstanceTool {
+    fn definition(&self) -> ToolDefinition {
+        tree_tool(
+            "clone_instance",
+            concat!("Copy an instance (by `uuid`) and everything under it, beside the original or under `new_parent_uuid` / `new_parent_service`, optionally as `name` (a free name is chosen if taken). Every copied record gets a fresh uuid; links and junctions are never followed; at most 5,000 records and 512 MB. The file watcher spawns the copy on a following frame. ", tree_rules!()),
+            serde_json::json!({ "type": "object", "properties": {
+                "uuid": { "type": "string" }, "new_parent_uuid": { "type": "string" }, "new_parent_service": { "type": "string" },
+                "name": { "type": "string" }, "expose_to_clients": { "type": "boolean" } }, "required": ["uuid"] }),
+        )
+    }
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        tree_call("clone_instance", "instance.clone", &input, &["uuid", "new_parent_uuid", "new_parent_service", "name", "expose_to_clients"], ctx)
+    }
+}
+
+pub struct CreateInstanceTool;
+
+impl ToolHandler for CreateInstanceTool {
+    fn definition(&self) -> ToolDefinition {
+        tree_tool(
+            "create_instance",
+            concat!("Create an instance of `class` from its template under `parent_uuid` or `parent_service`, optionally with `name`, `position` [x, y, z] (local, metres) and `asset_mesh` (a mesh file inside the Space, Space-relative). Scripts are made with create_script and terrain layers with terrain_layer_create; services and unknown classes are refused. The file watcher spawns it on a following frame. ", tree_rules!()),
+            serde_json::json!({ "type": "object", "properties": {
+                "class": { "type": "string" }, "parent_uuid": { "type": "string" }, "parent_service": { "type": "string" },
+                "name": { "type": "string" }, "position": { "type": "array", "items": { "type": "number" } }, "asset_mesh": { "type": "string" } },
+                "required": ["class"] }),
+        )
+    }
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        tree_call("create_instance", "instance.create", &input, &["class", "parent_uuid", "parent_service", "name", "position", "asset_mesh"], ctx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Space and assets: open_space / list_meshes / reload_mesh
+// ---------------------------------------------------------------------------
+
+pub struct OpenSpaceTool;
+
+impl ToolHandler for OpenSpaceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "open_space",
+            description: "Open another Space of this Universe in the LIVE engine, as File > Open does: pending edits are saved, the open Space closes, and `name` (a Space folder in this Universe's Spaces folder) loads. Answers when the load settles (up to 5 minutes; then it says it is still loading). The undo history is CLEARED, since its steps belong to the Space being closed, and neither that nor the switch can be undone: this tool asks before it runs. Refused during Play. Requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": { "name": { "type": "string", "description": "The Space's folder name." } }, "required": ["name"] }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match eustress_bridge_client::call_engine_with_timeout(&ctx.universe_root, "space.open", copy_params(&input, &["name"]), std::time::Duration::from_secs(330)) {
+            Ok(result) => {
+                let name = result.get("opened").and_then(|v| v.as_str()).unwrap_or("?");
+                let loaded = result.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false);
+                let summary = if loaded {
+                    format!("Opened {name}; the undo history was cleared.")
+                } else {
+                    format!("Opening {name}: still loading after 5 minutes; the undo history was cleared.")
+                };
+                ok("open_space", summary, result)
+            }
+            Err(e) => fail("open_space", e),
+        }
+    }
+}
+
+pub struct ListMeshesTool;
+
+impl ToolHandler for ListMeshesTool {
+    /// Read-only: lists mesh files, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_meshes",
+            description: "List the mesh files the LIVE engine's open Space draws, as paths relative to the Space with how many parts draw each, most used first (at most 5,000). Parts drawing a mesh from outside the Space are counted, not named. Changes nothing. Requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "assets.list_meshes", copy_params(&input, &[])) {
+            Ok(result) => {
+                let lines: Vec<String> = result
+                    .get("meshes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .take(50)
+                            .map(|m| format!("  {} ({} parts)", m["path"].as_str().unwrap_or("?"), m["parts"].as_u64().unwrap_or(0)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ok("list_meshes", format!("{count} mesh file(s):\n{}", lines.join("\n")), result)
+            }
+            Err(e) => fail("list_meshes", e),
+        }
+    }
+}
+
+pub struct ReloadMeshTool;
+
+impl ToolHandler for ReloadMeshTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "reload_mesh",
+            description: "Load a mesh file again in the LIVE engine, so a mesh replaced on disk (or one whose earlier load failed) shows without restarting Studio; every part drawing it updates when the load finishes. `path` is the mesh file relative to the Space (list_meshes shows them). Edit mode only. Requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "assets.reload_mesh", copy_params(&input, &["path"])) {
+            Ok(result) => {
+                let summary = format!(
+                    "Reloading {} ({} parts draw it).",
+                    result.get("reloaded").and_then(|v| v.as_str()).unwrap_or("?"),
+                    result.get("parts").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
+                ok("reload_mesh", summary, result)
+            }
+            Err(e) => fail("reload_mesh", e),
+        }
+    }
+}
+
+pub struct ParametersSetTool;
+
+impl ToolHandler for ParametersSetTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "parameters_set",
+            description: "Add or change one Parameter on an instance in the LIVE engine, with the same rules and save path as the Properties panel: the value is saved into the instance's record (the world database, its file, or its binary core). Name the instance like parameters_get, and the Parameter with `label` (`key`, or `domain.key`). To change a value, pass `value` as JSON of the Parameter's type: a number for Int and Float, true or false for Bool, a string for String, [x, y, z] for Vector3, [r, g, b, a] (0 to 1) for Color, any JSON for Json. To add a Parameter or change its type, also pass `type` (String, Float, Int, Bool, Vector3, Color, EntityRef, Json). `bind: {connector, field, refresh_seconds}` makes a Connector own the value, and `unbind: true` hands it back, keeping the last value. Refused: editing a bound Parameter's value (its Connector owns it), an empty value (this tool never deletes), during Play, and while the Space is loading. Not an undo step, as with a Properties edit. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({
+                "label": { "type": "string", "description": "The Parameter: `key` in the default domain, or `domain.key`." },
+                "value": { "description": "The new value, as JSON of the Parameter's type. Optional when binding." },
+                "type": { "type": "string", "enum": ["String", "Float", "Int", "Bool", "Vector3", "Color", "EntityRef", "Json"], "description": "Needed to add a Parameter; changes an existing one's type." },
+                "bind": {
+                    "type": "object",
+                    "description": "Read the value from a Connector under DataService.",
+                    "properties": {
+                        "connector": { "type": "string", "description": "The Connector's name." },
+                        "field": { "type": "string", "description": "The field to read, such as a column of its table." },
+                        "refresh_seconds": { "type": "integer", "minimum": 5, "description": "Seconds between reads; leave out to read once." }
+                    },
+                    "required": ["connector", "field"]
+                },
+                "unbind": { "type": "boolean", "description": "true: stop reading from the Connector; the instance owns the value again." }
+            })),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut keys: Vec<&str> = TARGET_PROPS.to_vec();
+        keys.extend(["label", "value", "type", "bind", "unbind"]);
+        match call_engine(&ctx.universe_root, "parameters.set", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let verb = if result.get("added").and_then(|v| v.as_bool()).unwrap_or(false) { "Added" } else { "Set" };
+                let line = result.get("parameter").map(summary_line).unwrap_or_default();
+                ok(
+                    "parameters_set",
+                    format!("{verb} on {}:\n{line}", instance_line(&result)),
+                    result,
+                )
+            }
+            Err(e) => fail("parameters_set", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Properties: get_properties / set_properties / call_method  ->  properties.*
+// ---------------------------------------------------------------------------
+
+/// One property row of `get_properties`, as a line.
+fn property_line(p: &Value) -> String {
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let value = p.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    let unit = p.get("unit").and_then(|v| v.as_str()).map(|u| format!(" {u}")).unwrap_or_default();
+    let kind = p.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+    let lock = if p.get("editable").and_then(|v| v.as_bool()) == Some(false) { ", read-only" } else { "" };
+    format!("  {name} ({kind}{lock}) = {value}{unit}")
+}
+
+pub struct GetPropertiesTool;
+
+impl ToolHandler for GetPropertiesTool {
+    /// Read-only: lists properties, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "get_properties",
+            description: "List every property of an instance in the LIVE engine, of any class, read through the same rows the Properties panel shows: each one's name, category, type, value (the panel's text form, lengths in metres), whether set_properties can change it, and its unit, description and choices where the class has them. Also lists the methods its class declares for call_method. Name the instance with `path` (relative to the Space), `uuid`, `name`, or `selected: true`. The reply says what is not covered yet (service properties, Bloom and SunRays, Attributes, renaming). Changes nothing. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({})),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "properties.get", copy_params(&input, TARGET_PROPS)) {
+            Ok(result) => {
+                let lines: Vec<String> = result
+                    .get("properties")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().map(property_line).collect())
+                    .unwrap_or_default();
+                let methods = result.get("methods").and_then(|v| v.as_array()).map_or(0, Vec::len);
+                let summary = format!(
+                    "{} has {} properties{}:\n{}",
+                    instance_line(&result),
+                    lines.len(),
+                    if methods > 0 { format!(" and {methods} method(s)") } else { String::new() },
+                    lines.join("\n")
+                );
+                ok("get_properties", summary, result)
+            }
+            Err(e) => fail("get_properties", e),
+        }
+    }
+}
+
+pub struct SetPropertiesTool;
+
+impl ToolHandler for SetPropertiesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "set_properties",
+            description: "Set properties of any class in the LIVE engine, through the same path a Properties panel edit takes (the class's own parser and save, and the Move and Scale tools' path for Position, Rotation and Size, so a terrain layer re-bakes and a road follows its points). One instance: name it like get_properties and pass `properties` {Name: value}. Several: pass `changes`, a list of {path|uuid|name, properties}. Values are the panel's text form or plain JSON: a number, true/false, a string, or [x, y, z]; lengths in metres, Rotation in degrees (Euler XYZ), colours as [r, g, b] in 0-1 or 0-255. All or nothing: every value is checked first and nothing changes if one is wrong; the whole call is ONE undo step. Get the names from get_properties. Refused during Play and while the Space is loading. Renaming (Name) is not offered yet. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({
+                "properties": { "type": "object", "description": "{Name: value} for the one instance named." },
+                "changes": {
+                    "type": "array",
+                    "description": "Several instances in one call and one undo step: each item names an instance (path, uuid or name) and its `properties`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "uuid": { "type": "string" },
+                            "name": { "type": "string" },
+                            "properties": { "type": "object" }
+                        },
+                        "required": ["properties"]
+                    }
+                }
+            })),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut keys: Vec<&str> = TARGET_PROPS.to_vec();
+        keys.extend(["properties", "changes"]);
+        match call_engine(&ctx.universe_root, "properties.set", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let lines: Vec<String> = result
+                    .get("changed")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|c| {
+                                let names: Vec<&str> = c
+                                    .get("changed")
+                                    .and_then(|v| v.as_array())
+                                    .map(|n| n.iter().filter_map(|x| x.as_str()).collect())
+                                    .unwrap_or_default();
+                                format!("  {}: {}", instance_line(c), names.join(", "))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let not_undoable: Vec<&str> = result
+                    .get("not_undoable")
+                    .and_then(|v| v.as_array())
+                    .map(|n| n.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                let mut summary = format!("Set, as one undo step:\n{}", lines.join("\n"));
+                if !not_undoable.is_empty() {
+                    summary.push_str(&format!("\nNot covered by the undo step: {}.", not_undoable.join(", ")));
+                }
+                ok("set_properties", summary, result)
+            }
+            Err(e) => fail("set_properties", e),
+        }
+    }
+}
+
+pub struct CallMethodTool;
+
+impl ToolHandler for CallMethodTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "call_method",
+            description: "Call a method a class declares (such as \"Road:Split\") on an instance in the LIVE engine. `method` is \"Class:Name\" and the instance must be of that class; `args` is an object matching the method's parameters. get_properties lists an instance's methods with their parameters, units and effect. A method's effect (Read, Write or Destructive) decides who may call it, as for any tool. Methods that change the Space are refused during Play. Requires the engine running.",
+            input_schema: target_schema(serde_json::json!({
+                "method": { "type": "string", "description": "\"Class:Name\", such as \"Road:Split\"." },
+                "args": { "type": "object", "description": "The method's arguments, by parameter name." }
+            })),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut keys: Vec<&str> = TARGET_PROPS.to_vec();
+        keys.extend(["method", "args"]);
+        match call_engine(&ctx.universe_root, "class.call_method", copy_params(&input, &keys)) {
+            Ok(result) => {
+                let method = result.get("method").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                ok("call_method", format!("Called {method} on {}.", instance_line(&result)), result)
+            }
+            Err(e) => fail("call_method", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // export_instances_toml  ->  db.export_toml
 // ---------------------------------------------------------------------------
 
@@ -1855,21 +2487,18 @@ impl ToolHandler for ExportInstancesTomlTool {
 // live engine port — so they are NOT in BRIDGE_TOOL_NAMES.
 // ---------------------------------------------------------------------------
 
-/// Recursively copy a directory tree (used to scaffold a Space from the service
-/// templates).
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_all(&path, &target)?;
-        } else {
-            std::fs::copy(&path, &target)?;
-        }
+/// The `name` of a new Universe or Space: one folder name by the shared rules
+/// in `eustress_tools::sandbox`, and not a name the engine reserves.
+fn folder_name(input: &Value) -> Result<String, String> {
+    let raw = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if raw.trim().is_empty() {
+        return Err("missing or empty 'name'".to_string());
     }
-    Ok(())
+    let name = eustress_tools::sandbox::plain_name(raw).map_err(|why| format!("invalid 'name': {why}"))?;
+    if eustress_common::instance_create::is_eep_reserved_name(&name) {
+        return Err(format!("invalid 'name': '{name}' is a name the engine reserves"));
+    }
+    Ok(name)
 }
 
 pub struct NewUniverseTool;
@@ -1893,9 +2522,9 @@ impl ToolHandler for NewUniverseTool {
     }
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let name = match input.get("name").and_then(|v| v.as_str()) {
-            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-            _ => return fail("new_universe", "missing or empty 'name'".to_string()),
+        let name = match folder_name(&input) {
+            Ok(n) => n,
+            Err(e) => return fail("new_universe", e),
         };
         // Universes are siblings under the Eustress documents root (the active
         // Universe's parent).
@@ -1933,7 +2562,7 @@ impl ToolHandler for NewSpaceTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "new_space",
-            description: "Create a new Space inside a Universe by scaffolding the standard service folders (Workspace, Lighting, MaterialService, ...) from the service templates. Disk-based; the engine creates the world database on first open. Defaults to the active Universe. Returns the new Space path + the services created.",
+            description: "Create a new Space inside a Universe with the structure Studio's New Space makes: the service folders (Workspace, Lighting, MaterialService, ...), space.toml at the current Space format, the .eustress manifests, a Baseplate and a WelcomeCube, and Lighting's children. Disk-based; the engine creates the world database on first open. Defaults to the active Universe. Returns the new Space path + the services created.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1949,19 +2578,34 @@ impl ToolHandler for NewSpaceTool {
     }
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let name = match input.get("name").and_then(|v| v.as_str()) {
-            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-            _ => return fail("new_space", "missing or empty 'name'".to_string()),
+        let name = match folder_name(&input) {
+            Ok(n) => n,
+            Err(e) => return fail("new_space", e),
         };
-        // Resolve the target Universe: explicit path, explicit name (sibling of
-        // the active Universe), or the active Universe.
-        let universe = match input.get("universe").and_then(|v| v.as_str()) {
-            Some(u) if u.contains('/') || u.contains('\\') => std::path::PathBuf::from(u),
-            Some(u) => ctx
-                .universe_root
-                .parent()
-                .map(|p| p.join(u))
-                .unwrap_or_else(|| ctx.universe_root.clone()),
+        // Resolve the target Universe: an absolute path to a Universe, a name
+        // (a sibling of the active Universe), or the active Universe.
+        let universe = match input.get("universe").and_then(|v| v.as_str()).map(str::trim).filter(|u| !u.is_empty()) {
+            Some(u) if std::path::Path::new(u).is_absolute() => {
+                // The rule the server's own `universe` override applies.
+                let path = std::path::PathBuf::from(u);
+                if !path.join("Spaces").is_dir() {
+                    return fail("new_space", format!("'{u}' is not a Universe (no Spaces/ folder in it)"));
+                }
+                path
+            }
+            Some(u) => match eustress_tools::sandbox::plain_name(u) {
+                Ok(n) => ctx
+                    .universe_root
+                    .parent()
+                    .map(|p| p.join(&n))
+                    .unwrap_or_else(|| ctx.universe_root.clone()),
+                Err(why) => {
+                    return fail(
+                        "new_space",
+                        format!("invalid 'universe': {why}. Give a Universe's folder name or its absolute path"),
+                    )
+                }
+            },
             None => ctx.universe_root.clone(),
         };
         let space = universe.join("Spaces").join(&name);
@@ -1976,29 +2620,24 @@ impl ToolHandler for NewSpaceTool {
         if space.exists() {
             return fail("new_space", format!("space '{name}' already exists at {}", space.display()));
         }
-        let templates = eustress_common::service_templates_dir();
-        if !templates.is_dir() {
-            return fail("new_space", format!("service templates not found at {}", templates.display()));
+        // The shared scaffold, the one the tools' new_space uses: the
+        // structure Studio's New Space makes, space.toml at the current Space
+        // format included, so the open-time migration never treats this Space
+        // as an older one.
+        let author = ctx.username.clone().unwrap_or_else(|| "Eustress User".to_string());
+        if let Err(e) = eustress_tools::universe_tools::scaffold_new_space(&universe.join("Spaces"), &name, &author) {
+            return fail("new_space", format!("could not scaffold the Space: {e}"));
         }
-        if let Err(e) = std::fs::create_dir_all(space.join(".eustress")) {
-            return fail("new_space", format!("create {}: {e}", space.display()));
-        }
-        // Copy every service-template folder into the new Space.
-        let mut services = Vec::new();
-        let entries = match std::fs::read_dir(&templates) {
-            Ok(e) => e,
-            Err(e) => return fail("new_space", format!("read service templates: {e}")),
-        };
-        for entry in entries.flatten() {
-            let src = entry.path();
-            if src.is_dir() {
-                let svc = entry.file_name().to_string_lossy().to_string();
-                if let Err(e) = copy_dir_all(&src, &space.join(&svc)) {
-                    return fail("new_space", format!("copy service {svc}: {e}"));
-                }
-                services.push(svc);
-            }
-        }
+        // The services it made: each folder holding a `_service.toml`.
+        let mut services: Vec<String> = std::fs::read_dir(&space)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().join("_service.toml").is_file())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
         services.sort();
         ok(
             "new_space",
@@ -2268,13 +2907,33 @@ impl ToolHandler for ReadOutputTool {
 // invoke_action  ->  action.invoke
 // ---------------------------------------------------------------------------
 
+/// An action's Output lines, one per line, for a summary.
+fn output_lines(result: &Value) -> String {
+    result
+        .get("output")
+        .and_then(|v| v.as_array())
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|l| {
+                    format!(
+                        "\n  [{}] {}",
+                        l.get("level").and_then(|v| v.as_str()).unwrap_or("?"),
+                        l.get("message").and_then(|v| v.as_str()).unwrap_or("")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct InvokeActionTool;
 
 impl ToolHandler for InvokeActionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "invoke_action",
-            description: "Run a LIVE engine editor action by name over the bridge: the AI equivalent of pressing its keyboard shortcut, through the same handler. Each action is judged by what its handler can reach. A caller with the standard grant (read and write) may run the ones that change the view, the selection, a tool or a setting, or make an edit the editor's Undo reverses, such as ViewMode2D, ViewTop, FocusSelection, SelectAll, MoveTool, SnapMode1, Copy, Paste, Duplicate, Group, ToggleAnchor, RotateY90 and SaveScene. Refused at that grant: removing or overwriting data (Delete, Cut, the CSG operations, Ungroup, and terrain region Cut, Delete and Duplicate), Undo and Redo, switching or blocking the session (NewSpace, NewUniverse, OpenFile, SaveSceneAs), hosting (StartServer, StopServer), publishing (PublishSpace, PublishUniverse), and starting Play (PlaySolo, PlayWithCharacter, which run the Space's scripts). The name must be the exact variant name. Pair it with select_entity to set what it acts on, and with inspect_scene or get_editor_state to check the result. Requires the engine running.",
+            description: "Run a LIVE engine editor action by name over the bridge: the AI equivalent of pressing its keyboard shortcut, through the same handler. Each action is judged by what its handler can reach. A caller with the standard grant (read and write) may run the ones that change the view, the selection, a tool or a setting, or make an edit the editor's Undo reverses, such as ViewMode2D, ViewTop, FocusSelection, SelectAll, MoveTool, SnapMode1, Copy, Paste, Duplicate, Group, ToggleAnchor, RotateY90 and SaveScene. Refused at that grant: removing or overwriting data (Delete, Cut, the CSG operations, Ungroup, and terrain region Cut, Delete and Duplicate), Undo and Redo, switching or blocking the session (NewSpace, NewUniverse, OpenFile, SaveSceneAs), hosting (StartServer, StopServer), publishing (PublishSpace, PublishUniverse), and starting Play (PlaySolo, PlayWithCharacter, which run the Space's scripts). The name must be the exact variant name. Pair it with select_entity to set what it acts on. The reply says what the action did, a few frames after it ran: `outcome` is refused (it wrote an error to Output; the lines are in `output`), opened (a dialog opened, named in `dialogs_opened`, and waits for the person), changed (the History gained a step, or Play started or stopped), warned, or no visible effect. A refused action is reported as a failure. read_output tails the whole Output panel; inspect_scene and get_editor_state show the Space and the editor. Requires the engine running.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2305,7 +2964,31 @@ impl ToolHandler for InvokeActionTool {
         };
         let class = eustress_tools::capability::action_capability(action).label();
         match call_engine(&ctx.universe_root, "action.invoke", params) {
-            Ok(result) => ok("invoke_action", format!("Invoked action '{action:?}' ({class})."), result),
+            Ok(result) => {
+                let outcome = result.get("outcome").and_then(|v| v.as_str()).unwrap_or("dispatched").to_string();
+                let mut summary = format!("{action:?} ({class}): {outcome}.");
+                let opened: Vec<&str> = result
+                    .get("dialogs_opened")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|d| d.as_str()).collect())
+                    .unwrap_or_default();
+                if !opened.is_empty() {
+                    summary.push_str(&format!(" Opened: {}; it waits for the person.", opened.join(", ")));
+                }
+                summary.push_str(&output_lines(&result));
+                if outcome == "refused" {
+                    ToolResult {
+                        tool_name: "invoke_action".to_string(),
+                        tool_use_id: String::new(),
+                        success: false,
+                        content: summary,
+                        structured_data: Some(result),
+                        stream_topic: None,
+                    }
+                } else {
+                    ok("invoke_action", summary, result)
+                }
+            }
             Err(e) => fail("invoke_action", e),
         }
     }
@@ -2382,42 +3065,8 @@ impl ToolHandler for CaptureViewportTool {
 
     fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         match call_engine(&ctx.universe_root, "viewport.capture", serde_json::json!({})) {
-            Ok(result) => capture_result("capture_viewport", result),
+            Ok(result) => eustress_tools::image_result::capture_result("capture_viewport", result, ctx),
             Err(e) => fail("capture_viewport", e),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AI camera — the AI's OWN independent off-screen camera (not the user's view)
-// ---------------------------------------------------------------------------
-
-pub struct AiCameraSetPoseTool;
-
-impl ToolHandler for AiCameraSetPoseTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "ai_camera_set_pose",
-            description: "Place the AI's OWN independent off-screen camera (separate from the user's viewport — it never displaces what the human sees). Params: position [x,y,z] (required), plus either look_at [x,y,z] or rotation [x,y,z,w]. Then call ai_camera_capture to see from this pose. This is how you move your own eyes around the world on your own timeline. Requires the engine running.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "position": { "type": "array", "items": { "type": "number" }, "description": "[x,y,z] world position of the AI camera." },
-                    "look_at":  { "type": "array", "items": { "type": "number" }, "description": "[x,y,z] point to look at (use this OR rotation)." },
-                    "rotation": { "type": "array", "items": { "type": "number" }, "description": "[x,y,z,w] quaternion orientation (use this OR look_at)." }
-                },
-                "required": ["position"]
-            }),
-            modes: &[WorkshopMode::General],
-            requires_approval: false,
-            stream_topics: &[],
-        }
-    }
-
-    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        match call_engine(&ctx.universe_root, "ai_camera.set_pose", input) {
-            Ok(r) => ok("ai_camera_set_pose", "AI camera repositioned.".to_string(), r),
-            Err(e) => fail("ai_camera_set_pose", e),
         }
     }
 }
@@ -2588,87 +3237,6 @@ impl ToolHandler for SetPhysicsSettingsTool {
                 ok("set_physics_settings", content, reply)
             }
             Err(e) => fail("set_physics_settings", e),
-        }
-    }
-}
-
-pub struct AiCameraOrbitTool;
-
-impl ToolHandler for AiCameraOrbitTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "ai_camera_orbit",
-            description: "Orbit the AI's own off-screen camera around a point — convenient for circling what you're working on. Params: center [x,y,z] (default origin), distance (default 15), yaw_deg (default 45), pitch_deg (default 30). Then ai_camera_capture to view it. Requires the engine running.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "center":    { "type": "array", "items": { "type": "number" }, "description": "[x,y,z] point to orbit around (default [0,0,0])." },
-                    "distance":  { "type": "number", "description": "Distance from center (default 15)." },
-                    "yaw_deg":   { "type": "number", "description": "Horizontal angle in degrees (default 45)." },
-                    "pitch_deg": { "type": "number", "description": "Vertical angle in degrees (default 30)." }
-                }
-            }),
-            modes: &[WorkshopMode::General],
-            requires_approval: false,
-            stream_topics: &[],
-        }
-    }
-
-    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        match call_engine(&ctx.universe_root, "ai_camera.orbit", input) {
-            Ok(r) => ok("ai_camera_orbit", "AI camera orbited.".to_string(), r),
-            Err(e) => fail("ai_camera_orbit", e),
-        }
-    }
-}
-
-pub struct AiCameraFrameTool;
-
-impl ToolHandler for AiCameraFrameTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "ai_camera_frame",
-            description: "Point the AI's own off-screen camera at a named entity and back off to a sensible distance for its size — 'go look at that part'. Param: name (the entity's Name, e.g. \"House_Roof\"). Then ai_camera_capture to view it. Requires the engine running.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the entity to frame (e.g. \"House_Floor\")." }
-                },
-                "required": ["name"]
-            }),
-            modes: &[WorkshopMode::General],
-            requires_approval: false,
-            stream_topics: &[],
-        }
-    }
-
-    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        match call_engine(&ctx.universe_root, "ai_camera.frame", input) {
-            Ok(r) => ok("ai_camera_frame", format!("AI camera framed '{name}'."), r),
-            Err(e) => fail("ai_camera_frame", e),
-        }
-    }
-}
-
-pub struct AiCameraCaptureTool;
-
-impl ToolHandler for AiCameraCaptureTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "ai_camera_capture",
-            description: "Render the AI's OWN independent camera and return the image inline — your own eyes, separate from capture_viewport (which is the human's window). The PNG comes back in the response, so you see your frame directly. Use ai_camera_set_pose/orbit/frame first to aim it. On-demand: the off-screen camera powers up only for this shot, so it doesn't tax the user's framerate. The call waits for the PNG to finish writing before returning. Requires the engine running.",
-            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
-            modes: &[WorkshopMode::General],
-            requires_approval: false,
-            stream_topics: &[],
-        }
-    }
-
-    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
-        match call_engine(&ctx.universe_root, "ai_camera.capture", serde_json::json!({})) {
-            Ok(r) => capture_result("ai_camera_capture", r),
-            Err(e) => fail("ai_camera_capture", e),
         }
     }
 }
@@ -3718,6 +4286,61 @@ impl ToolHandler for TerrainClearTool {
     }
 }
 
+pub struct TerrainReloadTool;
+
+impl ToolHandler for TerrainReloadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "terrain_reload",
+            description: "Read the open Space's terrain again from its files under Workspace/Terrain (the height raster, material maps, caves, voxel chunks) and replace the live terrain with it, without switching Spaces: the step after regenerating terrain files outside the engine. The live terrain is replaced only after the files are read, the save baseline resets to what was read, and the layers are kept. Refused while a generation runs, for a converted Space (its terrain lives in the world database), and when the live terrain has unsaved edits, unless `discard_unsaved` is true. A call with `discard_unsaved: true` loses those edits and is classed Destructive; without it the call is Write. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "discard_unsaved": { "type": "boolean", "description": "true: reload even when the live terrain has unsaved edits, which are lost (default false)." },
+                },
+            }),
+            modes: &[WorkshopMode::General],
+            // It can replace the live terrain and, with `discard_unsaved`, lose edits.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // Only `discard_unsaved` is sent, the same value the capability check
+        // judged (`capability::terrain_reload_capability`).
+        let params = terrain_params(&input, &["discard_unsaved"]);
+        match call_terrain(ctx, "terrain.reload", params, TERRAIN_LONG_REPLY_TIMEOUT) {
+            Ok(r) => ok("terrain_reload", summarize_terrain_reload(&r), r),
+            Err(e) => fail("terrain_reload", e),
+        }
+    }
+}
+
+/// What terrain_reload read and replaced.
+fn summarize_terrain_reload(r: &Value) -> String {
+    let mut summary = if r["reloaded"].as_bool() == Some(true) {
+        format!(
+            "Reloaded the terrain from Workspace/Terrain: replaced {} root(s) and {} chunk(s), read {} chunk file(s) and {} volume brick(s).",
+            r["replaced_roots"], r["replaced_chunks"], r["chunk_files"], r["volume_bricks"]
+        )
+    } else {
+        "The terrain was not reloaded.".to_string()
+    };
+    if !r["size_m"].is_null() {
+        summary.push_str(&format!(" Size {} m", r["size_m"]));
+        if !r["height_band_m"].is_null() {
+            summary.push_str(&format!(", height band {} m", r["height_band_m"]));
+        }
+        summary.push('.');
+    }
+    if let Some(note) = r["note"].as_str().filter(|n| !n.is_empty()) {
+        summary.push(' ');
+        summary.push_str(note);
+    }
+    summary
+}
+
 /// What terrain_clear deleted, kept and could not delete.
 fn summarize_terrain_clear(r: &Value) -> String {
     let removed: Vec<&str> = r["removed"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -3738,4 +4361,72 @@ fn summarize_terrain_clear(r: &Value) -> String {
         summary.push_str(&format!(" {failed} entry or entries could not be deleted; see `failed`."));
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(universe: &std::path::Path) -> ToolContext {
+        // Constructed field by field: ToolContext does not implement Default.
+        ToolContext {
+            space_root: universe.join("Spaces"),
+            universe_root: universe.to_path_buf(),
+            user_id: None,
+            username: None,
+            luau_executor: None,
+            display_unit: None,
+            cancelled: None,
+            permissions: eustress_tools::Permissions::standard(),
+        }
+    }
+
+    /// A Space made over MCP has the structure Studio's New Space makes, its
+    /// space.toml at the current Space format included.
+    #[test]
+    fn new_space_is_born_at_the_current_format() {
+        let root = std::env::temp_dir().join(format!("eus_mcp_new_space_format_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let universe = root.join("U");
+        std::fs::create_dir_all(universe.join("Spaces")).unwrap();
+        let r = NewSpaceTool.execute(serde_json::json!({ "name": "Fresh" }), &ctx(&universe));
+        assert!(r.success, "{}", r.content);
+        let space = universe.join("Spaces").join("Fresh");
+        let text = std::fs::read_to_string(space.join("space.toml")).expect("space.toml is written");
+        let stamp = format!("format = {}", eustress_common::space_format::CURRENT);
+        assert!(text.lines().any(|l| l.trim() == stamp), "no `{stamp}` in:\n{text}");
+        assert!(space.join(".eustress").join("project.toml").is_file());
+        let again = NewSpaceTool.execute(serde_json::json!({ "name": "Fresh" }), &ctx(&universe));
+        assert!(!again.success && again.content.contains("already exists"), "{}", again.content);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A new Space or Universe takes one folder name, and an absolute
+    /// `universe` must be a Universe; nothing is created outside.
+    #[test]
+    fn new_space_and_new_universe_take_one_name() {
+        let root = std::env::temp_dir().join(format!("eus_mcp_new_space_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let universe = root.join("U");
+        let outside = root.join("Outside");
+        std::fs::create_dir_all(universe.join("Spaces")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let c = ctx(&universe);
+
+        for input in [
+            serde_json::json!({ "name": "../../Outside/Escaped" }),
+            serde_json::json!({ "name": r"..\..\Outside\Escaped" }),
+            serde_json::json!({ "name": "Fine", "universe": outside.to_string_lossy() }),
+        ] {
+            let r = NewSpaceTool.execute(input.clone(), &c);
+            assert!(!r.success, "{input}: {}", r.content);
+            assert!(r.content.contains("invalid") || r.content.contains("not a Universe"), "{input}: {}", r.content);
+        }
+        for name in ["Outside/Escaped", "../Outside/Escaped"] {
+            let r = NewUniverseTool.execute(serde_json::json!({ "name": name }), &c);
+            assert!(!r.success && r.content.contains("invalid"), "{name}: {}", r.content);
+        }
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "nothing may be created outside");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

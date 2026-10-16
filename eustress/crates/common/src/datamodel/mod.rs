@@ -57,6 +57,18 @@ pub fn new_shared() -> SharedDataModel {
     Arc::new(parking_lot::Mutex::new(DataModel::new()))
 }
 
+/// The session a shared tree belongs to: [`DataModel::session`]. Compare it,
+/// never the tree's address, to tell one Play session from the next.
+pub fn session_of(shared: &SharedDataModel) -> u64 {
+    shared.lock().session()
+}
+
+/// The next tree's session number, from 1, never repeated in this process.
+fn next_session() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The tree of the running Play session, reachable from any thread. Rune's
 /// native functions take no Bevy parameters, so this (not a thread-local)
 /// is how they find it.
@@ -472,6 +484,8 @@ pub struct DataModel {
     pub structure_version: u64,
     /// Every Animator's tracks: their control state, clocks and clips.
     pub animation: animation::AnimationState,
+    /// This tree's session number ([`DataModel::session`]).
+    session: u64,
 }
 
 impl Default for DataModel {
@@ -481,6 +495,13 @@ impl Default for DataModel {
 }
 
 impl DataModel {
+    /// The number this tree was given when it was made, unique in the
+    /// process: what tells one Play session's tree from the next, where the
+    /// tree's address could repeat once the old one is freed.
+    pub fn session(&self) -> u64 {
+        self.session
+    }
+
     /// A tree holding only the `game` root.
     pub fn new() -> Self {
         let mut dm = Self {
@@ -521,6 +542,7 @@ impl DataModel {
             reply_in: Vec::new(),
             structure_version: 0,
             animation: animation::AnimationState::default(),
+            session: next_session(),
         };
         let root = dm.alloc("DataModel", "Game", Origin::Scene);
         dm.root = root;
@@ -1108,6 +1130,7 @@ impl DataModel {
     /// A property as scripts read it, including the derived ones
     /// (`Position` and `Orientation` from `CFrame`, `Velocity`, ...).
     pub fn get_prop(&self, id: InstanceId, name: &str) -> Option<DmValue> {
+        crate::utils::script_profile::dm_read();
         let inst = self.get(id)?;
         match name {
             "Name" => return Some(DmValue::String(inst.name.clone())),
@@ -1176,6 +1199,7 @@ impl DataModel {
     /// A script write. Normalises the value (enum strings, `Position` into
     /// `CFrame`, ...), stores it, and marks it for the engine.
     pub fn set_prop(&mut self, id: InstanceId, name: &str, value: DmValue) -> Result<(), String> {
+        crate::utils::script_profile::dm_write();
         let class = match self.get(id) {
             Some(i) if !i.destroyed => i.class_name.clone(),
             Some(_) => return Ok(()), // writes to a destroyed instance are ignored, like Roblox
@@ -1365,6 +1389,7 @@ impl DataModel {
     /// like [`DataModel::set_prop_from_engine`], but no `Changed` event. A
     /// script's write this frame still wins.
     pub fn set_prop_quietly(&mut self, id: InstanceId, name: &str, value: DmValue) {
+        crate::utils::script_profile::dm_write();
         if let Some(inst) = self.get_mut(id) {
             if !inst.dirty.iter().any(|d| d == name) {
                 inst.props.insert(name.to_string(), value);
@@ -1373,6 +1398,7 @@ impl DataModel {
     }
 
     pub fn set_prop_from_engine(&mut self, id: InstanceId, name: &str, value: DmValue) {
+        crate::utils::script_profile::dm_write();
         let watch = match self.get_mut(id) {
             Some(inst) => {
                 if inst.dirty.iter().any(|d| d == name) {
@@ -1420,10 +1446,12 @@ impl DataModel {
     // ── Attributes and tags ────────────────────────────────────────────────
 
     pub fn get_attribute(&self, id: InstanceId, name: &str) -> Option<DmValue> {
+        crate::utils::script_profile::dm_read();
         self.get(id)?.attributes.get(name).cloned()
     }
 
     pub fn set_attribute(&mut self, id: InstanceId, name: &str, value: DmValue) -> Result<(), String> {
+        crate::utils::script_profile::dm_write();
         if matches!(value, DmValue::Instance(_)) {
             return Err("attributes cannot hold Instances".into());
         }
@@ -1815,6 +1843,23 @@ pub fn vector2(x: f64, y: f64) -> Vector2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new tree never shares a session number with one before it, even
+    /// when it is given the freed tree's memory.
+    #[test]
+    fn every_tree_has_its_own_session() {
+        let first = new_shared();
+        let (session, address) = (session_of(&first), Arc::as_ptr(&first) as usize);
+        drop(first);
+        for _ in 0..64 {
+            let next = new_shared();
+            assert_ne!(session_of(&next), session, "a session number came back");
+            if Arc::as_ptr(&next) as usize == address {
+                // The address repeated: exactly the case the number is for.
+                assert_ne!(session_of(&next), session);
+            }
+        }
+    }
     use crate::scripting::Color3;
 
     fn part(dm: &mut DataModel, name: &str) -> InstanceId {

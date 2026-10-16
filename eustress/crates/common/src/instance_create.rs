@@ -685,6 +685,12 @@ pub fn sanitize_entity_name(raw: &str) -> String {
         out.push('-');
     }
 
+    // `.git` is git's own folder name, and git records nothing in a folder
+    // with that name, so the instance would never reach the Space's history.
+    if out.eq_ignore_ascii_case(".git") {
+        out.push('-');
+    }
+
     out
 }
 
@@ -1032,6 +1038,14 @@ mod sanitize_tests {
 
     /// The end-to-end guarantee: a name the OS would reject now produces a
     /// real folder, and the TRUE name survives in `[metadata] name`.
+    #[test]
+    fn a_git_folder_name_is_never_written() {
+        for raw in [".git", ".GIT", ".git.", ".git "] {
+            assert_eq!(sanitize_entity_name(raw).to_ascii_lowercase(), ".git-", "{raw:?}");
+        }
+        assert_eq!(sanitize_entity_name(".gitignore"), ".gitignore");
+    }
+
     #[test]
     fn create_instance_survives_an_unsafe_name() {
         let dir = std::env::temp_dir().join(format!(

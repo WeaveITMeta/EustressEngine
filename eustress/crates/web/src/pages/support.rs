@@ -62,7 +62,7 @@ pub fn SupportPage() -> impl IntoView {
 
                     <section class="legal-section">
                         <h2>"Bliss and Tickets"</h2>
-                        <p>"Tickets are what you buy. Bliss is what you earn for real contribution, and it can cash out."</p>
+                        <p>"Tickets are what you buy. Bliss is what you earn for real contribution. With identity verification and a Creator, Professional or Bundle plan, it can cash out."</p>
                         <p>"Questions about how the economy works are fair game in Discord; we are happy to walk through it."</p>
                         <p>"Anything touching your balance, a payout, or a charge is private. Send those to support@eustress.dev."</p>
                     </section>
@@ -82,6 +82,12 @@ pub fn SupportPage() -> impl IntoView {
                         <p>"Using Eustress for something serious. Forking it. Building a business on top."</p>
                         <p>"Email support@eustress.dev with what you are building and what you need cleared up."</p>
                         <p>"Real questions get real answers. We would rather you ask up front than guess."</p>
+                    </section>
+
+                    <section class="legal-section">
+                        <h2>"An intimate image of you was shared without your consent"</h2>
+                        <p>"You can ask us to remove it, whether it is real or made by AI. You do not need an account."</p>
+                        <p><a href="/take-it-down">"Remove intimate images (TAKE IT DOWN)"</a></p>
                     </section>
 
                     <section class="legal-section">

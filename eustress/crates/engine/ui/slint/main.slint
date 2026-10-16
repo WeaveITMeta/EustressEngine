@@ -31,10 +31,10 @@ import { ListingReason } from "listing_status.slint";
 export { ListingReason }
 // History's restore points, built in Rust (MCP's snapshot layer).
 export { RestorePointRow }
-import { PublishTreeNode } from "publish.slint";
+import { PublishTreeNode, PublishTargetRow, ChangeLogRow } from "publish.slint";
 import { ContextMenu, MenuItem } from "context_menu.slint";
 import { RadialMenu, RadialOption } from "radial_menu.slint";
-import { Theme, ThemeData, FloatingPanelHeader } from "theme.slint";
+import { Theme, ThemeData, PopupBounds, FloatingPanelHeader } from "theme.slint";
 // Re-export so `slint::include_modules!()` generates Rust bindings for the
 // Theme global + the ThemeData struct (a plain `import` only makes them usable
 // within .slint files). Rust builds a ThemeData and pushes it via set_data().
@@ -83,6 +83,7 @@ import { DomainsDialog, DomainEntry } from "domains_dialog.slint";
 import { GlobalVariablesDialog, GlobalVariableEntry } from "global_variables_dialog.slint";
 import { KeybindingsDialog, ShortcutEntry } from "keybindings.slint";
 import { InsertObjectDialog } from "insert_object_dialog.slint";
+import { ScriptSearchModal, ScriptSearchRow } from "script_search.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
@@ -152,6 +153,11 @@ export struct GuiElementData {
 // ============================================================================
 
 export component StudioWindow inherits Window {
+    // Popups below an anchor read this to open upward instead of running off
+    // the bottom (see PopupBounds in theme.slint). Read only: the window's size
+    // still comes from the Bevy adapter.
+    init => { PopupBounds.window-height = root.height; }
+    changed height => { PopupBounds.window-height = root.height; }
     // Window properties
     // NOTE: Do NOT set width/height here — the size comes from the BevyWindowAdapter
     // via WindowEvent::Resized. Hardcoding dimensions prevents resize from working.
@@ -211,6 +217,11 @@ export component StudioWindow inherits Window {
     in property <string> listing-appeal-error: "";
     callback listing-appeal(string);   // 10 to 2000 characters
     callback listing-open-review();
+    // Ask for a review stuck in review again (`moderation_dossier`).
+    in property <bool> listing-can-rerequest: false;
+    in property <bool> listing-rerequest-busy: false;
+    in property <string> listing-rerequest-note: "";
+    callback listing-rerequest();
     // The revert confirm: open, and which point it asks about.
     in-out property <bool> show-revert-confirm: false;
     in-out property <string> revert-confirm-id: "";
@@ -258,6 +269,55 @@ export component StudioWindow inherits Window {
     in-out property <bool> publish-studio-editable: false;
     in-out property <string> publish-mode: "universe"; // "universe" or "space"
     in-out property <bool> publish-is-update: false;
+    // A publish under way (`moderation_dossier`): its stage and percent,
+    // and the error it ended with.
+    in property <bool> publish-is-publishing: false;
+    in property <string> publish-progress: "";
+    in property <string> publish-error: "";
+    // The Publish dialog's Max players (the start Space's
+    // Players.MaxPlayers), and the load-tested size it notes above.
+    in-out property <string> publish-max-players: "10";
+    in property <int> publish-load-tested-players: 4;
+    // Publish As...: where the publish goes (`publish_targets`).
+    in property <[PublishTargetRow]> publish-targets: [];
+    in-out property <string> publish-target-id: "";
+    in-out property <string> publish-target-title: "New listing";
+    in-out property <int> publish-target-index: 0;
+    in property <string> publish-own-listing-id: "";
+    in property <string> publish-targets-note: "";
+    in property <bool> publish-focus-targets: false;
+    callback publish-as();
+    // The Publish dialog's change logs (`publish_changelog`).
+    in property <bool> publish-changelog-ready: false;
+    in property <int> publish-changelog-version: 0;
+    in property <bool> publish-changelog-stored: true;
+    in property <[ChangeLogRow]> publish-changelogs: [];
+    in property <string> publish-changelogs-note: "";
+    callback publish-changelog-save();
+    callback publish-changelog-download(string);
+    // The Publish dialog's cover (`publish_cover`).
+    in property <string> publish-cover-state: "keep";
+    in property <string> publish-cover-now: "";
+    in property <image> publish-cover-image;
+    in property <string> publish-cover-info: "";
+    in property <string> publish-cover-error: "";
+    callback publish-cover-choose();
+    callback publish-cover-remove();
+    callback publish-cover-keep();
+    // The Publish dialog's hashtags (`publish_targets`): the whole list,
+    // whether it is known (loaded or edited; an unknown list is not sent),
+    // and the field's two rows, count, refusal and text.
+    in property <[string]> publish-tags: [];
+    in property <bool> publish-tags-known: false;
+    in property <[string]> publish-tags-row-0: [];
+    in property <[string]> publish-tags-row-1: [];
+    in property <int> publish-tags-count: 0;
+    in property <bool> publish-tags-suggested: false;
+    in property <string> publish-tags-error: "";
+    in-out property <string> publish-tags-text: "";
+    callback publish-tag-add(string);
+    callback publish-tag-typed(string);
+    callback publish-tag-remove(int);
     in property <[string]> publish-spaces: [];
     in property <[PublishTreeNode]> publish-tree-nodes: [];
     in property <string> publish-pak-size: "";
@@ -266,6 +326,9 @@ export component StudioWindow inherits Window {
     in-out property <string> login-identity-path: "";
     in-out property <string> login-error: "";
     in-out property <string> login-status: "";
+    // The sign-in dialog's server lines (`auth::sign_in_texts`), set once.
+    in property <string> login-server: "";
+    in property <string> login-identity-hint: "Your eustress-username.toml holds your Ed25519 keypair. Get one at eustress.dev/login. Never share your private key.";
     in-out property <bool> login-loading: false;
     callback browse-identity();
     callback login-with-identity();
@@ -334,7 +397,7 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-exit-confirmation: false;
     in-out property <bool> show-settings-dialog: false;
     in-out property <int> settings-active-tab: 0;
-    // Legacy Classic/Modern bool round-trip (kept for back-compat; the Theme
+    // Legacy Classic/Voltec bool round-trip (kept for back-compat; the Theme
     // tab now uses the data-driven theme list below).
     callback set-theme-modern(bool);
     // TOML theme engine — the list of loaded themes (pushed from Rust), the
@@ -342,7 +405,7 @@ export component StudioWindow inherits Window {
     // swaps the whole palette live + persists; `rescan-themes` re-reads the
     // user Themes folder.
     in property <[ThemeEntry]> settings-available-themes: [];
-    in-out property <string> settings-active-theme-id: "modern";
+    in-out property <string> settings-active-theme-id: "voltec";
     callback select-theme(string);
     callback rescan-themes();
     // Settings dialog's "Reset Defaults" button — was declared on
@@ -396,6 +459,21 @@ export component StudioWindow inherits Window {
     callback find-replace-one();
     callback find-replace-all();
     callback find-closed();
+    // Find in Scripts (Ctrl+Shift+F). Rust searches on each keystroke and pushes
+    // the matches; the modal sends back the typing and the keys.
+    in-out property <bool> show-script-search: false;
+    in-out property <string> script-search-query: "";
+    in-out property <bool> script-search-match-case: false;
+    in property <[ScriptSearchRow]> script-search-results: [];
+    in property <int> script-search-selected: 0;
+    in property <string> script-search-status: "";
+    callback script-search-query-changed(string);
+    callback script-search-match-case-changed(bool);
+    callback script-search-open(int);
+    callback script-search-move(int);
+    callback script-search-close();
+    // Ctrl+Shift+F while a script holds the keyboard: the engine's shortcuts wait.
+    callback script-search-request();
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
     in-out property <bool> show-new-space-dialog: false;
@@ -751,6 +829,7 @@ export component StudioWindow inherits Window {
     in-out property <bool> update-available: false;
     in-out property <string> update-version: "";
     in-out property <string> update-status: "";
+    in-out property <string> update-error: "";
     in-out property <int> update-progress: 0;
     callback update-clicked();
 
@@ -1042,6 +1121,28 @@ export component StudioWindow inherits Window {
     // above; both get committed together on "on-save".
     in-out property <string> soul-xai-api-key: "";
     in-out property <string> soul-openai-api-key: "";
+    // The AI keys page: masks and Remove state, pushed by Rust. No key is
+    // ever in a Slint property; the key fields hold only what is typed.
+    in-out property <string> soul-api-key-mask: "";
+    in-out property <string> soul-xai-api-key-mask: "";
+    in-out property <string> soul-openai-api-key-mask: "";
+    in-out property <bool> soul-api-key-can-remove: false;
+    in-out property <bool> soul-xai-api-key-can-remove: false;
+    in-out property <bool> soul-openai-api-key-can-remove: false;
+    in-out property <string> soul-key-status: "";
+    in-out property <string> soul-key-remove-prompt: "";
+    callback soul-key-remove(string);
+    callback soul-key-remove-confirm();
+    callback soul-key-remove-cancel();
+    // Closing Settings without Save drops whatever was typed in the key
+    // fields, so a typed key never stays in a Slint property.
+    changed show-settings-dialog => {
+        if (!root.show-settings-dialog) {
+            root.soul-api-key = "";
+            root.soul-xai-api-key = "";
+            root.soul-openai-api-key = "";
+        }
+    }
     in-out property <int> soul-rune-count: 0;
     in-out property <int> soul-luau-server-count: 0;
     in-out property <int> soul-luau-client-count: 0;
@@ -1109,6 +1210,8 @@ export component StudioWindow inherits Window {
     // handling so typing a filter doesn't drive the camera.
     in-out property <string> property-search-query: "";
     in-out property <bool> property-search-has-focus: false;
+    // Explorer search box (see explorer.slint).
+    in-out property <bool> explorer-search-has-focus: false;
     callback property-search-changed(string);
     
     // Panel widths (resizable)
@@ -1544,6 +1647,8 @@ export component StudioWindow inherits Window {
     callback copy-output-line(int);
     callback copy-output-visible();
     callback toggle-output-stack(int);
+    // Output: show another page of an open line's message (id, page).
+    callback turn-output-page(int, int);
     
     // Toolbox part insertion
     callback insert-part(string);
@@ -1582,6 +1687,7 @@ export component StudioWindow inherits Window {
     // Auth
     callback login();
     callback logout();
+    callback logout-everywhere();
     callback open-path-from-log(string);
     
     // Terrain
@@ -1708,6 +1814,13 @@ export component StudioWindow inherits Window {
     callback toggle-theme-editor();
     callback apply-theme-settings(bool, bool, float); // dark-mode, high-contrast, ui-scale
     callback detach-panel-to-window(string);
+    // Pinned panels stay through every mode and discipline switch
+    // (`layout_tables`). Each dock's pin button toggles its active panel;
+    // Rust says whether that panel is pinned.
+    callback toggle-pin-panel(string);
+    callback reset-mode-layout();
+    in-out property <bool> left-active-pinned: false;
+    in-out property <bool> right-active-pinned: false;
     
     // Native Window Integration Callbacks
     // These are called when viewport bounds change so Bevy can reposition its window
@@ -1830,6 +1943,7 @@ export component StudioWindow inherits Window {
             total-hours: root.total-hours;
             saved-identities: root.saved-identities;
             on-sign-out => { root.logout(); }
+            on-sign-out-everywhere => { root.logout-everywhere(); }
             on-switch-identity(username) => { root.switch-identity(username); }
             on-remove-identity(username) => { root.remove-identity(username); }
 
@@ -1837,6 +1951,7 @@ export component StudioWindow inherits Window {
             update-available: root.update-available;
             update-version: root.update-version;
             update-status: root.update-status;
+            update-error: root.update-error;
             update-progress: root.update-progress;
             on-update-clicked => { root.update-clicked(); }
 
@@ -1860,6 +1975,7 @@ export component StudioWindow inherits Window {
             on-import-asset => { root.import-asset(); }
             on-import-roblox-place => { root.import-roblox-place(); }
             on-publish-universe => { root.publish-universe(); }
+            on-publish-as => { root.publish-as(); }
             on-publish-space => { root.publish-space(); }
             on-show-insert-object => { root.insert-object-request(); }
             on-insert-menu-opened => { root.insert-menu-opened(); }
@@ -2008,6 +2124,35 @@ export component StudioWindow inherits Window {
                         height: 30px;
                         background: Theme.header-background;
 
+                        // Pin the active left-dock panel: it stays through
+                        // every mode and discipline switch (`layout_tables`).
+                        Rectangle {
+                            x: parent.width - 44px;
+                            y: (parent.height - 18px) / 2;
+                            width: 18px; height: 18px;
+                            border-radius: 3px;
+                            background: left-pin-ta.has-hover ? Theme.button-hover
+                                : root.left-active-pinned ? Theme.accent-cyan.with-alpha(0.16) : transparent;
+                            left-pin-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.toggle-pin-panel(
+                                        root.left-tab-index == 0 ? "explorer" :
+                                        root.left-tab-index == 1 ? "assets" :
+                                        root.left-tab-index == 2 ? "universe" :
+                                        root.left-tab-index == 3 ? "toolbox" : "terrain"
+                                    );
+                                }
+                            }
+                            Image {
+                                width: 12px; height: 12px;
+                                x: 3px; y: 3px;
+                                source: @image-url("../../assets/icons/ui/pin.svg");
+                                colorize: root.left-active-pinned ? Theme.accent-cyan : Theme.text-secondary;
+                                image-fit: contain;
+                            }
+                        }
+
                         // Phase F: pop the CURRENTLY ACTIVE left-zone panel out
                         // into its own draggable OS window. Absolutely
                         // positioned so it never disturbs the tab
@@ -2040,7 +2185,7 @@ export component StudioWindow inherits Window {
 
                         HorizontalLayout {
                             padding-left: 2px;
-                            padding-right: 24px;
+                            padding-right: 46px;
                             padding-top: 2px;
                             spacing: 1px;
 
@@ -2210,6 +2355,7 @@ export component StudioWindow inherits Window {
                             scroll-pulse: root.explorer-scroll-pulse;
                             scroll-target-y: root.explorer-scroll-target-y;
                             renaming-node-id: root.explorer-renaming-node-id;
+                            on-search-focus-changed(f) => { root.explorer-search-has-focus = f; }
                             on-select-node(id, node-type, ctrl, shift) => { root.select-node(id, node-type, ctrl, shift); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
                             on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
@@ -3322,6 +3468,14 @@ export component StudioWindow inherits Window {
                             }
                             return accept;
                         }
+                        // Ctrl+Shift+F: Find in Scripts. The engine's shortcuts do not
+                        // run while a script holds the keyboard, so the editor's own
+                        // press is passed to Rust from here. With the viewport focused
+                        // the engine answers, and this stays out of its way.
+                        if event.modifiers.control && event.modifiers.shift && (event.text == "f" || event.text == "F") && root.script-editor-has-focus {
+                            root.script-search-request();
+                            return accept;
+                        }
                         // Ctrl+Shift+T: reopen last closed tab
                         if event.modifiers.control && event.modifiers.shift && event.text == "T" {
                             root.reopen-closed-tab();
@@ -4007,6 +4161,34 @@ export component StudioWindow inherits Window {
                         height: 30px;
                         background: Theme.header-background;
 
+                        // Pin the active right-dock panel: it stays through
+                        // every mode and discipline switch (`layout_tables`).
+                        Rectangle {
+                            x: parent.width - 44px;
+                            y: (parent.height - 18px) / 2;
+                            width: 18px; height: 18px;
+                            border-radius: 3px;
+                            background: right-pin-ta.has-hover ? Theme.button-hover
+                                : root.right-active-pinned ? Theme.accent-cyan.with-alpha(0.16) : transparent;
+                            right-pin-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.toggle-pin-panel(
+                                        root.right-tab-index == 0 ? "properties" :
+                                        root.right-tab-index == 1 ? "history" :
+                                        root.right-tab-index == 2 ? "soul" : "workshop"
+                                    );
+                                }
+                            }
+                            Image {
+                                width: 12px; height: 12px;
+                                x: 3px; y: 3px;
+                                source: @image-url("../../assets/icons/ui/pin.svg");
+                                colorize: root.right-active-pinned ? Theme.accent-cyan : Theme.text-secondary;
+                                image-fit: contain;
+                            }
+                        }
+
                         // Phase F: pop the CURRENTLY ACTIVE right-zone panel
                         // out into its own draggable OS window.
                         Rectangle {
@@ -4036,7 +4218,7 @@ export component StudioWindow inherits Window {
 
                         HorizontalLayout {
                             padding-left: 2px;
-                            padding-right: 24px;
+                            padding-right: 46px;
                             padding-top: 2px;
                             spacing: 1px;
 
@@ -4582,6 +4764,7 @@ export component StudioWindow inherits Window {
                 on-copy-log(id) => { root.copy-output-line(id); }
                 on-copy-all => { root.copy-output-visible(); }
                 on-toggle-stack(id) => { root.toggle-output-stack(id); }
+                on-turn-page(id, page) => { root.turn-output-page(id, page); }
             }
 
             // Timeline — data-agnostic marker panel fed by the
@@ -4713,6 +4896,10 @@ export component StudioWindow inherits Window {
                 root.save-layout-to-file();
                 root.show-layout-dropdown = false;
             }
+            reset-mode-layout => {
+                root.reset-mode-layout();
+                root.show-layout-dropdown = false;
+            }
             close => { root.show-layout-dropdown = false; }
         }
     }
@@ -4807,6 +4994,10 @@ export component StudioWindow inherits Window {
         listing-appeal-error: root.listing-appeal-error;
         on-listing-appeal(text) => { root.listing-appeal(text); }
         on-listing-open-review => { root.listing-open-review(); }
+        listing-can-rerequest: root.listing-can-rerequest;
+        listing-rerequest-busy: root.listing-rerequest-busy;
+        listing-rerequest-note: root.listing-rerequest-note;
+        on-listing-rerequest => { root.listing-rerequest(); }
         spaces: root.publish-spaces;
         tree-nodes: root.publish-tree-nodes;
         pak-size-estimate: root.publish-pak-size;
@@ -4814,8 +5005,44 @@ export component StudioWindow inherits Window {
         sync-status: root.sync-status;
         is-update: root.publish-is-update;
         publish-mode: root.publish-mode;
+        is-publishing: root.publish-is-publishing;
+        progress: root.publish-progress;
+        error-message: root.publish-error;
+        max-players <=> root.publish-max-players;
+        load-tested-players: root.publish-load-tested-players;
+        targets: root.publish-targets;
+        target-id <=> root.publish-target-id;
+        target-title <=> root.publish-target-title;
+        target-index <=> root.publish-target-index;
+        own-listing-id: root.publish-own-listing-id;
+        targets-note: root.publish-targets-note;
+        focus-targets: root.publish-focus-targets;
+        changelog-ready: root.publish-changelog-ready;
+        changelog-version: root.publish-changelog-version;
+        changelog-stored: root.publish-changelog-stored;
+        changelogs: root.publish-changelogs;
+        changelogs-note: root.publish-changelogs-note;
+        on-changelog-save => { root.publish-changelog-save(); }
+        on-changelog-download(id) => { root.publish-changelog-download(id); }
+        cover-state: root.publish-cover-state;
+        cover-now: root.publish-cover-now;
+        cover-image: root.publish-cover-image;
+        cover-info: root.publish-cover-info;
+        cover-error: root.publish-cover-error;
+        on-cover-choose => { root.publish-cover-choose(); }
+        on-cover-remove => { root.publish-cover-remove(); }
+        on-cover-keep => { root.publish-cover-keep(); }
+        tags-row-0: root.publish-tags-row-0;
+        tags-row-1: root.publish-tags-row-1;
+        tags-count: root.publish-tags-count;
+        tags-suggested: root.publish-tags-suggested;
+        tags-error: root.publish-tags-error;
+        tags-text <=> root.publish-tags-text;
+        on-tag-add(tag) => { root.publish-tag-add(tag); }
+        on-tag-typed(text) => { root.publish-tag-typed(text); }
+        on-tag-remove(i) => { root.publish-tag-remove(i); }
+        // The dialog stays open: it shows the progress, then the result.
         on-publish(experience_name, description, genre, is_public, open_source, studio_editable, as_new) => {
-            root.show-publish-dialog = false;
             root.publish(experience_name, description, genre, is_public, open_source, studio_editable, as_new);
         }
         on-close => { root.show-publish-dialog = false; }
@@ -4826,6 +5053,8 @@ export component StudioWindow inherits Window {
         identity-path: root.login-identity-path;
         error-message: root.login-error;
         status-message: root.login-status;
+        server-note: root.login-server;
+        identity-hint: root.login-identity-hint;
         is-loading: root.login-loading;
         on-browse-identity => { root.browse-identity(); }
         on-login => { root.login-with-identity(); }
@@ -4879,6 +5108,17 @@ export component StudioWindow inherits Window {
         on-test-soul-connection => { root.soul-test-connection(); }
         soul-xai-api-key <=> root.soul-xai-api-key;
         soul-openai-api-key <=> root.soul-openai-api-key;
+        soul-api-key-mask: root.soul-api-key-mask;
+        soul-xai-api-key-mask: root.soul-xai-api-key-mask;
+        soul-openai-api-key-mask: root.soul-openai-api-key-mask;
+        soul-api-key-can-remove: root.soul-api-key-can-remove;
+        soul-xai-api-key-can-remove: root.soul-xai-api-key-can-remove;
+        soul-openai-api-key-can-remove: root.soul-openai-api-key-can-remove;
+        soul-key-status: root.soul-key-status;
+        soul-key-remove-prompt: root.soul-key-remove-prompt;
+        on-soul-key-remove(provider) => { root.soul-key-remove(provider); }
+        on-soul-key-remove-confirm => { root.soul-key-remove-confirm(); }
+        on-soul-key-remove-cancel => { root.soul-key-remove-cancel(); }
         notifications-enabled <=> root.notifications-enabled;
         usage-telemetry-enabled <=> root.usage-telemetry-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
@@ -5168,6 +5408,28 @@ export component StudioWindow inherits Window {
             root.menu-action("insert:" + class-name);
         }
         on-close => { root.show-insert-object-dialog = false; }
+    }
+
+    // Find in Scripts: a result list over every script in the Space. A row
+    // opens its script at the matching line.
+    if root.show-script-search: ScriptSearchModal {
+        show: root.show-script-search;
+        query <=> root.script-search-query;
+        match-case <=> root.script-search-match-case;
+        results: root.script-search-results;
+        selected: root.script-search-selected;
+        status: root.script-search-status;
+        query-changed(text) => { root.script-search-query-changed(text); }
+        match-case-changed(on) => { root.script-search-match-case-changed(on); }
+        open-result(row) => {
+            root.show-script-search = false;
+            root.script-search-open(row);
+        }
+        move-selection(delta) => { root.script-search-move(delta); }
+        close => {
+            root.show-script-search = false;
+            root.script-search-close();
+        }
     }
 
     // About Eustress Engine dialog

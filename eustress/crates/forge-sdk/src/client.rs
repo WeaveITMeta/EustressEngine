@@ -24,12 +24,13 @@ pub struct ForgeClient {
 }
 
 impl ForgeClient {
-    /// Create a new Forge client connected to the given API URL.
+    /// Create a new Forge client connected to the given API URL. The URL
+    /// must pass the connection policy (https, or http only to this computer
+    /// or a private network), and the client follows no redirects: see
+    /// [`crate::connect_policy`].
     pub async fn new(base_url: &str) -> SdkResult<Self> {
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(SdkError::Http)?;
+        crate::connect_policy::check_url(base_url).map_err(SdkError::Config)?;
+        let http = crate::connect_policy::http_client().map_err(SdkError::Http)?;
 
         info!("Forge client connecting to {}", base_url);
 

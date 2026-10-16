@@ -1,0 +1,120 @@
+# Eustress Studio: the "Voltec" theme.
+#
+# Voltec's design language: white for precision, near-black for structure,
+# xenon blue for what is live. Blue means ON (active, focused, selected) and
+# nothing else; surfaces and lines stay neutral graphite. This is the shipped
+# dark theme and the base that user themes fall back to for any token they
+# do not specify.
+#
+# Primary-button fills use the deep xenon (#0077a3) because their label is
+# white, and white on the bright xenon (#00bfff) is 2.8:1. The bright xenon
+# is for text, rings, focus and live indicators.
+#
+# To author your own: copy this (or classic.toml) to
+#   %LOCALAPPDATA%/Eustress/Themes/<yourtheme>.toml
+# change [meta].id, tweak tokens, Rescan in File > Settings > Theme.
+
+[meta]
+id = "voltec"
+name = "Voltec"
+description = "Graphite and white with xenon blue for what is live. Clean, industrial, no ornament."
+
+[tokens]
+# Surfaces: cool graphite, ink at the bottom, elevated at the top
+background-primary = "#0b0f15"
+background-secondary = "#0f141b"
+background-tertiary = "#161c25"
+panel-background = "#0f141b"
+header-background = "#161c25"
+viewport-background = "#06080c"
+# Tabs
+tab-active = "#161c25"
+tab-inactive = "#0b0f15"
+tab-hover = "#1c2430"
+# Text: precision white, grey for the quiet
+text-primary = "#f5f5f5"
+text-secondary = "#9aa4b2"
+text-disabled = "#5b6675"
+text-accent = "#66d9ff"
+text-error = "#ff6b6b"
+text-warning = "#f2c14e"
+text-success = "#4ade80"
+# Borders: neutral lines; blue only where something is focused
+border-color = "#1f2733"
+border-focus = "#00bfff"
+border-error = "#ff5470"
+# Status surfaces: dark tints behind success and danger controls
+success-surface = "#0d2419"
+success-surface-hover = "#123320"
+success-surface-border = "#1f5c3a"
+success-surface-text-hover = "#8ce6b8"
+error-surface = "#2a0f14"
+error-surface-hover = "#3d1219"
+error-surface-border = "#7a2030"
+# Buttons: the primary fill is the deep xenon so its white label reads
+button-background = "#1c2430"
+button-hover = "#243040"
+button-pressed = "#0f141b"
+button-primary = "#006a94"
+button-primary-hover = "#0077a3"
+# Inputs
+input-background = "#0b0f15"
+input-border = "#2b3646"
+input-focus = "#00bfff"
+# Selection: xenon, the live colour
+selection-background = "#00bfff26"
+selection-border = "#00bfff"
+# Overlays and dialogs
+overlay-background = "#06080ce8"
+dialog-background = "#161c25"
+modal-backdrop = "#000000cc"
+dialog-titlebar-background = "#0f141b"
+# Accents
+accent-blue = "#0099cc"
+accent-cyan = "#00bfff"
+accent-eustress = "#0077a3"
+accent-green = "#4ade80"
+accent-green-bright = "#86efac"
+accent-orange = "#ff9f45"
+accent-purple = "#c084fc"
+accent-red = "#ff5470"
+accent-yellow = "#f2c14e"
+# Ribbon tint categories
+cat-parts = "#38bdf8"
+cat-structure = "#4ade80"
+cat-constraint = "#f2c14e"
+cat-modify = "#c084fc"
+cat-data = "#00bfff"
+# Floating surfaces: a faint xenon edge on the viewport
+panel-glass = "#0f141bcc"
+border-highlight = "#ffffff0f"
+shadow-float = "#000000a6"
+border-glow-color = "#00bfff40"
+# Ribbon
+ribbon-background = "#06080c"
+ribbon-tab-active = "#161c25"
+ribbon-tab-inactive = "#0b0f15"
+ribbon-separator = "#1f2733"
+# Explorer
+explorer-item-hover = "#121821"
+explorer-item-selected = "#0a3a4d"
+explorer-folder = "#f2c14e"
+explorer-file = "#c9d1dc"
+# Output console
+output-info = "#66d9ff"
+output-warning = "#f2c14e"
+output-error = "#ff6b6b"
+output-debug = "#9aa4b2"
+# Gizmo: the standard axis hues, for muscle memory
+gizmo-x = "#f14c4c"
+gizmo-y = "#4ec9b0"
+gizmo-z = "#569cd6"
+# Shadow
+shadow-color = "#000000a0"
+# Lengths: sharp industrial corners (the site draws buttons at 2px), a quiet edge glow
+accent-glow-blur = "8px"
+backdrop-blur-lg = "14px"
+radius-sm = "2px"
+radius-md = "4px"
+radius-lg = "8px"
+radius-xl = "12px"

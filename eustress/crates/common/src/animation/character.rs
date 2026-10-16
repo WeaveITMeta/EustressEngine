@@ -256,15 +256,16 @@ mod system {
             With<LocalAvatar>,
         >,
         mut bound: Local<Option<BoundCharacter>>,
-        mut session: Local<usize>,
+        mut session: Local<u64>,
     ) {
         let Some(tree) = tree else {
             *bound = None;
             return;
         };
         // A new tree is a new session: a character id from the last one
-        // must not carry over.
-        let id = std::sync::Arc::as_ptr(&tree.dm) as usize;
+        // must not carry over. The session number, not the tree's address,
+        // which a freed tree's successor can reuse.
+        let id = crate::datamodel::session_of(&tree.dm);
         if *session != id {
             *session = id;
             *bound = None;

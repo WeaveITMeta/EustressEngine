@@ -95,7 +95,7 @@ struct Seating {
     /// When each Humanoid last left a seat, on the tree's clock.
     left_at: HashMap<InstanceId, f64>,
     cursor: u64,
-    session: usize,
+    session: u64,
 }
 
 /// A character's Humanoid and root, from its root part: a
@@ -162,7 +162,8 @@ fn seat_characters(
     };
     let seating = &mut *seating;
     let mut g = dm.dm.lock();
-    let tree = Arc::as_ptr(&dm.dm) as usize;
+    // From the guard already held: `session_of` would lock the tree again.
+    let tree = g.session();
     if seating.session != tree {
         seating.session = tree;
         seating.by_humanoid.clear();

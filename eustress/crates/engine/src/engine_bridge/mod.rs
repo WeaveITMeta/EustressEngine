@@ -50,12 +50,26 @@ use std::sync::Arc;
 
 mod instance_file;
 mod port_file;
+mod datamodel_list;
+mod action_outcome;
 mod protocol;
 mod self_test;
 mod server;
+mod attributes;
+mod instance_edit;
+mod instance_tree;
+mod space_assets;
+/// One line per bridge write, in the user's data folder.
+mod write_log;
+mod parameters;
+mod properties;
 mod snapshots;
+mod token_file;
+mod tools_call;
 pub(crate) mod terrain;
 mod ui_surface;
+#[cfg(test)]
+mod write_audit_tests;
 #[cfg(unix)]
 mod unix_socket_file;
 
@@ -79,6 +93,10 @@ struct BridgeRuntime {
     handle: tokio::runtime::Handle,
     // Holds the runtime alive — dropping it shuts down the listener.
     _runtime: tokio::runtime::Runtime,
+    /// This launch's token, which every request must carry (`token_file`).
+    token: Arc<str>,
+    /// Its file, removed when the engine exits.
+    _token_file: Option<token_file::TokenFile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -96,13 +114,21 @@ impl Plugin for EngineBridgePlugin {
         app.insert_resource(BridgePendingQueue(pending.clone()))
             .init_resource::<SimStepJob>()
             .add_systems(Startup, setup_engine_bridge)
+            // Answers a `space.open` once the Space it opened has loaded.
+            .add_systems(Update, space_assets::pump_space_open)
+            // A clone interrupted by a crash leaves its staging folder; the
+            // next open of that Space removes it.
+            .add_systems(
+                Update,
+                instance_tree::sweep_on_space_open.run_if(resource_exists_and_changed::<crate::space::SpaceRoot>),
+            )
             // `pump_sim_step` runs after the drain so a step requested this
             // frame starts advancing this frame rather than next. A revert is
             // answered by `space::snapshot::SnapshotPlugin`'s pump.
             .add_systems(
                 Update,
                 (
-                    (drain_bridge_requests, pump_sim_step).chain(),
+                    (drain_bridge_requests, pump_sim_step, action_outcome::pump_action_jobs).chain(),
                     resync_port_file_to_space,
                     reclaim_port_file_if_released,
                 ),
@@ -493,7 +519,21 @@ fn setup_engine_bridge(
     // Spawn the long-lived accept loop on the runtime. The runtime is moved into
     // `BridgeRuntime` (below) and lives as long as the engine, so this task is
     // never aborted by an early drop.
-    handle.spawn(server::run_accept_loop(listener, queue.clone()));
+    // This launch's token (`token_file`): every request must carry it.
+    // Written before the accept loop starts and before the port file names
+    // the port, so a client that finds the port finds the token too.
+    let token: Arc<str> = Arc::from(token_file::generate());
+    let token_record = match token_file::TokenFile::write(port, &token) {
+        Ok(f) => {
+            info!("🔗 Engine Bridge token written: {}", f.display_path());
+            Some(f)
+        }
+        Err(e) => {
+            error!("EngineBridge: could not write the bridge token ({}); no client can authenticate this run", e);
+            None
+        }
+    };
+    handle.spawn(server::run_accept_loop(listener, queue.clone(), token.clone()));
 
     // Write the port to `.eustress/engine.port` under whichever Universe
     // is current at startup. If `SpaceRoot` isn't set yet (bare engine
@@ -566,7 +606,7 @@ fn setup_engine_bridge(
         let bind_path = unix_socket_file::bind_path_for(&universe);
         match handle.block_on(server::bind_unix_listener(&bind_path)) {
             Ok(unix_listener) => {
-                handle.spawn(server::run_unix_accept_loop(unix_listener, queue.clone()));
+                handle.spawn(server::run_unix_accept_loop(unix_listener, queue.clone(), token.clone()));
                 match UnixSocketFile::write_for_universe(&universe, &bind_path) {
                     Ok(usf) => {
                         info!(
@@ -609,11 +649,13 @@ fn setup_engine_bridge(
     // screams in the log instead of surfacing hours later as a dead MCP loop.
     // Spawned (not blocking): the response is serviced by `drain_bridge_requests`
     // on a later `Update` frame, so blocking Startup on it would deadlock.
-    handle.spawn(self_test::run(port));
+    handle.spawn(self_test::run(port, token.clone()));
 
     commands.insert_resource(BridgeRuntime {
         handle,
         _runtime: runtime,
+        token,
+        _token_file: token_record,
     });
 }
 
@@ -630,6 +672,27 @@ fn setup_engine_bridge(
 /// client can't stall the frame. Extras stay queued for next frame.
 const MAX_PER_FRAME: usize = 64;
 
+/// The answer to an entity edit that has to wait, or `None` to run it.
+/// During Play the entity edits are refused: each writes the Space, and Stop
+/// puts the authored scene back. The Play state is read as the rest of the
+/// Play gate reads it. A load in progress is not this check's, so while
+/// editing the entity edits run as they always have.
+fn entity_edit_refusal(world: &World, req: &BridgeRequest) -> Option<BridgeResponse> {
+    let edit = matches!(
+        req.method,
+        MethodName::EntityCreate | MethodName::EntityUpdate | MethodName::EntityDelete | MethodName::EntityAddTag | MethodName::EntityRemoveTag | MethodName::EntityPromote | MethodName::EntityDemote
+    );
+    let playing = world
+        .get_resource::<State<crate::play_mode::PlayModeState>>()
+        .is_some_and(|s| *s.get() != crate::play_mode::PlayModeState::Editing);
+    (edit && playing).then(|| {
+        BridgeResponse::error(
+            req.id.clone(),
+            BridgeError::invalid_params("the editor is in Play. Stop first: an entity edit during Play would be saved while Stop restores the scene from before Play"),
+        )
+    })
+}
+
 fn drain_bridge_requests(world: &mut World) {
     let Some(queue) = world.get_resource::<BridgePendingQueue>().cloned() else {
         return;
@@ -641,6 +704,25 @@ fn drain_bridge_requests(world: &mut World) {
     }
 
     for pending in drained.drain(..) {
+        // A write that is answered later is logged as accepted now; every
+        // other write is logged with its answer, below.
+        if matches!(
+            pending.request.method,
+            MethodName::SimStep
+                | MethodName::DbExportToml
+                | MethodName::SnapshotRevert
+                | MethodName::ActionInvoke
+                | MethodName::ToolsCall
+                | MethodName::SpaceOpen
+        ) {
+            write_log::note(world, &pending.request, None);
+        }
+        // Likewise deferred: opening a Space loads over many frames, and is
+        // answered from `space_assets::pump_space_open` once it settles.
+        if matches!(pending.request.method, MethodName::SpaceOpen) {
+            space_assets::begin_space_open(world, pending);
+            continue;
+        }
         // `sim.step` is the one method that does unbounded work, so it is
         // deferred to `pump_sim_step` and answered from there once complete.
         // Running it inline would block the frame for its whole duration.
@@ -660,6 +742,30 @@ fn drain_bridge_requests(world: &mut World) {
             snapshots::begin_snapshot_revert(world, pending);
             continue;
         }
+        // Likewise: an action is answered a few frames after it runs, with
+        // what it did (`action_outcome`).
+        if matches!(pending.request.method, MethodName::ActionInvoke) {
+            action_outcome::begin_action_invoke(world, pending);
+            continue;
+        }
+        // Likewise: a tool runs on a worker thread, so one that waits (a
+        // capture, a simulation) never holds the frame, and one that calls
+        // this bridge back is not left waiting on the thread that answers it.
+        if matches!(pending.request.method, MethodName::ToolsCall) {
+            tools_call::begin_tools_call(world, pending);
+            continue;
+        }
+
+        // During Play the entity edits are refused before they run
+        // (`entity_edit_refusal`); the refusal is logged and answered like
+        // any other answer.
+        if let Some(response) = entity_edit_refusal(world, &pending.request) {
+            write_log::note(world, &pending.request, Some(&response));
+            if pending.responder.send(response).is_err() {
+                debug!("EngineBridge: client dropped before response could be delivered");
+            }
+            continue;
+        }
 
         let response = match pending.request.method {
             MethodName::Ping => protocol::handlers::ping(&pending.request),
@@ -671,7 +777,11 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::SelectionSet => protocol::handlers::selection_set(world, &pending.request),
             MethodName::StateGet => protocol::handlers::state_get(world, &pending.request),
             MethodName::OutputTail => protocol::handlers::output_tail(world, &pending.request),
-            MethodName::ActionInvoke => protocol::handlers::action_invoke(world, &pending.request),
+            // Deferred above to `action_outcome::begin_action_invoke`.
+            MethodName::ActionInvoke => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("action.invoke reached the synchronous dispatch path"),
+            ),
             MethodName::InputInject => {
                 let result = match world.get_resource_mut::<crate::play_datamodel::pull::InjectedInput>() {
                     Some(mut inj) => crate::play_datamodel::pull::apply_injection(&mut inj, &pending.request.params),
@@ -690,7 +800,11 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::PhysicsGet => protocol::handlers::physics_get(world, &pending.request),
             MethodName::PhysicsSet => protocol::handlers::physics_set(world, &pending.request),
             MethodName::ToolsList => protocol::handlers::tools_list(world, &pending.request),
-            MethodName::ToolsCall => protocol::handlers::tools_call(world, &pending.request),
+            // Deferred above to `tools_call::begin_tools_call`.
+            MethodName::ToolsCall => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("tools.call reached the synchronous dispatch path"),
+            ),
             MethodName::EntityCreate => protocol::handlers::entity_create(world, &pending.request),
             MethodName::EntityRead => protocol::handlers::entity_read(world, &pending.request),
             MethodName::EntityUpdate => protocol::handlers::entity_update(world, &pending.request),
@@ -728,6 +842,26 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::SnapshotList => snapshots::snapshot_list(world, &pending.request),
             MethodName::SnapshotDiff => snapshots::snapshot_diff(world, &pending.request),
             MethodName::SnapshotCancelRevert => snapshots::snapshot_cancel_revert(world, &pending.request),
+            MethodName::ParametersGet => parameters::parameters_get(world, &pending.request),
+            MethodName::ParametersSet => parameters::parameters_set(world, &pending.request),
+            MethodName::DataModelList => datamodel_list::datamodel_list(world, &pending.request),
+            MethodName::PropertiesGet => properties::properties_get(world, &pending.request),
+            MethodName::PropertiesSet => properties::properties_set(world, &pending.request),
+            MethodName::AttributeGet => attributes::attribute_get(world, &pending.request),
+            MethodName::AttributeSet => attributes::attribute_set(world, &pending.request),
+            MethodName::TransformSubtree => instance_edit::transform_subtree(world, &pending.request),
+            MethodName::InstanceRename => instance_tree::rename(world, &pending.request),
+            MethodName::InstanceReparent => instance_tree::reparent(world, &pending.request),
+            MethodName::InstanceClone => instance_tree::clone(world, &pending.request),
+            MethodName::InstanceCreate => instance_tree::create(world, &pending.request),
+            MethodName::AssetsListMeshes => space_assets::list_meshes(world, &pending.request),
+            MethodName::AssetsReloadMesh => space_assets::reload_mesh(world, &pending.request),
+            // Answered by `begin_space_open` above; never reaches here.
+            MethodName::SpaceOpen => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("space.open is answered when the Space has loaded"),
+            ),
+            MethodName::ClassCallMethod => properties::class_call_method(world, &pending.request),
             // Deferred above; answered by the revert pump in `space::snapshot`.
             MethodName::SnapshotRevert => BridgeResponse::error(
                 pending.request.id.clone(),
@@ -754,6 +888,7 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::TerrainReplaceMaterial => terrain::terrain_replace_material(world, &pending.request),
             MethodName::TerrainLayerCreate => terrain::terrain_layer_create(world, &pending.request),
             MethodName::TerrainClear => terrain::terrain_clear(world, &pending.request),
+            MethodName::TerrainReload => terrain::terrain_reload(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.
@@ -767,6 +902,7 @@ fn drain_bridge_requests(world: &mut World) {
         // Deliver the response. `send` returns `Err` only when the
         // receiver is gone (client dropped the connection mid-flight),
         // which we log once per drop and otherwise ignore.
+        write_log::note(world, &pending.request, Some(&response));
         if pending.responder.send(response).is_err() {
             debug!("EngineBridge: client dropped before response could be delivered");
         }
@@ -875,7 +1011,7 @@ fn resync_port_file_to_space(
                     Ok(unix_listener) => {
                         bridge_runtime
                             .handle
-                            .spawn(server::run_unix_accept_loop(unix_listener, queue.0.clone()));
+                            .spawn(server::run_unix_accept_loop(unix_listener, queue.0.clone(), bridge_runtime.token.clone()));
                         match UnixSocketFile::write_for_universe(&universe, &new_bind_path) {
                             Ok(new_usf) => {
                                 info!(
@@ -907,6 +1043,64 @@ fn resync_port_file_to_space(
                     ),
                 }
             }
+        }
+    }
+}
+
+/// During Play the entity edits are refused before they run; the reads and
+/// the other methods are not this check's.
+#[cfg(test)]
+mod play_gate_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    const EDITS: [&str; 7] = [
+        "entity.create",
+        "entity.update",
+        "entity.delete",
+        "entity.add_tag",
+        "entity.remove_tag",
+        "entity.promote",
+        "entity.demote",
+    ];
+
+    fn request(method: &str) -> BridgeRequest {
+        serde_json::from_value(serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": method, "params": {} })).unwrap()
+    }
+
+    #[test]
+    fn play_refuses_the_entity_edits() {
+        for state in [PlayModeState::Playing, PlayModeState::Paused] {
+            let mut world = World::new();
+            world.insert_resource(State::new(state));
+            for method in EDITS {
+                let answer = entity_edit_refusal(&world, &request(method)).unwrap_or_else(|| panic!("{state:?} ran {method}"));
+                let answer = serde_json::to_value(answer).unwrap();
+                let message = answer["error"]["message"].as_str().unwrap_or_default().to_string();
+                assert!(message.contains("the editor is in Play"), "{state:?} {method}: {answer}");
+            }
+            for method in ["entity.read", "entity.find", "ping"] {
+                assert!(entity_edit_refusal(&world, &request(method)).is_none(), "{state:?} refused {method}");
+            }
+        }
+        // While editing every entity edit runs.
+        let mut world = World::new();
+        world.insert_resource(State::new(PlayModeState::Editing));
+        for method in EDITS {
+            assert!(entity_edit_refusal(&world, &request(method)).is_none(), "editing refused {method}");
+        }
+    }
+
+    /// A load in progress is not this check's: while editing, an entity edit
+    /// asked for during a load runs as it always has, and during Play the
+    /// same edit is refused.
+    #[test]
+    fn a_load_while_editing_leaves_the_entity_edits_alone() {
+        for (state, refused) in [(PlayModeState::Editing, false), (PlayModeState::Playing, true)] {
+            let mut world = World::new();
+            world.insert_resource(State::new(state));
+            world.insert_resource(crate::space::file_loader::LoadInProgress { active: true, ..Default::default() });
+            assert_eq!(entity_edit_refusal(&world, &request("entity.create")).is_some(), refused, "{state:?}");
         }
     }
 }

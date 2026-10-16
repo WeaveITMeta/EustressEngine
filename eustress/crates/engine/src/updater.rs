@@ -9,10 +9,14 @@
 //! 4. User clicks → download platform binary → verify SHA-256 → replace → restart
 
 use bevy::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const MANIFEST_URL: &str = "https://downloads.eustress.dev/latest.json";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the ribbon says when this install cannot be updated in place. The reason is in the log.
+const REFUSED_UI_TEXT: &str = "Reinstall to enable updates";
 
 /// Bevy resource tracking update state
 #[derive(Resource)]
@@ -68,7 +72,8 @@ impl Plugin for UpdaterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UpdateState>()
             .add_systems(Startup, check_for_updates)
-            .add_systems(Update, sync_update_state_to_slint);
+            .add_systems(Update, sync_update_state_to_slint)
+            .add_systems(Update, exit_for_pending_update);
     }
 }
 
@@ -100,10 +105,32 @@ fn check_for_updates(state: ResMut<UpdateState>) {
 /// Global for passing async check result to main thread
 static UPDATE_CHECK_RESULT: Mutex<Option<(String, String, String, u64)>> = Mutex::new(None);
 
+/// The downloaded update the user has asked to apply. Taken by
+/// `finish_pending_update` once the engine has shut down.
+static PENDING_UPDATE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// Set by `apply_update_and_restart`. The next frame closes the engine with
+/// `AppExit`, which runs the normal shutdown.
+static EXIT_FOR_UPDATE: AtomicBool = AtomicBool::new(false);
+
+/// What the last sync pushed to Slint. The sync compares against it, so only a
+/// change reaches the window.
+#[derive(Default)]
+struct PushedUpdate {
+    /// False until the first push, so the first frame always sends.
+    sent: bool,
+    available: bool,
+    version: String,
+    error: String,
+    status: String,
+    progress: i32,
+}
+
 /// Sync update state to Slint UI each frame
 fn sync_update_state_to_slint(
     mut state: ResMut<UpdateState>,
     slint_context: Option<NonSend<crate::ui::slint_ui::SlintUiState>>,
+    mut pushed: Local<PushedUpdate>,
 ) {
     // Check if async update check completed
     if !state.available {
@@ -137,15 +164,43 @@ fn sync_update_state_to_slint(
         if let Some(e) = error { state.error = Some(e); state.status = "error".to_string(); }
     }
 
-    // Sync to Slint
+    // The apply step runs after the download and reports here too, so a refusal
+    // (a folder this account cannot update) reaches the UI.
+    if state.status == "ready" {
+        let error = state.async_state.lock().ok().and_then(|s| s.error.clone());
+        if let Some(e) = error { state.error = Some(e); state.status = "error".to_string(); }
+    }
+
+    // Sync to Slint. Only a change reaches Slint: an idle frame makes no setter
+    // calls and no string copies.
     let Some(ref context) = slint_context else { return };
     let ui = &context.window;
+    let error = state.error.as_deref().unwrap_or("");
+    let progress = state.progress as i32;
+    let unchanged = pushed.sent
+        && pushed.available == state.available
+        && (!state.available
+            || (pushed.version == state.new_version
+                && pushed.error == error
+                && pushed.status == state.status
+                && pushed.progress == progress));
+    if unchanged {
+        return;
+    }
     ui.set_update_available(state.available);
     if state.available {
-        ui.set_update_version(state.new_version.clone().into());
+        ui.set_update_version(crate::ui::display_text::shown_line(&state.new_version));
+        ui.set_update_error(crate::ui::display_text::shown_line(error));
         ui.set_update_status(state.status.clone().into());
-        ui.set_update_progress(state.progress as i32);
+        ui.set_update_progress(progress);
     }
+    pushed.sent = true;
+    pushed.available = state.available;
+    pushed.version.clone_from(&state.new_version);
+    pushed.error.clear();
+    pushed.error.push_str(error);
+    pushed.status.clone_from(&state.status);
+    pushed.progress = progress;
 }
 
 /// Check manifest and compare versions. Returns Some((version, url, hash, size)) if update available.
@@ -387,131 +442,172 @@ fn extract_targz_into(archive_path: &std::path::Path, install_dir: &std::path::P
     Ok(())
 }
 
-/// Replace current binary and restart. Called when user clicks "Restart to update".
+/// Ask to apply the downloaded update and restart. Called when the user clicks
+/// "Restart to update".
 ///
-/// SAFETY NOTE — this is not fully correct today: `std::process::exit(0)`
-/// below skips every Rust destructor, so a Drop-based flush (e.g.
-/// `FjallWorldDb`'s checkpoint/persist-on-drop for a currently-open Space)
-/// does NOT run before the process actually exits. A properly correct
-/// restart should fire Bevy's `AppExit` and let the app shut down normally
-/// — including its DB handles — before handing off to the new binary. That
-/// requires this function to run as (or signal) a Bevy system rather than
-/// a plain free function called from a Slint callback, which is out of
-/// scope for this fix. Today, clicking "Restart to update" while a Space
-/// with unsaved changes is open is not guaranteed safe.
+/// Nothing is replaced here. The engine is asked to close the normal way: the
+/// `AppExit` runs the shutdown systems, which write pending edits and flush the
+/// open Space database. Once `main` has returned, `finish_pending_update` swaps
+/// the files and starts the new build. So no Space is open in two engines at
+/// once, and no running system reads a file while it is being replaced.
+///
+/// The folder is checked before anything closes. An install under Program Files
+/// (what an administrator's install produced before this version) cannot be
+/// changed by a standard account, so the update stops here with a message
+/// instead of closing the engine and failing after.
 pub fn apply_update_and_restart(state: &UpdateState) {
-    let download_path = if let Ok(s) = state.async_state.lock() {
-        s.download_path.clone()
-    } else {
-        None
-    };
+    if cfg!(target_os = "macos") {
+        // The download is a `.dmg`, an Apple compressed disk image with no
+        // lightweight pure-Rust reader, and replacing a running `.app` from a
+        // mounted image has Gatekeeper and notarization implications. Writing the
+        // raw bytes over the executable is what this path used to do, so it stays
+        // off. The verified download stays on disk for a manual reinstall.
+        info!("Update downloaded and verified. macOS auto-apply is not supported: open the .dmg and reinstall.");
+        return;
+    }
 
+    let download_path = state.async_state.lock().ok().and_then(|s| s.download_path.clone());
     let Some(download_path) = download_path else {
         error!("No downloaded update to apply");
         return;
     };
-
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Failed to get current exe path: {}", e);
-            return;
+    let Some(install_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+    else {
+        error!("Could not determine the install directory");
+        return;
+    };
+    if !folder_is_writable(&install_dir) {
+        let message = format!(
+            "Eustress can't update itself from {}: this account can't change that folder. \
+             Install the current version from eustress.dev. New installs go to your user \
+             folder, where updates apply without administrator rights.",
+            install_dir.display()
+        );
+        error!("{message}");
+        if let Ok(mut s) = state.async_state.lock() {
+            s.error = Some(REFUSED_UI_TEXT.to_string());
         }
+        return;
+    }
+
+    info!("🔄 Closing to apply the update from {:?}", download_path);
+    if let Ok(mut pending) = PENDING_UPDATE.lock() {
+        *pending = Some(download_path);
+    }
+    EXIT_FOR_UPDATE.store(true, Ordering::Release);
+}
+
+/// Whether this account can create files in `dir`. The update renames the
+/// running executable and writes the new files beside it, so a folder that
+/// refuses a new file cannot be updated.
+fn folder_is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".update-probe-{}", std::process::id()));
+    let writable = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    writable
+}
+
+/// Closes the engine once the user has asked for an update. The shutdown
+/// systems in `Last` see the `AppExit` written here, as they do for a normal quit.
+fn exit_for_pending_update(mut exit: MessageWriter<bevy::app::AppExit>) {
+    if EXIT_FOR_UPDATE.swap(false, Ordering::AcqRel) {
+        exit.write(bevy::app::AppExit::Success);
+    }
+}
+
+/// Apply an update that `apply_update_and_restart` requested, then start the new
+/// build. `main` calls this after `App::run` returns and the app has been dropped.
+/// By then the shutdown systems have run and no system still reads the files.
+///
+/// The engine is started again in every case, so a failed update never leaves the
+/// user without one. The failure is logged.
+pub fn finish_pending_update() {
+    let Some(download_path) = PENDING_UPDATE.lock().ok().and_then(|mut p| p.take()) else {
+        return;
+    };
+    let Ok(current_exe) = std::env::current_exe() else {
+        error!("Update not applied: the current executable path is unknown");
+        return;
     };
 
-    info!("🔄 Applying update from {:?}", download_path);
+    // The open Space database lives in a static, so its Drop has not run on the
+    // way out. Releasing the handle here runs that Drop, which checkpoints and
+    // persists it. The new build must not open the database while this one holds it.
+    crate::space::active_db::clear();
 
-    #[cfg(target_os = "windows")]
-    {
-        // Rename current exe out of the way first so the archive's own
-        // eustress-engine.exe entry can be written to that exact path.
-        let old_exe = current_exe.with_extension("exe.old");
-        let _ = std::fs::remove_file(&old_exe); // Remove previous .old
-        if let Err(e) = std::fs::rename(&current_exe, &old_exe) {
-            error!("Failed to rename current exe: {}", e);
-            return;
+    match replace_files(&download_path, &current_exe) {
+        Ok(()) => info!("✅ Update applied; starting the new build"),
+        Err(e) => error!("Update apply failed; starting the current build: {e}"),
+    }
+    if let Err(e) = std::process::Command::new(&current_exe).spawn() {
+        error!("Failed to start the engine after the update: {e}");
+    }
+}
+
+/// Puts the downloaded build in place of the running one.
+#[cfg(target_os = "windows")]
+fn replace_files(download: &std::path::Path, current_exe: &std::path::Path) -> Result<(), String> {
+    // Rename the running exe out of the way first, so the archive's own
+    // eustress-engine.exe can be written to that exact path.
+    let old_exe = current_exe.with_extension("exe.old");
+    let _ = std::fs::remove_file(&old_exe);
+    std::fs::rename(current_exe, &old_exe).map_err(|e| format!("Failed to rename current exe: {e}"))?;
+
+    let result = match current_exe.parent() {
+        None => Err("Could not determine install directory".to_string()),
+        Some(install_dir) if download.extension().is_some_and(|e| e == "zip") => {
+            extract_zip_into(download, install_dir)
         }
+        // Not a zip: a raw binary drop-in.
+        Some(_) => std::fs::copy(download, current_exe)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy new binary: {e}")),
+    };
+    if result.is_err() {
+        let _ = std::fs::rename(&old_exe, current_exe); // Restore
+    }
+    result
+}
 
-        let install_dir = current_exe.parent().map(|p| p.to_path_buf());
-        let apply_result = match install_dir {
-            None => Err("Could not determine install directory".to_string()),
-            Some(install_dir) => {
-                if download_path.extension().map(|e| e == "zip").unwrap_or(false) {
-                    extract_zip_into(&download_path, &install_dir)
-                } else {
-                    // Not a zip — legacy/manual path: treat as a raw binary drop-in.
-                    std::fs::copy(&download_path, &current_exe)
-                        .map(|_| ())
-                        .map_err(|e| format!("Failed to copy new binary: {e}"))
-                }
+/// Puts the downloaded build in place of the running one.
+#[cfg(target_os = "linux")]
+fn replace_files(download: &std::path::Path, current_exe: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let old_exe = current_exe.with_extension("old");
+    let _ = std::fs::remove_file(&old_exe);
+    std::fs::rename(current_exe, &old_exe).map_err(|e| format!("Failed to rename current exe: {e}"))?;
+
+    let is_archive = download.to_string_lossy().ends_with(".tar.gz")
+        || download.extension().is_some_and(|e| e == "gz");
+    let result = match current_exe.parent() {
+        None => Err("Could not determine install directory".to_string()),
+        Some(install_dir) if is_archive => extract_targz_into(download, install_dir),
+        Some(_) => std::fs::copy(download, current_exe)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to replace binary: {e}")),
+    };
+    match result {
+        Err(e) => {
+            let _ = std::fs::rename(&old_exe, current_exe); // Restore
+            Err(e)
+        }
+        Ok(()) => {
+            // Extraction does not keep the executable bit on every tar/gzip producer.
+            if let Ok(metadata) = std::fs::metadata(current_exe) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(current_exe, perms);
             }
-        };
-
-        if let Err(e) = apply_result {
-            error!("Update apply failed: {}", e);
-            let _ = std::fs::rename(&old_exe, &current_exe); // Restore
-            return;
+            Ok(())
         }
-
-        let _ = std::process::Command::new(&current_exe).spawn();
-        std::process::exit(0);
     }
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let old_exe = current_exe.with_extension("old");
-        let _ = std::fs::remove_file(&old_exe);
-        if let Err(e) = std::fs::rename(&current_exe, &old_exe) {
-            error!("Failed to rename current exe: {}", e);
-            return;
-        }
-
-        let install_dir = current_exe.parent().map(|p| p.to_path_buf());
-        let is_archive = download_path.to_string_lossy().ends_with(".tar.gz")
-            || download_path.extension().map(|e| e == "gz").unwrap_or(false);
-        let apply_result = match install_dir {
-            None => Err("Could not determine install directory".to_string()),
-            Some(install_dir) if is_archive => extract_targz_into(&download_path, &install_dir),
-            Some(_) => std::fs::copy(&download_path, &current_exe)
-                .map(|_| ())
-                .map_err(|e| format!("Failed to replace binary: {e}")),
-        };
-
-        if let Err(e) = apply_result {
-            error!("Update apply failed: {}", e);
-            let _ = std::fs::rename(&old_exe, &current_exe); // Restore
-            return;
-        }
-
-        // Extraction (unpack_in) does not preserve the executable bit reliably
-        // across all tar/gzip producers — ensure it explicitly.
-        if let Ok(metadata) = std::fs::metadata(&current_exe) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o755);
-            let _ = std::fs::set_permissions(&current_exe, perms);
-        }
-
-        let _ = std::process::Command::new(&current_exe).spawn();
-        std::process::exit(0);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // The download is a `.dmg` — an Apple compressed disk-image format
-        // with no lightweight pure-Rust reader, and self-replacing a running
-        // .app bundle from inside a mounted DMG is architecturally unusual
-        // (Gatekeeper/notarization implications too). The previous code
-        // here did `std::fs::copy(&download_path, &current_exe)`, which
-        // would have overwritten the executable WITH THE RAW DMG BYTES —
-        // silent corruption of the install. Do not attempt in-place
-        // replacement; leave the verified download on disk and let the
-        // user open it and reinstall manually.
-        info!(
-            "Update downloaded and verified at {:?} — macOS auto-apply is not supported. \
-             Please open the .dmg and reinstall manually.",
-            download_path
-        );
-    }
+/// macOS never reaches this: `apply_update_and_restart` refuses before closing.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn replace_files(_download: &std::path::Path, _current_exe: &std::path::Path) -> Result<(), String> {
+    Err("automatic update is not supported on this platform".to_string())
 }

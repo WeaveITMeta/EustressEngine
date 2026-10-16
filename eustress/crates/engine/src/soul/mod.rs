@@ -23,6 +23,9 @@ pub mod xai_client;
 pub mod openai_client;
 pub mod workshop_model;
 pub mod model_catalog;
+/// AI provider keys in the system credential store: what the screen
+/// shows, and the one-time move out of `soul_settings.json`.
+pub mod key_store;
 pub mod hot_compile;
 pub mod build_pipeline;
 pub mod scope;
@@ -65,7 +68,6 @@ pub use error_tracker::{RuneErrorTracker, ErrorCategory, TrackedError, Suggested
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 #[allow(unused_imports)]
 use eustress_common::soul::{SoulConfig, ScriptRegistry, SoulPlugin as CommonSoulPlugin, SoulAST};
@@ -75,10 +77,17 @@ use eustress_common::soul::{SoulConfig, ScriptRegistry, SoulPlugin as CommonSoul
 // ============================================================================
 
 /// Global Soul settings that persist across sessions and spaces
-/// Stored in ~/.eustress_engine/soul_settings.json
-#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+/// Stored in ~/.eustress_engine/soul_settings.json, which holds no key of
+/// this build's: the keys live in the system credential store (see
+/// [`key_store`]). `Debug` is written by hand there, so no key reaches a
+/// log. A missing field takes its default, so a file this build wrote
+/// (with no key fields) reads back whole.
+#[derive(Resource, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GlobalSoulSettings {
-    /// Global Claude API key (used as default for new spaces)
+    /// This session's Anthropic key, from the credential store. serde
+    /// never reads or writes it.
+    #[serde(skip)]
     pub global_api_key: String,
     /// Whether the global API key has been validated
     #[serde(skip)]
@@ -92,34 +101,49 @@ pub struct GlobalSoulSettings {
     /// wiping the saved API key) on ANY parse failure.
     #[serde(default = "default_workshop_model")]
     pub workshop_model: String,
-    /// Global xAI (Grok) API key. Sibling to `global_api_key`, global-only —
-    /// no per-space override in v1.
-    #[serde(default)]
+    /// This session's xAI (Grok) key, from the credential store. Global
+    /// only. serde never reads or writes it.
+    #[serde(skip)]
     pub global_xai_api_key: String,
-    /// Global OpenAI API key. Sibling to the two above, and global-only for
-    /// the same reason: the model picker is a global preference, so the key it
-    /// spends has no per-space meaning.
-    #[serde(default)]
+    /// This session's OpenAI key, from the credential store. Global only,
+    /// for the same reason: the model picker is a global preference, so the
+    /// key it spends has no per-space meaning. serde never reads or writes it.
+    #[serde(skip)]
     pub global_openai_api_key: String,
     /// Whether Workshop's Gauntlet (AAA verify-loop) mode is on. Defaults to
     /// OFF — it deliberately spends extra tokens per artifact, so it must be
     /// an explicit opt-in, never a silent default.
     #[serde(default)]
     pub workshop_gauntlet: bool,
-    /// Whether Workshop executes approval-gated tools without asking.
+    /// Whether Workshop runs tools that work inside the Space (read and write)
+    /// without asking.
     ///
     /// Defaults to OFF, and stays an explicit opt-in for the same reason the
-    /// gauntlet does: the tools behind this gate are the ones that write files
-    /// and run commands. Turning it on trades the per-call confirmation for
-    /// speed, which is the right trade during a long working session and the
-    /// wrong one by default.
+    /// gauntlet does. Turning it on trades the per-call confirmation for speed,
+    /// which is the right trade during a long working session and the wrong one
+    /// by default.
     ///
-    /// This bypasses the *prompt*, never the capability check. An unclassified
-    /// or disallowed tool is still refused at dispatch by
-    /// `tools::capability::authorize`, so auto mode cannot widen what Workshop
-    /// is permitted to do, only how often it stops to ask.
+    /// It covers Read and Write tools ONLY. A tool that runs commands or code,
+    /// deletes, or goes online (Execute, Destructive, Network) shows its
+    /// approval card whatever this says: `workshop::approval_policy` decides
+    /// that, and a call that runs without a card holds a Read and Write grant,
+    /// so `tools::capability::authorize_call` refuses anything wider at
+    /// dispatch. An unclassified tool is refused there too.
+    ///
+    /// Write includes writing scripts and files inside the Space, which a person
+    /// later runs with Play. Auto saves the clicks on writing, never the click
+    /// on running.
     #[serde(default)]
     pub workshop_auto_approve: bool,
+    /// The keys an older build left in the settings file, as read at
+    /// start-up, until each has moved into the credential store. serde
+    /// skips them; `key_store` writes an unmoved one back as it was.
+    #[serde(skip)]
+    pub legacy_keys: [key_store::LegacyKey; 3],
+    /// Each provider's key on screen: busy, warning, failure line. Holds
+    /// no key.
+    #[serde(skip)]
+    pub key_slots: [key_store::KeySlot; 3],
 }
 
 fn default_workshop_model() -> String {
@@ -140,6 +164,8 @@ impl Default for GlobalSoulSettings {
             // Likewise: the tools behind the approval gate are the ones that
             // write files and run commands, so this is never a silent default.
             workshop_auto_approve: false,
+            legacy_keys: Default::default(),
+            key_slots: Default::default(),
         }
     }
 }
@@ -155,56 +181,31 @@ impl GlobalSoulSettings {
         }
     }
     
-    /// Load settings from file or create default
+    /// Load settings from file or create default. Never fails; the keys
+    /// are not in the file (see [`key_store`]).
     pub fn load() -> Self {
-        if let Some(path) = Self::settings_path() {
-            if path.exists() {
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<GlobalSoulSettings>(&content) {
-                            Ok(settings) => {
-                                info!("✅ Loaded global Soul settings from {:?}", path);
-                                return settings;
-                            }
-                            Err(e) => {
-                                warn!("⚠ Failed to parse Soul settings file: {}. Using defaults.", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("⚠ Failed to read Soul settings file: {}. Using defaults.", e);
-                    }
-                }
-            } else {
-                info!("ℹ No Soul settings file found. Creating default settings.");
-            }
-        } else {
-            warn!("⚠ Could not determine home directory. Using default Soul settings.");
-        }
-        
-        Self::default()
+        Self::load_with_report().0
     }
-    
-    /// Save settings to file
+
+    /// [`Self::load`], with what start-up needs to move an older build's
+    /// keys out of the file.
+    pub fn load_with_report() -> (Self, key_store::SettingsLoad) {
+        match Self::settings_path() {
+            Some(path) => Self::load_from(&path),
+            None => {
+                warn!("Could not determine home directory. Using default Soul settings.");
+                (Self::default(), key_store::SettingsLoad::default())
+            }
+        }
+    }
+
+    /// Save settings to file. Writes no key of this build's; an older
+    /// build's key that has not moved yet is written back as it was.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::settings_path()
             .ok_or_else(|| "Could not determine home directory".to_string())?;
-        
-        // Create directory if it doesn't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create settings directory: {}", e))?;
-        }
-        
-        // Serialize settings to JSON with pretty formatting
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize Soul settings: {}", e))?;
-        
-        // Write to file
-        fs::write(&path, json)
-            .map_err(|e| format!("Failed to write Soul settings file: {}", e))?;
-        
-        info!("✅ Saved global Soul settings to {:?}", path);
+        self.save_to(&path, None)?;
+        info!("Saved global Soul settings to {:?}", path);
         Ok(())
     }
     
@@ -255,45 +256,34 @@ fn default_telemetry_enabled() -> bool {
     true
 }
 
-/// Resource for SoulService settings editable from the Properties panel
-/// This is per-space and saved with the scene file
+/// Resource for the SoulService settings of the open Space.
+///
+/// It holds no key. A Space never carries an API key: Soul spends the one
+/// global key per provider, kept in the system credential store, and a key
+/// found in a Space's SoulService file is removed and never used (see
+/// `space::service_loader::take_legacy_soul_properties`).
 #[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SoulServiceSettings {
-    /// Per-space Claude API key (overrides global if set)
-    pub claude_api_key: String,
     /// Whether the API key is valid (set after validation)
     #[serde(skip)]
     pub api_key_valid: Option<bool>,
-    /// Whether this space uses the global API key (true = use global, false = use per-space)
-    pub use_global_key: bool,
     /// Whether to send anonymous error reports to help improve Eustress (opt-out, default on)
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
 }
 
 impl SoulServiceSettings {
-    /// Get the effective API key (per-space or global fallback)
-    /// Always trims whitespace/newlines to prevent HTTP header errors
+    /// The Anthropic key Soul spends: the global one. Trimmed so a stray
+    /// newline cannot break an HTTP header.
     pub fn effective_api_key(&self, global: &GlobalSoulSettings) -> String {
-        if self.use_global_key || self.claude_api_key.trim().is_empty() {
-            global.global_api_key.trim().to_string()
-        } else {
-            self.claude_api_key.trim().to_string()
-        }
+        global.global_api_key.trim().to_string()
     }
-    
-    /// Check if this space has a custom API key set
-    pub fn has_custom_key(&self) -> bool {
-        !self.use_global_key && !self.claude_api_key.trim().is_empty()
-    }
-    
-    /// Initialize from global settings (for new spaces)
+
+    /// Initialize from global settings (for new spaces). Carries no key.
     pub fn from_global(global: &GlobalSoulSettings) -> Self {
         if global.use_global_for_new_spaces && global.has_api_key() {
             Self {
-                claude_api_key: String::new(), // Don't copy the key, just reference global
                 api_key_valid: None,
-                use_global_key: true,
                 telemetry_enabled: true, // Opt-out, default on
             }
         } else {
@@ -392,7 +382,12 @@ impl Plugin for EngineSoulPlugin {
         model_catalog::remove_retired_catalog_cache();
 
         // Load global Soul settings from disk
-        let global_settings = GlobalSoulSettings::load();
+        // The keys are not in the file: each is looked up in the system
+        // credential store off the UI thread, and its field shows
+        // "checking" until the store answers.
+        let (mut global_settings, settings_load) = GlobalSoulSettings::load_with_report();
+        let mut soul_keys = key_store::SoulKeyStore::new(GlobalSoulSettings::settings_path());
+        soul_keys.start_load(&mut global_settings, &settings_load);
         
         // Initialize space settings from global (respects "use global for new spaces" setting)
         let space_settings = SoulServiceSettings::from_global(&global_settings);
@@ -402,6 +397,7 @@ impl Plugin for EngineSoulPlugin {
             .init_resource::<SoulBuilder>()
             .init_resource::<SoulCache>()
             .insert_resource(global_settings)
+            .insert_resource(soul_keys)
             .insert_resource(space_settings)
             .add_message::<BuildRequestEvent>()
             .add_message::<BuildCompleteEvent>()
@@ -410,6 +406,8 @@ impl Plugin for EngineSoulPlugin {
                 update_build_status,
                 cleanup_removed_soulscripts,
                 sync_space_root_to_audit,
+                poll_soul_keys,
+                remove_space_soul_keys,
             ));
 
         // Ask the providers which models the user's keys can use: at launch,
@@ -435,6 +433,112 @@ fn sync_space_root_to_audit(
             audit_log::set_current_space(Some(sr.0.clone()));
         }
     }
+}
+
+/// Pick up what the credential store answered, and send its lines to the
+/// Output panel. Marks the settings changed only when something on screen
+/// did, so the Slint sync systems do not run every frame.
+fn poll_soul_keys(
+    mut store: ResMut<key_store::SoulKeyStore>,
+    mut global: ResMut<GlobalSoulSettings>,
+    mut output: Option<ResMut<crate::ui::OutputConsole>>,
+) {
+    if store.bypass_change_detection().poll(global.bypass_change_detection()) {
+        global.set_changed();
+    }
+    for line in store.bypass_change_detection().take_lines() {
+        match line {
+            key_store::Line::Info(text) => {
+                info!("{}", text);
+                if let Some(out) = output.as_mut() {
+                    out.info(text);
+                }
+            }
+            key_store::Line::Warn(text) => {
+                warn!("{}", text);
+                if let Some(out) = output.as_mut() {
+                    out.warn(text);
+                }
+            }
+        }
+    }
+}
+
+/// A SoulService that loaded with a legacy key property (see
+/// `service_loader::take_legacy_soul_properties`): remove it from the Space's
+/// file at once, and from the Space database's record once that database is
+/// open; compare the key with the saved one for the notice. The key is never
+/// used, stored or set. The file half runs once per Space open. The database
+/// half waits while a database open is in flight, and warns only for a
+/// database-backed Space whose record could not be updated.
+fn remove_space_soul_keys(
+    mut commands: Commands,
+    mut found: Query<(
+        Entity,
+        &crate::space::service_loader::ServiceComponent,
+        &mut crate::space::service_loader::SoulServiceLegacyKey,
+    )>,
+    mut store: ResMut<key_store::SoulKeyStore>,
+    auth: Option<Res<crate::auth::AuthState>>,
+    pending_open: Option<Res<PendingSpaceDatabase>>,
+) {
+    use crate::space::service_loader::{self as loader, RecordStep};
+    if found.is_empty() {
+        return;
+    }
+    let open_settled = space_database_open_settled(pending_open);
+    let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+    for (entity, service, mut legacy) in &mut found {
+        let path = service.toml_path.clone();
+        if !legacy.file_done {
+            legacy.file_done = true;
+            if let Err(e) = loader::remove_legacy_from_file(&path, stamp.as_ref()) {
+                store.warn(format!("The SoulService file still holds a removed API key setting: {e}"));
+            }
+            if let Some(removed) = legacy.api_key.take() {
+                store.check_space_key(removed);
+            }
+        }
+        let step = loader::record_cleanup_step(
+            open_settled,
+            crate::space::active_db::is_active(),
+            legacy.frames_waited,
+            || loader::remove_legacy_from_record(&path, stamp.as_ref()),
+            || crate::space::active_db::get_instance_text(&path).is_some_and(|text| loader::text_holds_legacy_soul_keys(&text)),
+        );
+        match step {
+            RecordStep::Wait => legacy.frames_waited += 1,
+            RecordStep::Done => {
+                commands.entity(entity).remove::<crate::space::service_loader::SoulServiceLegacyKey>();
+            }
+            RecordStep::Warn(why) => {
+                let space = path.parent().and_then(|p| p.parent()).unwrap_or(&path).display().to_string();
+                store.warn(format!(
+                    "The Space at {space} may still hold a removed API key in its local database until it is cleared: {why}."
+                ));
+                commands.entity(entity).remove::<crate::space::service_loader::SoulServiceLegacyKey>();
+            }
+        }
+    }
+}
+
+/// The Space database open in flight, when the build has the database.
+#[cfg(feature = "world-db")]
+type PendingSpaceDatabase = crate::space::world_db_plugin::PendingWorldDbOpen;
+
+/// A build without the Space database never has an open in flight.
+#[cfg(not(feature = "world-db"))]
+#[derive(Resource, Default)]
+struct PendingSpaceDatabase;
+
+#[cfg(feature = "world-db")]
+fn space_database_open_settled(pending: Option<Res<PendingSpaceDatabase>>) -> bool {
+    pending.map(crate::space::world_db_plugin::world_db_open_settled).unwrap_or(true)
+}
+
+#[cfg(not(feature = "world-db"))]
+fn space_database_open_settled(_pending: Option<Res<PendingSpaceDatabase>>) -> bool {
+    true
 }
 
 

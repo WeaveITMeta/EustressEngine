@@ -69,7 +69,8 @@ use super::layers::{
     StampLayer, StampShape, TerrainBaked,
 };
 use super::material::{TerrainMaterial, MATERIAL_SLOT_NONE};
-use super::road_surface::{sync_road_surfaces, RoadSurfaces};
+use super::road_design::{EdgeChoice, ProfileMode, RoadClass, RoadSpec, MAX_LANES};
+use super::road_surface::{carve_road_tunnels, sync_road_surfaces, RoadSurfaces, RoadTunnelCarves};
 use super::scatter::{
     ScatterFootprint, ScatterKind, ScatterLayer, TreeType, MAX_DENSITY, MAX_RADIUS, MAX_SCALE, MIN_SCALE,
 };
@@ -222,6 +223,13 @@ pub fn compose_world_pose(
 // ============================================================================
 
 const SPLINE_MODES: &[&str] = &["Road", "Path", "River", "Canyon", "Embankment"];
+/// "None", then every road class ([`RoadClass::ALL`]).
+const ROAD_CLASSES: &[&str] =
+    &["None", "Motorway", "Arterial", "Collector", "Local", "Mountain", "Rural", "Unpaved", "Driveway"];
+/// Every [`ProfileMode`], by name.
+const ROAD_PROFILES: &[&str] = &["Auto", "Explicit", "Ground"];
+/// Every [`EdgeChoice`], by name.
+const ROAD_EDGES: &[&str] = &["Auto", "Sidewalk", "Ditch", "None"];
 const STAMP_SHAPES: &[&str] = &["Crater", "Mound", "Plateau", "Ridge"];
 const STAMP_BLENDS: &[&str] = &["Add", "Max", "Min", "Replace"];
 const SCATTER_KINDS: &[&str] = &["Grass", "Shrubs", "Rocks", "Trees", "Custom"];
@@ -276,6 +284,18 @@ pub const SPLINE_FIELDS: &[FieldSpec] = &[
         "River only: lay a water surface along the channel, flowing downhill. Nothing collides with it."),
     layer_field!("WaterFill", "water_fill", Float, "Water", "",
         "River only: 0 to 1, how full of water the channel is, as a fraction of its Depth."),
+    layer_field!("RoadClass", "road_class", Choice(ROAD_CLASSES), "Road", "",
+        "Road only: the class the road is designed to. A class fits tangents, spirals and arcs through the points, grades the profile within the class's limits and lays its lanes, shoulders, kerbs, markings and cut and fill slopes; Width is then the lanes' total width and ShoulderWidth how far the slopes may reach. None keeps the plain corridor."),
+    layer_field!("Profile", "profile", Choice(ROAD_PROFILES), "Road", "",
+        "Designed roads only: Auto grades the road to the ground within its class's grade, Explicit passes through each point's height, Ground follows the ground."),
+    layer_field!("Lanes", "lanes", Int, "Road", "",
+        "Designed roads only: lanes in each direction (every lane of a one-way road), 1 to 4. 0 keeps the class's. Width is shared by every lane."),
+    layer_field!("OneWay", "one_way", Bool, "Road", "",
+        "Designed roads only: every lane runs toward the road's last point. Junctions let traffic in and out only that way."),
+    layer_field!("Parking", "parking", Bool, "Road", "",
+        "Designed roads only: a 2.4 m parking lane along each kerb, striped into stalls."),
+    layer_field!("Edge", "edge", Choice(ROAD_EDGES), "Road", "",
+        "Designed roads only: how the road's edge is finished. Auto keeps the class's; Sidewalk adds a kerb, gutter and sidewalk (3 m, 2 m on a Local street); Ditch and None as named."),
 ];
 
 /// Every property of `TerrainSplinePoint`, in panel order.
@@ -407,6 +427,19 @@ pub struct TerrainSpline {
     /// River only: how full the channel is, 0 to 1 of `depth`. Bakes
     /// nothing.
     pub water_fill: f64,
+    /// Road only: the class the road is designed to, `None` for the plain
+    /// corridor.
+    pub road_class: Option<RoadClass>,
+    /// Designed roads only: where the profile comes from.
+    pub profile: ProfileMode,
+    /// Designed roads only: lanes each way (every lane when one-way); 0 keeps the class's.
+    pub lanes: u8,
+    /// Designed roads only: every lane runs toward the last point.
+    pub one_way: bool,
+    /// Designed roads only: a parking lane along each kerb.
+    pub parking: bool,
+    /// Designed roads only: the edge, or the class's.
+    pub edge: EdgeChoice,
 }
 
 impl Default for TerrainSpline {
@@ -426,6 +459,12 @@ impl Default for TerrainSpline {
             shoulder_material: Some(TerrainMaterial::Dirt),
             water_surface: true,
             water_fill: 0.6,
+            road_class: None,
+            profile: ProfileMode::Auto,
+            lanes: 0,
+            one_way: false,
+            parking: false,
+            edge: EdgeChoice::Auto,
         }
     }
 }
@@ -713,6 +752,12 @@ impl TerrainSpline {
             "shoulder_material" => FieldValue::Choice(material_name(self.shoulder_material).into()),
             "water_surface" => FieldValue::Bool(self.water_surface),
             "water_fill" => FieldValue::Float(self.water_fill),
+            "road_class" => FieldValue::Choice(self.road_class.map_or("None", RoadClass::name).into()),
+            "profile" => FieldValue::Choice(self.profile.name().into()),
+            "lanes" => FieldValue::Int(i64::from(self.lanes)),
+            "one_way" => FieldValue::Bool(self.one_way),
+            "parking" => FieldValue::Bool(self.parking),
+            "edge" => FieldValue::Choice(self.edge.name().into()),
             _ => return None,
         })
     }
@@ -736,9 +781,43 @@ impl TerrainSpline {
             "shoulder_material" => self.shoulder_material = parse_material(&v)?,
             "water_surface" => self.water_surface = as_bool(&v)?,
             "water_fill" => self.water_fill = as_f64(&v)?.clamp(0.0, 1.0),
+            "road_class" => {
+                let s = as_choice(&v)?;
+                self.road_class = if s.trim().eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(RoadClass::from_name(s).ok_or_else(|| format!("unknown road class {s}"))?)
+                };
+            }
+            "profile" => {
+                let s = as_choice(&v)?;
+                self.profile = ProfileMode::from_name(s).ok_or_else(|| format!("unknown road profile {s}"))?;
+            }
+            "lanes" => self.lanes = as_i64(&v)?.clamp(0, i64::from(MAX_LANES)) as u8,
+            "one_way" => self.one_way = as_bool(&v)?,
+            "parking" => self.parking = as_bool(&v)?,
+            "edge" => {
+                let s = as_choice(&v)?;
+                self.edge = EdgeChoice::from_name(s).ok_or_else(|| format!("unknown road edge {s}"))?;
+            }
             other => return Err(format!("unhandled field {other}")),
         }
         Ok(())
+    }
+
+    /// The road design this spline is built to: its class, profile and lane
+    /// layout, in Road mode with a class; `None` otherwise.
+    pub fn design(&self) -> Option<RoadSpec> {
+        match (self.mode, self.road_class) {
+            (SplineMode::Road, Some(class)) => Some(RoadSpec {
+                lanes: self.lanes,
+                one_way: self.one_way,
+                parking: self.parking,
+                edge: self.edge,
+                ..RoadSpec::new(class, self.profile)
+            }),
+            _ => None,
+        }
     }
 
     /// The spline layer through `points`, world positions in path order.
@@ -753,6 +832,7 @@ impl TerrainSpline {
             smoothing: self.smoothing as f32,
             bed_material: self.bed_material.map(TerrainMaterial::to_u8),
             shoulder_material: self.shoulder_material.map(TerrainMaterial::to_u8),
+            design: self.design(),
         }
     }
 }
@@ -1603,12 +1683,16 @@ impl Plugin for TerrainLayersPlugin {
         app.init_resource::<TerrainLayerSync>()
             .init_resource::<TerrainDirtyChunks>()
             .init_resource::<RoadSurfaces>()
+            .init_resource::<RoadTunnelCarves>()
             // Before the dirty-chunk pass, so a new or replaced stack bakes
             // and remeshes in the frame it was handed over.
             .add_systems(Update, sync_terrain_layers.before(apply_terrain_dirty_chunks))
             // After it, so a road's surface is rebuilt from the stations of
             // the bake that pass just ran, in the same frame as its corridor.
-            .add_systems(Update, sync_road_surfaces.after(apply_terrain_dirty_chunks));
+            .add_systems(Update, sync_road_surfaces.after(apply_terrain_dirty_chunks))
+            // After the surfaces, from the same bake: the chunks a tunnel carve
+            // opens remesh in the next dirty-chunk pass.
+            .add_systems(Update, carve_road_tunnels.after(sync_road_surfaces));
     }
 }
 
@@ -1846,6 +1930,50 @@ mod tests {
         spline.set_text("WaterSurface", "false").unwrap();
         assert!(!spline.water_surface);
         assert_eq!(spline.layer(vec![Vec3::ZERO, Vec3::X * 10.0]), before, "the bake sees no difference");
+    }
+
+    #[test]
+    fn road_choices_name_every_class_and_profile_and_design_only_roads() {
+        let classes: Vec<&str> = RoadClass::ALL.iter().map(|c| c.name()).collect();
+        assert_eq!(ROAD_CLASSES[0], "None");
+        assert_eq!(&ROAD_CLASSES[1..], classes.as_slice());
+        let profiles: Vec<&str> = ProfileMode::ALL.iter().map(|p| p.name()).collect();
+        assert_eq!(ROAD_PROFILES, profiles.as_slice());
+
+        let mut spline = TerrainSpline::default();
+        assert_eq!(spline.design(), None, "a new road keeps the plain corridor");
+        spline.set_text("RoadClass", "mountain").unwrap();
+        spline.set_text("Profile", "Explicit").unwrap();
+        let spec = RoadSpec::new(RoadClass::Mountain, ProfileMode::Explicit);
+        assert_eq!(spline.layer(vec![Vec3::ZERO, Vec3::X * 10.0]).design, Some(spec));
+        assert!(spline.set_text("RoadClass", "Highway").is_err());
+        assert_eq!(spline.road_class, Some(RoadClass::Mountain), "a refused name changes nothing");
+        spline.set_text("Mode", "River").unwrap();
+        assert_eq!(spline.design(), None, "only a Road is designed");
+        spline.set_text("Mode", "Road").unwrap();
+        spline.set_text("RoadClass", "None").unwrap();
+        assert_eq!(spline.design(), None);
+    }
+
+    #[test]
+    fn lanes_one_way_parking_and_edge_reach_the_road_design() {
+        let edges: Vec<&str> = EdgeChoice::ALL.iter().map(|e| e.name()).collect();
+        assert_eq!(ROAD_EDGES, edges.as_slice());
+        let mut spline = TerrainSpline::default();
+        spline.set_text("RoadClass", "Arterial").unwrap();
+        spline.set_text("Lanes", "3").unwrap();
+        spline.set_text("OneWay", "true").unwrap();
+        spline.set_text("Parking", "true").unwrap();
+        spline.set_text("Edge", "sidewalk").unwrap();
+        let spec = spline.design().expect("a designed road");
+        assert_eq!((spec.lanes, spec.one_way, spec.parking, spec.edge), (3, true, true, EdgeChoice::Sidewalk));
+        let standard = spec.standard(10.5);
+        assert_eq!((standard.lanes_total(), standard.one_way, standard.parking), (3, true, true));
+        // Lanes are held to what a road takes; an unknown edge changes nothing.
+        spline.set_text("Lanes", "9").unwrap();
+        assert_eq!(spline.lanes, MAX_LANES);
+        assert!(spline.set_text("Edge", "Moat").is_err());
+        assert_eq!(spline.edge, EdgeChoice::Sidewalk);
     }
 
     #[test]

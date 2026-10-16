@@ -54,7 +54,7 @@ use crate::classes::{
     PropertyValue, SpecialMesh,
 };
 use crate::scripting::{CFrame, Color3, NumberRange, UDim, UDim2, Vector2, Vector3};
-use crate::space_read::{authored_pose, decode_color, primitive_shape, shape_name};
+use crate::space_read::{authored_pose_scaled, decode_color, primitive_shape, shape_name};
 
 // ============================================================================
 // Values
@@ -1008,17 +1008,36 @@ fn vec_of<const N: usize>(v: Option<&toml::Value>, default: [f32; N]) -> [f32; N
 /// `[asset]` names the wedge: the engine has no wedge class.
 const DEFAULT_PART_MESH: &str = "parts/block.glb";
 
+/// The mesh a record is drawn with: its `[asset] mesh`, or the block a
+/// [`loads_as_part`] class draws when it names none. `None` for a record that
+/// draws no mesh. [`record_props`] draws by it, and a Space's wedge migration
+/// asks it what a part draws.
+pub fn record_mesh(engine_class: ClassName, doc: &toml::Value) -> Option<String> {
+    let mesh = get_ci(doc, "asset")
+        .and_then(|a| get_ci(a, "mesh"))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+        .map(str::to_owned);
+    match mesh {
+        None if loads_as_part(engine_class) => Some(DEFAULT_PART_MESH.to_string()),
+        other => other,
+    }
+}
+
 /// A file's own pose: its `[transform]` in the unit its `[metadata] unit`
 /// names, converted to metres and cleaned as the loader cleans it. `scale`
-/// is a part's size.
+/// is a part's size, converted only when it is a length
+/// (`scale_kind::is_length` of its `[asset]`): a custom mesh's multiplier
+/// has no unit.
 pub fn record_pose(doc: &toml::Value) -> Transform {
     let unit = get_ci(doc, "metadata").and_then(|m| get_ci(m, "unit")).and_then(|u| u.as_str());
     let t = get_ci(doc, "transform");
-    authored_pose(
+    authored_pose_scaled(
         vec_of(t.and_then(|t| get_ci(t, "position")), [0.0; 3]),
         vec_of(t.and_then(|t| get_ci(t, "rotation")), [0.0, 0.0, 0.0, 1.0]),
         vec_of(t.and_then(|t| get_ci(t, "scale")), [1.0; 3]),
         unit,
+        crate::scale_kind::is_length(get_ci(doc, "asset")),
     )
 }
 
@@ -1288,15 +1307,7 @@ pub fn record_props(rec: InstanceRecord<'_>) -> RecordInstance {
     }
 
     // The mesh: a primitive names the part's shape, anything else is custom.
-    let mesh = get_ci(&doc, "asset")
-        .and_then(|a| get_ci(a, "mesh"))
-        .and_then(|m| m.as_str())
-        .filter(|m| !m.trim().is_empty())
-        .map(str::to_owned);
-    let mesh = match mesh {
-        None if loads_as_part(engine_class) => Some(DEFAULT_PART_MESH.to_string()),
-        other => other,
-    };
+    let mesh = record_mesh(engine_class, &doc);
     let has_mesh = mesh.is_some();
     let custom_mesh = mesh.as_deref().is_some_and(|m| primitive_shape(m).is_none());
     let shape = mesh.as_deref().map(|m| primitive_shape(m).unwrap_or(PartType::Block));
@@ -1324,6 +1335,7 @@ pub fn record_props(rec: InstanceRecord<'_>) -> RecordInstance {
         props.extend(camera_props(&doc, &world));
     }
     props.extend(record_class_props(&class, &doc));
+    props.extend(record_component_props(&class, &doc));
     props.extend(data_mesh_props(engine_class, data_mesh_section(&doc)));
 
     let mut attributes: Vec<(String, DmValue)> = Vec::new();
@@ -1394,6 +1406,29 @@ pub fn record_class_props(class: &str, doc: &toml::Value) -> Vec<(String, DmValu
             .map(|origin| ("ScriptOrigin".to_string(), DmValue::String(origin)))
             .into_iter()
             .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A class's component properties, as Studio's seed copies them from the
+/// component its loader builds from the same file: a Sound's
+/// (`services::sound::sound_from_document`) and a PointLight's, SpotLight's or
+/// SurfaceLight's (`light_classes::light_component_from_document`). Only a
+/// Player's reader calls it. Studio's tree reads the live component, so an
+/// edit made in Studio after loading is never overridden by the file.
+pub fn record_component_props(class: &str, doc: &toml::Value) -> Vec<(String, DmValue)> {
+    use crate::plugins::light_classes::{light_component_from_document, LightComponent};
+    let light = |class: ClassName| match light_component_from_document(class, doc) {
+        Some(LightComponent::Point(c)) => component_props(&c),
+        Some(LightComponent::Spot(c)) => component_props(&c),
+        Some(LightComponent::Surface(c)) => component_props(&c),
+        _ => Vec::new(),
+    };
+    match class {
+        "Sound" => component_props(&crate::services::sound::sound_from_document(doc)),
+        "PointLight" => light(ClassName::PointLight),
+        "SpotLight" => light(ClassName::SpotLight),
+        "SurfaceLight" => light(ClassName::SurfaceLight),
         _ => Vec::new(),
     }
 }
@@ -1646,8 +1681,8 @@ pub fn starter_player_props(doc: &toml::Value) -> Vec<(String, DmValue)> {
 #[derive(Component, Debug, Clone, Default)]
 pub struct RecordClassProps(pub Vec<(String, DmValue)>);
 
-/// Whether [`record_props`] reads every property Studio's seed gives a class.
-/// The rest get their class defaults and their attributes.
+/// Whether a Player's reader reads every property Studio's seed gives a
+/// class. The rest get their class defaults and their attributes.
 pub fn reads_own_properties(class: &str) -> bool {
     !matches!(
         class,
@@ -1662,14 +1697,9 @@ pub fn reads_own_properties(class: &str) -> bool {
             | "ImageLabel"
             | "ImageButton"
             | "ViewportFrame"
-            | "PointLight"
-            | "SpotLight"
-            | "SurfaceLight"
-            | "Sound"
             | "ParticleEmitter"
             | "Beam"
             | "Decal"
-            | "Attachment"
     )
 }
 
@@ -1893,6 +1923,53 @@ mod tests {
         let plain = part("material = \"Wood\"\n");
         assert!(plain.custom_physical_properties.is_none(), "no override: the material's density");
         assert_eq!(plain.effective_density(), BasePart::material_default_density(&plain.material));
+    }
+
+    /// A Sound and a light read their file's values into their component's
+    /// properties, which the Player draws and plays them by.
+    #[test]
+    fn a_sound_and_a_light_read_their_files() {
+        let get = |props: &[(String, DmValue)], key: &str| {
+            props.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).unwrap_or_else(|| panic!("no {key}"))
+        };
+        let number = |v: DmValue| match v {
+            DmValue::Number(n) => n,
+            other => panic!("{other:?}"),
+        };
+        let sound: toml::Value =
+            toml::from_str("[sound]\nsound_id = \"sounds/bounce.ogg\"\nvolume = 0.3\nlooped = true\n").unwrap();
+        let props = record_component_props("Sound", &sound);
+        assert!((number(get(&props, "Volume")) - 0.3).abs() < 1e-6);
+        assert_eq!(get(&props, "Looped"), DmValue::Bool(true));
+        assert_ne!(props, record_component_props("Sound", &toml::Value::Table(toml::Table::new())), "not the defaults");
+
+        let spot: toml::Value = toml::from_str("[light]\nbrightness = 4.0\nrange = 12.0\nangle = 60.0\n").unwrap();
+        let props = record_component_props("SpotLight", &spot);
+        assert_eq!(number(get(&props, "Brightness")), 4.0);
+        assert_eq!(number(get(&props, "Range")), 12.0);
+        assert_eq!(number(get(&props, "Angle")), 60.0);
+        assert!(record_component_props("Folder", &spot).is_empty());
+        assert!(reads_own_properties("Sound") && reads_own_properties("PointLight") && reads_own_properties("Attachment"));
+    }
+
+    /// A custom mesh's scale converts from the file's unit only when it is a
+    /// length; a position, and a primitive's size, always do.
+    #[cfg(feature = "units_v1")]
+    #[test]
+    fn a_custom_meshs_scale_converts_only_as_a_length() {
+        let pose = |asset: &str| {
+            let text = format!(
+                "[metadata]\nunit = \"ft\"\n\n{asset}[transform]\nposition = [10.0, 0.0, 0.0]\nscale = [2.0, 2.0, 2.0]\n"
+            );
+            record_pose(&toml::from_str(&text).unwrap())
+        };
+        let ratio = pose("[asset]\nmesh = \"meshes/Rock.glb\"\nscale_kind = \"multiplier\"\n\n");
+        assert_eq!(ratio.scale, Vec3::splat(2.0), "a multiplier has no unit");
+        assert!((ratio.translation.x - 3.048).abs() < 1e-4, "a position is always a length: {:?}", ratio.translation);
+        let length = pose("[asset]\nmesh = \"meshes/Rock.glb\"\nscale_kind = \"length\"\n\n");
+        assert!((length.scale.x - 0.6096).abs() < 1e-5, "{:?}", length.scale);
+        let block = pose("");
+        assert!((block.scale.x - 0.6096).abs() < 1e-5, "a primitive's size is a length: {:?}", block.scale);
     }
 
     #[test]

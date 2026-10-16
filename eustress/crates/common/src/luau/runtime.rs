@@ -433,6 +433,61 @@ pub struct LuauRuntime {
     pub stats: LuauRuntimeStats,
 }
 
+/// Whether a script run by a [`LuauRuntime`] may make HTTP requests. A runtime
+/// starts with `Denied`: code an AI wrote, and code from a Space someone else
+/// published or joined, must not reach the network by default. The caller that
+/// runs the user's own code opts in with [`LuauRuntime::set_network_access`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkAccess {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Whether the Lua state this runs in may make HTTP requests. A state with no
+/// setting (never the case for a runtime built by `new`) is denied.
+#[cfg(feature = "luau")]
+fn network_allowed(lua: &mlua::Lua) -> bool {
+    lua.app_data_ref::<NetworkAccess>().map_or(false, |access| *access == NetworkAccess::Allowed)
+}
+
+/// The error a refused request raises, also written to the Output log, so the
+/// refusal is visible to the user and not only to the script.
+#[cfg(feature = "luau")]
+fn refuse_http(what: &str) -> mlua::Error {
+    let line = format!("{what} refused: network access is off for this script (SoulService.AllowNetworkAccess)");
+    LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((line.clone(), true)));
+    mlua::Error::RuntimeError(line)
+}
+
+/// The arguments of an HttpService call without the service itself. The colon
+/// form every Roblox script uses, `HttpService:GetAsync(url)`, passes the
+/// service as the first argument; the dot form, `HttpService.GetAsync(url)`,
+/// does not.
+#[cfg(feature = "luau")]
+fn without_service(lua: &mlua::Lua, mut args: mlua::MultiValue) -> mlua::MultiValue {
+    let is_service = match args.front() {
+        Some(mlua::Value::Table(table)) => {
+            let service: Option<mlua::Table> = lua.globals().raw_get("HttpService").ok();
+            service.map_or(false, |service| service.to_pointer() == table.to_pointer())
+        }
+        _ => false,
+    };
+    if is_service {
+        args.pop_front();
+    }
+    args
+}
+
+/// The next argument as a string, or the error a call with it missing raises.
+#[cfg(feature = "luau")]
+fn string_arg(lua: &mlua::Lua, args: &mut mlua::MultiValue, what: &str, expects: &str) -> mlua::Result<String> {
+    match args.pop_front() {
+        Some(value) => <String as mlua::FromLua>::from_lua(value, lua),
+        None => Err(mlua::Error::RuntimeError(format!("{what} expects {expects}"))),
+    }
+}
+
 /// Runtime execution statistics
 #[derive(Debug, Clone, Default)]
 pub struct LuauRuntimeStats {
@@ -456,6 +511,8 @@ impl LuauRuntime {
 
         // Enable Luau sandboxing — restricts dangerous operations
         lua.sandbox(true).map_err(|error| format!("Failed to enable Luau sandbox: {}", error))?;
+        // Denied until the caller allows it; see NetworkAccess.
+        lua.set_app_data(NetworkAccess::Denied);
 
         // Inject Eustress global stubs into the VM
         Self::inject_eustress_globals(&lua)?;
@@ -467,10 +524,21 @@ impl LuauRuntime {
         })
     }
 
+    /// Without the luau feature there is no network to allow.
+    #[cfg(not(feature = "luau"))]
+    pub fn set_network_access(&self, _access: NetworkAccess) {}
+
     /// Fallback when luau feature is not enabled
     #[cfg(not(feature = "luau"))]
     pub fn new() -> Result<Self, String> {
         Err("Luau feature is not enabled. Rebuild with --features luau".to_string())
+    }
+
+    /// Set whether this runtime's scripts may make HTTP requests. A runtime
+    /// starts with `NetworkAccess::Denied`.
+    #[cfg(feature = "luau")]
+    pub fn set_network_access(&self, access: NetworkAccess) {
+        self.lua.set_app_data(access);
     }
 
     /// Execute a chunk of Luau source code
@@ -3015,7 +3083,12 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to create HttpService table: {}", error))?;
 
         // HttpService:GetAsync(url) -> string?
-        let http_get = lua.create_function(|_, url: String| {
+        let http_get = lua.create_function(|lua, args: mlua::MultiValue| {
+            if !network_allowed(lua) {
+                return Err(refuse_http("HttpService:GetAsync"));
+            }
+            let mut args = without_service(lua, args);
+            let url = string_arg(lua, &mut args, "HttpService:GetAsync", "a URL")?;
             match ureq::get(&url).call() {
                 Ok(response) => Ok(response.into_string().ok()),
                 Err(_) => Ok(None),
@@ -3025,7 +3098,13 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set HttpService.GetAsync: {}", error))?;
 
         // HttpService:PostAsync(url, body) -> string?
-        let http_post = lua.create_function(|_, (url, body): (String, String)| {
+        let http_post = lua.create_function(|lua, args: mlua::MultiValue| {
+            if !network_allowed(lua) {
+                return Err(refuse_http("HttpService:PostAsync"));
+            }
+            let mut args = without_service(lua, args);
+            let url = string_arg(lua, &mut args, "HttpService:PostAsync", "a URL")?;
+            let body = string_arg(lua, &mut args, "HttpService:PostAsync", "a body")?;
             match ureq::post(&url)
                 .set("Content-Type", "application/json")
                 .send_string(&body)
@@ -3038,7 +3117,15 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set HttpService.PostAsync: {}", error))?;
 
         // HttpService:RequestAsync(options) -> {Success, StatusCode, StatusMessage, Headers, Body}
-        let http_request = lua.create_function(|lua, options: mlua::Table| {
+        let http_request = lua.create_function(|lua, args: mlua::MultiValue| {
+            if !network_allowed(lua) {
+                return Err(refuse_http("HttpService:RequestAsync"));
+            }
+            let mut args = without_service(lua, args);
+            let options: mlua::Table = match args.pop_front() {
+                Some(mlua::Value::Table(options)) => options,
+                _ => return Err(mlua::Error::RuntimeError("HttpService:RequestAsync expects an options table".into())),
+            };
             let url: String = options.get("Url")?;
             let method: String = options.get::<Option<String>>("Method")?.unwrap_or_else(|| "GET".to_string());
             let body: Option<String> = options.get("Body")?;
@@ -5306,4 +5393,86 @@ fn humanoid_default(key: &str) -> f64 {
         .find(|(k, _)| *k == key)
         .and_then(|(_, v)| v.as_number())
         .unwrap_or(0.0)
+}
+
+// ============================================================================
+// Network gate tests (HttpService in the legacy runtime)
+// ============================================================================
+#[cfg(all(test, feature = "luau"))]
+mod network_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// The lines the last run printed, cleared.
+    fn output() -> Vec<String> {
+        drain_luau_output().into_iter().map(|(text, _)| text).collect()
+    }
+
+    /// A one-shot HTTP server on loopback: answers the first request with a
+    /// 200 and `ok`, and sends on the returned channel once it has answered.
+    fn serve_once() -> (u16, std::sync::mpsc::Receiver<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            }
+            let _ = tx.send(());
+        });
+        (port, rx)
+    }
+
+    /// The colon form every Roblox script uses, and the dot form, which passes
+    /// no service as the first argument.
+    const FORMS: [&str; 2] = [":", "."];
+
+    #[test]
+    fn a_runtime_refuses_http_until_it_is_allowed_in_both_call_forms() {
+        for form in FORMS {
+            let mut rt = LuauRuntime::new().unwrap();
+            // Port 9 on loopback is closed; a refused request never reaches it.
+            let source = format!(
+                "local ok, err = pcall(function() return HttpService{form}GetAsync('http://127.0.0.1:9/') end)\nprint('ok', tostring(ok))\nprint('err', tostring(err))"
+            );
+            rt.execute_chunk(&source, "untrusted").unwrap();
+            let lines = output();
+            assert!(lines.iter().any(|l| l == "ok\tfalse"), "{form}: the request is an error: {lines:?}");
+            assert!(lines.iter().any(|l| l.contains("network access is off")), "{form}: the refusal is logged: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn an_allowed_runtime_reaches_the_network_in_both_call_forms() {
+        for form in FORMS {
+            let (port, served) = serve_once();
+            let mut rt = LuauRuntime::new().unwrap();
+            rt.set_network_access(NetworkAccess::Allowed);
+            let source = format!("print('body', HttpService{form}GetAsync('http://127.0.0.1:{port}/'))");
+            rt.execute_chunk(&source, "trusted").unwrap();
+            assert!(served.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "{form}: the request reached the server");
+            assert!(output().iter().any(|l| l == "body\tok"), "{form}: the body came back");
+        }
+    }
+
+    #[test]
+    fn post_and_request_async_take_both_call_forms() {
+        for form in FORMS {
+            let (port, served) = serve_once();
+            let mut rt = LuauRuntime::new().unwrap();
+            rt.set_network_access(NetworkAccess::Allowed);
+            let source = format!("print('post', HttpService{form}PostAsync('http://127.0.0.1:{port}/', '{{}}'))");
+            rt.execute_chunk(&source, "trusted").unwrap();
+            assert!(served.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "{form}: PostAsync reached the server");
+            assert!(output().iter().any(|l| l == "post\tok"), "{form}: PostAsync returned the body");
+
+            let (port, served) = serve_once();
+            let source = format!("local r = HttpService{form}RequestAsync({{Url = 'http://127.0.0.1:{port}/'}})\nprint('request', r.StatusCode)");
+            rt.execute_chunk(&source, "trusted").unwrap();
+            assert!(served.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "{form}: RequestAsync reached the server");
+            assert!(output().iter().any(|l| l == "request\t200"), "{form}: RequestAsync returned the status");
+        }
+    }
 }

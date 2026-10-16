@@ -293,7 +293,11 @@ fn parse_rotation(v: &Value) -> Result<Quat, String> {
         .collect::<Option<Vec<f32>>>()
         .ok_or_else(bad)?;
     match parts.as_slice() {
-        &[x, y, z] => Ok(Quat::from_euler(EulerRot::XYZ, x.to_radians(), y.to_radians(), z.to_radians())),
+        // Roblox's CFrame.Angles: X, then the turned Y, then the turned Z,
+        // written out, since glam's EulerRot orders compose the other way.
+        &[x, y, z] => Ok(Quat::from_rotation_x(x.to_radians())
+            * Quat::from_rotation_y(y.to_radians())
+            * Quat::from_rotation_z(z.to_radians())),
         &[x, y, z, w] => {
             let q = Quat::from_xyzw(x, y, z, w);
             if !(q.length() > 1e-6) {
@@ -1020,6 +1024,9 @@ fn flat_spec(half_extent: u32, height_m: f32, material_slot: u8) -> Result<FlatS
 /// presets. The world generator runs in the background and replaces the
 /// terrain when it finishes; the response only says it was queued.
 pub fn terrain_generate(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+    if let Err(e) = refuse_in_play(world) {
+        return refuse(req, e);
+    }
     let parsed = (|| -> Result<(String, (u32, u32), u64), String> {
         let preset = opt_str(&req.params, "preset")?.unwrap_or("medium").to_ascii_lowercase();
         let regions = world_preset(&preset)?;
@@ -1065,6 +1072,9 @@ pub fn terrain_generate(world: &mut World, req: &BridgeRequest) -> BridgeRespons
 /// is written and loaded on the next frame and meshes over the frames after;
 /// the response only says it was queued.
 pub fn terrain_flat(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+    if let Err(e) = refuse_in_play(world) {
+        return refuse(req, e);
+    }
     let parsed = {
         let slots = world.get_resource::<TerrainMaterialSlots>();
         (|| -> Result<(String, FlatSpec, String), String> {
@@ -1592,6 +1602,9 @@ fn layer_request(p: &Value) -> Result<LayerRequest, String> {
 /// `Workspace/Terrain/Layers` as Insert does, one undo step that removes its
 /// folder. A spline's points go under it, numbered in path order.
 pub fn terrain_layer_create(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+    if let Err(e) = refuse_in_play(world) {
+        return refuse(req, e);
+    }
     let request = match layer_request(&req.params) {
         Ok(request) => request,
         Err(e) => return refuse(req, e),
@@ -1642,6 +1655,113 @@ pub fn terrain_layer_create(world: &mut World, req: &BridgeRequest) -> BridgeRes
 }
 
 // ---------------------------------------------------------------------------
+// terrain.reload
+// ---------------------------------------------------------------------------
+
+/// `terrain.reload`: replace the live terrain with what `Workspace/Terrain`
+/// holds on disk now (`_terrain.toml`, the chunk heightmaps, material maps,
+/// volume bricks and water), read through the Space-open loader's own
+/// [`hydrate_terrain_from_disk`](crate::terrain_disk_load::hydrate_terrain_from_disk),
+/// so the result is exactly what reopening the Space would load.
+///
+/// The terrain layers are instances and stay as they are; they bake over the
+/// reloaded ground on the following frames. The disk is read first and the
+/// live terrain replaced only once that succeeded, so a bad file leaves the
+/// terrain as it was. Unsaved terrain edits would be lost, so they refuse the
+/// reload unless `discard_unsaved` is true. A converted Space's terrain lives
+/// in the world database and is the voxel loader's to read: reopen the Space
+/// for that.
+pub fn terrain_reload(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+    let discard_unsaved = match opt_bool(&req.params, "discard_unsaved") {
+        Ok(flag) => flag.unwrap_or(false),
+        Err(e) => return refuse(req, e),
+    };
+    let Some(space_root) = world.get_resource::<SpaceRoot>().map(|root| root.0.clone()) else {
+        return refuse(req, "no Space is open, so there is no terrain to reload");
+    };
+    if generation_busy(world) {
+        return refuse(
+            req,
+            "a terrain generation is running or queued; wait until terrain_stats reports generation.busy false",
+        );
+    }
+    if crate::space::space_ops::space_is_migrated(&space_root) {
+        return refuse(
+            req,
+            "this Space's terrain lives in its world database (a converted Space); reopen the Space to reload it",
+        );
+    }
+    let terrain_dir = space_root.join("Workspace").join("Terrain");
+    if !terrain_dir.join("_terrain.toml").exists() {
+        return refuse(req, "Workspace/Terrain has no _terrain.toml, so there is no terrain on disk to load");
+    }
+    if !discard_unsaved && crate::ui::file_event_handler::terrain_changed_since_save(world, false) {
+        return refuse(
+            req,
+            "the live terrain has edits that are not saved, and reloading would lose them; save first, or pass \
+             discard_unsaved: true",
+        );
+    }
+    let terrain = match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
+        Ok(terrain) => terrain,
+        Err(e) => return fail(req, format!("Workspace/Terrain could not be read, so the live terrain is unchanged: {e}")),
+    };
+    let chunk_files = terrain.chunk_files;
+    let volume_bricks = terrain.volume.brick_count();
+    let size = terrain.config.total_size();
+    let band = (terrain.config.world_height(0.0), terrain.config.world_height(1.0));
+    // The new terrain's meshes and materials go into these: a host without
+    // them could not draw it, so it keeps the terrain it has.
+    if !world.contains_resource::<Assets<Mesh>>() || !world.contains_resource::<Assets<StandardMaterial>>() {
+        return fail(req, "this host has no mesh or material assets to draw terrain with, so the live terrain is unchanged");
+    }
+
+    // A chunk goes with its root; the rest are strays.
+    let roots: Vec<Entity> = world.query_filtered::<Entity, With<TerrainRoot>>().iter(world).collect();
+    let chunks: Vec<Entity> = world.query_filtered::<Entity, With<Chunk>>().iter(world).collect();
+    for &entity in roots.iter().chain(&chunks) {
+        let _ = world.try_despawn(entity);
+    }
+    let mut state: bevy::ecs::system::SystemState<(Commands, ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>)> =
+        bevy::ecs::system::SystemState::new(world);
+    let root = {
+        // Both assets were checked above, and Commands always validate.
+        let Ok((mut commands, mut meshes, mut materials)) = state.get_mut(world) else {
+            return fail(req, "the old terrain was removed but the reloaded one could not be spawned; reopen the Space");
+        };
+        let root = terrain.spawn(&mut commands, &mut meshes, &mut materials);
+        // Disk-sourced: the save baseline is taken from it as it arrives, so
+        // the next save writes only what changes after the reload.
+        commands.entity(root).insert(crate::terrain_disk_load::DiskSourcedTerrain);
+        root
+    };
+    state.apply(world);
+    if let Some(mut explorer) = world.get_resource_mut::<crate::ui::slint_ui::UnifiedExplorerState>() {
+        explorer.dirty = true;
+    }
+    info!(
+        "terrain.reload: replaced {} roots and {} chunks with Workspace/Terrain ({chunk_files} chunk files, {volume_bricks} volume bricks)",
+        roots.len(),
+        chunks.len()
+    );
+    reply(
+        req,
+        json!({
+            "reloaded": true,
+            "root": format!("{root:?}"),
+            "replaced_roots": roots.len(),
+            "replaced_chunks": chunks.len(),
+            "chunk_files": chunk_files,
+            "volume_bricks": volume_bricks,
+            "size_m": [num(size.0, 1), num(size.1, 1)],
+            "height_band_m": [num(band.0, 2), num(band.1, 2)],
+            "note": "Chunks mesh over the next frames and the layers bake over the new ground; terrain_stats \
+                     reports generation.busy false when they are done.",
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // terrain.clear
 // ---------------------------------------------------------------------------
 
@@ -1660,6 +1780,10 @@ pub fn terrain_layer_create(world: &mut World, req: &BridgeRequest) -> BridgeRes
 /// Terrain holds nothing, so the terrain does not come back on the next open.
 /// Then every terrain root and chunk in the live world is despawned.
 pub fn terrain_clear(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+    // Refused first: its delete of the terrain's files cannot be undone.
+    if let Err(e) = refuse_in_play(world) {
+        return refuse(req, e);
+    }
     let include_layers = match opt_bool(&req.params, "include_layers") {
         Ok(flag) => flag.unwrap_or(false),
         Err(e) => return refuse(req, e),
@@ -2182,7 +2306,12 @@ mod tests {
         let expected = Quat::from_rotation_x(30f32.to_radians())
             * Quat::from_rotation_y(45f32.to_radians())
             * Quat::from_rotation_z(60f32.to_radians());
-        assert!(euler.angle_between(expected) < 1e-4, "X, then the turned Y, then the turned Z");
+        // Components, not angle_between: its acos of a dot one ulp under 1.0
+        // reads 7e-4 radians for two equal quaternions.
+        assert!(
+            euler.abs_diff_eq(expected, 1e-5) || euler.abs_diff_eq(-expected, 1e-5),
+            "X, then the turned Y, then the turned Z"
+        );
         let quat = parse_rotation(&json!([0, 0, 0, 2])).unwrap();
         assert!(quat.abs_diff_eq(Quat::IDENTITY, 1e-6), "a quaternion is normalized");
         assert!(parse_rotation(&json!([0, 0, 0, 0])).is_err());
@@ -2302,5 +2431,30 @@ mod tests {
         assert_eq!(num(0.1f32, 3), 0.1);
         assert_eq!(num(12.3456f32, 2), 12.35);
         assert_eq!(json!(num(f32::NAN, 3)), Value::Null);
+    }
+
+    /// During Play the terrain edits that write the Space are refused before
+    /// they run, Clear included: its file delete cannot be undone.
+    #[test]
+    fn play_refuses_the_terrain_writes() {
+        type Handler = fn(&mut World, &BridgeRequest) -> BridgeResponse;
+        let handlers: [(&str, Handler); 4] = [
+            ("terrain.generate", terrain_generate),
+            ("terrain.flat", terrain_flat),
+            ("terrain.layer_create", terrain_layer_create),
+            ("terrain.clear", terrain_clear),
+        ];
+        for state in [crate::play_mode::PlayModeState::Playing, crate::play_mode::PlayModeState::Paused] {
+            let mut world = World::new();
+            world.insert_resource(State::new(state));
+            // An explicit root, so no fallback ever reads the settings file.
+            world.insert_resource(SpaceRoot(std::env::temp_dir().join("eustress_play_gate_terrain_bridge")));
+            for (method, handler) in handlers {
+                let req: BridgeRequest = serde_json::from_value(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} })).unwrap();
+                let answer = serde_json::to_value(handler(&mut world, &req)).unwrap();
+                let message = answer["error"]["message"].as_str().unwrap_or_default().to_string();
+                assert!(message.starts_with("Stop Play first"), "{state:?} {method}: {answer}");
+            }
+        }
     }
 }

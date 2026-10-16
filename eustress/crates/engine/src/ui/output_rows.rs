@@ -13,11 +13,12 @@
 //! Pure data, no Slint types: `sync_bevy_to_slint` converts `RowData` to the
 //! generated `OutputRow`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::slint_ui::{LogEntry, LogLevel};
+use super::display_text;
 
 /// One row, before it becomes a Slint `OutputRow`.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +39,17 @@ pub struct RowData {
     pub line: i32,
     pub stack: String,
     pub expanded: bool,
+    /// The message has lines after its first, which the open row shows.
+    pub more: bool,
+    /// While the row is open: one page of the message after its first line
+    /// (`display_text::page`), which page it is, and how many there are.
+    pub body: String,
+    pub page: i32,
+    pub pages: i32,
 }
+
+/// Lines of a message an open row shows at once.
+pub const OUTPUT_PAGE_LINES: usize = 40;
 
 /// The panel's filters, read from the toolbar.
 pub struct Filters<'a> {
@@ -132,6 +143,16 @@ fn matches_search(needle_lower: &str, parts: &[&str]) -> bool {
 
 /// The rows for the panel. See the module comment.
 pub fn build(entries: &[LogEntry], filters: &Filters, expanded: &HashSet<u64>) -> Built {
+    build_paged(entries, filters, expanded, &HashMap::new())
+}
+
+/// [`build`], with the page each open row shows (`row_pages`).
+pub fn build_paged(
+    entries: &[LogEntry],
+    filters: &Filters,
+    expanded: &HashSet<u64>,
+    pages: &HashMap<u64, usize>,
+) -> Built {
     let mut counts = [0i32; 4];
     let mut rows: Vec<RowData> = Vec::new();
     let needle = filters.search.trim().to_lowercase();
@@ -160,6 +181,10 @@ pub fn build(entries: &[LogEntry], filters: &Filters, expanded: &HashSet<u64>) -
                     line: 0,
                     stack: String::new(),
                     expanded: false,
+                    more: false,
+                    body: String::new(),
+                    page: 0,
+                    pages: 0,
                 });
             }
             continue;
@@ -212,9 +237,31 @@ pub fn build(entries: &[LogEntry], filters: &Filters, expanded: &HashSet<u64>) -
             script_label: short_label(&entry.script).to_string(),
             file: entry.file.clone(),
             line: i32::try_from(entry.line).unwrap_or(0),
-            expanded: !stack.is_empty() && expanded.contains(&entry.id),
+            expanded: (!stack.is_empty() || display_text::has_more_lines(text)) && expanded.contains(&entry.id),
             stack,
+            more: false,
+            body: String::new(),
+            page: 0,
+            pages: 0,
         });
+    }
+
+    // What each row draws (`display_text`): its message's first line, and
+    // while it is open the rest a page at a time. After the repeats
+    // collapse, which compares whole messages.
+    for row in rows.iter_mut().filter(|r| r.kind == "line") {
+        let rest = display_text::after_first_line(&row.text).map(str::to_owned);
+        row.text = display_text::bound_line(&row.text);
+        row.script_label = display_text::bound_line(&row.script_label);
+        row.stack = display_text::bound_block(&row.stack);
+        row.more = rest.is_some();
+        if let (Some(rest), true) = (rest, row.expanded) {
+            let want = pages.get(&row.id).copied().unwrap_or(0);
+            let p = display_text::page(&rest, display_text::Wrap::NoWrap, OUTPUT_PAGE_LINES, want);
+            row.body = p.text;
+            row.page = p.index as i32;
+            row.pages = p.count as i32;
+        }
     }
 
     Built { rows, counts }
@@ -288,6 +335,20 @@ pub fn toggle_expanded(id: u64) {
 /// The rows showing their stack.
 pub fn expanded_ids() -> HashSet<u64> {
     EXPANDED.lock().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_default()
+}
+
+static PAGES: Mutex<Option<HashMap<u64, usize>>> = Mutex::new(None);
+
+/// Show page `page` (from 0) of an open row's message.
+pub fn set_page(id: u64, page: usize) {
+    let mut guard = PAGES.lock().unwrap_or_else(|p| p.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(id, page);
+    EXPAND_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The page each row shows, where it is not the first.
+pub fn row_pages() -> HashMap<u64, usize> {
+    PAGES.lock().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_default()
 }
 
 /// Moves whenever a stack is shown or hidden, so the panel rebuilds.
@@ -406,6 +467,36 @@ mod tests {
         assert!(open[0].expanded);
         let text = copy_text(&entries[0]);
         assert_eq!(text, "15:02:07 Error [Luau] Workspace.A:88  nil index\n    A.luau:88\n    B.luau:51");
+    }
+
+    #[test]
+    fn a_long_message_opens_a_page_at_a_time() {
+        let message: String = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let entries = vec![entry(5, LogLevel::Info, "luau", &message, "")];
+        let closed = build(&entries, &all(), &HashSet::new()).rows;
+        assert_eq!(closed[0].text, "line 0…");
+        assert!(closed[0].more && closed[0].body.is_empty() && !closed[0].expanded);
+        let open = build(&entries, &all(), &HashSet::from([5])).rows;
+        assert!(open[0].expanded);
+        assert_eq!((open[0].page, open[0].pages), (0, 3), "99 more lines, 40 a page");
+        assert_eq!(open[0].body.lines().count(), OUTPUT_PAGE_LINES);
+        assert!(open[0].body.starts_with("line 1\n"));
+        let last = build_paged(&entries, &all(), &HashSet::from([5]), &HashMap::from([(5, 9)])).rows;
+        assert_eq!((last[0].page, last[0].pages), (2, 3), "past the end is the last page");
+        assert!(last[0].body.starts_with("line 81") && last[0].body.ends_with("line 99"));
+        assert_eq!(copy_text(&entries[0]).lines().count(), 100, "copy takes it all");
+    }
+
+    #[test]
+    fn a_huge_line_draws_bounded() {
+        let entries = vec![entry(6, LogLevel::Info, "luau", &"x".repeat(131_000), "")];
+        let rows = build(&entries, &all(), &HashSet::new()).rows;
+        assert!(rows[0].text.ends_with('…') && rows[0].text.chars().count() <= 201);
+        assert!(!rows[0].more);
+        let tall = vec![entry(7, LogLevel::Info, "luau", &"y\n".repeat(10_000), "")];
+        let open = build(&tall, &all(), &HashSet::from([7])).rows;
+        assert_eq!(open[0].body.lines().count(), OUTPUT_PAGE_LINES);
+        assert_eq!(open[0].pages, 250);
     }
 
     #[test]

@@ -1,80 +1,81 @@
 // =============================================================================
-// Eustress Web - Legal Acts Compliance Page
+// Eustress Web - Legal index (/acts)
 // =============================================================================
+//
+// The laws Eustress answers to, one card each, linking to its page under
+// /legal/:act (pages/legal_acts.rs holds every word of those pages, and the
+// cards' one-line summaries).
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
+use crate::pages::legal_acts::{route_of, ACTS, DRAFT};
 
 #[component]
 pub fn ActsPage() -> impl IntoView {
     view! {
-        <div class="page page-legal">
+        <div class="page g-page lg-page">
             <CentralNav active="".to_string() />
-            
-            <div class="legal-container">
-                <div class="legal-header">
-                    <h1>"Legal Compliance"</h1>
-                    <p class="legal-updated">"Our commitment to legal and regulatory compliance"</p>
-                </div>
-                
-                <div class="legal-content">
-                    <section class="legal-section">
-                        <h2>"Regulatory Compliance"</h2>
-                        <p>"Eustress Engine is committed to complying with all applicable laws and regulations. Below are the key legal frameworks we adhere to:"</p>
-                    </section>
-                    
-                    <div class="acts-grid">
-                        <a href="/acts/ccpa" class="act-card">
-                            <h3>"CCPA"</h3>
-                            <p class="act-full">"California Consumer Privacy Act"</p>
-                            <p class="act-desc">"Privacy rights for California residents including data access, deletion, and opt-out rights."</p>
-                        </a>
-                        
-                        <a href="/acts/coppa" class="act-card">
-                            <h3>"COPPA"</h3>
-                            <p class="act-full">"Children's Online Privacy Protection Act"</p>
-                            <p class="act-desc">"Protections for children under 13, including parental consent requirements."</p>
-                        </a>
-                        
-                        <a href="/acts/csam" class="act-card">
-                            <h3>"CSAM Policy"</h3>
-                            <p class="act-full">"Child Sexual Abuse Material"</p>
-                            <p class="act-desc">"Zero tolerance policy with immediate reporting to NCMEC and law enforcement."</p>
-                        </a>
-                        
-                        <a href="/dmca" class="act-card">
-                            <h3>"DMCA"</h3>
-                            <p class="act-full">"Digital Millennium Copyright Act"</p>
-                            <p class="act-desc">"Copyright protection and takedown procedures for infringing content."</p>
-                        </a>
-                        
-                        <a href="/acts/gdpr" class="act-card">
-                            <h3>"GDPR"</h3>
-                            <p class="act-full">"General Data Protection Regulation"</p>
-                            <p class="act-desc">"EU data protection rights including consent, access, portability, and erasure."</p>
-                        </a>
-                        
-                        <a href="/acts/tida" class="act-card">
-                            <h3>"TIDA"</h3>
-                            <p class="act-full">"Take It Down Act"</p>
-                            <p class="act-desc">"Protections against non-consensual intimate imagery, requiring platforms to remove such content upon request."</p>
-                        </a>
-                    </div>
-                    
-                    <section class="legal-section">
-                        <h2>"Reporting Violations"</h2>
-                        <p>"If you believe there has been a violation of any of these regulations, please contact us:"</p>
-                        <ul>
-                            <li>"Privacy concerns: "<a href="mailto:privacy@eustress.dev">"privacy@eustress.dev"</a></li>
-                            <li>"Copyright/DMCA: "<a href="mailto:dmca@eustress.dev">"dmca@eustress.dev"</a></li>
-                            <li>"Child safety: "<a href="mailto:safety@eustress.dev">"safety@eustress.dev"</a></li>
-                            <li>"General legal: "<a href="mailto:legal@eustress.dev">"legal@eustress.dev"</a></li>
-                        </ul>
-                    </section>
-                </div>
-            </div>
-            
+            <div class="g-backdrop" aria-hidden="true"></div>
+            <main class="g-main">
+                <ActsBody />
+            </main>
             <Footer />
         </div>
+    }
+}
+
+/// The index without the site's frame (so tests can render it alone).
+#[component]
+pub fn ActsBody() -> impl IntoView {
+    view! {
+        <div class="g-wrap lg-wrap">
+            <header class="lg-index-head g-rise">
+                <div class="g-kicker"><span class="g-kick-rule"></span>"Legal"</div>
+                <h1 class="lg-title">"The laws Eustress answers to"</h1>
+                <p class="lg-lede">"Each page says what the law is in plain words, what it means on Eustress, your rights and how to use them, and how fast we answer. Where something is not built yet, the page says so."</p>
+                {DRAFT.then(|| view! { <div class="g-chips"><span class="g-chip warn">"Draft for legal review"</span></div> })}
+            </header>
+
+            <div class="lg-cards">
+                {ACTS.iter().map(|a| view! {
+                    <a href=route_of(a) class="g-glass lg-card">
+                        <span class="lg-card-code">{a.short}</span>
+                        <span class="lg-card-name">{a.name}</span>
+                        <p>{a.card}</p>
+                        <span class="lg-card-go">"Read the page"</span>
+                    </a>
+                }).collect_view()}
+            </div>
+
+            <section class="g-section">
+                <div class="g-head"><h2>"Contacts"</h2><span class="g-rule"></span></div>
+                <dl class="g-kv g-glass lg-contacts">
+                    <dt>"Privacy"</dt><dd><a class="lg-link" href="mailto:privacy@eustress.dev">"privacy@eustress.dev"</a></dd>
+                    <dt>"Copyright"</dt><dd><a class="lg-link" href="mailto:dmca@eustress.dev">"dmca@eustress.dev"</a></dd>
+                    <dt>"Child safety"</dt><dd><a class="lg-link" href="mailto:safety@eustress.dev">"safety@eustress.dev"</a></dd>
+                    <dt>"Intimate images"</dt><dd><a class="lg-link" href="/take-it-down">"The TAKE IT DOWN request form"</a></dd>
+                    <dt>"Other legal"</dt><dd><a class="lg-link" href="mailto:legal@eustress.dev">"legal@eustress.dev"</a></dd>
+                </dl>
+            </section>
+        </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_card_links_to_its_act_page() {
+        let owner = Owner::new();
+        let html = owner.with(|| view! { <ActsBody /> }.to_html());
+        for a in ACTS {
+            assert!(html.contains(&format!("href=\"/legal/{}\"", a.slug)), "{}", a.slug);
+        }
+        // The old card addresses had no pages behind them.
+        assert!(!html.contains("href=\"/acts/"));
+        // The audit's overclaims stay off the cards.
+        assert!(!html.to_lowercase().contains("immediate reporting to ncmec"));
+        assert!(!html.to_lowercase().contains("parental consent requirements"));
     }
 }

@@ -64,6 +64,20 @@ pub fn is_join_link(link: &str) -> bool {
         && link.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:/?&=[]".contains(&b))
 }
 
+/// True for the final link the page gives to `window.location`: the host's join link or a solo link, with the `ticket`
+/// and `api` parameters the Play chooser appended. Only the Player's two schemes, only the characters the grammar
+/// uses (letters, digits and `-.:/?&=[]_`), and no longer than a Worker link (512), a ticket (2,048) and the
+/// parameter names (32). `is_join_link` still checks the Worker's own link before anything is appended.
+pub fn is_launch_link(link: &str) -> bool {
+    const MAX: usize = 512 + 2_048 + 32;
+    let rest = link
+        .strip_prefix("eustress-player://join/")
+        .or_else(|| link.strip_prefix("eustress-player://play/"));
+    rest.is_some_and(|rest| !rest.is_empty())
+        && link.len() <= MAX
+        && link.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:/?&=[]_".contains(&b))
+}
+
 // -----------------------------------------------------------------------------
 // 2. Live Hosts API Functions
 // -----------------------------------------------------------------------------
@@ -73,4 +87,64 @@ pub fn is_join_link(link: &str) -> bool {
 /// approved yet.
 pub async fn get_live_host(client: &ApiClient, simulation_id: &str) -> Result<LiveHost, ApiError> {
     client.get(&format!("/api/simulations/{}/live", simulation_id)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn join() -> String {
+        format!("eustress-player://join/192.168.1.20:7777?key={}&pin={}", "0123456789abcdef".repeat(2), "ab".repeat(32))
+    }
+
+    #[test]
+    fn the_final_link_may_carry_a_ticket_and_the_api_name_and_the_workers_own_link_stays_capped_at_512() {
+        let ticketed = format!("{}&ticket=eyJhbGciOi_JIUzI1.NiIsInR5-cCI6&api=staging", join());
+        assert!(is_launch_link(&ticketed));
+        assert!(is_launch_link(&join()));
+        assert!(is_launch_link("eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa?api=production"));
+        assert!(is_launch_link("eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"));
+        assert!(is_launch_link("eustress-player://join/[::1]:7777?key=a&pin=b"));
+        // The largest link the contract allows is still accepted ...
+        let base = "eustress-player://join/h?pin=".to_string();
+        let max = format!("{base}{}", "a".repeat(512 + 2_048 + 32 - base.len()));
+        assert_eq!(max.len(), 512 + 2_048 + 32);
+        assert!(is_launch_link(&max));
+        assert!(!is_launch_link(&format!("{max}a")));
+        // ... but the Worker's own link is not allowed to grow past 512 because of it.
+        let worker_long = format!("{base}{}", "a".repeat(513 - base.len()));
+        assert_eq!(worker_long.len(), 513);
+        assert!(!is_join_link(&worker_long));
+        assert!(is_launch_link(&worker_long));
+        assert!(!is_join_link(&ticketed), "the Worker's own check is unchanged: no underscore, no ticket");
+    }
+
+    #[test]
+    fn the_final_link_check_refuses_other_schemes_and_any_character_outside_the_grammar() {
+        let ok = join();
+        for bad in [
+            "javascript:alert(1)".to_string(),
+            "https://example.com/".to_string(),
+            "http://eustress.dev/".to_string(),
+            "eustress://join/1.2.3.4:5?key=a&pin=b".to_string(),
+            "eustress-player://exec/calc".to_string(),
+            "eustress-player://join/".to_string(),
+            "eustress-player://play/".to_string(),
+            "".to_string(),
+            format!("{ok} x"),
+            format!("{ok}&ticket=a b"),
+            format!("{ok}\""),
+            format!("{ok}'"),
+            format!("{ok}%20"),
+            format!("{ok}#frag"),
+            format!("{ok}+"),
+            format!("{ok}\n"),
+            format!("{ok}<"),
+            format!("{ok}\u{e9}"),
+            format!(" {ok}"),
+            format!("{ok}{}", "a".repeat(3_000)),
+        ] {
+            assert!(!is_launch_link(&bad), "{bad:.80}");
+        }
+    }
 }

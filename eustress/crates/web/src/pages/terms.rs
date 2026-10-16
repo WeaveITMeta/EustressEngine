@@ -70,12 +70,12 @@ pub fn TermsPage() -> impl IntoView {
                     
                     <section class="legal-section">
                         <h2>"6. Subscriptions"</h2>
-                        <p>"Premium subscriptions (Player Plus, Creator Pro, Bundle) are billed through our payment system. You may cancel at any time, and your benefits continue until the end of the billing period."</p>
+                        <p>"Premium subscriptions (Player Plus, Creator, Professional, Bundle) are billed through our payment system. You may cancel at any time, and your benefits continue until the end of the billing period."</p>
                     </section>
                     
                     <section class="legal-section">
                         <h2>"7. Creator Revenue"</h2>
-                        <p>"Creators earn a share of marketplace sales (25% free tier, 40% Creator Pro). Revenue is paid in Bliss currency. Minimum payout thresholds may apply."</p>
+                        <p>"Creators earn a share of marketplace sales (25% free tier, 40% Creator). Revenue is paid in Bliss currency. Minimum payout thresholds may apply."</p>
                     </section>
                     
                     <section class="legal-section">

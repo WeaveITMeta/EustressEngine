@@ -77,7 +77,9 @@ impl Plugin for SimulationPlugin {
             .add_systems(OnEnter(PlayModeState::Editing), on_play_stop)
             // Resolve this instance's IPC paths when the Space changes, then
             // drain its command queues every frame, in any state, so `run`
-            // works from Edit and `stop` from Play.
+            // works from Edit and `stop` from Play. Never on a stagger slot: a
+            // `stop` that waited for its slot would let the run go on for up to
+            // three more frames.
             .add_systems(PreUpdate, (sync_sim_ipc, drain_sim_command_queues).chain())
             // Advance simulation clock when playing
             .add_systems(

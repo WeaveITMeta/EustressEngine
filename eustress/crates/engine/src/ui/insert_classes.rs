@@ -221,6 +221,16 @@ pub fn default_service_for(category: &str) -> &'static str {
     }
 }
 
+/// The service a class is inserted under when nothing is selected. The Data
+/// Platform's classes belong to DataService by class: their category ("Data")
+/// would otherwise send them to Workspace, next to the Parts.
+pub fn default_service_for_class(class: ClassName) -> &'static str {
+    match class {
+        ClassName::Connector | ClassName::Dataset | ClassName::Domain | ClassName::ExportTarget => "DataService",
+        _ => default_service_for(category_for(class)),
+    }
+}
+
 /// Whether a class with a template may be created blank from the Insert
 /// menu. The exceptions have templates for their own tools:
 /// - one per Space: a second terrain root, camera, sun or moon fights the
