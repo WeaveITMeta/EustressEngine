@@ -447,9 +447,19 @@ jobs:
       - name: Build
         working-directory: eustress
         run: cargo build --release --locked --package eustress-client --bin eustress-client
+        # The system linker, not mold: under mold the Player started with
+        # Luau's C++ static initializers unrun (kSizeClassConfig all zero), and
+        # lua_newstate divided by a zero block size (SIGFPE) at startup.
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      # DIAGNOSTIC, remove with the symbols above: it needs an unstripped
+      # binary. The smoke test, which starts Luau, is the lasting check.
+      - name: Check that Luau's static initializers are linked
+        continue-on-error: true
+        run: |
+          nm -C "$BIN_DIR/eustress-client" | grep -E '_GLOBAL__sub_I_.*lmem' || { echo "::error::lmem.cpp's static initializer is missing"; exit 1; }
+          readelf -S -W "$BIN_DIR/eustress-client" | grep -E 'init_array'
 
       - name: Check the reported version
         run: |
