@@ -24,6 +24,10 @@ on:
       version:
         description: "Version to build (without the leading v)"
         required: true
+      publish:
+        description: "Publish to R2 and create a GitHub release. Off: build only; the installers stay as run artifacts."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -397,6 +401,9 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   publish:
     needs: [version, build-windows, build-macos-arm64, build-linux]
+    # A tag push publishes. A dispatched run publishes only when asked, so a
+    # manual run can prove the three builds before anything goes public.
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
