@@ -165,9 +165,13 @@ jobs:
         shell: pwsh
         run: |
           # Also the first launch: a missing DLL fails here, before packaging.
-          $got = & "$env:BIN_DIR\eustress-client.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw "eustress-client --version exited $LASTEXITCODE" }
-          $got = ($got | Out-String).Trim()
+          # The release Player is a windows-subsystem app, so `&` neither waits
+          # for it nor keeps its stdout open; Start-Process -Wait does both.
+          $out = "$env:RUNNER_TEMP\version.txt"
+          $p = Start-Process -FilePath "$env:BIN_DIR\eustress-client.exe" -ArgumentList "--version" `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out
+          if ($p.ExitCode -ne 0) { throw "eustress-client --version exited $($p.ExitCode)" }
+          $got = (Get-Content -Raw $out).Trim()
           if ($got -ne "eustress-client $env:VERSION") { throw "--version printed '$got', want 'eustress-client $env:VERSION'" }
           "OK: $got"
 
