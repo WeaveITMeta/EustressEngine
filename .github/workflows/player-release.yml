@@ -508,7 +508,10 @@ jobs:
       - name: Package
         run: |
           # The checks above needed the symbol table; what ships does not.
-          strip --strip-all "$BIN_DIR/eustress-client"
+          # Strip to a new file and move it over: the smoke test's Player may
+          # still hold the old one open ("Text file busy" for strip in place).
+          strip --strip-all -o "$BIN_DIR/eustress-client.stripped" "$BIN_DIR/eustress-client"
+          mv -f "$BIN_DIR/eustress-client.stripped" "$BIN_DIR/eustress-client"
           # One top-level folder, so unpacking never scatters files.
           STAGE=pkg/eustress-player
           pwsh installer/stage-player.ps1 -BinDir "$BIN_DIR" -OutDir "$STAGE"
