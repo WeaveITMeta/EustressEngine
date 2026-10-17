@@ -23,6 +23,9 @@ use bevy::image::{
 };
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use texture_gen::mips::{build_mip_chain_rgba8, MapKind};
+use std::sync::Arc;
+use eustress_common::play_session::PlaySpaceSource;
+use eustress_common::space_source::SpaceSource;
 
 // ============================================================================
 // MaterialDefinition — the parsed .mat.toml structure
@@ -140,10 +143,15 @@ pub struct MaterialRegistry {
     pending_textures: HashMap<String, PendingTextures>,
     /// Materials whose maps have been attached.
     hydrated: std::collections::HashSet<String>,
-    /// One GPU image per map file and filtering kind, shared by every
-    /// material that references it (the library points `occlusion` and
-    /// `metallic_roughness` at the same ORM file).
-    texture_cache: HashMap<(PathBuf, MapKind), Handle<Image>>,
+    /// One GPU image per map file (by its asset URL) and filtering kind,
+    /// shared by every material that references it (the library points
+    /// `occlusion` and `metallic_roughness` at the same ORM file).
+    texture_cache: HashMap<(String, MapKind), Handle<Image>>,
+    /// The open Space's files when its shell reads them from somewhere other
+    /// than a folder on this computer (the browser Player's records), set by
+    /// [`register_space_materials_from`]; `None` for a folder. Where a map is
+    /// looked for.
+    space_source: Option<Arc<dyn SpaceSource>>,
 }
 
 /// Adaptive color-quantization shift for the dedup key. `0` == lossless
@@ -457,52 +465,148 @@ impl MaterialRegistry {
 /// A Space's own materials into the registry, as Studio's loader registers
 /// them when it opens a Space: every `MaterialService/**/*.mat.toml`, by the
 /// name inside it or else its file name. Maps attach the first time a part
-/// uses the material. Returns how many registered, and the files that did
-/// not read.
+/// uses the material. Returns how many registered, and the files and
+/// folders that did not read.
 pub fn register_space_materials(
     space_root: &Path,
     registry: &mut MaterialRegistry,
     materials: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
 ) -> (usize, Vec<String>) {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
+    registry.space_source = None;
+    let mut registered = 0;
+    let (files, mut failed) = disk_material_files(space_root);
+    for path in files {
+        match register_material(load_material_definition(&path), &path, space_root, registry, materials, asset_server) {
+            Ok(()) => registered += 1,
+            Err(e) => failed.push(e),
+        }
+    }
+    (registered, failed)
+}
+
+/// [`register_space_materials`] for a Space its shell reads from `source`
+/// rather than a folder on this computer (the browser Player's records):
+/// its material files are listed and read through the source, and their
+/// maps are looked for in it ([`texture_source_in`]). `space_root` is the
+/// `PlayAssetRoot` the shell gave the Space.
+pub fn register_space_materials_from(
+    source: &PlaySpaceSource,
+    space_root: &Path,
+    registry: &mut MaterialRegistry,
+    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
+) -> (usize, Vec<String>) {
+    registry.space_source = Some(source.0.clone());
+    let mut registered = 0;
+    let (files, mut failed) = source_material_files(&*source.0);
+    for rel in files {
+        let path = space_root.join(&rel);
+        let definition = source
+            .0
+            .read_to_string(&rel)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))
+            .and_then(|content| load_material_definition_from_str(&content));
+        match register_material(definition, &path, space_root, registry, materials, asset_server) {
+            Ok(()) => registered += 1,
+            Err(e) => failed.push(e),
+        }
+    }
+    (registered, failed)
+}
+
+/// Every `MaterialService/**/*.mat.toml` in the Space's folder, in path
+/// order, and each folder that could not be listed. Hidden files and folders
+/// are skipped; a linked folder is followed. A Space without MaterialService
+/// has none and reports nothing.
+fn disk_material_files(space_root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, problems: &mut Vec<String>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                problems.push(format!("Failed to list {}: {}", dir.display(), e));
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                // A failed entry ends the listing (on Windows for good), so
+                // what the folder holds past it is unknown.
+                Err(e) => {
+                    problems.push(format!("Failed to list all of {}: {}", dir.display(), e));
+                    break;
+                }
+            };
             let path = entry.path();
             let hidden = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.'));
             if hidden {
                 continue;
             }
             if path.is_dir() {
-                walk(&path, out);
+                walk(&path, out, problems);
             } else if path.to_string_lossy().ends_with(".mat.toml") {
                 out.push(path);
             }
         }
     }
-    let mut files = Vec::new();
-    walk(&space_root.join("MaterialService"), &mut files);
+    let (mut files, mut problems) = (Vec::new(), Vec::new());
+    walk(&space_root.join("MaterialService"), &mut files, &mut problems);
     files.sort();
-    let mut registered = 0;
-    let mut failed = Vec::new();
-    for path in files {
-        match load_material_definition(&path) {
-            Ok(definition) => {
-                let name = if definition.material.name.is_empty() {
-                    material_name_from_path(&path)
-                } else {
-                    definition.material.name.clone()
-                };
-                let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                let handle = materials.add(build_standard_material(&definition, asset_server, &dir, space_root));
-                registry.insert(name.clone(), handle, definition.clone(), path.clone());
-                registry.defer_textures(&name, &definition.textures, &dir, space_root);
-                registered += 1;
+    (files, problems)
+}
+
+/// [`disk_material_files`] from a [`SpaceSource`]: Space-relative paths, in
+/// the same order, and the folders that could not be listed.
+fn source_material_files(source: &dyn SpaceSource) -> (Vec<String>, Vec<String>) {
+    fn walk(source: &dyn SpaceSource, dir: &str, out: &mut Vec<String>, problems: &mut Vec<String>) {
+        let entries = match source.list(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                problems.push(format!("Failed to list {dir}: {e}"));
+                return;
             }
-            Err(e) => failed.push(e),
+        };
+        for entry in entries {
+            if entry.name.starts_with('.') {
+                continue;
+            }
+            if entry.is_dir {
+                walk(source, &entry.rel_path, out, problems);
+            } else if entry.name.ends_with(".mat.toml") {
+                out.push(entry.rel_path);
+            }
         }
     }
-    (registered, failed)
+    let (mut files, mut problems) = (Vec::new(), Vec::new());
+    walk(source, "MaterialService", &mut files, &mut problems);
+    files.sort_by(|a, b| Path::new(a).cmp(Path::new(b)));
+    (files, problems)
+}
+
+/// One material into the registry, by the name inside it or else its file
+/// name, its maps left to attach when a part first uses it.
+fn register_material(
+    definition: Result<MaterialDefinition, String>,
+    path: &Path,
+    space_root: &Path,
+    registry: &mut MaterialRegistry,
+    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
+) -> Result<(), String> {
+    let definition = definition?;
+    let name = if definition.material.name.is_empty() {
+        material_name_from_path(path)
+    } else {
+        definition.material.name.clone()
+    };
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let handle = materials.add(build_standard_material(&definition, asset_server, &dir, space_root));
+    registry.insert(name.clone(), handle, definition.clone(), path.to_path_buf());
+    registry.defer_textures(&name, &definition.textures, &dir, space_root);
+    Ok(())
 }
 
 pub fn load_material_definition(path: &Path) -> Result<MaterialDefinition, String> {
@@ -706,13 +810,29 @@ pub fn build_standard_material(
     mat
 }
 
+/// [`texture_source_in`] for a Space read from its folder.
+#[cfg(test)]
+fn texture_source(
+    mat_toml_dir: &Path,
+    relative_path: &str,
+    space_root: &Path,
+    bundled_root: &Path,
+) -> Result<(PathBuf, String), String> {
+    texture_source_in(None, mat_toml_dir, relative_path, space_root, bundled_root)
+}
+
 /// The file a material's texture path names, and its asset path: 1. relative
 /// to the .mat.toml directory, inside the Space (`space://...`), else 2. in the
 /// bundled library (`bundled://materials/textures/brick_base_color.png`). A
 /// path is the Space's own: one that leaves its folder (`..`, a drive or share,
 /// a `:`) or reaches out through a link is refused (`space_paths`). The `Err`
-/// is the warning to log.
-fn texture_source(
+/// is the warning to log. The Space's files are read from `space` when its
+/// shell gave one (the browser Player's records), else from its folder. A
+/// browser cannot look in the bundled library, so there a map the Space does
+/// not hold is named in the library unseen, and its reader answers when the
+/// map is read.
+fn texture_source_in(
+    space: Option<&dyn SpaceSource>,
     mat_toml_dir: &Path,
     relative_path: &str,
     space_root: &Path,
@@ -722,41 +842,47 @@ fn texture_source(
         return Err(format!("Texture path {relative_path:?} leaves its folder; not loaded"));
     };
     let in_space = mat_toml_dir.join(&rel);
-    if in_space.exists() && crate::space_paths::is_within(&in_space, space_root) {
-        let asset_path = match in_space.strip_prefix(space_root) {
-            Ok(inside) => format!("space://{}", inside.to_string_lossy().replace('\\', "/")),
-            Err(_) => in_space.to_string_lossy().into_owned(),
+    if let Ok(inside) = in_space.strip_prefix(space_root) {
+        let inside = inside.to_string_lossy().replace('\\', "/");
+        let found = match space {
+            Some(space) => space.exists(&inside),
+            None => in_space.exists() && crate::space_paths::is_within(&in_space, space_root),
         };
-        return Ok((in_space, asset_path));
+        if found {
+            return Ok((in_space, format!("space://{inside}")));
+        }
     }
     let bundled = bundled_root.join(&rel);
-    if bundled.exists() && crate::space_paths::is_within(&bundled, bundled_root) {
+    let in_library = cfg!(target_arch = "wasm32")
+        || (bundled.exists() && crate::space_paths::is_within(&bundled, bundled_root));
+    if in_library {
         return Ok((bundled, format!("bundled://{rel}")));
     }
     Err(format!("Texture not found: {in_space:?} (not in space or bundled assets)"))
 }
 
 /// Load a material map relative to the .mat.toml directory (the Space), falling
-/// back to the bundled library (`common/assets/`). One image per file and
+/// back to the bundled library (`common/assets/`). One image per map URL and
 /// filtering kind, shared through `cache`.
 fn load_texture(
     asset_server: &AssetServer,
-    cache: &mut HashMap<(PathBuf, MapKind), Handle<Image>>,
+    cache: &mut HashMap<(String, MapKind), Handle<Image>>,
+    space: Option<&dyn SpaceSource>,
     mat_toml_dir: &Path,
     relative_path: &str,
     space_root: &Path,
     kind: MapKind,
 ) -> Option<Handle<Image>> {
-    let (disk, asset_path) = match texture_source(mat_toml_dir, relative_path, space_root, &eustress_common::assets_dir()) {
-        Ok(found) => found,
+    let url = match texture_source_in(space, mat_toml_dir, relative_path, space_root, &eustress_common::assets_dir()) {
+        Ok((_, url)) => url,
         Err(why) => {
             warn!("{why}");
             return None;
         }
     };
     let handle = cache
-        .entry((disk.clone(), kind))
-        .or_insert_with(|| load_image(asset_server, disk, asset_path, kind))
+        .entry((url.clone(), kind))
+        .or_insert_with(|| load_image(asset_server, url, kind))
         .clone();
     Some(handle)
 }
@@ -895,6 +1021,136 @@ mod tests {
         for bad in ["../../secret.png", "textures/../../../secret.png", absolute.as_str(), r"\\host\share\x.png", "textures/brick.png:zone"] {
             assert!(texture_source(&mats, bad, &space, &bundled).is_err(), "{bad:?}");
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A texture path resolves alike from the Space's folder and from its
+    /// records (the browser Player's): the same URL for a map both hold, the
+    /// bundled library's for one neither holds, the same refusals. What the
+    /// records hold, and only that, decides for the records.
+    #[test]
+    fn a_texture_resolves_alike_from_the_folder_and_its_records() {
+        let base = std::env::temp_dir().join(format!("eustress_texture_records_{}", std::process::id()));
+        let space = base.join("space");
+        let mats = space.join("MaterialService");
+        let bundled = base.join("bundled");
+        std::fs::create_dir_all(mats.join("textures")).unwrap();
+        std::fs::create_dir_all(bundled.join("materials")).unwrap();
+        std::fs::write(mats.join("textures/brick.png"), b"x").unwrap();
+        std::fs::write(mats.join("textures/folder_only.png"), b"x").unwrap();
+        std::fs::write(bundled.join("materials/stone.png"), b"x").unwrap();
+        let records = eustress_common::space_source::RecordsSource::new(vec![
+            ("MaterialService/Brick.mat.toml".to_string(), b"[material]\n".to_vec()),
+            ("MaterialService/textures/brick.png".to_string(), b"x".to_vec()),
+            ("MaterialService/textures/records_only.png".to_string(), b"x".to_vec()),
+        ]);
+        let url = |space_source: Option<&dyn SpaceSource>, rel: &str| {
+            texture_source_in(space_source, &mats, rel, &space, &bundled).map(|(_, url)| url)
+        };
+        for rel in ["textures/brick.png", "./textures//brick.png", "textures\\brick.png", "materials/stone.png", "textures/none.png"] {
+            assert_eq!(url(None, rel), url(Some(&records), rel), "{rel:?}");
+        }
+        assert_eq!(url(Some(&records), "textures/brick.png").unwrap(), "space://MaterialService/textures/brick.png");
+        assert_eq!(url(Some(&records), "materials/stone.png").unwrap(), "bundled://materials/stone.png");
+        assert_eq!(url(Some(&records), "textures/records_only.png").unwrap(), "space://MaterialService/textures/records_only.png");
+        assert!(url(None, "textures/records_only.png").is_err(), "the folder does not hold it");
+        assert_eq!(url(None, "textures/folder_only.png").unwrap(), "space://MaterialService/textures/folder_only.png");
+        assert!(url(Some(&records), "textures/folder_only.png").is_err(), "the records do not hold it");
+        for bad in ["../../secret.png", "textures/../../../secret.png", r"\\host\share\x.png", "textures/brick.png:zone"] {
+            assert!(url(Some(&records), bad).is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A Space's material files list alike from its folder and from its
+    /// records: nested folders walked, hidden files and folders and other
+    /// files skipped, in path order (a folder before a longer name that
+    /// starts with it).
+    #[test]
+    fn a_spaces_material_files_list_alike_from_its_folder_and_its_records() {
+        let space = std::env::temp_dir().join(format!("eustress_material_files_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        let mut records = Vec::new();
+        for rel in [
+            "MaterialService/Brick.mat.toml",
+            "MaterialService/A b/Moss.mat.toml",
+            "MaterialService/A/Sand.mat.toml",
+            "MaterialService/.hidden.mat.toml",
+            "MaterialService/.cache/Old.mat.toml",
+            "MaterialService/textures/brick.png",
+            "Workspace/Stray.mat.toml",
+        ] {
+            let file = space.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"[material]\n").unwrap();
+            records.push((rel.to_string(), b"[material]\n".to_vec()));
+        }
+        let (from_records, problems) = source_material_files(&eustress_common::space_source::RecordsSource::new(records));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            from_records,
+            ["MaterialService/A/Sand.mat.toml", "MaterialService/A b/Moss.mat.toml", "MaterialService/Brick.mat.toml"]
+        );
+        assert_eq!(source_material_files(&eustress_common::space_source::DiskSource::new(&space)), (from_records.clone(), vec![]));
+        assert_eq!(
+            disk_material_files(&space),
+            (from_records.iter().map(|rel| space.join(rel)).collect::<Vec<_>>(), vec![])
+        );
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// A material folder that cannot be listed is named among the problems
+    /// while the rest still list; a Space with no MaterialService reports
+    /// nothing. Alike from the folder and from the records.
+    #[test]
+    fn an_unlistable_material_folder_is_reported_and_a_missing_one_is_not() {
+        use eustress_common::space_source::{DiskSource, RecordsSource, SourceEntry};
+        /// Records whose `MaterialService/Locked` folder refuses to list.
+        struct Locked(RecordsSource);
+        impl SpaceSource for Locked {
+            fn read(&self, rel: &str) -> std::io::Result<Vec<u8>> {
+                self.0.read(rel)
+            }
+            fn list(&self, rel_dir: &str) -> std::io::Result<Vec<SourceEntry>> {
+                if rel_dir == "MaterialService/Locked" {
+                    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked"));
+                }
+                self.0.list(rel_dir)
+            }
+            fn exists(&self, rel: &str) -> bool {
+                self.0.exists(rel)
+            }
+            fn is_fjall(&self) -> bool {
+                false
+            }
+        }
+        let record = |rel: &str| (rel.to_string(), b"[material]\n".to_vec());
+        let locked = Locked(RecordsSource::new(vec![
+            record("MaterialService/Brick.mat.toml"),
+            record("MaterialService/Locked/Moss.mat.toml"),
+        ]));
+        let (files, problems) = source_material_files(&locked);
+        assert_eq!(files, ["MaterialService/Brick.mat.toml"], "the rest still list");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("MaterialService/Locked"), "the folder is named: {}", problems[0]);
+
+        let none = source_material_files(&RecordsSource::new(vec![record("Workspace/Part.toml")]));
+        assert_eq!(none, (vec![], vec![]), "no MaterialService, nothing to report");
+        let (files, problems) = source_material_files(&RecordsSource::new(vec![record("MaterialService")]));
+        assert!(files.is_empty() && problems.len() == 1, "a file where the folder belongs: {problems:?}");
+
+        let base = std::env::temp_dir().join(format!("eustress_material_list_errors_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (bare, odd) = (base.join("bare"), base.join("odd"));
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&odd).unwrap();
+        std::fs::write(odd.join("MaterialService"), b"not a folder").unwrap();
+        assert_eq!(disk_material_files(&bare), (vec![], vec![]), "no MaterialService on disk");
+        assert_eq!(source_material_files(&DiskSource::new(&bare)), (vec![], vec![]));
+        let (files, problems) = disk_material_files(&odd);
+        assert!(files.is_empty() && problems.len() == 1, "a file where the folder belongs: {problems:?}");
+        let (files, problems) = source_material_files(&DiskSource::new(&odd));
+        assert!(files.is_empty() && problems.len() == 1, "{problems:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1077,6 +1333,7 @@ impl MaterialRegistry {
             &pending.refs,
             asset_server,
             &mut self.texture_cache,
+            self.space_source.as_deref(),
             &pending.mat_toml_dir,
             &pending.space_root,
         );
@@ -1089,12 +1346,14 @@ impl MaterialRegistry {
 /// Load `tex`'s maps and attach them to `mat`. Colour maps (base colour,
 /// emissive) are sRGB; every data map (normal, metallic/roughness,
 /// occlusion, depth) is linear, and each is mip-filtered the way its data
-/// needs (see [`MapKind`]).
+/// needs (see [`MapKind`]). `space`: where the Space's files are read from
+/// when its shell gave a source, `None` for its folder.
 pub fn attach_material_textures(
     mat: &mut StandardMaterial,
     tex: &TextureProperties,
     asset_server: &AssetServer,
-    cache: &mut HashMap<(PathBuf, MapKind), Handle<Image>>,
+    cache: &mut HashMap<(String, MapKind), Handle<Image>>,
+    space: Option<&dyn SpaceSource>,
     mat_toml_dir: &Path,
     space_root: &Path,
 ) {
@@ -1102,7 +1361,7 @@ pub fn attach_material_textures(
         if path.is_empty() {
             return None;
         }
-        load_texture(asset_server, cache, mat_toml_dir, path, space_root, kind)
+        load_texture(asset_server, cache, space, mat_toml_dir, path, space_root, kind)
     };
     if let Some(h) = load(&tex.base_color, MapKind::Color) {
         mat.base_color_texture = Some(h);
@@ -1145,15 +1404,19 @@ fn material_sampler() -> ImageSampler {
 /// * Mips: PNG and the other formats the `image` crate decodes arrive as a
 ///   single level, and Bevy builds none, so a map would be sampled at its
 ///   full 2048² at every distance: shimmer, moiré, and a texel cache thrashed
-///   by far-away surfaces. These are decoded on the IO pool and given a chain
-///   built for their [`MapKind`]. KTX2/DDS/Basis carry their own chain and go
-///   through Bevy's loader.
+///   by far-away surfaces. These are read and decoded on the IO pool and
+///   given a chain built for their [`MapKind`]. KTX2/DDS/Basis carry their
+///   own chain and go through Bevy's loader.
+/// * Bytes: read through the asset server's own source for the map's URL
+///   (`space://`, `bundled://`), the reader each shell registered, so a
+///   map reads alike from a folder and from the browser Player's records,
+///   and every shell builds the same chain from it.
 /// * `asset_usage = RENDER_WORLD`: no decoded copy stays in `Assets<Image>`
 ///   after upload (16 MB of RAM per 2048² map that nothing reads again).
 /// * The sampler is set here because a `RENDER_WORLD`-only image is never in
 ///   `Assets<Image>` for anything to patch afterwards.
-fn load_image(asset_server: &AssetServer, disk: PathBuf, asset_path: String, kind: MapKind) -> Handle<Image> {
-    let ext = disk
+fn load_image(asset_server: &AssetServer, url: String, kind: MapKind) -> Handle<Image> {
+    let ext = Path::new(&url)
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
@@ -1167,18 +1430,38 @@ fn load_image(asset_server: &AssetServer, disk: PathBuf, asset_path: String, kin
                 s.asset_usage = RenderAssetUsages::RENDER_WORLD;
                 s.sampler = material_sampler();
             })
-            .load(asset_path);
+            .load(url);
     }
-    asset_server.add_async(async move {
-        Ok::<Image, std::convert::Infallible>(decode_with_mips(&disk, &ext, kind))
-    })
+    // The read runs in a task of its own: a source's reader future is not
+    // `Send` in a browser, which `add_async` asks of its future, while the
+    // task holding it is.
+    let server = asset_server.clone();
+    let task = bevy::tasks::IoTaskPool::get().spawn(async move {
+        let bytes = read_asset_bytes(&server, &url).await;
+        decode_with_mips(bytes, &url, &ext, kind)
+    });
+    asset_server.add_async(async move { Ok::<Image, std::convert::Infallible>(task.await) })
 }
 
-/// Decode `disk` and append its mip chain. A file that cannot be read or
-/// decoded becomes a single neutral texel, so the material still renders
-/// (untextured) instead of waiting forever on an image that never arrives.
-fn decode_with_mips(disk: &Path, ext: &str, kind: MapKind) -> Image {
-    let decoded = std::fs::read(disk).map_err(|e| e.to_string()).and_then(|bytes| {
+/// The bytes of the file an asset URL names, read through the asset server's
+/// own source for it.
+async fn read_asset_bytes(server: &AssetServer, url: &str) -> Result<Vec<u8>, String> {
+    let path = bevy::asset::AssetPath::try_parse(url).map_err(|e| e.to_string())?;
+    let source = server.get_source(path.source().clone()).map_err(|e| e.to_string())?;
+    let mut reader = source.reader().read(path.path()).await.map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    bevy::asset::io::Reader::read_to_end(&mut *reader, &mut bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// Decode a map's bytes and append its mip chain. A map that could not be
+/// read or decoded becomes a single neutral texel, so the material still
+/// renders (untextured) instead of waiting forever on an image that never
+/// arrives. `url` names it in the log.
+fn decode_with_mips(bytes: Result<Vec<u8>, String>, url: &str, ext: &str, kind: MapKind) -> Image {
+    let decoded = bytes.and_then(|bytes| {
         Image::from_buffer(
             &bytes,
             ImageType::Extension(ext),
@@ -1192,7 +1475,7 @@ fn decode_with_mips(disk: &Path, ext: &str, kind: MapKind) -> Image {
     let mut image = match decoded {
         Ok(image) => image,
         Err(e) => {
-            warn!("Material map {:?} could not be decoded ({}); using a neutral texel", disk, e);
+            warn!("Material map {} could not be decoded ({}); using a neutral texel", url, e);
             return neutral_texel(kind);
         }
     };

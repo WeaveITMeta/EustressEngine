@@ -3,14 +3,20 @@
 //! An ImageLabel's or ImageButton's `Image`, decoded once and kept for the
 //! billboard and HUD rasterizer. A path is `space://` inside the open Space, or
 //! relative to the Space's folder ([`crate::apply::PlayAssetRoot`]); one that
-//! leaves the Space is never read ([`crate::space_paths`]).
+//! leaves the Space is never read ([`crate::space_paths`]). A shell whose
+//! Space is not a folder on this computer (the browser Player, which holds
+//! its records) hands its files over as a [`PlaySpaceSource`], and images
+//! are read from there.
 //! A content id this machine holds no file for (`rbxassetid://...`) draws the
 //! rasterizer's placeholder.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::prelude::*;
+use eustress_common::play_session::PlaySpaceSource;
+use eustress_common::space_source::{FileStamp, SpaceSource};
 use tiny_skia::{IntSize, Pixmap};
 
 /// Decoded GUI images by file. A file that failed to load is remembered as
@@ -21,19 +27,17 @@ use tiny_skia::{IntSize, Pixmap};
 pub struct GuiImages {
     decoded: HashMap<PathBuf, Cached>,
     generation: u64,
+    /// Where the Space's files are read from: the shell's source, or `None`
+    /// for its folder on this computer.
+    source: Option<Arc<dyn SpaceSource>>,
 }
 
 /// One file's image, and the file as it was when it was read.
 struct Cached {
     stamp: Option<FileStamp>,
     image: Option<Pixmap>,
-}
-
-/// A file's size and modification time: when either moves, it was rewritten.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
+    /// Its path in the Space, when it was read through a source.
+    rel: Option<String>,
 }
 
 fn stamp(path: &Path) -> Option<FileStamp> {
@@ -45,14 +49,18 @@ impl GuiImages {
     /// The image an element names, decoded the first time it is asked for.
     pub fn get(&mut self, image: &str, space_root: &Path) -> Option<&Pixmap> {
         let path = resolve(image, space_root)?;
+        let source = self.source.clone();
         self.decoded
             .entry(path)
-            .or_insert_with_key(|p| {
-                // Through a link or junction, the file may still be elsewhere.
-                if !crate::space_paths::is_within(p, space_root) {
-                    return Cached { stamp: stamp(p), image: None };
+            .or_insert_with_key(|p| match source {
+                Some(source) => read_through(&*source, p, space_root),
+                None => {
+                    // Through a link or junction, the file may still be elsewhere.
+                    if !crate::space_paths::is_within(p, space_root) {
+                        return Cached { stamp: stamp(p), image: None, rel: None };
+                    }
+                    Cached { stamp: stamp(p), image: decode(p), rel: None }
                 }
-                Cached { stamp: stamp(p), image: decode(p) }
             })
             .image
             .as_ref()
@@ -62,7 +70,11 @@ impl GuiImages {
     /// read, so it is read again when next drawn. Returns whether any did.
     pub fn refresh(&mut self) -> bool {
         let before = self.decoded.len();
-        self.decoded.retain(|path, cached| stamp(path) == cached.stamp);
+        let source = self.source.clone();
+        self.decoded.retain(|path, cached| match (&source, &cached.rel) {
+            (Some(source), Some(rel)) => source.stamp(rel) == cached.stamp,
+            _ => stamp(path) == cached.stamp,
+        });
         let changed = self.decoded.len() != before;
         if changed {
             self.generation = self.generation.wrapping_add(1);
@@ -75,13 +87,42 @@ impl GuiImages {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Read the Space's files through `source` from now on (`None`: its
+    /// folder on this computer). Every image read the other way is let go
+    /// of, so none stays drawn from the other place. Returns whether the
+    /// source changed.
+    pub fn read_from(&mut self, source: Option<Arc<dyn SpaceSource>>) -> bool {
+        let same = match (&self.source, &source) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        if same {
+            return false;
+        }
+        self.source = source;
+        self.decoded.clear();
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
 }
 
 /// How often the GUI image files are looked at again, seconds.
 const REFRESH_EVERY_S: f32 = 1.0;
 
-/// Look at the GUI image files about once a second (a `stat` per cached file).
-pub fn refresh_gui_images(time: Res<Time>, mut since: Local<f32>, mut images: ResMut<GuiImages>) {
+/// Read the GUI images from where the shell keeps the Space's files (its
+/// [`PlaySpaceSource`], else the folder), and look at those files again
+/// about once a second (a `stat` per cached file).
+pub fn refresh_gui_images(
+    time: Res<Time>,
+    mut since: Local<f32>,
+    source: Option<Res<PlaySpaceSource>>,
+    mut images: ResMut<GuiImages>,
+) {
+    if images.bypass_change_detection().read_from(source.map(|s| s.0.clone())) {
+        images.set_changed();
+    }
     *since += time.delta_secs();
     if *since < REFRESH_EVERY_S {
         return;
@@ -96,10 +137,25 @@ fn resolve(image: &str, space_root: &Path) -> Option<PathBuf> {
     crate::space_paths::contained_file(image, space_root)
 }
 
+/// An image read through the shell's source, by its path in the Space.
+fn read_through(source: &dyn SpaceSource, path: &Path, space_root: &Path) -> Cached {
+    let Ok(rel) = path.strip_prefix(space_root) else {
+        return Cached { stamp: None, image: None, rel: None };
+    };
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let image = source.read(&rel).ok().and_then(|bytes| decode_bytes(&bytes, path));
+    Cached { stamp: source.stamp(&rel), image, rel: Some(rel) }
+}
+
 /// A file decoded to a premultiplied pixmap, the form tiny-skia draws.
 fn decode(path: &Path) -> Option<Pixmap> {
     let bytes = std::fs::read(path).ok()?;
-    let rgba = match image::load_from_memory(&bytes) {
+    decode_bytes(&bytes, path)
+}
+
+/// [`decode`] for a file's bytes; `path` names it in the log.
+fn decode_bytes(bytes: &[u8], path: &Path) -> Option<Pixmap> {
+    let rgba = match image::load_from_memory(bytes) {
         Ok(img) => img.to_rgba8(),
         Err(e) => {
             warn!("GUI image {} could not be decoded: {e}", path.display());
@@ -147,6 +203,34 @@ mod tests {
         assert_eq!(images.generation(), 1);
         assert!(images.get("logo.png", &dir).is_some(), "and drawn");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shell that holds its Space as records (the browser Player) has its
+    /// images read from them, and records never change. Changing where the
+    /// files come from lets go of every image read from the other place.
+    #[test]
+    fn an_image_reads_from_the_shells_source() {
+        let png = {
+            let mut bytes = Vec::new();
+            image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .unwrap();
+            bytes
+        };
+        let records: Arc<dyn SpaceSource> =
+            Arc::new(eustress_common::space_source::RecordsSource::new(vec![("Assets/logo.png".to_string(), png)]));
+        let root = Path::new("/no such space");
+        let mut images = GuiImages::default();
+        assert!(images.get("Assets/logo.png", root).is_none(), "no such folder on this computer");
+        assert!(images.read_from(Some(records.clone())), "now read from the records");
+        assert_eq!(images.generation(), 1);
+        assert!(images.get("Assets/logo.png", root).is_some(), "drawn from the records");
+        assert!(images.get("space://Assets/logo.png", root).is_some());
+        assert!(images.get("Assets/missing.png", root).is_none());
+        assert!(!images.read_from(Some(records)), "the same source");
+        assert!(!images.refresh(), "records never change");
+        assert!(images.read_from(None), "back to the folder");
+        assert!(images.get("Assets/logo.png", root).is_none(), "which has none");
     }
 
     #[test]

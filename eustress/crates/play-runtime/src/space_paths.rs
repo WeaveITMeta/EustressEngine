@@ -13,14 +13,18 @@
 //! - [`is_within`] after resolving, so a junction inside the Space that
 //!   points elsewhere is refused too.
 //!
-//! And the Player reads `space://` through [`ContainedFileReader`], so a path
-//! that reaches the asset server some other way is checked once more where
-//! the file is opened. The rules are common's `space_path`, which Studio's
-//! `space://` reader applies too.
+//! And the desktop Player reads `space://` through [`ContainedFileReader`], so
+//! a path that reaches the asset server some other way is checked once more
+//! where the file is opened. The rules are common's `space_path`, which
+//! Studio's `space://` reader applies too. The browser Player has no file
+//! reader: its `space://` source holds only the Space's own records, so there
+//! is no outside to reach, and the reader is not built for wasm32.
 
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::asset::io::file::FileAssetReader;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::asset::io::{AssetReader, AssetReaderError, PathStream, Reader};
 
 pub use eustress_common::space_path::ALLOWED_SOURCES;
@@ -66,12 +70,14 @@ pub fn is_within(path: &Path, root: &Path) -> bool {
 /// local drive path only, judged by its text before anything is opened). A
 /// refused path reads as absent and names only the path asked for, so
 /// nothing tells a caller whether a file outside exists.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ContainedFileReader {
     root: PathBuf,
     absolute_roots: Vec<PathBuf>,
     inner: FileAssetReader,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ContainedFileReader {
     /// A reader over `root`, which need not exist yet (a joined world is
     /// written there once it arrives; until then every read is absent). A
@@ -110,6 +116,7 @@ impl ContainedFileReader {
 
 /// Bevy's sidecar for `path`: `Foo.glb` is `Foo.glb.meta`, `Foo` is
 /// `Foo.meta` (`bevy_asset::io::get_meta_path`, which is not public).
+#[cfg(not(target_arch = "wasm32"))]
 fn meta_path(path: &Path) -> PathBuf {
     let mut meta = path.to_path_buf();
     let mut ext = path.extension().unwrap_or_default().to_os_string();
@@ -121,6 +128,7 @@ fn meta_path(path: &Path) -> PathBuf {
     meta
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AssetReader for ContainedFileReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
         self.check(path)?;
@@ -219,6 +227,7 @@ mod tests {
 
     /// The Player's reader opens what is in its Space and nothing else, an
     /// absolute path to a file that exists included.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_players_reader_opens_only_its_space() {
         let base = std::env::temp_dir().join(format!("eustress_contained_reader_{}", std::process::id()));
@@ -238,6 +247,7 @@ mod tests {
 
     /// The default source opens its own folder and, by absolute path, only
     /// the roots it names (the enhancement cache); a share never.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn an_absolute_path_opens_only_inside_a_named_root() {
         let base = std::env::temp_dir().join(format!("eustress_absolute_roots_{}", std::process::id()));
@@ -259,6 +269,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_sidecar_is_named_as_bevy_names_it() {
         assert_eq!(meta_path(Path::new("Meshes/car.glb")), PathBuf::from("Meshes/car.glb.meta"));

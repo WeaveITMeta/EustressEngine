@@ -27,7 +27,7 @@ use avian3d::prelude::*;
 use eustress_common::{spawn_baseplate, spawn_welcome_cube};
 use eustress_common::services::TeamServicePlugin;
 use eustress_networking::JoinLink;
-use eustress_networking::join_link::{split_link_extras, LinkExtras};
+use eustress_networking::join_link::{parse_join_link, split_link_extras, LinkExtras};
 use plugins::{
     EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin,
     PauseMenuPlugin, ClientTerrainPlugin, CharacterAnimationPlugin,
@@ -79,17 +79,6 @@ fn player_link(arg: &str) -> Option<&str> {
 /// argument such as `--connect=<link>` must not put the link in a message.
 fn option_name(arg: &str) -> String {
     arg.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect()
-}
-
-/// [`JoinLink::parse`], whose errors can quote a link's address. Query text
-/// (a `ticket=`, `pin=` or `key=`) sits in that address when no `?` comes
-/// before it (`host:port&pin=..`), and [`split_link_extras`] takes out only
-/// what follows a `?`. So an error that holds `=` or `&` is replaced by one
-/// that quotes nothing.
-fn parse_join_link(text: &str) -> Result<JoinLink, String> {
-    JoinLink::parse(text).map_err(|e| {
-        if e.contains('=') || e.contains('&') { "this link is malformed".to_string() } else { e }
-    })
 }
 
 /// How the Player was launched. Not `Clone`: a join can carry the ticket a
@@ -501,12 +490,48 @@ pub fn build_app(launch: Launch) -> App {
     app
 }
 
+/// A line for the terminal that started the Player, written so it can never
+/// panic. A release Player on Windows is a GUI program with no console of its
+/// own: a shell that captures its output and stops reading closes the pipe,
+/// and `println!` then panics ("The pipe is being closed", os error 232)
+/// before any message box or crash hook exists. So this first borrows the
+/// parent's console when there is one, then ignores a failed write.
+fn say(to_stderr: bool, text: &str) {
+    use std::io::Write;
+    attach_parent_console();
+    let _ = if to_stderr { writeln!(std::io::stderr(), "{text}") } else { writeln!(std::io::stdout(), "{text}") };
+}
+
+/// Windows release builds: attach to the console of the terminal that started
+/// the Player, so `--version` or a refused link shows there. It fails quietly
+/// when there is none (a browser or Explorer started it), and a handle the
+/// shell redirected to a file or pipe is left as it is.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    /// `ATTACH_PARENT_PROCESS`, `(DWORD)-1`.
+    const PARENT: u32 = u32::MAX;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: AttachConsole takes a plain value and changes only this
+    // process's console attachment; its failure is not an error here.
+    ONCE.call_once(|| unsafe {
+        AttachConsole(PARENT);
+    });
+}
+
+/// Elsewhere the Player already has its terminal (or none to find).
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_parent_console() {}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Not a way to launch, so it never reaches `Launch`. The release pipeline
     // checks this against the tag it builds.
     if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("eustress-client {}", env!("CARGO_PKG_VERSION"));
+        say(false, &format!("eustress-client {}", env!("CARGO_PKG_VERSION")));
         return;
     }
     // `--api-url`: before anything reads the API base, which is read once.
@@ -516,7 +541,7 @@ fn main() {
     let launch = match Launch::from_args(&args) {
         Ok(launch) => launch,
         Err(e) => {
-            eprintln!("eustress-client: {e}\n\n{USAGE}");
+            say(true, &format!("eustress-client: {e}\n\n{USAGE}"));
             // A release Player has no console, so the reason would go nowhere:
             // show it in plain words (C3).
             if !cfg!(debug_assertions) {
@@ -533,7 +558,7 @@ fn main() {
     // minted or connected. A link never sets the API; only `--api-url` above
     // does (docs/networking/PLAYER_JOIN_TICKET.md).
     if let Err(why) = launch.check_api(eustress_common::api_base::api_base()) {
-        eprintln!("eustress-client: {why}");
+        say(true, &format!("eustress-client: {why}"));
         if !cfg!(debug_assertions) {
             show_message("Eustress Player could not open this link", &why);
         }

@@ -101,6 +101,46 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
 fi
 
+# The system libraries the Player needs. libasound is linked, so without it
+# the Player does not start at all; the window and GPU libraries are loaded at
+# run time, and a missing one stops the Player as it opens its window (for
+# example libxkbcommon-x11 on an X11 desktop). Each name is followed by its
+# Debian and Ubuntu package. Missing ones are reported, not installed.
+LDCONFIG="$(command -v ldconfig || echo /sbin/ldconfig)"
+missing=""
+need() {  # need <soname> <package>
+    if [ -x "$LDCONFIG" ] && ! "$LDCONFIG" -p 2>/dev/null | grep -q "[[:space:]]$1 "; then
+        missing="$missing $2"
+        echo "  MISSING: $1 (package $2)"
+    fi
+}
+need libasound.so.2 libasound2
+need libxkbcommon.so.0 libxkbcommon0
+need libvulkan.so.1 libvulkan1
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    need libwayland-client.so.0 libwayland-client0
+    need libwayland-cursor.so.0 libwayland-cursor0
+else
+    need libxkbcommon-x11.so.0 libxkbcommon-x11-0
+    need libX11.so.6 libx11-6
+    need libX11-xcb.so.1 libx11-xcb1
+    need libXcursor.so.1 libxcursor1
+    need libXi.so.6 libxi6
+    need libXrandr.so.2 libxrandr2
+fi
+if [ -n "$missing" ]; then
+    echo ""
+    echo "NOTE: the Player needs the libraries above. On Debian or Ubuntu:"
+    echo "  sudo apt install$missing"
+    echo "(Ubuntu 24.04 and later name libasound2 libasound2t64.) Other"
+    echo "distributions ship the same libraries under their own package names."
+fi
+if ! command -v zenity &> /dev/null; then
+    echo ""
+    echo "NOTE: zenity is not installed, so the Player cannot show its error"
+    echo "messages in a window; they go to its log and the terminal instead."
+fi
+
 echo ""
 echo "Eustress Player installed. Open an eustress-player:// link, launch it from"
 echo "your application menu, or run:"

@@ -84,19 +84,6 @@ struct PendingAvatar {
     root: Option<std::path::PathBuf>,
 }
 
-/// The Space's `Players.CharacterAutoLoads`, read as Studio reads it from
-/// `Players/_service.toml` (`character_auto_loads`, in `[properties]`, at the
-/// top level, or in `[service]`, the first of those winning): on unless the
-/// Space turns it off. Off, nobody gets a body; a paddle game is played
-/// through its camera and input alone.
-fn character_auto_loads(space_root: &std::path::Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(space_root.join("Players").join("_service.toml")) else { return true };
-    let Ok(doc) = text.parse::<toml::Table>() else { return true };
-    let pick = |t: &toml::Table| t.get("character_auto_loads").or_else(|| t.get("CharacterAutoLoads")).and_then(toml::Value::as_bool);
-    let section = |name: &str| doc.get(name).and_then(toml::Value::as_table).and_then(|t| pick(t));
-    section("properties").or_else(|| pick(&doc)).or_else(|| section("service")).unwrap_or(true)
-}
-
 pub struct NetPlayPlugin;
 
 impl Plugin for NetPlayPlugin {
@@ -188,7 +175,9 @@ fn spawn_avatar_in_opened_world(
     if *frames < SETTLE_FRAMES || !terrain_ready {
         return;
     }
-    if pending.root.as_deref().map_or(true, character_auto_loads) {
+    // The Space's `Players.CharacterAutoLoads`, by Studio's rule: off, nobody
+    // gets a body, and a paddle game is played through its camera and input.
+    if pending.root.as_deref().map_or(true, eustress_common::play_session::space_character_auto_loads) {
         let token = super::commerce::auth_token();
         // A host placed a joined player in metres, so its position stands. A
         // published world has no host: its place is the Space's own

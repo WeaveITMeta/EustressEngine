@@ -30,11 +30,11 @@ use bevy::render::render_phase::{
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
     Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
-    DepthStencilState, FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
-    RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines,
-    TextureFormat, VertexState,
+    DepthStencilState, DownlevelFlags, FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode,
+    PrimitiveState, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline,
+    SpecializedRenderPipelines, TextureFormat, VertexState,
 };
-use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderAdapter, RenderDevice, RenderQueue};
 use bevy::render::sync_world::{MainEntity, RenderEntity, SyncToRenderWorld};
 use bevy::render::view::{ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
@@ -426,8 +426,22 @@ impl Plugin for ParticleRenderPlugin {
         app.insert_resource(ParticleCloudShader(shader.clone()))
             .add_systems(PostUpdate, sync_particle_clouds_to_render_world);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
+        render_app.insert_resource(ParticleCloudShader(shader));
+    }
+
+    /// The draw is set up here, once the GPU is known. A GPU that cannot read
+    /// a storage buffer in the vertex stage (WebGL2, some GL drivers) gets no
+    /// particle pipeline, buffers or draw: its simulations still run and are
+    /// not drawn, where building the pipeline would stop the app on a wgpu
+    /// validation error.
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
+        if !vertex_storage_supported(render_app.world()) {
+            warn!("particles: this GPU cannot read storage buffers in the vertex stage, so particle simulations run without being drawn");
+            return;
+        }
         render_app
-            .insert_resource(ParticleCloudShader(shader))
+            .init_resource::<ParticleCloudPipeline>()
             .init_resource::<SpecializedRenderPipelines<ParticleCloudPipeline>>()
             .add_render_command::<Transparent3d, DrawParticleCloud>()
             .add_systems(ExtractSchedule, extract_particle_clouds)
@@ -440,10 +454,15 @@ impl Plugin for ParticleRenderPlugin {
                 ),
             );
     }
+}
 
-    fn finish(&self, app: &mut App) {
-        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.init_resource::<ParticleCloudPipeline>();
-        }
-    }
+/// Whether the render world's GPU reads storage buffers in the vertex stage,
+/// which the particle shader does (the cloud's instances). Bevy asks the same
+/// way of its own GPU features (`GpuPreprocessingSupport`).
+fn vertex_storage_supported(world: &World) -> bool {
+    let (Some(device), Some(adapter)) = (world.get_resource::<RenderDevice>(), world.get_resource::<RenderAdapter>()) else {
+        return false;
+    };
+    device.limits().max_storage_buffers_per_shader_stage >= 1
+        && adapter.get_downlevel_capabilities().flags.contains(DownlevelFlags::VERTEX_STORAGE)
 }

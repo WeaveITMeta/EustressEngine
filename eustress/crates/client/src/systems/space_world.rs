@@ -19,9 +19,11 @@
 //!
 //! A Space opened on this computer spawns its parts straight from its files
 //! (`space_read`). A world that arrived from a host, or as a published
-//! simulation, is read into a DataModel tree instead (`tree_read`), set up
-//! by `play_session::begin_session` as Studio's Play sets up its own, and
-//! inserted as the session's `PlayDataModel` with its [`SceneKeys`]; the
+//! simulation, is opened as a DataModel tree instead
+//! (`tree_read::open_player_world_dir`; the browser Player opens its records
+//! with `open_player_world`), its session begun as Studio's Play begins its
+//! own, and inserted as the session's `PlayDataModel` with its
+//! [`SceneKeys`]; the
 //! Play runtime Studio shares draws it as a replica. The tree is where
 //! replication writes, so the host's changes reach the screen, and each
 //! part is drawn once.
@@ -59,9 +61,7 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use eustress_common::datamodel::{is_base_part, DataModel};
 use eustress_common::space_read::{read_space_parts, spawn_space_parts, SpawnedFromSpace};
-use eustress_common::play_session::{
-    begin_session, space_character_auto_loads, FromTree, PlayAssetRoot, PlayDataModel, SessionCamera, SessionStart,
-};
+use eustress_common::play_session::{FromTree, PlayAssetRoot, PlayDataModel};
 use eustress_play_runtime::material_registry::{register_space_materials, MaterialRegistry};
 
 use super::net_replica::SceneKeys;
@@ -388,44 +388,31 @@ fn open_space_at(
             (spawned, geo.skipped_total(), geo.spawn_point(), geo.errors.len())
         }
         PartSource::Tree { player_name } => {
-            let scene = match eustress_common::tree_read::read_space_dir(&root) {
-                Ok(scene) => scene,
+            // The tree with its session begun as Studio's Play begins its
+            // own: the local Player (which replication maps the host's
+            // Player for this peer onto), the Space's camera, gravity and
+            // CharacterAutoLoads. The browser Player opens its records the
+            // same way.
+            let world = match eustress_common::tree_read::open_player_world_dir(&root, player_name) {
+                Ok(world) => world,
                 Err(e) => {
                     error!("space: {} failed to open — {e}", root.display());
                     return None;
                 }
             };
-            info!("space: {} read into its tree: {}", root.display(), scene.report.summary());
-            for problem in &scene.report.problems {
+            info!("space: {} read into its tree: {}", root.display(), world.report.summary());
+            for problem in &world.report.problems {
                 warn!("space: {problem}");
             }
-            let parts = tree_parts(&scene.dm);
-            // The session, set up as Studio's Play sets up its own: the local
-            // Player (which replication maps the host's Player for this peer
-            // onto), the Space's camera, gravity and CharacterAutoLoads.
-            let mut dm = scene.dm;
-            let me = match dm.local_player.filter(|p| dm.exists(*p)) {
-                Some(me) => me,
-                None => {
-                    let players = dm.get_service("Players");
-                    dm.create_virtual("Player", player_name, players)
-                }
-            };
-            let start = SessionStart {
-                camera: SessionCamera::SpaceOrFresh,
-                gravity,
-                character_auto_loads: space_character_auto_loads(&root),
-            };
-            begin_session(&mut dm, me, &start);
-            let spawn = eustress_common::space_read::tree_spawn_point(&dm);
+            let parts = tree_parts(&world.dm);
             let shared = eustress_common::datamodel::new_shared();
-            *shared.lock() = dm;
+            *shared.lock() = world.dm;
             // Replication binds the tree by these keys; the draw step draws it
             // from the next frame, its MeshIds relative to this folder.
-            commands.insert_resource(SceneKeys(scene.keys));
+            commands.insert_resource(SceneKeys(world.keys));
             commands.insert_resource(PlayDataModel { dm: shared });
             commands.insert_resource(PlayAssetRoot(root.clone()));
-            (parts, 0, spawn, scene.report.problems.len())
+            (parts, 0, world.spawn, world.report.problems.len())
         }
     };
 
