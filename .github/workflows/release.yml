@@ -101,7 +101,14 @@ jobs:
   build-windows:
     needs: version
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+    env:
+      # The engine crate is the largest compile in the workspace. With thin LTO
+      # and parallel jobs, rustc ran the 16 GB runner out of memory
+      # (STATUS_STACK_BUFFER_OVERRUN after "memory allocation ... failed").
+      # Linux takes the same two settings for the same reason.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
