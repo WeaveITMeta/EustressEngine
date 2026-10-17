@@ -1281,15 +1281,19 @@ export async function alertStaffLegalReport(env, facts) {
 /// daily while it stands. `facts`: reference, case_kind, case_id, report_kind, reason, since, stuck_at, alerts, admin_url.
 /// Never the content, the account or an address.
 export async function alertStaffStuckReport(env, facts) {
-  return alertStaff(env, 'staff_legal_stuck', facts, { required: false, alertId: `legal-stuck:${facts?.case_kind}:${facts?.case_id}:${facts?.stuck_at}:${facts?.alerts ?? 1}` });
+  return alertStaff(env, 'staff_legal_stuck', facts, { required: false, alertId: `legal-stuck:${facts?.case_kind}:${facts?.case_id}:${facts?.report_kind || 'unknown'}:${facts?.stuck_at}:${facts?.alerts ?? 1}` });
 }
 
 /// A case now owes a legal report its try could not write (src/legal_reports.mjs alertReportOwed), on this module's staff alert
 /// path, once when the debt is created. `facts`: reference, case_kind, case_id, category, reason, since, admin_url. Never the
 /// content, the account or an address.
 export async function alertStaffReportOwed(env, facts) {
-  return alertStaff(env, 'staff_legal_owed', facts, { required: false, alertId: `legal-owed:${facts?.case_kind}:${facts?.case_id}:${facts?.since || 'unknown'}` });
+  return alertStaff(env, 'staff_legal_owed', facts, { required: false, alertId: `legal-owed:${facts?.case_kind}:${facts?.case_id}:${facts?.category || 'unknown'}:${facts?.since || 'unknown'}` });
 }
+
+/// The alert id of a case's failing-step alert: the case, the steps still owed and the UTC day, so a mail outage leaves one
+/// entry a day per case and failing state on the over-cap list (src/staff_alerts.mjs), not one an hour.
+export const staffFailureAlertId = (rec, nowMs = Date.now()) => `staff-failure:${rec.id}:${[...(rec.pending || [])].sort().join(',')}:${new Date(nowMs).toISOString().slice(0, 10)}`;
 
 function staffFacts(rec, ctx) {
   return {
@@ -1487,9 +1491,10 @@ export function renderMail(kind, d) {
       });
     case 'staff_digest':
       return mail({
-        subject: `Staff alerts past the day's allowance: ${d.total}${d.at_least ? ' or more' : ''} waiting`, heading: 'Staff alerts past the allowance', label: 'Staff Notice',
+        subject: `Staff alerts waiting: ${d.total}${d.at_least ? ' or more' : ''} (past the day's allowance or after a failed send)`, heading: 'Staff alerts not sent one by one', label: 'Staff Notice',
         paragraphs: [
           `${d.total}${d.at_least ? ' or more' : ''} staff alert(s) for this address were not sent one by one: past the day's allowance, or a send that failed. Each is named below by its kind and reference; open the queue for the case.`,
+          `Named here: ${(d.entries || []).filter((e) => !e.reason || e.reason === 'daily_cap').length} past the day's allowance, ${(d.entries || []).filter((e) => e.reason && e.reason !== 'daily_cap').length} after a failed send.`,
           ...(d.more ? [`${d.more} more are waiting and are named in the next digest, within the hour.`] : []),
         ],
         rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}${e.reason && e.reason !== 'daily_cap' ? ', after its send failed' : ''}`]),
@@ -1500,7 +1505,7 @@ export function renderMail(kind, d) {
       return mail({
         subject: `Staff alerts undelivered for ${hours} hours: ${d.overdue}${d.at_least ? ' or more' : ''} past 24 hours`, heading: 'Staff alerts are not being delivered', label: 'Staff Notice',
         paragraphs: [
-          "Staff alerts past the day's allowance wait on a queue for the hourly digest, and at least one has waited more than 24 hours: the digest is not being sent. A required alert on the queue is not counted as delivered, so its step is still owed.",
+          "Staff alerts that were not sent (past the day's allowance, or after a failed send) wait on a queue for the hourly digest, and at least one has waited more than 24 hours: the digest is not being sent. A required alert on the queue is not counted as delivered, so its step is still owed.",
           'Check the mail binding. Entries are kept 30 days; this alert is sent once a day while any has waited past 24 hours. It names counts and kinds only, never a case.',
           `The queue's state, with an administrator session: ${d.admin_url}.`,
         ],
@@ -1589,7 +1594,7 @@ async function fileRequest(request, url, env, cors, deps) {
   await saveTakedown(env, rec, 'received');
   if (ctx.locksWritten) await refreshServingCaches(env, ctx);
   // A removal step that failed is the one thing staff must hear about now; the rest is retried by the sweep first.
-  if (rec.pending.some(LOCK_STEP)) await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }).catch(() => {});
+  if (rec.pending.some(LOCK_STEP)) await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }, { alertId: staffFailureAlertId(rec) }).catch(() => {});
   try { await deps.auditLog?.(env, 'TAKEDOWN_RECEIVED', 'system', rec.reference, { case_id: rec.id, listings: rec.targets.length, removed_at: rec.removed_at, possible_csam: rec.possible_csam }); }
   catch (e) { console.error('takedown: the audit log write failed:', e?.message || e); }
 
@@ -1831,7 +1836,7 @@ async function sweepCases(env, deps, out, { cases, scanPages }) {
     const removalOwed = rec.pending.some(LOCK_STEP);
     if (removalOwed) out.removal_owed += 1;
     if (removalOwed || [3, 12, 24].includes(rec.attempts) || rec.attempts % 24 === 0) {
-      await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }).catch((e) => console.error('takedown: alert failed:', e?.message || e));
+      await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }, { alertId: staffFailureAlertId(rec) }).catch((e) => console.error('takedown: alert failed:', e?.message || e));
     }
   }
   ctx.open = new Map();

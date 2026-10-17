@@ -17,6 +17,7 @@ import { takeMailSlot, STAFF_ALERTS_PER_DAY } from '../src/mail_limits.mjs';
 import {
   staffQueueState, sendStaffAlert, sendStaffDigests, alertOverdueStaffQueue, STAFF_OVER_CAP_TTL_SECONDS, STAFF_QUEUE_OVERDUE_MS,
   STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS, STAFF_QUEUE_OVERDUE_ALERT_KEY, STAFF_DIGEST_MAX_ENTRIES, STAFF_QUEUE_LEGACY_READS,
+  staffDigestPlan, STAFF_DIGEST_RUN_OPS,
 } from '../src/staff_alerts.mjs';
 
 const worker = await loadWorker();
@@ -26,7 +27,7 @@ const ADMIN_EMAIL = 'staff.person@example.com';
 const NOWHERE = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
 const HOUR = 3600000;
 const OVERDUE = /^Staff alerts undelivered for /;
-const DIGEST = /^Staff alerts past the day's allowance/;
+const DIGEST = /^Staff alerts waiting: /;
 
 class StubMessage { constructor(from, to, raw) { this.from = from; this.to = to; this.raw = raw; } }
 const quiet = async (fn) => { const s = {}; for (const k of ['log', 'info', 'warn', 'error', 'debug']) { s[k] = console[k]; console[k] = () => {}; } try { return await fn(); } finally { Object.assign(console, s); } };
@@ -369,7 +370,7 @@ test('one run of digests names at most STAFF_DIGEST_MAX_ENTRIES alerts, every ad
   assert.equal(queueKeys(env).length, 360 - r.named);
   const first = staffMail(env).filter((m) => DIGEST.test(m.subject));
   assert.equal(first.length, 1);
-  assert.ok(first[0].subject.includes('120 waiting'), first[0].subject);
+  assert.ok(first[0].subject.includes('waiting: 120 '), first[0].subject);
   assert.match(first[0].text, new RegExp(`${120 - Math.floor(STAFF_DIGEST_MAX_ENTRIES / 3)} more are waiting`));
   // One address alone gets the whole share; the rest are named in the hours after.
   env.USERS.ops.length = 0;
@@ -409,4 +410,39 @@ test('the sweep runs the TAKE IT DOWN case steps first, then the digests, then t
   assert.ok(at(caseStep) >= 0 && at(digestOp) >= 0 && at(overdueOp) >= 0);
   assert.ok(lastAt(caseStep) < at(digestOp), `the digest ran after the case steps (${lastAt(caseStep)} < ${at(digestOp)})`);
   assert.ok(lastAt(digestOp) < at(overdueOp), 'the overdue check ran after the digest');
+});
+
+test('the digests stay within 200 storage operations for any number of staff addresses, and the addresses take turns', async () => {
+  for (let n = 1; n <= 200; n++) {
+    const { addresses, share } = staffDigestPlan(n);
+    assert.ok(addresses >= 1 && addresses <= n && share >= 1, `plan for ${n}`);
+    assert.ok(addresses * 5 + addresses * share * 3 <= STAFF_DIGEST_RUN_OPS, `${n} addresses: ${addresses} x (5 + 3 x ${share})`);
+    assert.ok(addresses * share <= STAFF_DIGEST_MAX_ENTRIES);
+  }
+  assert.deepEqual(staffDigestPlan(1), { addresses: 1, share: STAFF_DIGEST_MAX_ENTRIES });
+  assert.deepEqual(staffDigestPlan(3), { addresses: 3, share: 16 });
+  assert.deepEqual(staffDigestPlan(0), { addresses: 0, share: 0 });
+
+  const env = environment();
+  const addresses = Array.from({ length: 60 }, (_, i) => `staff${i}@example.com`);
+  const at = new Date().toISOString();
+  for (const a of addresses) {
+    for (let j = 0; j < 3; j++) {
+      const e = { kind: 'staff_new', lane: 'general', reference: `EC-MANY-${j}`, queued_at: at, required: true, reason: 'daily_cap' };
+      await env.USERS.put(`staffmail-queue:${tag(a)}:${tag(`many-${a}-${j}`)}`, JSON.stringify({ alert_id: `many-${a}-${j}`, ...e, digested_at: null }), { expirationTtl: STAFF_OVER_CAP_TTL_SECONDS, metadata: e });
+    }
+  }
+  const render = (d) => renderMail('staff_digest', { ...d, at: new Date().toISOString() });
+  const plan = staffDigestPlan(addresses.length);
+  const base = Math.floor(Date.now() / HOUR) * HOUR;
+  const told = new Set();
+  for (let hour = 0; hour * plan.addresses < addresses.length; hour++) {
+    env.USERS.ops.length = 0;
+    const r = await quiet(() => sendStaffDigests(env, addresses, render, { now: base + hour * HOUR }));
+    assert.ok(env.USERS.ops.length <= STAFF_DIGEST_RUN_OPS, `hour ${hour}: ${env.USERS.ops.length} operations`);
+    assert.ok(r.digests <= plan.addresses);
+    assert.equal(r.rotated, addresses.length - plan.addresses);
+    for (const m of env.mail.filter((x) => DIGEST.test(readMail(x).subject))) told.add(m.to);
+  }
+  assert.equal(told.size, addresses.length, 'every address had its digest within a few hours');
 });

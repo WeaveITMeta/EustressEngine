@@ -37,7 +37,7 @@ function environment() {
   return env;
 }
 const staffMail = (env) => env.mail.filter((m) => m.to === STAFF).map(readMail);
-const DIGEST = /^Staff alerts past the day's allowance/;
+const DIGEST = /^Staff alerts waiting: /;
 
 async function file(env, i, { minor = false } = {}) {
   const body = {
@@ -121,7 +121,7 @@ test('250 filings in a day: each required alert is sent or carried by a digest t
   assert.equal(digests.length, 1, 'one digest');
   assert.ok(queued.length <= STAFF_DIGEST_MAX_ENTRIES);
   for (const ref of queued) assert.ok(digests[0].text.includes(ref), `the digest names ${ref}`);
-  assert.ok(digests[0].subject.includes(`${queued.length} waiting`), digests[0].subject);
+  assert.ok(digests[0].subject.includes(`waiting: ${queued.length} `), digests[0].subject);
   // The next run's steps find each alert carried by the digest that sent.
   await quiet(() => runCron(env));
   for (const ref of refs) {

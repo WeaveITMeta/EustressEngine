@@ -13,7 +13,8 @@ import crypto from 'node:crypto';
 import { fakeKv } from './helpers/load_worker.mjs';
 import { makeToolExecutor, loadCase, POLICY_HASH_ANCHORED, listingReportOwedKey } from '../src/moderation.mjs';
 import { sweepLegalReports } from '../src/legal_reports.mjs';
-import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport, alertStaffForumReport, alertStaffEvidence } from '../src/takedown.mjs';
+import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport, alertStaffForumReport, alertStaffEvidence, sweepTakedowns, staffFailureAlertId } from '../src/takedown.mjs';
+import { takeMailSlot, STAFF_ALERTS_PER_DAY } from '../src/mail_limits.mjs';
 import { sendStaffAlert } from '../src/staff_alerts.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 
@@ -94,7 +95,7 @@ function mails(env) {
   });
 }
 const owedMails = (env) => mails(env).filter((m) => m.subject.startsWith('A legal report is owed'));
-const digests = (env) => mails(env).filter((m) => m.subject.startsWith("Staff alerts past the day's allowance"));
+const digests = (env) => mails(env).filter((m) => m.subject.startsWith('Staff alerts waiting: '));
 const queueKeys = (env) => [...env.USERS.store.keys()].filter((k) => k.startsWith('staffmail-queue:'));
 
 async function quarantineDuringMailOutage(env, { mailDown }) {
@@ -218,4 +219,65 @@ test('a general alert that is not required, failing to send, is counted failed a
   const r = await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'general', alertId: 'g-2', kind: 'staff_relocked', required: false }));
   assert.deepEqual([r.sent, r.queued, r.failed, r.delivered], [0, 0, 1, false]);
   assert.equal(queueKeys(env).length, 0);
+});
+
+// --- Security's notes on 02786872 ---
+
+test('the digest subject covers alerts past the allowance and alerts after a failed send, and counts each', async () => {
+  const env = await environment();
+  const rendered = { subject: 'A staff alert for the test', text: 'A staff alert for the test.', html: '<p>A staff alert for the test.</p>' };
+  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
+  await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'priority', alertId: 'mix-1', kind: 'staff_forum_csam', reference: 'EC-MIX-0001' }));
+  env.EMAIL.send = async (m) => { env.mail.push(m); };
+  for (let i = 0; i < STAFF_ALERTS_PER_DAY; i++) await takeMailSlot(env, STAFF, 'staff');
+  await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'general', alertId: 'mix-2', kind: 'staff_new', reference: 'EC-MIX-0002', required: true }));
+  assert.equal(queueKeys(env).length, 2);
+  await quiet(() => sendStaffDigest(env, { recipients: [STAFF] }));
+  const [d] = digests(env);
+  assert.equal(d.subject, "Staff alerts waiting: 2 (past the day's allowance or after a failed send)");
+  assert.doesNotMatch(d.subject, /^Staff alerts past the day's allowance/);
+  assert.match(d.text, /Named here: 1 past the day's allowance, 1 after a failed send\./);
+});
+
+test('the owed alert id carries the category and the stuck alert id the report kind', async () => {
+  const env = await environment();
+  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
+  const owed = { reference: 'EC-F5-0003', case_kind: 'moderation', case_id: SIM, category: CAT, reason: 'write_failed', since: '2026-10-16T01:00:00.000Z', admin_url: 'https://x' };
+  await quiet(() => alertStaffReportOwed(env, owed));
+  await quiet(() => alertStaffReportOwed(env, owed));
+  const one = queueKeys(env).length;
+  assert.equal(one, 2, 'one entry per staff address');
+  // The same case and time, another category: its own debt, its own entry.
+  await quiet(() => alertStaffReportOwed(env, { ...owed, category: 'threat' }));
+  assert.equal(queueKeys(env).length, one + 2, 'another category is its own alert');
+  const stuck = { reference: 'EC-F5-0004', case_kind: 'forum', case_id: 'f6f6f6f6f6f6f6f6f6f6f6f6-1', report_kind: 'threat', reason: 'no_account', since: '2026-10-15T00:00:00.000Z', stuck_at: '2026-10-15T01:00:00.000Z', alerts: 1, admin_url: 'https://x' };
+  await quiet(() => alertStaffStuckReport(env, stuck));
+  await quiet(() => alertStaffStuckReport(env, stuck));
+  assert.equal(queueKeys(env).length, one + 4);
+  await quiet(() => alertStaffStuckReport(env, { ...stuck, report_kind: 'csam' }));
+  assert.equal(queueKeys(env).length, one + 6, 'another report kind is its own alert');
+});
+
+test('a possible-CSAM case whose removal keeps failing in a mail outage has one staff_failure entry a day, not one an hour', async () => {
+  const env = await environment();
+  const ID = 'cccccccc-6666-4666-8666-cccccccccccc';
+  const LISTING = 'dddddddd-6666-4666-8666-dddddddddddd';
+  await env.SOCIAL.put(`tdcase:${ID}`, JSON.stringify({
+    id: ID, reference: 'EC-F5-TD01-0000-0000-0000', status: 'received', possible_csam: true, received_at: new Date(Date.now() - 3600000).toISOString(), removed_at: null, updated_at: new Date().toISOString(),
+    request: { requester_name: 'Filer', requester_email: 'filer@example.org', description: 'x' },
+    locations: [], targets: [{ sim_id: LISTING, author_id: AUTHOR, via: 'request', locked_at: null }], forum_targets: [], unresolved: [], hashes: [], pending: [`lock:${LISTING}`], step_errors: {}, reviews: [], history: [], attempts: 0,
+  }));
+  await env.SOCIAL.put(`tdpending:${ID}`, '1');
+  // The lock cannot be written, and no mail can be sent.
+  env.SCENES.put = async () => { throw new Error('R2 is unavailable'); };
+  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
+  for (let hour = 0; hour < 3; hour++) await quiet(() => sweepTakedowns(env, {}));
+  const failures = queueKeys(env).map((k) => JSON.parse(env.USERS.store.get(k))).filter((e) => e.kind === 'staff_failure');
+  assert.equal(failures.length, 2, 'one staff_failure entry per staff address for the three runs');
+  for (const e of failures) {
+    assert.equal(e.lane, 'priority', 'about a possible-CSAM case: the priority lane');
+    assert.equal(e.alert_id, staffFailureAlertId({ id: ID, pending: [`lock:${LISTING}`] }));
+  }
+  assert.match(staffFailureAlertId({ id: ID, pending: ['b', 'a'] }, Date.parse('2026-10-16T05:00:00.000Z')), new RegExp(`^staff-failure:${ID}:a,b:2026-10-16$`));
+  assert.notEqual(staffFailureAlertId({ id: ID, pending: ['a'] }, Date.parse('2026-10-16T05:00:00.000Z')), staffFailureAlertId({ id: ID, pending: ['a'] }, Date.parse('2026-10-17T05:00:00.000Z')), 'a new day, a new alert');
 });

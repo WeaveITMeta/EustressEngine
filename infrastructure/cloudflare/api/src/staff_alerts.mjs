@@ -58,9 +58,26 @@ export const STAFF_LANES = Object.freeze({ general: 'staff', priority: 'staff_pr
 /// A digest is sent at most this often per staff address.
 export const STAFF_DIGEST_EVERY_MS = 3600000;
 /// The most alerts the digests of one hourly run name, every staff address together (each address gets an equal share, at
-/// least one); the rest are counted in each digest and named by the next. A named entry costs two storage writes (its mark
-/// and the queue key's delete), three when it has no metadata, so one run's digests stay under about 200 operations.
+/// least one); the rest are counted in each digest and named by the next.
 export const STAFF_DIGEST_MAX_ENTRIES = 50;
+/// The storage operations one run's digests may spend, however many staff addresses there are (staffDigestPlan).
+export const STAFF_DIGEST_RUN_OPS = 200;
+// What a digest costs: per address, the list, the hour's mark read, the digest mail's count (read and write) and the mark
+// write; per named entry, at most a read (an entry with no metadata), its mark and the queue key's delete.
+const DIGEST_ADDRESS_OPS = 5;
+const DIGEST_ENTRY_OPS = 3;
+
+/// How one run's digests spend STAFF_DIGEST_RUN_OPS over `addressCount` staff addresses: `addresses`, how many get a digest
+/// this run (each costs DIGEST_ADDRESS_OPS and names at least one entry), and `share`, the entries each names, from what the
+/// addresses leave of the budget (at most STAFF_DIGEST_MAX_ENTRIES together). Past `addresses`, the run's addresses rotate
+/// by the hour, so every address has its digest within a few hours.
+export function staffDigestPlan(addressCount) {
+  const n = Math.max(0, Math.floor(addressCount) || 0);
+  const addresses = Math.min(n, Math.floor(STAFF_DIGEST_RUN_OPS / (DIGEST_ADDRESS_OPS + DIGEST_ENTRY_OPS)));
+  if (!addresses) return { addresses: 0, share: 0 };
+  const entries = Math.min(STAFF_DIGEST_MAX_ENTRIES, Math.floor((STAFF_DIGEST_RUN_OPS - DIGEST_ADDRESS_OPS * addresses) / DIGEST_ENTRY_OPS));
+  return { addresses, share: Math.max(1, Math.floor(entries / addresses)) };
+}
 /// How long an over-cap entry is kept, so a retry of its alert finds whether a digest carried it. Far longer than
 /// STAFF_QUEUE_OVERDUE_MS, so an entry still undelivered is alerted on every day before it can expire.
 export const STAFF_OVER_CAP_TTL_SECONDS = 30 * 86400;
@@ -155,12 +172,16 @@ export async function sendStaffAlert(env, recipients, rendered, { lane = 'genera
 /// waiting on its over-cap list and the references of its share of STAFF_DIGEST_MAX_ENTRIES of them (read from the queue
 /// keys' metadata). `render({ total, entries, more })` builds the mail. Once a digest is SENT each entry it named is marked
 /// `digested_at` and leaves the queue; one that fails to send changes nothing, so the next hour tries again. The digest itself
-/// is not counted against a lane. Never throws. `{ digests, named, waiting, failed }`.
+/// is not counted against a lane. The run stays within STAFF_DIGEST_RUN_OPS (staffDigestPlan): with more staff addresses than
+/// it covers, `rotated` counts the ones whose turn is a later hour. Never throws. `{ digests, named, waiting, failed, rotated }`.
 export async function sendStaffDigests(env, recipients, render, { now = Date.now(), fromName } = {}) {
-  const out = { digests: 0, named: 0, waiting: 0, failed: 0 };
-  if (!env.USERS) return out;
-  const share = Math.max(1, Math.floor(STAFF_DIGEST_MAX_ENTRIES / Math.max(1, recipients.length)));
-  for (const to of recipients) {
+  const out = { digests: 0, named: 0, waiting: 0, failed: 0, rotated: 0 };
+  if (!env.USERS || !recipients.length) return out;
+  const { addresses, share } = staffDigestPlan(recipients.length);
+  const start = (Math.floor(now / STAFF_DIGEST_EVERY_MS) * addresses) % recipients.length;
+  const turn = Array.from({ length: addresses }, (_, i) => recipients[(start + i) % recipients.length]);
+  out.rotated = recipients.length - turn.length;
+  for (const to of turn) {
     try {
       const addr = await addressTag(to);
       const listed = await env.USERS.list({ prefix: queuePrefix(addr), limit: 1000 });
