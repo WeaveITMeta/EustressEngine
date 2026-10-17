@@ -166,7 +166,7 @@ impl PointCloudProcessor {
     
     /// Process a point cloud file
     pub fn process(&mut self, input_path: &Path, output_path: &Path) -> ProcessingResult {
-        let start_time = std::time::Instant::now();
+        let start_time = bevy::platform::time::Instant::now();
         let mut result = ProcessingResult {
             success: false,
             output_path: None,
@@ -639,7 +639,7 @@ impl PointCloudProcessor {
             }
             
             // Compress
-            let compressed = zstd::encode_all(&chunk_data[..], self.config.compression_level)
+            let compressed = crate::zstd_codec::encode_all(&chunk_data[..], self.config.compression_level)
                 .map_err(|e| e.to_string())?;
             
             total_compressed += compressed.len();

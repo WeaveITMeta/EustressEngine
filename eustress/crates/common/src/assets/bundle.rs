@@ -78,8 +78,8 @@ impl BundleManifest {
             total_size: 0,
             total_original_size: 0,
             entries: Vec::new(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             description: None,
@@ -171,7 +171,7 @@ impl AssetBundle {
                 Some(decompressed)
             }
             BundleCompression::Zstd => {
-                zstd::decode_all(compressed).ok()
+                crate::zstd_codec::decode_all(compressed).ok()
             }
             BundleCompression::Lz4 => {
                 // LZ4 requires knowing the decompressed size
@@ -237,7 +237,7 @@ impl BundleBuilder {
                 encoder.finish().unwrap()
             }
             BundleCompression::Zstd => {
-                zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
+                crate::zstd_codec::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
             }
             BundleCompression::Lz4 => {
                 lz4_flex::compress_prepend_size(data)

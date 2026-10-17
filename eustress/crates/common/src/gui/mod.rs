@@ -1,9 +1,15 @@
-//! Slint-based in-game GUI rendering for ScreenGui, BillboardGui, SurfaceGui.
+//! In-world GUI for ScreenGui, BillboardGui and SurfaceGui.
 //!
 //! Lives in eustress-common so both the engine (editor) and client (player)
 //! can render interactive UI elements in the 3D world.
 //!
-//! Architecture:
+//! The Slint renderer (`renderer`, `input`, `generator`, `plugin`,
+//! `gui_bridge`) needs the `gui` feature. The rest builds in every shell, the
+//! browser Player's included: the shared BillboardGui and SurfaceGui component
+//! types (`billboard_renderer`), the script command queues (`gui_commands`,
+//! `physics_commands`) and `edge_bounds`.
+//!
+//! Slint renderer architecture:
 //! - Each GUI instance gets a `GuiWindowAdapter` (Slint software renderer)
 //! - Renders to a pixel buffer → Bevy `Image` → `StandardMaterial`
 //! - ScreenGui: fullscreen camera overlay
@@ -29,10 +35,7 @@ pub use plugin::SlintGuiPlugin;
 #[cfg(feature = "gui")]
 pub use generator::{GuiElement, generate_slint_markup};
 
-#[cfg(feature = "gui")]
 pub mod billboard_renderer;
-
-#[cfg(feature = "gui")]
 pub use billboard_renderer::BillboardRendererPlugin;
 
 pub mod edge_bounds;
