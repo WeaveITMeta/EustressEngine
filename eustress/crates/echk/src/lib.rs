@@ -1587,7 +1587,7 @@ mod provider_key_tests {
     }
 
     /// One `.luau` record holding `text` on its third line.
-    fn luau_with(text: &str) -> Vec<Record> {
+    fn mlua_with(text: &str) -> Vec<Record> {
         let source = format!("-- settings\nlocal Config = {{}}\nConfig.key = \"{text}\"\nreturn Config\n");
         vec![("ReplicatedStorage/Config.luau".to_string(), source.into_bytes())]
     }
@@ -1610,7 +1610,7 @@ mod provider_key_tests {
                 assert_eq!(provider_key_at(bytes.as_bytes()), None, "{label}, placement {place}");
             }
             for destination in EVERY_DESTINATION {
-                let mut records = luau_with(text);
+                let mut records = mlua_with(text);
                 assert_eq!(screen_package(&mut records, destination), Ok(Screened::default()), "{label} on {destination:?}");
             }
         }
@@ -1620,7 +1620,7 @@ mod provider_key_tests {
     fn the_sk_and_xai_fakes_are_refused() {
         for (provider, label, key) in refusing_fakes().into_iter().take(4) {
             assert_eq!(provider_key_at(key.as_bytes()).map(|(_, p)| p), Some(provider), "{label}");
-            let mut records = luau_with(&key);
+            let mut records = mlua_with(&key);
             let Err(refusal) = screen_package(&mut records, Destination::Publish) else { panic!("{label} went through") };
             assert!(!holds_a_piece(&refusal, &key), "a piece of {label} reached the refusal");
             assert!(refusal.contains(&format!("Config.luau:3 contains what looks like a key for {provider}.")), "{refusal}");
@@ -1739,7 +1739,7 @@ mod provider_key_tests {
     /// A fake of the rule is refused, in the provider's own words; its
     /// near-miss passes.
     fn refused_and_near_miss(provider: &str, fake: &str, near_miss: (&str, String)) {
-        let mut records = luau_with(fake);
+        let mut records = mlua_with(fake);
         let Err(refusal) = screen_package(&mut records, Destination::Publish) else { panic!("the {provider} fake went through") };
         assert!(!holds_a_piece(&refusal, fake), "a piece of the {provider} fake reached the refusal");
         assert!(refusal.contains(&format!("{}.", phrase(provider))), "{refusal}");
@@ -1782,7 +1782,7 @@ mod provider_key_tests {
         refused_and_near_miss(PRIVATE_KEY, &pem(&[]), ("a certificate header", certificate));
         refused_and_near_miss(PRIVATE_KEY, &pem(&["ENCRYPTED"]), ("a public key header", join(&["-----", "BEGIN", " ", "PUBLIC", " KEY", "-----"])));
         refused_and_near_miss(PRIVATE_KEY, &pem(&["OPENSSH"]), ("PRIVATE KEY without its dashes", join(&["-----", "BEGIN", " ", "PRIVATE", " KEY"])));
-        let mut records = luau_with(&pem(&[]));
+        let mut records = mlua_with(&pem(&[]));
         let Err(refusal) = screen_package(&mut records, Destination::Publish) else { panic!("the PEM header went through") };
         assert_eq!(
             refusal,
@@ -1808,7 +1808,7 @@ mod provider_key_tests {
         for prefix in ["sk_", "rk_"] {
             let key = join(&[prefix, "test_", &strong(24)]);
             for destination in EVERY_DESTINATION {
-                let mut records = luau_with(&key);
+                let mut records = mlua_with(&key);
                 let Ok(screened) = screen_package(&mut records, destination) else {
                     panic!("{prefix}test_ was refused on {destination:?}")
                 };
@@ -1823,10 +1823,10 @@ mod provider_key_tests {
     }
 
     #[test]
-    fn a_luau_key_is_refused_when_the_package_leaves_and_warned_on_a_loopback_host() {
+    fn a_mlua_key_is_refused_when_the_package_leaves_and_warned_on_a_loopback_host() {
         let key = anthropic();
         for destination in [Destination::Publish, Destination::LanHost] {
-            let mut records = luau_with(&key);
+            let mut records = mlua_with(&key);
             let Err(refusal) = screen_package(&mut records, destination) else { panic!("{destination:?} let the key through") };
             assert!(!holds_a_piece(&refusal, &key), "a piece of the key reached the refusal");
             assert_eq!(
@@ -1834,7 +1834,7 @@ mod provider_key_tests {
                 "Refused: ReplicatedStorage/Config.luau:3 contains what looks like a key for Anthropic. Remove the key from that file, then try again."
             );
         }
-        let mut records = luau_with(&key);
+        let mut records = mlua_with(&key);
         let Ok(screened) = screen_package(&mut records, Destination::LoopbackHost) else { panic!("the loopback host was refused") };
         assert!(!holds_a_piece(&format!("{screened:?}"), &key), "a piece of the key reached a warning");
         assert_eq!(

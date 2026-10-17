@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use tracing;
 

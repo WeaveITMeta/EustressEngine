@@ -11,7 +11,7 @@
 //! ```text
 //! engine pulls ECS -> DataModel        (poses, input, mouse, camera,
 //!                                       collisions)
-//! PlayLuau::frame(raycaster, terrain)  (input + queued events, RenderStepped,
+//! PlayMlua::frame(raycaster, terrain)  (input + queued events, RenderStepped,
 //!                                       Stepped, task scheduler, tweens,
 //!                                       Heartbeat, events the scripts caused)
 //! engine applies DataModel -> ECS      (spawns, writes, destroys, commands,
@@ -56,7 +56,7 @@ use crate::datamodel::{
     CommerceStatus, DmEvent, DmValue, EnumItem, InputPhase, InstanceId, OutputLevel, ProductKind, PurchasePrompt,
     ReceiptDecision, RemoteCall, RemoteReply, RemoteTarget, RemoteValue, SharedDataModel, INVOKE_TIMEOUT_SECS,
 };
-use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim2, LuauVector3, UserDataPeek};
+use crate::mlua::types::{MluaCFrame, MluaColor3, MluaUDim2, MluaVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, Vector3};
 use crate::utils::script_profile;
 
@@ -66,7 +66,7 @@ pub use terrain::{with_terrain_reader, TerrainReadFn, TerrainView};
 const PRELUDE: &str = include_str!("prelude.luau");
 
 /// Longest a script may run without yielding before it is stopped, as in
-/// Roblox. [`PlayLuau::set_script_timeout`] changes it for one VM.
+/// Roblox. [`PlayMlua::set_script_timeout`] changes it for one VM.
 const SCRIPT_TIMEOUT_MS: u64 = 10_000;
 
 /// The prelude's chunk name, which stacks and positions skip.
@@ -87,7 +87,7 @@ pub struct ScriptLaunch {
 }
 
 /// The Play VM.
-pub struct PlayLuau {
+pub struct PlayMlua {
     lua: Lua,
     dm: SharedDataModel,
     host: Table,
@@ -98,7 +98,7 @@ pub struct PlayLuau {
 }
 
 fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -232,7 +232,7 @@ fn script_of_chunk(lua: &Lua, chunk: &str) -> Option<InstanceId> {
     script
 }
 
-impl PlayLuau {
+impl PlayMlua {
     /// A fresh VM bound to `dm`. `dm` should already hold the seeded tree.
     pub fn new(dm: SharedDataModel) -> Result<Self, String> {
         let lua = Lua::new();
@@ -286,15 +286,15 @@ impl PlayLuau {
 
         // Value types, then Roblox-compatible constructors that accept the
         // omitted arguments real scripts use (`Vector3.new()`).
-        crate::luau::types::inject_types(lua)?;
+        crate::mlua::types::inject_types(lua)?;
         types_ext::install(lua, &globals)?;
         let v3: Table = globals.get("Vector3")?;
         v3.raw_set("new", lua.create_function(|_, (x, y, z): (Option<f64>, Option<f64>, Option<f64>)| {
-            Ok(LuauVector3(Vector3::new(x.unwrap_or(0.0), y.unwrap_or(0.0), z.unwrap_or(0.0))))
+            Ok(MluaVector3(Vector3::new(x.unwrap_or(0.0), y.unwrap_or(0.0), z.unwrap_or(0.0))))
         })?)?;
         v3.raw_set("FromNormalId", lua.create_function(|_, n: Value| {
             let name = convert::enum_name_arg(&n).unwrap_or_default();
-            Ok(LuauVector3(match name.as_str() {
+            Ok(MluaVector3(match name.as_str() {
                 "Right" => Vector3::new(1.0, 0.0, 0.0),
                 "Left" => Vector3::new(-1.0, 0.0, 0.0),
                 "Top" => Vector3::new(0.0, 1.0, 0.0),
@@ -305,37 +305,37 @@ impl PlayLuau {
         })?)?;
         let c3: Table = globals.get("Color3")?;
         c3.raw_set("new", lua.create_function(|_, (r, g, b): (Option<f64>, Option<f64>, Option<f64>)| {
-            Ok(LuauColor3(Color3::new(r.unwrap_or(0.0), g.unwrap_or(0.0), b.unwrap_or(0.0))))
+            Ok(MluaColor3(Color3::new(r.unwrap_or(0.0), g.unwrap_or(0.0), b.unwrap_or(0.0))))
         })?)?;
         c3.raw_set("fromRGB", lua.create_function(|_, (r, g, b): (Option<f64>, Option<f64>, Option<f64>)| {
             let c = |v: Option<f64>| v.unwrap_or(0.0).clamp(0.0, 255.0) / 255.0;
-            Ok(LuauColor3(Color3::new(c(r), c(g), c(b))))
+            Ok(MluaColor3(Color3::new(c(r), c(g), c(b))))
         })?)?;
         let ud2: Table = globals.get("UDim2")?;
         ud2.raw_set("new", lua.create_function(|_, (a, b, c, d): (Option<Value>, Option<Value>, Option<f64>, Option<f64>)| {
             // UDim2.new(UDim, UDim) or UDim2.new(xs, xo, ys, yo)
             let udim = |v: &Option<Value>| match v {
-                Some(Value::UserData(ud)) => ud.peek::<crate::luau::types::LuauUDim>().ok().map(|u| (u.scale, u.offset)),
+                Some(Value::UserData(ud)) => ud.peek::<crate::mlua::types::MluaUDim>().ok().map(|u| (u.scale, u.offset)),
                 _ => None,
             };
             if let Some((xs, xo)) = udim(&a) {
                 let (ys, yo) = udim(&b).unwrap_or((0.0, 0.0));
-                return Ok(LuauUDim2::new(xs, xo, ys, yo));
+                return Ok(MluaUDim2::new(xs, xo, ys, yo));
             }
             let num = |v: &Option<Value>| match v {
                 Some(Value::Number(n)) => *n,
                 Some(Value::Integer(i)) => *i as f64,
                 _ => 0.0,
             };
-            Ok(LuauUDim2::new(num(&a), num(&b), c.unwrap_or(0.0), d.unwrap_or(0.0)))
+            Ok(MluaUDim2::new(num(&a), num(&b), c.unwrap_or(0.0), d.unwrap_or(0.0)))
         })?)?;
         let cf: Table = globals.get("CFrame")?;
-        cf.raw_set("fromMatrix", lua.create_function(|_, (p, x, y, z): (LuauVector3, LuauVector3, LuauVector3, Option<LuauVector3>)| {
+        cf.raw_set("fromMatrix", lua.create_function(|_, (p, x, y, z): (MluaVector3, MluaVector3, MluaVector3, Option<MluaVector3>)| {
             let z = z.map(|z| z.0).unwrap_or_else(|| x.0.cross(&y.0).unit());
-            Ok(LuauCFrame(CFrame::from_matrix(p.0, x.0, y.0, z)))
+            Ok(MluaCFrame(CFrame::from_matrix(p.0, x.0, y.0, z)))
         })?)?;
-        cf.raw_set("lookAlong", lua.create_function(|_, (p, dir, up): (LuauVector3, LuauVector3, Option<LuauVector3>)| {
-            Ok(LuauCFrame(CFrame::look_at(p.0, p.0 + dir.0, up.map(|u| u.0))))
+        cf.raw_set("lookAlong", lua.create_function(|_, (p, dir, up): (MluaVector3, MluaVector3, Option<MluaVector3>)| {
+            Ok(MluaCFrame(CFrame::look_at(p.0, p.0 + dir.0, up.map(|u| u.0))))
         })?)?;
 
         // Instances.
@@ -432,7 +432,7 @@ impl PlayLuau {
                 let Some(Value::UserData(ud)) = it.next() else { return Ok(()) };
                 let Ok(event) = ud.peek::<LInst>().map(|i| i.0) else { return Ok(()) };
                 let args: Vec<DmValue> = it.filter_map(|v| convert::from_lua(&v).ok()).collect();
-                dm.lock().push_event(DmEvent::Fired { event, args, from_luau: true });
+                dm.lock().push_event(DmEvent::Fired { event, args, from_mlua: true });
                 Ok(())
             })?)?;
         }
@@ -517,8 +517,8 @@ impl PlayLuau {
             globals.set("elapsedTime", lua.create_function(move |_, ()| Ok(dm.lock().frame.time))?)?;
         }
         globals.set("tick", lua.create_function(|_, ()| {
-            Ok(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            Ok(web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0))
         })?)?;
@@ -595,7 +595,7 @@ impl PlayLuau {
     /// scheduler and tweens, then the events scripts caused this frame.
     pub fn frame(&mut self, raycaster: &RaycastFn<'_>, terrain: &TerrainReadFn<'_>) {
         let _scope = script_profile::scope();
-        let started = script_profile::armed().then(std::time::Instant::now);
+        let started = script_profile::armed().then(bevy::platform::time::Instant::now);
         with_terrain_reader(terrain, || {
             with_raycaster(raycaster, || {
                 self.begin_entry();
@@ -767,7 +767,7 @@ impl PlayLuau {
                     }
                     fire.call::<()>(mlua::MultiValue::from_vec(all))?;
                 }
-                DmEvent::Fired { event, args, from_luau } if !from_luau && listening(event, "Event") => {
+                DmEvent::Fired { event, args, from_mlua } if !from_mlua && listening(event, "Event") => {
                     let mut vals = Vec::with_capacity(args.len());
                     for a in &args {
                         vals.push(convert::to_lua(lua, a)?);
@@ -802,8 +802,8 @@ impl PlayLuau {
             };
             let state_item = convert::enum_item(lua, &EnumItem::new("UserInputState", state))?;
             obj.raw_set("UserInputState", state_item.clone())?;
-            obj.raw_set("Position", LuauVector3(Vector3::new(ev.x, ev.y, ev.wheel)))?;
-            obj.raw_set("Delta", LuauVector3(Vector3::new(ev.dx, ev.dy, ev.wheel)))?;
+            obj.raw_set("Position", MluaVector3(Vector3::new(ev.x, ev.y, ev.wheel)))?;
+            obj.raw_set("Delta", MluaVector3(Vector3::new(ev.dx, ev.dy, ev.wheel)))?;
             let meta = lua.create_table()?;
             meta.raw_set("__type", "InputObject")?;
             obj.set_metatable(Some(meta));
@@ -1115,7 +1115,7 @@ fn install_commerce(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::
         // A script set ProcessReceipt: receipts are Luau's to answer.
         host_fns.raw_set("commerceWanted", lua.create_function(move |_, ()| {
             let mut g = dm.lock();
-            g.commerce.luau_process_receipt = true;
+            g.commerce.mlua_process_receipt = true;
             g.commerce.wake();
             Ok(())
         })?)?;
@@ -1301,11 +1301,11 @@ fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> 
             let p = if m.has_hit { m.hit_position } else { m.ray_origin + dir * 1000.0 };
             let mut cf = CFrame::look_at(m.ray_origin, p, None);
             cf.position = p;
-            Value::UserData(lua.create_userdata(LuauCFrame(studs::scale_frame(cf, 1.0 / k)))?)
+            Value::UserData(lua.create_userdata(MluaCFrame(studs::scale_frame(cf, 1.0 / k)))?)
         }
         "Origin" => {
             let cf = CFrame::look_at(m.ray_origin, m.ray_origin + dir, None);
-            Value::UserData(lua.create_userdata(LuauCFrame(studs::scale_frame(cf, 1.0 / k)))?)
+            Value::UserData(lua.create_userdata(MluaCFrame(studs::scale_frame(cf, 1.0 / k)))?)
         }
         "Target" => match m.target {
             Some(t) => handle(lua, t)?,
@@ -1316,7 +1316,7 @@ fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> 
             None => Value::Nil,
         },
         "TargetSurface" => convert::enum_item(lua, &EnumItem::new("NormalId", "Top"))?,
-        "UnitRay" => Value::UserData(lua.create_userdata(types_ext::LuauRay { origin: m.ray_origin * (1.0 / k), direction: dir })?),
+        "UnitRay" => Value::UserData(lua.create_userdata(types_ext::MluaRay { origin: m.ray_origin * (1.0 / k), direction: dir })?),
         "X" => Value::Number(x),
         "Y" => Value::Number(y),
         "ViewSizeX" => Value::Number(w),
@@ -1339,7 +1339,7 @@ mod tests {
 
     /// A VM over a tree whose local player has UserId 42, and a Script to run
     /// code as.
-    fn session() -> (PlayLuau, SharedDataModel, InstanceId) {
+    fn session() -> (PlayMlua, SharedDataModel, InstanceId) {
         let dm = crate::datamodel::new_shared();
         let script = {
             let mut g = dm.lock();
@@ -1350,11 +1350,11 @@ mod tests {
             let service = g.get_service("ServerScriptService").expect("ServerScriptService");
             g.create_virtual("Script", "Shop", Some(service))
         };
-        let vm = PlayLuau::new(dm.clone()).expect("the prelude loads");
+        let vm = PlayMlua::new(dm.clone()).expect("the prelude loads");
         (vm, dm, script)
     }
 
-    fn run(vm: &mut PlayLuau, script: InstanceId, source: &str) {
+    fn run(vm: &mut PlayMlua, script: InstanceId, source: &str) {
         let launch = ScriptLaunch { instance: script, source: source.to_string(), chunk_name: "Shop".into() };
         // A Space without terrain: the reader never visits.
         let no_terrain: &TerrainReadFn<'_> = &|_| {};
@@ -1446,7 +1446,7 @@ mod tests {
             end)
         "#);
         assert_eq!(dm.lock().commerce.status, CommerceStatus::Loading, "setting ProcessReceipt wakes commerce");
-        assert!(dm.lock().commerce.luau_process_receipt, "and makes receipts Luau's to answer");
+        assert!(dm.lock().commerce.mlua_process_receipt, "and makes receipts Luau's to answer");
         dm.lock().commerce.outcomes.push(PromptOutcome {
             user_id: 42.0,
             product: 3,
@@ -1491,7 +1491,7 @@ mod tests {
 
     /// Start `source` as a new Script in ServerScriptService, its source
     /// read from `file` when one is given.
-    fn start(vm: &mut PlayLuau, dm: &SharedDataModel, name: &str, file: Option<&str>, source: &str) -> InstanceId {
+    fn start(vm: &mut PlayMlua, dm: &SharedDataModel, name: &str, file: Option<&str>, source: &str) -> InstanceId {
         let id = {
             let mut g = dm.lock();
             let service = g.get_service("ServerScriptService").expect("ServerScriptService");
@@ -1507,7 +1507,7 @@ mod tests {
         id
     }
 
-    fn step(vm: &mut PlayLuau) {
+    fn step(vm: &mut PlayMlua) {
         let no_terrain: &TerrainReadFn<'_> = &|_| {};
         vm.frame(&no_rays, no_terrain);
     }

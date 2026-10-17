@@ -52,8 +52,14 @@ pub const RESPAWN_TIME_SECS: f64 = 5.0;
 /// `[service]`, the first of those winning): on unless the Space turns it
 /// off, as for a paddle game played through its camera and input alone.
 pub fn space_character_auto_loads(space_root: &std::path::Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(space_root.join("Players").join("_service.toml")) else { return true };
-    let Ok(doc) = text.parse::<toml::Table>() else { return true };
+    character_auto_loads_in(std::fs::read_to_string(space_root.join("Players").join("_service.toml")).ok().as_deref())
+}
+
+/// [`space_character_auto_loads`] from the text of `Players/_service.toml`,
+/// `None` for a Space without one: for a world held as records, as the
+/// browser Player holds it.
+pub fn character_auto_loads_in(players_service: Option<&str>) -> bool {
+    let Some(doc) = players_service.and_then(|text| text.parse::<toml::Table>().ok()) else { return true };
     let pick = |t: &toml::Table| {
         t.get("character_auto_loads").or_else(|| t.get("CharacterAutoLoads")).and_then(toml::Value::as_bool)
     };
@@ -123,10 +129,15 @@ pub fn space_max_players(space_root: &std::path::Path) -> SpaceMaxPlayers {
 /// Workspace file with a `[properties.extras]` table and wrote its lengths in
 /// feet. No file, or no key, is standard gravity.
 pub fn space_gravity(space_root: &std::path::Path) -> Vec3 {
+    gravity_in(std::fs::read_to_string(space_root.join("Workspace").join("_service.toml")).ok().as_deref())
+}
+
+/// [`space_gravity`] from the text of `Workspace/_service.toml`, `None` for a
+/// Space without one: for a world held as records, as the browser Player
+/// holds it.
+pub fn gravity_in(workspace_service: Option<&str>) -> Vec3 {
     use crate::services::workspace::{authored_gravity, AuthoredGravity};
-    let doc = std::fs::read_to_string(space_root.join("Workspace").join("_service.toml"))
-        .ok()
-        .and_then(|text| text.parse::<toml::Table>().ok());
+    let doc = workspace_service.and_then(|text| text.parse::<toml::Table>().ok());
     let Some(doc) = doc else { return authored_gravity(None, None) };
     let props = doc.get("properties").and_then(toml::Value::as_table);
     let number = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
@@ -177,6 +188,14 @@ pub struct PlayEventCursor(pub Option<u64>);
 /// Player from the world it opened.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct PlayAssetRoot(pub std::path::PathBuf);
+
+/// The open Space's files, for a shell whose Space is not a folder on this
+/// computer: the browser Player hands over the records it downloaded
+/// ([`crate::space_source::RecordsSource`]), with [`PlayAssetRoot`] naming
+/// where they sit. Without it the Play runtime reads the folder
+/// [`PlayAssetRoot`] names, as Studio and the desktop Player do.
+#[derive(Resource, Clone)]
+pub struct PlaySpaceSource(pub std::sync::Arc<dyn crate::space_source::SpaceSource>);
 
 /// An entity a replica's draw step made for an instance, and the instance
 /// it draws. The draw step gives back only these; the motion lane moves
@@ -338,6 +357,28 @@ mod tests {
         assert_eq!(space("native", Some("[properties]\ngravity = 196.2\n")), standard, "a native stud-era number was never read");
         let import = space("import", Some("[properties]\ngravity = 196.2\n\n[properties.extras]\nFallenPartsDestroyHeight = -500\n"));
         assert!((import.y + 196.2 * 0.3048).abs() < 1e-3, "a Roblox import's studs are its feet, got {import}");
+    }
+
+    /// CharacterAutoLoads is read from the Players service as file key or
+    /// Roblox name, from `[properties]`, then the top level, then
+    /// `[service]`; a Space that sets none, or sets something other than a
+    /// bool, loads characters.
+    #[test]
+    fn a_space_says_whether_characters_load() {
+        assert!(character_auto_loads_in(None), "no Players file loads characters");
+        assert!(!character_auto_loads_in(Some("[properties]\ncharacter_auto_loads = false\n")));
+        assert!(!character_auto_loads_in(Some("CharacterAutoLoads = false\n")), "the Roblox name, at the top level");
+        assert!(!character_auto_loads_in(Some("[service]\ncharacter_auto_loads = false\n")));
+        assert!(
+            character_auto_loads_in(Some("character_auto_loads = false\n\n[properties]\ncharacter_auto_loads = true\n")),
+            "[properties] wins over the top level"
+        );
+        assert!(
+            !character_auto_loads_in(Some("character_auto_loads = false\n\n[service]\ncharacter_auto_loads = true\n")),
+            "the top level wins over [service]"
+        );
+        assert!(character_auto_loads_in(Some("[properties]\ncharacter_auto_loads = \"no\"\n")), "not a bool");
+        assert!(character_auto_loads_in(Some("[properties\ncharacter_auto_loads = false\n")), "a file that does not parse");
     }
 
     /// A Space's StarterPack tools reach the player's Backpack when the session

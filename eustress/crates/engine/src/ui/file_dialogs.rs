@@ -149,6 +149,11 @@ pub enum FileEvent {
     SaveSceneAs,
     /// Open a recent scene by path
     OpenRecent(PathBuf),
+    /// File > Rename: show the Rename dialog with this folder chosen.
+    OpenRename(crate::space::rename::RenameTarget),
+    /// Rename the open Space's folder, or its Universe's, to this name (from
+    /// the Rename dialog).
+    Rename(crate::space::rename::RenameTarget, String),
     /// Publish Universe or Space to Eustress platform
     Publish(PublishRequest),
     /// User picked an image / video / model file to import. Handler

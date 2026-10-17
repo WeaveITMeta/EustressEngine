@@ -39,7 +39,7 @@ pub struct LoadedModule {
     /// System handles (for Bevy)
     pub systems: Vec<String>,
     /// Load timestamp
-    pub loaded_at: std::time::Instant,
+    pub loaded_at: bevy::platform::time::Instant,
 }
 
 /// Runtime statistics
@@ -65,7 +65,7 @@ pub struct RuntimeError {
     /// Error message
     pub message: String,
     /// Timestamp
-    pub timestamp: std::time::Instant,
+    pub timestamp: bevy::platform::time::Instant,
     /// Stack trace (if available)
     pub stack_trace: Option<String>,
 }
@@ -88,7 +88,7 @@ impl SoulRuntime {
     
     /// Execute a script
     pub fn execute(&mut self, script_id: &str, context: &ExecutionContext) {
-        let start = std::time::Instant::now();
+        let start = bevy::platform::time::Instant::now();
         
         self.stats.total_executions += 1;
         
@@ -120,7 +120,7 @@ impl SoulRuntime {
         self.errors.push(RuntimeError {
             script_id: script_id.to_string(),
             message: message.to_string(),
-            timestamp: std::time::Instant::now(),
+            timestamp: bevy::platform::time::Instant::now(),
             stack_trace: None,
         });
         

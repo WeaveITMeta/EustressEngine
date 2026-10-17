@@ -1533,7 +1533,7 @@ fn handle_approve_mcp(
                     universe_root,
                     user_id,
                     username,
-                    luau_executor: None,
+                    mlua_executor: None,
                     display_unit: display_unit.as_deref().map(|d| d.0.symbol().to_string()),
                     cancelled: None,
                     // This path runs only after the user clicked Approve on

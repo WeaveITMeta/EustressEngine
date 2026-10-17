@@ -231,10 +231,31 @@ pub struct BillboardTextState {
 impl Default for BillboardTextState {
     fn default() -> Self {
         Self {
-            font_system: FontSystem::new(),
+            font_system: billboard_font_system(),
             swash_cache: SwashCache::new(),
         }
     }
+}
+
+/// The fonts a label is set in: this computer's own.
+#[cfg(not(target_arch = "wasm32"))]
+fn billboard_font_system() -> FontSystem {
+    FontSystem::new()
+}
+
+/// A browser lends a page no fonts of its own, so the browser Player sets
+/// every label in Bevy's default font (Fira Mono, ASCII), whatever family
+/// the label names.
+#[cfg(target_arch = "wasm32")]
+fn billboard_font_system() -> FontSystem {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_data(include_bytes!("../../common/assets/fonts/FiraMono-subset.ttf").to_vec());
+    db.set_serif_family("Fira Mono");
+    db.set_sans_serif_family("Fira Mono");
+    db.set_monospace_family("Fira Mono");
+    db.set_cursive_family("Fira Mono");
+    db.set_fantasy_family("Fira Mono");
+    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
 }
 
 /// Shared atlas backing every billboard. The CPU buffer is staged here and
@@ -1667,7 +1688,7 @@ fn intersect_clip(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// budget before (`fresh_deferred`) or after (`changed_deferred`) that work.
 #[derive(Default)]
 struct BillboardPassStats {
-    since: Option<std::time::Instant>,
+    since: Option<bevy::platform::time::Instant>,
     frames: u64,
     epoch_bumps: u64,
     evaluated: u64,
@@ -1678,7 +1699,7 @@ struct BillboardPassStats {
 
 impl BillboardPassStats {
     fn maybe_report(&mut self) {
-        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        let since = *self.since.get_or_insert_with(bevy::platform::time::Instant::now);
         if since.elapsed() < std::time::Duration::from_secs(10) {
             return;
         }
@@ -1694,7 +1715,7 @@ impl BillboardPassStats {
                 self.changed_deferred
             );
         }
-        *self = Self { since: Some(std::time::Instant::now()), ..Self::default() };
+        *self = Self { since: Some(bevy::platform::time::Instant::now()), ..Self::default() };
     }
 }
 

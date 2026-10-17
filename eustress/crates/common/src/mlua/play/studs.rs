@@ -294,7 +294,7 @@ pub fn script_scale(host: &Table) -> LuaResult<f64> {
 mod tests {
     use super::*;
     use crate::datamodel::{new_shared, OutputLevel, SharedDataModel};
-    use crate::luau::play::{instance, PlayLuau, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
+    use crate::mlua::play::{instance, PlayMlua, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
 
     fn no_rays(_: &RayQuery) -> Option<RayHit> {
         None
@@ -318,7 +318,7 @@ mod tests {
 
     /// A VM, a Humanoid in the Workspace, and two scripts: one written for
     /// Roblox, one native.
-    fn session() -> (PlayLuau, SharedDataModel, InstanceId, InstanceId, InstanceId) {
+    fn session() -> (PlayMlua, SharedDataModel, InstanceId, InstanceId, InstanceId) {
         let dm = new_shared();
         let (hum, roblox, native) = {
             let mut g = dm.lock();
@@ -330,11 +330,11 @@ mod tests {
             let native = g.create_virtual("Script", "Native", Some(sss));
             (hum, roblox, native)
         };
-        let vm = PlayLuau::new(dm.clone()).expect("the prelude loads");
+        let vm = PlayMlua::new(dm.clone()).expect("the prelude loads");
         (vm, dm, hum, roblox, native)
     }
 
-    fn run_with(vm: &mut PlayLuau, dm: &SharedDataModel, script: InstanceId, source: &str, rays: &crate::luau::play::RaycastFn<'_>) {
+    fn run_with(vm: &mut PlayMlua, dm: &SharedDataModel, script: InstanceId, source: &str, rays: &crate::mlua::play::RaycastFn<'_>) {
         let name = dm.lock().full_name(script);
         let launch = ScriptLaunch { instance: script, source: source.to_string(), chunk_name: name };
         let no_terrain: &TerrainReadFn<'_> = &|_| {};
@@ -344,7 +344,7 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
     }
 
-    fn run(vm: &mut PlayLuau, dm: &SharedDataModel, script: InstanceId, source: &str) {
+    fn run(vm: &mut PlayMlua, dm: &SharedDataModel, script: InstanceId, source: &str) {
         run_with(vm, dm, script, source, &no_rays);
     }
 

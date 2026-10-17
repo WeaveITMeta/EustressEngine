@@ -238,7 +238,7 @@ mod tests {
     use super::*;
 
     fn space(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos();
         let root = std::env::temp_dir().join(format!("eustress_space_path_{tag}_{}_{nanos}", std::process::id()));
         std::fs::create_dir_all(root.join("SoundService")).unwrap();
         std::fs::write(root.join("SoundService").join("flush.ogg"), b"ogg").unwrap();
@@ -249,7 +249,7 @@ mod tests {
     /// A Universe holding the Space `Garage` and `Other`, its shared assets
     /// with a Workshop mesh, and its engine files.
     fn universe(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos();
         let universe = std::env::temp_dir().join(format!("eustress_universe_{tag}_{}_{nanos}", std::process::id()));
         let space = universe.join("Spaces").join("Garage");
         let shared = universe.join(".eustress").join("assets");
@@ -364,7 +364,7 @@ mod tests {
             r"\??\UNC\no-such-host.invalid\share\x.glb",
             r"\\?\C:\Windows\win.ini",
         ] {
-            let started = std::time::Instant::now();
+            let started = bevy::platform::time::Instant::now();
             assert!(!is_local(Path::new(path)) || !Path::new(path).is_absolute(), "{path:?} read as local");
             assert_eq!(resolve_in_roots(&roots, Path::new(path)), None, "{path:?}");
             assert!(started.elapsed() < std::time::Duration::from_millis(50), "{path:?} took {:?}: it was looked up", started.elapsed());

@@ -59,12 +59,12 @@ use eustress_common::class_registry::{
     ClassSpawner, ComponentBundle, LodTier, PropertyBag, RobloxInstance, SpawnCtx,
 };
 use eustress_common::classes::{ClassName, Instance, PropertyValue};
-// The Component (data-only) `RemoteEvent` lives in `luau::components`.
+// The Component (data-only) `RemoteEvent` lives in `mlua::components`.
 // NOTE: the crate-root `eustress_common::RemoteEvent` re-export resolves
 // to the *runtime signal object* in `scripting::events` (not a Bevy
-// `Component`); we deliberately reach for the `luau::components` path so
+// `Component`); we deliberately reach for the `mlua::components` path so
 // `spawn` attaches the persistable ECS component, not the signal plumbing.
-use eustress_common::luau::components::RemoteEvent;
+use eustress_common::mlua::components::RemoteEvent;
 use eustress_common::{Attributes, Tags};
 
 /// Zero-sized spawner for [`ClassName::RemoteEvent`].

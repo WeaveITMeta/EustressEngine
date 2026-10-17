@@ -309,8 +309,8 @@ impl MarketplaceService {
     
     /// Check if player has active subscription
     pub fn has_subscription(&self, player_id: u64, sub_id: SubscriptionId) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         
@@ -331,8 +331,8 @@ impl MarketplaceService {
     
     /// Get all active subscriptions for player
     pub fn get_active_subscriptions(&self, player_id: u64) -> Vec<SubscriptionId> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         
@@ -361,8 +361,8 @@ impl MarketplaceService {
     
     /// Grant subscription to a player (server-side)
     pub fn grant_subscription(&mut self, player_id: u64, sub_id: SubscriptionId, duration_days: u32) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         

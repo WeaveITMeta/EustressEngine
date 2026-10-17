@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["gui", "realism-scripting", "luau", "physics", "realism", "avatar-profile", "view-look"] }
+eustress-common = { path = "../common", features = ["gui", "realism-scripting", "mlua", "physics", "realism", "avatar-profile", "view-look"] }
 # Multiplayer: joining a Studio host over WebTransport (`--connect`).
 eustress-networking = { path = "../common/eustress-networking" }
 # The Play runtime Studio shares: the draw step, HUD, billboards, sounds,
@@ -76,6 +76,13 @@ bevy = { workspace = true, features = [
     # bevy_render quits the app on the validation error the first time SMAA
     # runs. See the matching note in crates/engine/Cargo.toml.
     "smaa_luts",
+    # Studio's `raytracing` feature (in core) brings bevy_solari, which turns
+    # on bevy_pbr's `dfg_lut`: the specular lookup that changes how every
+    # material shades, ray traced or not. Built beside Studio the Player gets
+    # it through feature unification; built alone (player-release.yml) it
+    # would not, and would shade differently from Studio. Named here so both
+    # builds match.
+    "dfg_lut",
 ] }
 
 # Physics (Avian3D from workspace - supports Bevy 0.18)
@@ -109,6 +116,9 @@ base64 = "0.21"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 rand = "0.8"
+# The wall clock in every shell: std's own types on the desktop, the browser's
+# clock on wasm32, where std's SystemTime::now() panics.
+web-time = "1.1"
 gltf = "1.4.1"
 rune = "0.14"
 

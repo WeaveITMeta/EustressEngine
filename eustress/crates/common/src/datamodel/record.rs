@@ -19,7 +19,7 @@
 //!   [`merge_attribute_table`]: an `[attributes]` entry, as every reader reads
 //!   it and Studio writes it back.
 //! * [`class_from_toml`]: a file's `class_name`, as Studio's loader resolves it.
-//! * [`tree_class`], [`luau_script_class`], [`strip_script_suffix`] and
+//! * [`tree_class`], [`mlua_script_class`], [`strip_script_suffix`] and
 //!   [`folder_display_name`]: the class and name an instance has in the tree.
 //! * [`record_props`]: one instance file, as Studio's loader builds it.
 //! * [`record_name`], [`record_attribute_values`], [`record_tags`],
@@ -631,12 +631,12 @@ pub fn folder_display_name(folder: &str) -> String {
 /// The class a loaded instance has in the tree, as Studio's seed names it:
 /// the Luau script classes by their Roblox names, and a `Part` whose mesh is
 /// not one of the engine's primitives as a `MeshPart`. A `SoulScript` holding
-/// Luau takes its class from [`luau_script_class`] instead.
+/// Luau takes its class from [`mlua_script_class`] instead.
 pub fn tree_class(class: ClassName, custom_mesh: bool) -> String {
     match class {
-        ClassName::LuauScript => "Script".to_string(),
-        ClassName::LuauLocalScript => "LocalScript".to_string(),
-        ClassName::LuauModuleScript => "ModuleScript".to_string(),
+        ClassName::MluaScript => "Script".to_string(),
+        ClassName::MluaLocalScript => "LocalScript".to_string(),
+        ClassName::MluaModuleScript => "ModuleScript".to_string(),
         ClassName::Part if custom_mesh => "MeshPart".to_string(),
         other => other.as_str().to_string(),
     }
@@ -646,7 +646,7 @@ pub fn tree_class(class: ClassName, custom_mesh: bool) -> String {
 /// a Script, `x.client.luau` a LocalScript, `x.module.luau` a ModuleScript. A
 /// plain name is a ModuleScript where Roblox never runs code (the storage
 /// services) and a Script everywhere else, so existing Spaces keep running.
-pub fn luau_script_class(file_name: &str, service: &str) -> &'static str {
+pub fn mlua_script_class(file_name: &str, service: &str) -> &'static str {
     let file = file_name.to_lowercase();
     if file.contains(".server.") {
         "Script"
@@ -935,7 +935,7 @@ pub fn class_owned_section(class: ClassName, section: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordForm {
     /// A flat `<Name>.instance.toml`: the class resolves with
-    /// `ClassName::from_str`, where `Script` is a `LuauScript` and a name the
+    /// `ClassName::from_str`, where `Script` is a `MluaScript` and a name the
     /// engine does not know is a `Part`. A file that names no class takes the
     /// class its extension names ([`flat_extension_class`]).
     Flat,
@@ -1201,7 +1201,7 @@ pub fn record_script_origin(doc: &toml::Value) -> Option<String> {
 /// a Script or LocalScript whose file switches it off. A ModuleScript has no
 /// `Disabled`.
 pub fn script_starts_disabled(class: ClassName, doc: &toml::Value) -> bool {
-    matches!(class, ClassName::LuauScript | ClassName::LuauLocalScript) && record_script_disabled(doc)
+    matches!(class, ClassName::MluaScript | ClassName::MluaLocalScript) && record_script_disabled(doc)
 }
 
 /// The classes whose folders Studio builds as parts, through `spawn_instance`:
@@ -2058,11 +2058,11 @@ mod tests {
         assert!(!is_known_class("NoSuchClass") && is_known_class("Script") && is_known_class("Part"));
         assert!(is_known_class("Reference"), "a data class with a template is known");
         assert_eq!(class_from_toml("MeshPart"), ClassName::Part);
-        assert_eq!(tree_class(ClassName::LuauLocalScript, false), "LocalScript");
-        assert_eq!(luau_script_class("Door.server.luau", "Workspace"), "Script");
-        assert_eq!(luau_script_class("hud.client.luau", "StarterGui"), "LocalScript");
-        assert_eq!(luau_script_class("util.luau", "ReplicatedStorage"), "ModuleScript");
-        assert_eq!(luau_script_class("script.luau", "Workspace"), "Script");
+        assert_eq!(tree_class(ClassName::MluaLocalScript, false), "LocalScript");
+        assert_eq!(mlua_script_class("Door.server.luau", "Workspace"), "Script");
+        assert_eq!(mlua_script_class("hud.client.luau", "StarterGui"), "LocalScript");
+        assert_eq!(mlua_script_class("util.luau", "ReplicatedStorage"), "ModuleScript");
+        assert_eq!(mlua_script_class("script.luau", "Workspace"), "Script");
         assert_eq!(strip_script_suffix("Door.server"), "Door");
     }
 
@@ -2330,8 +2330,8 @@ mod tests {
         assert_eq!(general_branch_pose(ClassName::Attachment, &doc), Transform::IDENTITY, "part-local, not yet composed");
         assert_eq!(general_branch_pose(ClassName::Seat, &doc), Transform::IDENTITY, "a part class keeps its children's world poses");
         assert!(record_script_disabled(&doc));
-        assert!(script_starts_disabled(ClassName::LuauScript, &doc));
-        assert!(!script_starts_disabled(ClassName::LuauModuleScript, &doc), "a ModuleScript has no Disabled");
+        assert!(script_starts_disabled(ClassName::MluaScript, &doc));
+        assert!(!script_starts_disabled(ClassName::MluaModuleScript, &doc), "a ModuleScript has no Disabled");
         assert!(has_model_pivot(ClassName::Actor) && !has_model_pivot(ClassName::Folder));
         assert!(loads_as_part(ClassName::VehicleSeat) && loads_as_part(ClassName::UnionOperation));
         assert!(!loads_as_part(ClassName::Model) && !loads_as_part(ClassName::Attachment));

@@ -290,7 +290,7 @@ impl Default for ScriptLanguages {
     fn default() -> Self {
         let mut registry = super::language::LanguageRegistry::default();
         registry.register(std::sync::Arc::new(super::rune_service::RuneService));
-        registry.register(std::sync::Arc::new(super::luau_service::LuauService));
+        registry.register(std::sync::Arc::new(super::mlua_service::MluaService));
         Self(registry)
     }
 }

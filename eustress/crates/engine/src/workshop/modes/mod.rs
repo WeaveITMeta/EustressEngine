@@ -36,7 +36,7 @@ pub(crate) fn test_context() -> crate::workshop::tools::ToolContext {
         universe_root: std::path::PathBuf::new(),
         user_id: None,
         username: None,
-        luau_executor: None,
+        mlua_executor: None,
         display_unit: None,
         cancelled: None,
         permissions: eustress_tools::capability::Permissions::full(),

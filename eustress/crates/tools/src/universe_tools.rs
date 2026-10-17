@@ -481,9 +481,9 @@ impl ToolHandler for CreateScriptTool {
         // source file and run context, the same shape Studio's Insert writes.
         // Play classifies Luau by the source's Rojo suffix, so the suffix and
         // `run_context` always agree.
-        let is_luau = matches!(language, "luau" | "lua");
+        let is_mlua = matches!(language, "luau" | "lua");
         let kind = input.get("kind").and_then(|v| v.as_str()).unwrap_or("server");
-        let (suffix, run_context) = match (is_luau, kind) {
+        let (suffix, run_context) = match (is_mlua, kind) {
             (true, "server")  => (".server", "Server"),
             (true, "client")  => (".client", "Client"),
             (true, "module")  => (".module", "Module"),
@@ -495,7 +495,7 @@ impl ToolHandler for CreateScriptTool {
                 "Unknown kind '{}': use server, client or module", other,
             )),
         };
-        let ext = if is_luau { "luau" } else { "rune" };
+        let ext = if is_mlua { "luau" } else { "rune" };
 
         // The parent folder: the caller's Space-relative path, or the service
         // where this kind of script belongs.
@@ -550,7 +550,7 @@ impl ToolHandler for CreateScriptTool {
         //    it, with the run context its suffix implies. Files are named
         //    after the folder so two siblings never share a filename.
         let source_filename = format!("{}{}.{}", created.folder_name, suffix, ext);
-        let script_language = if is_luau { "luau" } else { "rune" };
+        let script_language = if is_mlua { "luau" } else { "rune" };
         if let Err(e) = patch_script_block(&created.toml_path, &source_filename, run_context, script_language) {
             return ToolResult {
                 tool_name: "create_script".to_string(), tool_use_id: String::new(),
@@ -1007,34 +1007,27 @@ impl ToolHandler for RenameSpaceTool {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(default_eustress_root);
         let spaces_dir = eustress_root.join(universe).join("Spaces");
-        let old_path = spaces_dir.join(old_name);
-        let new_path = spaces_dir.join(new_name);
 
-        if !old_path.exists() {
-            return err_result(TOOL, format!("Space '{}' not found at {}", old_name, old_path.display()));
-        }
-        if new_path.exists() {
-            return err_result(TOOL, format!("A Space named '{}' already exists — refusing to overwrite.", new_name));
-        }
-
-        if let Err(e) = std::fs::rename(&old_path, &new_path) {
-            return err_result(
-                TOOL,
-                format!(
-                    "Rename failed ({e}). The Space appears to be open in a running engine \
-                     (a locked WorldDb file or other open handle inside {}) — close it and retry.",
-                    old_path.display()
-                ),
-            );
-        }
-
-        let mut patched = Vec::new();
-        if patch_toml_name_field(&new_path.join("space.toml"), "space", old_name, new_name) {
-            patched.push("space.toml".to_string());
-        }
-        if patch_toml_name_field(&new_path.join(".eustress").join("project.toml"), "project", old_name, new_name) {
-            patched.push(".eustress/project.toml".to_string());
-        }
+        let (new_path, patched) = match rename_space_folder(&spaces_dir, old_name, new_name) {
+            Ok(done) => done,
+            Err(FolderRenameError::NotFound(path)) => {
+                return err_result(TOOL, format!("Space '{}' not found at {}", old_name, path.display()));
+            }
+            Err(FolderRenameError::Exists(_)) => {
+                return err_result(TOOL, format!("A Space named '{}' already exists — refusing to overwrite.", new_name));
+            }
+            Err(FolderRenameError::InvalidName(why)) => return err_result(TOOL, why),
+            Err(FolderRenameError::Busy(e)) => {
+                return err_result(
+                    TOOL,
+                    format!(
+                        "Rename failed ({e}). The Space appears to be open in a running engine \
+                         (a locked WorldDb file or other open handle inside {}) — close it and retry.",
+                        spaces_dir.join(old_name).display()
+                    ),
+                );
+            }
+        };
 
         ToolResult {
             tool_name: TOOL.to_string(), tool_use_id: String::new(),
@@ -1100,43 +1093,27 @@ impl ToolHandler for RenameUniverseTool {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(default_eustress_root);
-        let old_path = eustress_root.join(old_name);
-        let new_path = eustress_root.join(new_name);
 
-        if !old_path.exists() {
-            return err_result(TOOL, format!("Universe '{}' not found at {}", old_name, old_path.display()));
-        }
-        if new_path.exists() {
-            return err_result(TOOL, format!("A Universe named '{}' already exists — refusing to overwrite.", new_name));
-        }
-
-        if let Err(e) = std::fs::rename(&old_path, &new_path) {
-            return err_result(
-                TOOL,
-                format!(
-                    "Rename failed ({e}). The Universe appears to be open in a running engine \
-                     (a locked WorldDb file or other open handle inside {}) — close it and retry.",
-                    old_path.display()
-                ),
-            );
-        }
-
-        // The only on-disk "last opened Universe" state found in the codebase
-        // is the `.default_universe` next-launch sentinel written by
-        // `SetDefaultUniverseTool` / the engine's own picker (see
-        // `eustress-engine/src/space/mod.rs` and `engine_bridge/port_file.rs`).
-        // Per-user MRU state (`workshop/mention.rs`) lives *inside* each
-        // Space's `.eustress/` tree, so it moves with the rename automatically
-        // and needs no separate patch.
-        let sentinel = eustress_root.join(".default_universe");
-        let mut sentinel_updated = false;
-        if let Ok(content) = std::fs::read_to_string(&sentinel) {
-            if content.trim() == old_name {
-                if std::fs::write(&sentinel, new_name).is_ok() {
-                    sentinel_updated = true;
-                }
+        let (new_path, sentinel_updated) = match rename_universe_folder(&eustress_root, old_name, new_name) {
+            Ok(done) => done,
+            Err(FolderRenameError::NotFound(path)) => {
+                return err_result(TOOL, format!("Universe '{}' not found at {}", old_name, path.display()));
             }
-        }
+            Err(FolderRenameError::Exists(_)) => {
+                return err_result(TOOL, format!("A Universe named '{}' already exists — refusing to overwrite.", new_name));
+            }
+            Err(FolderRenameError::InvalidName(why)) => return err_result(TOOL, why),
+            Err(FolderRenameError::Busy(e)) => {
+                return err_result(
+                    TOOL,
+                    format!(
+                        "Rename failed ({e}). The Universe appears to be open in a running engine \
+                         (a locked WorldDb file or other open handle inside {}) — close it and retry.",
+                        eustress_root.join(old_name).display()
+                    ),
+                );
+            }
+        };
 
         ToolResult {
             tool_name: TOOL.to_string(), tool_use_id: String::new(),
@@ -1190,10 +1167,105 @@ fn named_universe(ctx: &ToolContext, raw: &str) -> Result<std::path::PathBuf, St
     Ok(ctx.universe_root.parent().unwrap_or(ctx.universe_root.as_path()).join(name))
 }
 
+/// Why a Space or Universe folder was not renamed. Only
+/// [`FolderRenameError::Busy`] can succeed on a later try: the names are
+/// fine, but a program still has files open inside the folder.
+#[derive(Debug)]
+pub enum FolderRenameError {
+    /// The new name breaks the naming rules; the text says which.
+    InvalidName(String),
+    /// Nothing is at the old path.
+    NotFound(std::path::PathBuf),
+    /// Something already has the new name. It is never overwritten.
+    Exists(std::path::PathBuf),
+    /// The operating system refused the rename, most often because a program
+    /// (a running engine, an editor) has files open inside the folder.
+    Busy(std::io::Error),
+}
+
+impl std::fmt::Display for FolderRenameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FolderRenameError::InvalidName(why) => f.write_str(why),
+            FolderRenameError::NotFound(path) => write!(f, "nothing to rename at {}", path.display()),
+            FolderRenameError::Exists(path) => write!(f, "{} already exists", path.display()),
+            FolderRenameError::Busy(e) => write!(f, "the folder is in use ({e})"),
+        }
+    }
+}
+
+/// Renames `parent/old_name` to `parent/new_name`: one folder, never onto an
+/// existing one. A change of letter case alone is allowed, since Windows
+/// reports the target as existing (it is the same folder).
+fn rename_folder(parent: &std::path::Path, old_name: &str, new_name: &str) -> Result<std::path::PathBuf, FolderRenameError> {
+    validate_path_component(new_name).map_err(FolderRenameError::InvalidName)?;
+    if std::path::Path::new(old_name).components().count() != 1 {
+        return Err(FolderRenameError::InvalidName(format!("Invalid name '{old_name}': one folder name only")));
+    }
+    let old_path = parent.join(old_name);
+    let new_path = parent.join(new_name);
+    if !old_path.is_dir() {
+        return Err(FolderRenameError::NotFound(old_path));
+    }
+    let case_only = old_name != new_name && old_name.to_lowercase() == new_name.to_lowercase();
+    if new_path.exists() && !case_only {
+        return Err(FolderRenameError::Exists(new_path));
+    }
+    std::fs::rename(&old_path, &new_path).map_err(FolderRenameError::Busy)?;
+    Ok(new_path)
+}
+
+/// Renames the Space folder `parent/old_name` to `parent/new_name` (a plain
+/// filesystem rename, no git operation), then updates the Space's own name in
+/// `space.toml` and `.eustress/project.toml` where they still say the old
+/// name. Returns the new path and the files it updated. The `rename_space`
+/// tool and Studio's File > Rename both rename Spaces through this.
+pub fn rename_space_folder(
+    parent: &std::path::Path,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(std::path::PathBuf, Vec<String>), FolderRenameError> {
+    let new_path = rename_folder(parent, old_name, new_name)?;
+    let mut patched = Vec::new();
+    if patch_toml_name_field(&new_path.join("space.toml"), "space", old_name, new_name) {
+        patched.push("space.toml".to_string());
+    }
+    if patch_toml_name_field(&new_path.join(".eustress").join("project.toml"), "project", old_name, new_name) {
+        patched.push(".eustress/project.toml".to_string());
+    }
+    Ok((new_path, patched))
+}
+
+/// Renames the Universe folder `eustress_root/old_name` to
+/// `eustress_root/new_name` (a plain filesystem rename, no git operation),
+/// then moves the `.default_universe` next-launch marker along when it named
+/// the old Universe. Returns the new path and whether the marker moved.
+/// The `rename_universe` tool and Studio's File > Rename both rename
+/// Universes through this.
+pub fn rename_universe_folder(
+    eustress_root: &std::path::Path,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(std::path::PathBuf, bool), FolderRenameError> {
+    let new_path = rename_folder(eustress_root, old_name, new_name)?;
+    // The only on-disk "last opened Universe" state is the `.default_universe`
+    // next-launch marker written by `SetDefaultUniverseTool` and the engine's
+    // own picker. Per-user state (`workshop/mention.rs`) lives inside each
+    // Space's `.eustress/` tree, so it moves with the rename.
+    let sentinel = eustress_root.join(".default_universe");
+    let mut sentinel_updated = false;
+    if let Ok(content) = std::fs::read_to_string(&sentinel) {
+        if content.trim() == old_name && std::fs::write(&sentinel, new_name).is_ok() {
+            sentinel_updated = true;
+        }
+    }
+    Ok((new_path, sentinel_updated))
+}
+
 /// Validate a single path component (Universe name, Space name, …): one
 /// ordinary name by the shared rules in [`crate::sandbox::plain_name`], with
 /// no space at either end, since callers use the name as given.
-fn validate_path_component(name: &str) -> Result<(), String> {
+pub fn validate_path_component(name: &str) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -1544,7 +1616,7 @@ mod tests {
             universe_root: dir.to_path_buf(),
             user_id: None,
             username: None,
-            luau_executor: None,
+            mlua_executor: None,
             display_unit: None,
             cancelled: None,
             permissions: crate::capability::Permissions::default(),
@@ -1591,5 +1663,75 @@ mod tests {
         assert_eq!(read.content, "return {}");
 
         let _ = std::fs::remove_dir_all(&space);
+    }
+
+    fn rename_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("eustress_rename_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_space_rename_moves_the_folder_and_its_own_name() {
+        let spaces = rename_root("space");
+        let old = spaces.join("Garage");
+        std::fs::create_dir_all(old.join(".eustress")).unwrap();
+        std::fs::write(old.join("space.toml"), "[space]\nname = \"Garage\"\n").unwrap();
+        std::fs::write(old.join(".eustress").join("project.toml"), "[project]\nname = \"My own title\"\n").unwrap();
+
+        let (new_path, patched) = rename_space_folder(&spaces, "Garage", "Workshop").unwrap();
+        assert_eq!(new_path, spaces.join("Workshop"));
+        assert!(!old.exists() && new_path.is_dir());
+        assert!(std::fs::read_to_string(new_path.join("space.toml")).unwrap().contains("\"Workshop\""));
+        // A name the author changed is theirs: only a name equal to the folder's follows it.
+        assert!(std::fs::read_to_string(new_path.join(".eustress").join("project.toml")).unwrap().contains("My own title"));
+        assert_eq!(patched, ["space.toml"]);
+        let _ = std::fs::remove_dir_all(&spaces);
+    }
+
+    #[test]
+    fn a_rename_never_overwrites() {
+        let spaces = rename_root("exists");
+        std::fs::create_dir_all(spaces.join("A")).unwrap();
+        std::fs::create_dir_all(spaces.join("B")).unwrap();
+        std::fs::write(spaces.join("B").join("keep.txt"), "B's").unwrap();
+        assert!(matches!(rename_space_folder(&spaces, "A", "B"), Err(FolderRenameError::Exists(_))));
+        assert!(spaces.join("A").is_dir());
+        assert_eq!(std::fs::read_to_string(spaces.join("B").join("keep.txt")).unwrap(), "B's");
+        let _ = std::fs::remove_dir_all(&spaces);
+    }
+
+    #[test]
+    fn a_case_only_rename_is_allowed() {
+        let spaces = rename_root("case");
+        std::fs::create_dir_all(spaces.join("garage")).unwrap();
+        let (new_path, _) = rename_space_folder(&spaces, "garage", "Garage").unwrap();
+        let listed: Vec<String> = std::fs::read_dir(&spaces).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(listed, ["Garage"], "{new_path:?}");
+        let _ = std::fs::remove_dir_all(&spaces);
+    }
+
+    #[test]
+    fn a_bad_name_or_a_missing_folder_changes_nothing() {
+        let spaces = rename_root("bad");
+        std::fs::create_dir_all(spaces.join("A")).unwrap();
+        assert!(matches!(rename_space_folder(&spaces, "A", "../escape"), Err(FolderRenameError::InvalidName(_))));
+        assert!(matches!(rename_space_folder(&spaces, "A", " padded"), Err(FolderRenameError::InvalidName(_))));
+        assert!(matches!(rename_space_folder(&spaces, "Missing", "B"), Err(FolderRenameError::NotFound(_))));
+        assert!(spaces.join("A").is_dir() && !spaces.join("B").exists());
+        let _ = std::fs::remove_dir_all(&spaces);
+    }
+
+    #[test]
+    fn a_universe_rename_moves_the_next_launch_marker_with_it() {
+        let root = rename_root("universe");
+        std::fs::create_dir_all(root.join("Voltec").join("Spaces").join("Lot")).unwrap();
+        std::fs::write(root.join(".default_universe"), "Voltec").unwrap();
+        let (new_path, moved) = rename_universe_folder(&root, "Voltec", "Voltec Motors").unwrap();
+        assert!(moved);
+        assert!(new_path.join("Spaces").join("Lot").is_dir());
+        assert_eq!(std::fs::read_to_string(root.join(".default_universe")).unwrap(), "Voltec Motors");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

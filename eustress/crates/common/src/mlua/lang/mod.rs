@@ -3,7 +3,7 @@
 //! syntax errors from the VM's own compiler. Static only: nothing here runs a
 //! script.
 //!
-//! The editor's Luau service (`engine/src/script_editor/luau_service.rs`)
+//! The editor's Luau service (`engine/src/script_editor/mlua_service.rs`)
 //! adapts these to its `LanguageService` trait.
 
 pub mod complete;

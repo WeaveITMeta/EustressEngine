@@ -344,6 +344,23 @@ impl CenterTabManager {
     /// VideoPlayer, WebBrowser, ApiBrowser, ServicesBrowser) survive.
     /// Entity-based tabs (SoulScript, ParametersEditor) survive only when
     /// they also carry a `file_path`; otherwise they're filtered.
+    /// A folder was renamed from `from` to `to`: every saved tab layout of a
+    /// Space at or inside `from`, and every tab's file in it, follow the
+    /// rename, so reopening the renamed Space brings its tabs back.
+    pub fn follow_rename(&mut self, from: &Path, to: &Path) {
+        let moved = |p: &Path| p.strip_prefix(from).ok().map(|rest| to.join(rest));
+        let snapshots = std::mem::take(&mut self.space_snapshots);
+        for (root, mut snapshot) in snapshots {
+            for tab in snapshot.tabs.iter_mut().chain(snapshot.closed_tabs.iter_mut()) {
+                if let Some(next) = tab.file_path.as_deref().and_then(moved) {
+                    tab.file_path = Some(next);
+                }
+            }
+            let root = moved(&root).unwrap_or(root);
+            self.space_snapshots.insert(root, snapshot);
+        }
+    }
+
     pub fn restore_for_space(&mut self, space_root: &Path) {
         // Always start with a fresh Scene tab in slot 0, but preserve the
         // snapshots map across the reset so other spaces' state survives.
@@ -936,7 +953,7 @@ impl CenterTabManager {
 // ============================================================================
 
 /// Resolve the source code content for a script path.
-/// If path is a directory (folder-based script), finds the .rune/.luau/.soul file inside.
+/// If path is a directory (folder-based script), finds the .rune/.mlua/.soul file inside.
 /// If path is a file, reads it directly.
 fn resolve_script_source(path: &Path) -> Option<String> {
     if path.is_dir() {
@@ -1375,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn save_writes_the_luau_file_the_folder_holds_never_a_new_rune() {
+    fn save_writes_the_mlua_file_the_folder_holds_never_a_new_rune() {
         let s = Scratch::new("luau");
         let folder = s.0.join("ClientController");
         std::fs::create_dir_all(&folder).unwrap();

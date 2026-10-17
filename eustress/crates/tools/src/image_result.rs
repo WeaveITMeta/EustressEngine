@@ -125,7 +125,7 @@ mod tests {
             universe_root: std::env::temp_dir(),
             user_id: None,
             username: None,
-            luau_executor: None,
+            mlua_executor: None,
             display_unit: None,
             cancelled: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cancelled))),
             permissions: crate::Permissions::standard(),

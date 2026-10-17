@@ -11,9 +11,15 @@ license = "PolyForm-Shield-1.0.0"
 # nothing to its Bevy.
 bevy = { workspace = true, features = ["bevy_render", "bevy_pbr", "bevy_asset", "bevy_audio", "bevy_color", "bevy_log"] }
 avian3d = { workspace = true }
-eustress-common = { path = "../common", features = ["physics", "gui", "realism"] }
+# Common without its default features, so the browser Player (player-web) can
+# build the Play runtime: no streaming, GeoTIFF or Slint. `units_v1` stays,
+# because the readers convert authored units to metres with it, and a browser
+# tree must match the host's. The desktop Player and Studio turn on more, and
+# cargo unifies, so their builds do not change. The GUI types the runtime
+# draws (`gui::billboard_renderer`) are not gated on `gui`.
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1", "model-import"] }
 # `ReplicationTap`: a hosting session hands the frame's writes to replication.
-eustress-networking = { path = "../common/eustress-networking" }
+eustress-networking = { path = "../common/eustress-networking", default-features = false }
 texture-gen = { path = "../texture-gen" }
 parking_lot = { workspace = true }
 serde = { workspace = true }
@@ -31,5 +37,5 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # The tests build trees with common's Luau-side helpers (the Terrain
-# instance); the apps turn `luau` on anyway, the library alone does not.
-eustress-common = { path = "../common", features = ["physics", "gui", "realism", "luau"] }
+# instance); the apps turn `mlua` on anyway, the library alone does not.
+eustress-common = { path = "../common", features = ["physics", "gui", "realism", "mlua"] }

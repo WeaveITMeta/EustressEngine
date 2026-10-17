@@ -12,7 +12,8 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 // ============================================================================
 // 1. DataStoreService — Main service for accessing data stores

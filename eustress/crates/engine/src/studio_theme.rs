@@ -1,8 +1,8 @@
 //! TOML-driven theme engine.
 //!
 //! A theme is a flat map of design-token → color/length, authored as a
-//! `*.toml` file. Two built-ins (`classic`, `voltec`) ship compiled into the
-//! binary via `include_str!` (they double as copy-me templates); any number of
+//! `*.toml` file. The built-ins (`classic`, `voltec`, `claude`) ship compiled
+//! into the binary via `include_str!` (they double as copy-me templates); any number of
 //! user themes are scanned from `%LOCALAPPDATA%/Eustress/Themes/` — that folder
 //! IS the v1 "marketplace": drop a `.toml` in, rescan, it appears.
 //!
@@ -120,7 +120,7 @@ pub struct ThemePalette {
     pub id: String,
     pub name: String,
     pub description: String,
-    /// True for the two compiled-in themes; false for user-folder themes.
+    /// True for the compiled-in themes; false for user-folder themes.
     /// (Purely informational — used to label the source in the UI.)
     pub builtin: bool,
     pub tokens: HashMap<String, String>,
@@ -237,13 +237,15 @@ pub fn parse_len(s: &str) -> Option<f32> {
     t.trim().parse::<f32>().ok()
 }
 
-/// The two compiled-in palettes. These are authoritative for Classic/Voltec
-/// and double as the copy-me templates users clone into the Themes folder.
+/// The compiled-in palettes. These are authoritative for Classic, Voltec and
+/// Claude, and double as the copy-me templates users clone into the Themes
+/// folder.
 pub fn load_builtin_themes() -> Vec<ThemePalette> {
     let mut out = Vec::new();
     for (text, id) in [
         (include_str!("../themes/classic.toml"), "classic"),
         (include_str!("../themes/voltec.toml"), "voltec"),
+        (include_str!("../themes/claude.toml"), "claude"),
     ] {
         match parse_theme_toml(text, true) {
             Ok(p) => out.push(p),
@@ -403,7 +405,7 @@ mod tests {
     #[test]
     fn builtins_parse_and_are_complete() {
         let themes = load_builtin_themes();
-        assert_eq!(themes.len(), 2, "classic + voltec must both parse");
+        assert_eq!(themes.len(), 3, "classic, voltec and claude must all parse");
         for t in &themes {
             // A built-in must specify EVERY known token (it's the base others
             // fall back to; incompleteness would leak the compiled-in default).
@@ -463,23 +465,32 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
-    /// Voltec's text is readable where it is drawn, and its primary buttons
-    /// (which hard-code a white label) are readable too.
-    #[test]
-    fn voltec_is_readable() {
-        let voltec = load_builtin_themes().into_iter().find(|t| t.id == "voltec").expect("voltec is built in");
-        let c = |k: &str| parse_hex(&voltec.tokens[k]).unwrap_or_else(|| panic!("{k} is a colour"));
+    /// A built-in's text is readable where it is drawn, and its primary
+    /// buttons (which hard-code a white label) are readable too.
+    fn assert_readable(id: &str) {
+        let theme = load_builtin_themes().into_iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id} is built in"));
+        let c = |k: &str| parse_hex(&theme.tokens[k]).unwrap_or_else(|| panic!("{id}: {k} is a colour"));
         let white = [255, 255, 255, 255];
         for surface in ["background-primary", "background-secondary", "background-tertiary", "panel-background", "header-background", "dialog-background", "input-background", "ribbon-background"] {
             for (text, min) in [("text-primary", 7.0), ("text-secondary", 4.5), ("text-accent", 4.5), ("text-error", 4.5), ("text-warning", 4.5), ("text-success", 4.5)] {
                 let r = contrast(c(text), c(surface));
-                assert!(r >= min, "{text} on {surface} is {r:.2}, under {min}");
+                assert!(r >= min, "{id}: {text} on {surface} is {r:.2}, under {min}");
             }
         }
         for fill in ["button-primary", "button-primary-hover", "accent-eustress"] {
             let r = contrast(white, c(fill));
-            assert!(r >= 4.5, "a white label on {fill} is {r:.2}, under 4.5");
+            assert!(r >= 4.5, "{id}: a white label on {fill} is {r:.2}, under 4.5");
         }
+    }
+
+    #[test]
+    fn voltec_is_readable() {
+        assert_readable("voltec");
+    }
+
+    #[test]
+    fn claude_is_readable() {
+        assert_readable("claude");
     }
 
     #[test]

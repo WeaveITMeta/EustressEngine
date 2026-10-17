@@ -1882,11 +1882,11 @@ impl Plugin for PlayModeCorePlugin {
                 crate::terrain_commands::clear_terrain_play_snapshot,
             )
 
-            // Dynamic-script runtimes. LuauRuntimeState is registered
+            // Dynamic-script runtimes. MluaRuntimeState is registered
             // here so the Luau hot-reload system has somewhere to write
             // recompiled chunks. The runtime itself initialises lazily
             // on first execution.
-            .init_resource::<eustress_common::luau::runtime::LuauRuntimeState>()
+            .init_resource::<eustress_common::mlua::runtime::MluaRuntimeState>()
 
             // Rune script execution during play mode:
             // 0. Hot-recompile any SoulScriptData marked `dirty` by the
@@ -1903,13 +1903,13 @@ impl Plugin for PlayModeCorePlugin {
             // any Play-state gate) so users see compile diagnostics from
             // the analyzer even in Edit mode — before they press Play.
             //
-            // bevy 0.19: LuauScriptErrorEvent was only registered inside
-            // common's LuauPlugin, which the engine never adds — so this
+            // bevy 0.19: MluaScriptErrorEvent was only registered inside
+            // common's MluaPlugin, which the engine never adds — so this
             // reader (and every writer of the event) failed fetch-time
             // validation and was SILENTLY skipped: Luau script errors never
             // reached the Output panel. Register the message here, where the
             // consuming system lives.
-            .add_message::<eustress_common::luau::runtime::LuauScriptErrorEvent>()
+            .add_message::<eustress_common::mlua::runtime::MluaScriptErrorEvent>()
             .add_systems(Update, crate::soul::rune_api::drain_script_errors_to_output)
             .add_systems(Update, (
                 crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
@@ -1932,7 +1932,7 @@ impl Plugin for PlayModeCorePlugin {
                 // Apply.
                 crate::soul::rune_play::drive_rune_frame
                     .after(crate::soul::rune_play::refresh_rune_scene_snapshot)
-                    .after(crate::play_datamodel::drive_luau),
+                    .after(crate::play_datamodel::drive_mlua),
                 crate::soul::rune_api::drain_script_logs_to_output
                     .after(crate::soul::rune_play::drive_rune_frame),
             ).in_set(crate::play_datamodel::PlayScriptSet::Scripts).run_if(in_state(PlayModeState::Playing)))

@@ -165,7 +165,7 @@ pub struct LoadedScript {
     /// Script type (meta/plausible/mixed)
     pub script_type: ScriptType,
     /// Last modified time
-    pub last_modified: std::time::SystemTime,
+    pub last_modified: web_time::SystemTime,
     /// Compilation status
     pub status: BuildStatus,
 }
@@ -255,7 +255,7 @@ fn process_script_loads(
             service: event.service,
             scene: event.scene.clone(),
             script_type: ScriptType::Mixed,
-            last_modified: std::time::SystemTime::now(),
+            last_modified: web_time::SystemTime::now(),
             status: BuildStatus::Pending,
         };
         

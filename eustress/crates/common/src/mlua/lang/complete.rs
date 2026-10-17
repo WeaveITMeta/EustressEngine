@@ -8,7 +8,7 @@
 
 use super::lexer::tokenize_line;
 use super::{Token, TokenClass};
-use crate::luau::catalog::{self, Kind};
+use crate::mlua::catalog::{self, Kind};
 
 /// What an expression is, as far as completion needs to know.
 #[derive(Clone, Debug, PartialEq, Eq)]

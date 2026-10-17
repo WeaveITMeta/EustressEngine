@@ -20,9 +20,9 @@ use eustress_common::avatar::LocalAvatar;
 use eustress_common::classes::BasePart;
 use eustress_common::datamodel::record::cframe_of;
 use eustress_common::datamodel::{DataModel, DmEvent, DmValue, InstanceId};
-use eustress_common::luau::play::instance::{DRAWN_CFRAME, DRAWN_FROM_CFRAME};
-use eustress_common::luau::play::terrain::terrain_instance;
-use eustress_common::luau::play::{RayHit, RayQuery};
+use eustress_common::mlua::play::instance::{DRAWN_CFRAME, DRAWN_FROM_CFRAME};
+use eustress_common::mlua::play::terrain::terrain_instance;
+use eustress_common::mlua::play::{RayHit, RayQuery};
 use eustress_common::machine_input::{write_camera, write_input, write_mouse, DeviceFrame, Taken, ViewRect};
 use eustress_common::scripting::{CFrame, Vector3};
 use eustress_common::terrain::TerrainChunkCollider;
@@ -110,7 +110,7 @@ pub fn apply_injection(inj: &mut InjectedInput, params: &serde_json::Value) -> R
         }
     };
     let known = |n: &str| {
-        eustress_common::luau::roblox_to_bevy_keycode(n).is_some() || eustress_common::luau::roblox_to_bevy_mouse(n).is_some()
+        eustress_common::mlua::roblox_to_bevy_keycode(n).is_some() || eustress_common::mlua::roblox_to_bevy_mouse(n).is_some()
     };
     for key in ["down", "up", "tap"] {
         if let Some(bad) = names(key)?.into_iter().find(|n| !known(n)) {
@@ -155,16 +155,16 @@ pub fn apply_injected_buttons(
     let press = std::mem::take(&mut injected.press);
     let release = std::mem::take(&mut injected.release);
     for n in &press {
-        if let Some(k) = eustress_common::luau::roblox_to_bevy_keycode(n) {
+        if let Some(k) = eustress_common::mlua::roblox_to_bevy_keycode(n) {
             keys.press(k);
-        } else if let Some(b) = eustress_common::luau::roblox_to_bevy_mouse(n) {
+        } else if let Some(b) = eustress_common::mlua::roblox_to_bevy_mouse(n) {
             buttons.press(b);
         }
     }
     for n in release.iter().chain(due.iter()) {
-        if let Some(k) = eustress_common::luau::roblox_to_bevy_keycode(n) {
+        if let Some(k) = eustress_common::mlua::roblox_to_bevy_keycode(n) {
             keys.release(k);
-        } else if let Some(b) = eustress_common::luau::roblox_to_bevy_mouse(n) {
+        } else if let Some(b) = eustress_common::mlua::roblox_to_bevy_mouse(n) {
             buttons.release(b);
         }
     }

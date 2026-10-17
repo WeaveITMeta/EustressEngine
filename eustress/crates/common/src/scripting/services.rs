@@ -13,7 +13,8 @@
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Ordering as CmpOrdering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use super::events::{Signal, Connection, SignalArg};
 use super::types::TweenInfo;

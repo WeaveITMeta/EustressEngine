@@ -1333,7 +1333,7 @@ fn write_script(space_root: &Path, parent: &str, name: &str, kind: &str, code: &
         universe_root: space_root.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| space_root.to_path_buf()),
         user_id: None,
         username: None,
-        luau_executor: None,
+        mlua_executor: None,
         display_unit: None,
         cancelled: None,
         permissions: eustress_tools::Permissions::standard().for_principal("ui-builder"),

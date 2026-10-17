@@ -27,7 +27,7 @@ pub struct LoadInProgress {
     pub active: bool,
     pub frames_since_quiescent: u32,
     /// When the deferred queue was last seen empty with priority done.
-    pub quiescent_since: Option<std::time::Instant>,
+    pub quiescent_since: Option<bevy::platform::time::Instant>,
 }
 
 impl LoadInProgress {

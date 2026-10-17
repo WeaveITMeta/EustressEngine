@@ -179,7 +179,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
 
     // Scripting.
     registry.register(script_tools::ExecuteRuneTool);
-    registry.register(script_tools::ExecuteLuauTool);
+    registry.register(script_tools::ExecuteMluaTool);
     registry.register(script_tools::ImageToCodeTool);
     // Scene-geometry reconstruction via VIGA (Vision-as-Inverse-Graphics).
     // Distinct from ImageToCodeTool — that returns a Rune script; this

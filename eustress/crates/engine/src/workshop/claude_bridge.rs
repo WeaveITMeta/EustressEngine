@@ -28,7 +28,7 @@ use super::{
     McpCommandStatus, MessageRole, normalizer, tool_dispatch, approval_policy, card_review,
 };
 use super::tools::ToolRegistry;
-use eustress_tools::registry::{LuauCreatedEntity, LuauExecutionResult, LuauExecutor};
+use eustress_tools::registry::{MluaCreatedEntity, MluaExecutionResult, MluaExecutor};
 use super::modes::ActiveModes;
 use crate::soul::claude_client::{AgenticResponse, ClaudeClient, ClaudeTool};
 use crate::soul::openai_client::{OpenAiClient, OpenAiConfig};
@@ -1542,29 +1542,29 @@ fn build_tool_context(
     let display_unit_sym = display_unit.as_ref()
         .map(|d| d.0.symbol().to_string());
     // Build a Luau executor that creates a fresh sandboxed runtime per
-    // invocation. LuauRuntime is !Send so we can't share one across
+    // invocation. MluaRuntime is !Send so we can't share one across
     // threads — creating a fresh VM per script is ~1 ms and avoids
     // cross-thread issues entirely.
-    let luau_executor: Option<LuauExecutor> = Some(Arc::new(
-        |source: &str, chunk_name: &str| -> LuauExecutionResult {
-            let mut runtime = match eustress_common::luau::runtime::LuauRuntime::new() {
+    let mlua_executor: Option<MluaExecutor> = Some(Arc::new(
+        |source: &str, chunk_name: &str| -> MluaExecutionResult {
+            let mut runtime = match eustress_common::mlua::runtime::MluaRuntime::new() {
                 Ok(r) => r,
-                Err(e) => return LuauExecutionResult {
+                Err(e) => return MluaExecutionResult {
                     success: false,
                     message: format!("Failed to create Luau runtime: {}", e),
                     created_entities: Vec::new(),
                 },
             };
             if let Err(e) = runtime.execute_chunk(source, chunk_name) {
-                return LuauExecutionResult {
+                return MluaExecutionResult {
                     success: false,
                     message: e,
                     created_entities: Vec::new(),
                 };
             }
             let instances = runtime.drain_created_instances();
-            let entities: Vec<LuauCreatedEntity> = instances.into_iter().map(|i| {
-                LuauCreatedEntity {
+            let entities: Vec<MluaCreatedEntity> = instances.into_iter().map(|i| {
+                MluaCreatedEntity {
                     class_name: i.class_name,
                     name: i.name,
                     position: i.position,
@@ -1585,12 +1585,12 @@ fn build_tool_context(
                     text_color: i.text_color,
                     text_size: i.text_size,
                     font: i.font,
-                    luau_entity_id: i.luau_entity_id,
+                    mlua_entity_id: i.mlua_entity_id,
                     parent_entity_id: i.parent_entity_id,
                 }
             }).collect();
             let count = entities.len();
-            LuauExecutionResult {
+            MluaExecutionResult {
                 success: true,
                 message: format!("OK — {} instances created", count),
                 created_entities: entities,
@@ -1603,7 +1603,7 @@ fn build_tool_context(
         universe_root,
         user_id,
         username,
-        luau_executor,
+        mlua_executor,
         display_unit: display_unit_sym,
         // Workshop tool calls aren't cancellable out of band today; wiring
         // the stop button through to here is the natural next step.

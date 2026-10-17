@@ -278,8 +278,8 @@ pub struct TwoFactorRecovery {
 impl TwoFactorRecovery {
     /// Check if recovery has expired
     pub fn is_expired(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         now > self.expires_at

@@ -5,7 +5,8 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 // ============================================================================
 // Hot Reload Watcher

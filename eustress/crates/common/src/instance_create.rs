@@ -43,8 +43,8 @@ pub const UUID_HEX_LEN: usize = 32;
 pub fn fresh_uuid_for_create() -> String {
     // 16 bytes random from uuid::Uuid::new_v4 (cryptographic RNG).
     let rand_bytes: [u8; 16] = *uuid::Uuid::new_v4().as_bytes();
-    let nanos: u128 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos: u128 = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let mut seed = Vec::with_capacity(16 + 1 + 16);
@@ -710,8 +710,8 @@ pub fn unique_entity_name(dir: &Path, base: &str) -> String {
     if entity_name_is_available(dir, base) {
         return base.to_string();
     }
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let seed = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     for i in 0u32..10_000 {
@@ -816,8 +816,8 @@ mod apply_overrides_tests {
         let stem = format!(
             "eustress_uuid_test_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
@@ -1051,8 +1051,8 @@ mod sanitize_tests {
         let dir = std::env::temp_dir().join(format!(
             "eustress_sanitize_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -1081,8 +1081,8 @@ mod requested_name_tests {
         let dir = std::env::temp_dir().join(format!(
             "eustress_requested_name_{tag}_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

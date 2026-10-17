@@ -19,13 +19,13 @@ pub struct PendingEnhancement {
 #[derive(Component)]
 #[allow(dead_code)]
 pub struct EnhancingInProgress {
-    pub started_at: std::time::Instant,
+    pub started_at: bevy::platform::time::Instant,
 }
 
 impl Default for EnhancingInProgress {
     fn default() -> Self {
         Self {
-            started_at: std::time::Instant::now(),
+            started_at: bevy::platform::time::Instant::now(),
         }
     }
 }
@@ -35,14 +35,14 @@ impl Default for EnhancingInProgress {
 #[allow(dead_code)]
 pub struct Enhanced {
     pub cache_key: String,
-    pub generated_at: std::time::SystemTime,
+    pub generated_at: web_time::SystemTime,
 }
 
 impl Default for Enhanced {
     fn default() -> Self {
         Self {
             cache_key: String::new(),
-            generated_at: std::time::SystemTime::now(),
+            generated_at: web_time::SystemTime::now(),
         }
     }
 }

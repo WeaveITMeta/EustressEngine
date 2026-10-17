@@ -107,6 +107,8 @@ pub mod data_mesh;
 pub mod space_read;
 /// Reading a world's records (or a Space on disk) into that tree.
 pub mod tree_read;
+/// A Space's files, from its folder, its records or (in Studio) its world DB.
+pub mod space_source;
 pub mod pose_migration;
 /// A Space's format version (`[space] format`), naming its one-time migrations.
 pub mod space_format;
@@ -114,6 +116,9 @@ pub mod space_format;
 pub mod scale_kind;
 /// Secrets in the operating system's credential store.
 pub mod credentials;
+/// Zstandard frames, the same in every shell: the C library on the desktop,
+/// pure Rust in the browser.
+pub mod zstd_codec;
 /// Paths a Space names, kept inside the Space (no drive, share, `..` or link out).
 pub mod space_path;
 pub mod space_trash;
@@ -137,26 +142,27 @@ pub mod wire_guard;
 /// The editor's named actions, shared by the engine and the permission gate.
 pub mod editor_action;
 /// Running a replicated DataModel tree's LocalScripts on a Player.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 pub mod tree_scripts;
 /// This machine's input, camera and cursor into a Play tree, the same on
 /// both apps.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 pub mod machine_input;
 pub mod properties;
 pub mod scene;
 pub mod scene_ops;
 pub mod services;
 pub mod soul;
-#[cfg(feature = "luau")]
-pub mod luau;
+#[cfg(feature = "mlua")]
+pub mod mlua;
 /// Shared (language-agnostic) script-plugin data types — used by both the
 /// `luau` and `realism-scripting` backends, so it stays unconditional
 /// (its own types are per-variant `#[cfg]`-gated internally instead).
 pub mod script_plugins;
 pub mod scripting;
 pub mod terrain;
-#[cfg(feature = "gui")]
+// In-world GUI. Its Slint renderer needs the `gui` feature; its component
+// types and script command queues build in every shell.
 pub mod gui;
 pub mod types;
 pub mod usd;

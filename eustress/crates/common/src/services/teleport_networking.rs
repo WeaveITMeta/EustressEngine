@@ -25,7 +25,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 use tracing::{info, warn};
 
 use super::teleport::{PlaceId, ServerId, MatchmakingCriteria, TeleportData, TeleportError, TeleportResult};
@@ -84,8 +85,8 @@ impl PlayerState {
             inventory,
             effects,
             teleport_data,
-            serialized_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            serialized_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             checksum: 0,

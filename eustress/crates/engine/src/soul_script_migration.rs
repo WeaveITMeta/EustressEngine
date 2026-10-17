@@ -1,6 +1,6 @@
 //! # Flat SoulScript → folder migration
 //!
-//! Older versions of the MCP `execute_rune` / `execute_luau` tools wrote
+//! Older versions of the MCP `execute_rune` / `execute_mlua` tools wrote
 //! flat files directly into `SoulService/` (e.g. `gravity_dance.rune`).
 //! The canonical layout is now **folder-per-script**:
 //!

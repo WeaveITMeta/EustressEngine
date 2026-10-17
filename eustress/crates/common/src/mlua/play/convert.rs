@@ -3,12 +3,12 @@
 use mlua::{Lua, Result as LuaResult, Value};
 
 use crate::datamodel::{DmValue, EnumItem, RemoteValue};
-use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim, LuauUDim2, LuauVector3, UserDataPeek};
+use crate::mlua::types::{MluaCFrame, MluaColor3, MluaUDim, MluaUDim2, MluaVector3, UserDataPeek};
 use crate::scripting::{UDim, UDim2};
 
 use super::instance::{handle, LInst};
 use super::types_ext::{
-    LuauBrickColor, LuauColorSequence, LuauEnumItem, LuauNumberRange, LuauNumberSequence, LuauVector2,
+    MluaBrickColor, MluaColorSequence, MluaEnumItem, MluaNumberRange, MluaNumberSequence, MluaVector2,
 };
 
 /// A DataModel value as a Luau value. Instances become their interned
@@ -19,19 +19,19 @@ pub fn to_lua(lua: &Lua, value: &DmValue) -> LuaResult<Value> {
         DmValue::Bool(b) => Value::Boolean(*b),
         DmValue::Number(n) => Value::Number(*n),
         DmValue::String(s) => Value::String(lua.create_string(s)?),
-        DmValue::Vector2(v) => Value::UserData(lua.create_userdata(LuauVector2(*v))?),
-        DmValue::Vector3(v) => Value::UserData(lua.create_userdata(LuauVector3(*v))?),
-        DmValue::CFrame(cf) => Value::UserData(lua.create_userdata(LuauCFrame(*cf))?),
-        DmValue::Color3(c) => Value::UserData(lua.create_userdata(LuauColor3(*c))?),
-        DmValue::UDim(u) => Value::UserData(lua.create_userdata(LuauUDim::new(u.scale, u.offset))?),
-        DmValue::UDim2(u) => Value::UserData(lua.create_userdata(LuauUDim2::new(
+        DmValue::Vector2(v) => Value::UserData(lua.create_userdata(MluaVector2(*v))?),
+        DmValue::Vector3(v) => Value::UserData(lua.create_userdata(MluaVector3(*v))?),
+        DmValue::CFrame(cf) => Value::UserData(lua.create_userdata(MluaCFrame(*cf))?),
+        DmValue::Color3(c) => Value::UserData(lua.create_userdata(MluaColor3(*c))?),
+        DmValue::UDim(u) => Value::UserData(lua.create_userdata(MluaUDim::new(u.scale, u.offset))?),
+        DmValue::UDim2(u) => Value::UserData(lua.create_userdata(MluaUDim2::new(
             u.x.scale, u.x.offset, u.y.scale, u.y.offset,
         ))?),
-        DmValue::NumberRange(r) => Value::UserData(lua.create_userdata(LuauNumberRange(*r))?),
+        DmValue::NumberRange(r) => Value::UserData(lua.create_userdata(MluaNumberRange(*r))?),
         DmValue::Enum(e) => enum_item(lua, e)?,
         DmValue::Instance(id) => handle(lua, *id)?,
-        DmValue::NumberSequence(k) => Value::UserData(lua.create_userdata(LuauNumberSequence(k.clone()))?),
-        DmValue::ColorSequence(k) => Value::UserData(lua.create_userdata(LuauColorSequence(k.clone()))?),
+        DmValue::NumberSequence(k) => Value::UserData(lua.create_userdata(MluaNumberSequence(k.clone()))?),
+        DmValue::ColorSequence(k) => Value::UserData(lua.create_userdata(MluaColorSequence(k.clone()))?),
     })
 }
 
@@ -47,27 +47,27 @@ pub fn from_lua(value: &Value) -> LuaResult<DmValue> {
         Value::UserData(ud) => {
             if let Ok(v) = ud.peek::<LInst>() {
                 DmValue::Instance(v.0)
-            } else if let Ok(v) = ud.peek::<LuauVector3>() {
+            } else if let Ok(v) = ud.peek::<MluaVector3>() {
                 DmValue::Vector3(v.0)
-            } else if let Ok(v) = ud.peek::<LuauCFrame>() {
+            } else if let Ok(v) = ud.peek::<MluaCFrame>() {
                 DmValue::CFrame(v.0)
-            } else if let Ok(v) = ud.peek::<LuauColor3>() {
+            } else if let Ok(v) = ud.peek::<MluaColor3>() {
                 DmValue::Color3(v.0)
-            } else if let Ok(v) = ud.peek::<LuauUDim2>() {
+            } else if let Ok(v) = ud.peek::<MluaUDim2>() {
                 DmValue::UDim2(UDim2::new(v.x_scale, v.x_offset, v.y_scale, v.y_offset))
-            } else if let Ok(v) = ud.peek::<LuauUDim>() {
+            } else if let Ok(v) = ud.peek::<MluaUDim>() {
                 DmValue::UDim(UDim::new(v.scale, v.offset))
-            } else if let Ok(v) = ud.peek::<LuauVector2>() {
+            } else if let Ok(v) = ud.peek::<MluaVector2>() {
                 DmValue::Vector2(v.0)
-            } else if let Ok(v) = ud.peek::<LuauEnumItem>() {
+            } else if let Ok(v) = ud.peek::<MluaEnumItem>() {
                 DmValue::Enum(v.0.clone())
-            } else if let Ok(v) = ud.peek::<LuauNumberRange>() {
+            } else if let Ok(v) = ud.peek::<MluaNumberRange>() {
                 DmValue::NumberRange(v.0)
-            } else if let Ok(v) = ud.peek::<LuauNumberSequence>() {
+            } else if let Ok(v) = ud.peek::<MluaNumberSequence>() {
                 DmValue::NumberSequence(v.0.clone())
-            } else if let Ok(v) = ud.peek::<LuauColorSequence>() {
+            } else if let Ok(v) = ud.peek::<MluaColorSequence>() {
                 DmValue::ColorSequence(v.0.clone())
-            } else if let Ok(v) = ud.peek::<LuauBrickColor>() {
+            } else if let Ok(v) = ud.peek::<MluaBrickColor>() {
                 DmValue::Color3(v.color)
             } else {
                 return Err(mlua::Error::RuntimeError("unsupported userdata as a property value".into()));
@@ -91,7 +91,7 @@ pub fn enum_item(lua: &Lua, item: &EnumItem) -> LuaResult<Value> {
     if !existing.is_nil() {
         return Ok(existing);
     }
-    let ud = Value::UserData(lua.create_userdata(LuauEnumItem(item.clone()))?);
+    let ud = Value::UserData(lua.create_userdata(MluaEnumItem(item.clone()))?);
     cache.raw_set(key, ud.clone())?;
     Ok(ud)
 }
@@ -99,7 +99,7 @@ pub fn enum_item(lua: &Lua, item: &EnumItem) -> LuaResult<Value> {
 /// Accept `Enum.KeyCode.W`, `"W"` or `"KeyCode.W"` and return the item name.
 pub fn enum_name_arg(value: &Value) -> Option<String> {
     match value {
-        Value::UserData(ud) => ud.peek::<LuauEnumItem>().ok().map(|e| e.0.name.clone()),
+        Value::UserData(ud) => ud.peek::<MluaEnumItem>().ok().map(|e| e.0.name.clone()),
         Value::String(s) => s
             .to_str()
             .ok()

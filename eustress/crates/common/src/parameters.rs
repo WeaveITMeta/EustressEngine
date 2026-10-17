@@ -1027,7 +1027,7 @@ impl ParameterRouter {
                     .send_bytes(bytes::Bytes::from(json_bytes));
                 self.stats.total_exports += 1;
                 self.stats.successful_exports += 1;
-                self.stats.last_export_time = Some(std::time::Instant::now());
+                self.stats.last_export_time = Some(bevy::platform::time::Instant::now());
             }
             Err(e) => {
                 tracing::error!("ParameterRouter: failed to serialize ExportRecord: {e}");
@@ -1042,7 +1042,7 @@ impl ParameterRouter {
         self.pending_exports.push(record);
         self.stats.total_exports += 1;
         self.stats.successful_exports += 1;
-        self.stats.last_export_time = Some(std::time::Instant::now());
+        self.stats.last_export_time = Some(bevy::platform::time::Instant::now());
     }
 
     /// Drain all buffered exports (for non-streaming builds or manual flush).
@@ -1057,7 +1057,7 @@ pub struct RouterStats {
     pub total_exports: u64,
     pub successful_exports: u64,
     pub failed_exports: u64,
-    pub last_export_time: Option<std::time::Instant>,
+    pub last_export_time: Option<bevy::platform::time::Instant>,
 }
 
 /// Record of data to export

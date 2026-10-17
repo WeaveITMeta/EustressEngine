@@ -254,9 +254,9 @@ export component SoulPanel inherits Rectangle {
     // Section counts — pushed from Rust so section headers render without
     // needing Slint-side array filtering (which isn't supported).
     in property <int> rune-count: 0;
-    in property <int> luau-server-count: 0;
-    in property <int> luau-client-count: 0;
-    in property <int> luau-module-count: 0;
+    in property <int> mlua-server-count: 0;
+    in property <int> mlua-client-count: 0;
+    in property <int> mlua-module-count: 0;
 
     // Callbacks
     callback on-build-script(int);
@@ -447,9 +447,9 @@ export component SoulPanel inherits Rectangle {
                 }
 
                 // ── Luau Server Scripts ──
-                if root.luau-server-count > 0: SectionHeader {
+                if root.mlua-server-count > 0: SectionHeader {
                     title: "LUAU SERVER";
-                    count: root.luau-server-count;
+                    count: root.mlua-server-count;
                 }
                 for script[i] in root.scripts: Rectangle {
                     visible: script.language == "luau-server";
@@ -472,9 +472,9 @@ export component SoulPanel inherits Rectangle {
                 }
 
                 // ── Luau Client Scripts ──
-                if root.luau-client-count > 0: SectionHeader {
+                if root.mlua-client-count > 0: SectionHeader {
                     title: "LUAU CLIENT";
-                    count: root.luau-client-count;
+                    count: root.mlua-client-count;
                 }
                 for script[i] in root.scripts: Rectangle {
                     visible: script.language == "luau-client";
@@ -497,9 +497,9 @@ export component SoulPanel inherits Rectangle {
                 }
 
                 // ── Luau Modules ──
-                if root.luau-module-count > 0: SectionHeader {
+                if root.mlua-module-count > 0: SectionHeader {
                     title: "LUAU MODULES";
-                    count: root.luau-module-count;
+                    count: root.mlua-module-count;
                 }
                 for script[i] in root.scripts: Rectangle {
                     visible: script.language == "luau-module";

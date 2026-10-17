@@ -806,8 +806,8 @@ impl SoulAST {
             rotation,
             valid: true, // Will be validated separately
             validation_errors: Vec::new(),
-            bound_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            bound_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         };

@@ -196,7 +196,7 @@ pub fn map_properties(
     // lengths are in studs, which the Luau boundary converts (mlua).
     if matches!(
         target_class,
-        ClassName::LuauScript | ClassName::LuauLocalScript | ClassName::LuauModuleScript
+        ClassName::MluaScript | ClassName::MluaLocalScript | ClassName::MluaModuleScript
     ) {
         put_section(&mut bag, "script", "origin", toml::Value::String(ROBLOX_SCRIPT_ORIGIN.to_string()));
     }
@@ -282,9 +282,9 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
     if key == "Source"
         && matches!(
             target_class,
-            ClassName::LuauScript
-                | ClassName::LuauLocalScript
-                | ClassName::LuauModuleScript
+            ClassName::MluaScript
+                | ClassName::MluaLocalScript
+                | ClassName::MluaModuleScript
                 | ClassName::SoulScript
         )
     {
@@ -1597,7 +1597,7 @@ fn try_character_property(bag: &mut PropertyBag, target_class: ClassName, key: &
 fn try_script_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, variant: &Variant) -> bool {
     if !matches!(
         target_class,
-        ClassName::LuauScript | ClassName::LuauLocalScript | ClassName::LuauModuleScript
+        ClassName::MluaScript | ClassName::MluaLocalScript | ClassName::MluaModuleScript
     ) {
         return false;
     }
@@ -3337,7 +3337,7 @@ mod tests {
                 "Source",
                 Variant::String("print('hello')".to_string()),
             )]),
-            ClassName::LuauScript,
+            ClassName::MluaScript,
         );
         assert_eq!(bag.script_source.as_deref(), Some("print('hello')"));
     }
@@ -4056,7 +4056,7 @@ mod tests {
     /// Every imported Luau script is marked as Roblox code.
     #[test]
     fn an_imported_script_is_marked_as_roblox_code() {
-        let bag = map_properties(&props_with(vec![]), ClassName::LuauScript);
+        let bag = map_properties(&props_with(vec![]), ClassName::MluaScript);
         assert_eq!(section(&bag, "script").get("origin").and_then(|v| v.as_str()), Some(ROBLOX_SCRIPT_ORIGIN));
         let part = map_properties(&props_with(vec![]), ClassName::Part);
         assert!(part.section_props.get("script").is_none());
@@ -4071,7 +4071,7 @@ mod tests {
                 ("Disabled", Variant::Bool(true)),
                 ("RunContext", Variant::Enum(Enum::from_u32(2))),
             ]),
-            ClassName::LuauScript,
+            ClassName::MluaScript,
         );
         let sc = section(&bag, "script");
         assert_eq!(sc.get("enabled").and_then(|v| v.as_bool()), Some(false));
@@ -4079,7 +4079,7 @@ mod tests {
 
         let legacy = map_properties(
             &props_with(vec![("RunContext", Variant::Enum(Enum::from_u32(0)))]),
-            ClassName::LuauScript,
+            ClassName::MluaScript,
         );
         assert!(legacy.unmapped.is_empty(), "Legacy is handled, not dropped");
         assert!(legacy.section_props.get("script").map_or(true, |s| !s.contains_key("run_context")));

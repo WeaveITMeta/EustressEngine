@@ -299,7 +299,7 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         universe_root,
         user_id: None,
         username: None,
-        luau_executor: None,
+        mlua_executor: None,
         // MCP server runs out-of-process from the engine — it doesn't
         // observe the engine's `DisplayUnit` resource. Callers passing
         // sizes via the MCP boundary must declare their `unit` arg
@@ -309,7 +309,7 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         // CMMC AC.L1-3.1.2. The MCP server is an out-of-process surface
         // reached by external clients (IDEs, agents). It gets the standard
         // set — Read and Write — so an MCP client cannot invoke `run_bash`,
-        // `execute_luau`, or `delete_entity`. Raising this is a deliberate
+        // `execute_mlua`, or `delete_entity`. Raising this is a deliberate
         // act that should follow peer authentication, not precede it.
         permissions: mcp_permissions(),
     })

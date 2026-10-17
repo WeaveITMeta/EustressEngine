@@ -4,7 +4,7 @@
 use super::complete::{locals, resolve, Ty};
 use super::lexer::{initial_state, tokenize_line};
 use super::TokenClass;
-use crate::luau::catalog::{self, Kind};
+use crate::mlua::catalog::{self, Kind};
 
 /// A token with its byte range in the whole source.
 #[derive(Clone, Copy, Debug)]

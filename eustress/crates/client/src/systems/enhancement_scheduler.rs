@@ -115,7 +115,7 @@ pub fn enhancement_scheduler_system(
             info!("⚡ Cache hit for: {}", pending.prompt);
             commands.entity(entity).insert(Enhanced {
                 cache_key: key.clone(),
-                generated_at: std::time::SystemTime::now(),
+                generated_at: web_time::SystemTime::now(),
             });
             commands.entity(entity).remove::<PendingEnhancement>();
             
@@ -138,7 +138,7 @@ pub fn enhancement_scheduler_system(
         info!("   Category: {:?}, Detail: {:?}", pending.category, pending.detail_level);
         
         commands.entity(entity).insert(EnhancingInProgress {
-            started_at: std::time::Instant::now(),
+            started_at: bevy::platform::time::Instant::now(),
         });
         
         // Spawn async generation task
@@ -245,7 +245,7 @@ fn handle_generation_result(commands: &mut Commands, result: GenerationResult) {
         info!("🎉 Enhancement complete for entity {:?}", result.entity);
         commands.entity(result.entity).insert(Enhanced {
             cache_key: result.cache_key,
-            generated_at: std::time::SystemTime::now(),
+            generated_at: web_time::SystemTime::now(),
         });
         commands.entity(result.entity).remove::<EnhancingInProgress>();
         commands.entity(result.entity).remove::<PendingEnhancement>();

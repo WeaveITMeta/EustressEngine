@@ -135,7 +135,7 @@ pub fn category_for(class: ClassName) -> &'static str {
         | UIDragDetector => "GUI",
 
         // ── Scripting / networking ──
-        SoulScript | LuauScript | LuauLocalScript | LuauModuleScript
+        SoulScript | MluaScript | MluaLocalScript | MluaModuleScript
         | WorkshopConversation | RemoteEvent | RemoteFunction | BindableEvent
         | BindableFunction | UnreliableRemoteEvent | Wire | OperationGraph
         => "Scripting",

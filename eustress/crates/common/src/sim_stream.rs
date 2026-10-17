@@ -18,7 +18,7 @@
 //! Compiled only when `streaming` feature is enabled.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use tracing::info;

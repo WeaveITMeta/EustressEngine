@@ -60,7 +60,8 @@ pub struct ApiCatalog {
     pub entries: Vec<ApiEntry>,
     pub categories: Vec<String>,
     pub rune_type_names: Vec<String>,
-    pub luau_services: Vec<String>,
+    #[serde(rename = "luau_services")]
+    pub mlua_services: Vec<String>,
     pub generated_at: String,
 }
 
@@ -139,7 +140,7 @@ impl ApiCatalog {
         for (_label, src) in SOURCES {
             entries.extend(parse_rune_functions(src, &status_map));
         }
-        entries.extend(luau_known_entries(&status_map));
+        entries.extend(mlua_known_entries(&status_map));
 
         // Dedupe by name — if two files register the same symbol name
         // (uncommon, but can happen with re-exports) keep the first.
@@ -159,7 +160,7 @@ impl ApiCatalog {
         // crate exposes pure functions, not types.
         let rune_type_names = parse_rune_types(SOURCES[0].1);
 
-        let luau_services = vec![
+        let mlua_services = vec![
             "Instance".into(), "Workspace".into(), "Players".into(),
             "RunService".into(), "TweenService".into(), "DataStoreService".into(),
             "CollectionService".into(), "HttpService".into(), "MarketplaceService".into(),
@@ -170,7 +171,7 @@ impl ApiCatalog {
             entries,
             categories,
             rune_type_names,
-            luau_services,
+            mlua_services,
             generated_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -212,7 +213,7 @@ impl ApiCatalog {
         // Luau summary
         out.push_str("\n### Luau API\n\n");
         out.push_str("Luau scripts have Roblox API compatibility. Available services:\n");
-        for svc in &self.luau_services {
+        for svc in &self.mlua_services {
             let _ = writeln!(out, "- `{}`", svc);
         }
         out.push_str("\nUse `Instance.new(className)` to create objects. ");
@@ -416,7 +417,7 @@ fn parse_rune_types(source: &str) -> Vec<String> {
 
 /// Known Luau API entries — the Luau runtime uses procedural mlua calls
 /// that are harder to auto-parse than Rune's #[rune::function] pattern.
-fn luau_known_entries(
+fn mlua_known_entries(
     status_map: &std::collections::HashMap<String, (ApiStatus, ApiStatus)>,
 ) -> Vec<ApiEntry> {
     let defs: &[(&str, &str, &str, &str, &str)] = &[
@@ -518,7 +519,7 @@ fn luau_known_entries(
 
     defs.iter().map(|(name, params, ret, doc, category)| {
         let status = status_map.get(*name)
-            .map(|(luau_status, _)| *luau_status)
+            .map(|(mlua_status, _)| *mlua_status)
             .unwrap_or(ApiStatus::Implemented);
 
         let params_vec: Vec<ApiParam> = if params.is_empty() {
@@ -556,7 +557,7 @@ fn luau_known_entries(
 // ============================================================================
 
 /// Parse SCRIPTING_API_CHECKLIST.md tables to extract implementation status.
-/// Returns map of function_name → (luau_status, rune_status).
+/// Returns map of function_name → (mlua_status, rune_status).
 fn parse_checklist_statuses(source: &str) -> std::collections::HashMap<String, (ApiStatus, ApiStatus)> {
     let mut map = std::collections::HashMap::new();
 
@@ -581,10 +582,10 @@ fn parse_checklist_statuses(source: &str) -> std::collections::HashMap<String, (
         if name.is_empty() { continue; }
 
         // Columns 2 and 3: Luau and Rune status
-        let luau_status = parse_status_cell(cols[2]);
+        let mlua_status = parse_status_cell(cols[2]);
         let rune_status = parse_status_cell(cols[3]);
 
-        map.insert(name.to_string(), (luau_status, rune_status));
+        map.insert(name.to_string(), (mlua_status, rune_status));
     }
 
     map
@@ -683,8 +684,8 @@ mod tests {
         let statuses = parse_checklist_statuses(checklist);
         assert!(!statuses.is_empty(), "No statuses parsed from checklist");
         // print(...) should be Implemented in both
-        if let Some((luau, rune)) = statuses.get("print") {
-            assert_eq!(*luau, ApiStatus::Implemented);
+        if let Some((mlua, rune)) = statuses.get("print") {
+            assert_eq!(*mlua, ApiStatus::Implemented);
             assert_eq!(*rune, ApiStatus::Implemented);
         }
     }

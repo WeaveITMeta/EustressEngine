@@ -94,11 +94,11 @@ pub struct EditorSettings {
     #[serde(default)]
     pub recent_inserts: Vec<String>,
 
-    /// Voltec (graphite and xenon blue) vs Classic (today's flat look)
-    /// theme. Classic is the default for new/never-saved settings — see
-    /// `default_theme_modern`. Pushed into the Slint `Theme.voltec`
-    /// global by `init_theme_to_slint` on startup and by the
-    /// `SetThemeModern` drain handler on every live toggle.
+    /// The Classic/Voltec switch from before `active_theme_id`: when no
+    /// theme id is saved, true opens Voltec and false opens Classic.
+    /// Selecting a theme keeps it in step (true only for Voltec). Classic
+    /// is the default for new/never-saved settings — see
+    /// `default_theme_modern`.
     #[serde(default = "default_theme_modern")]
     pub theme_modern: bool,
 
@@ -460,6 +460,27 @@ impl EditorSettings {
         self.recent_spaces.insert(0, key);
         self.recent_spaces.truncate(RECENT_SPACES_CAP);
     }
+
+    /// A folder was renamed from `from` to `to`: the recent Spaces and the
+    /// Space the next launch opens follow it, at `from` itself or anywhere
+    /// inside it.
+    pub fn follow_rename(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        let moved = |p: &str| -> Option<String> {
+            let rest = std::path::Path::new(p).strip_prefix(from).ok()?;
+            Some(to.join(rest).to_string_lossy().to_string())
+        };
+        if let Some(next) = self.last_space_path.as_deref().and_then(moved) {
+            self.last_space_path = Some(next);
+        }
+        for p in &mut self.recent_spaces {
+            if let Some(next) = moved(p) {
+                *p = next;
+            }
+        }
+        // Two entries can now name one folder; keep the first.
+        let mut seen = std::collections::HashSet::new();
+        self.recent_spaces.retain(|p| seen.insert(p.clone()));
+    }
 }
 
 /// Keep File > Recent current: every Space the editor opens goes to the
@@ -473,7 +494,7 @@ fn track_recent_spaces(
         return;
     }
     let path = root.0.clone();
-    if !path.is_dir() {
+    if !path.is_dir() || crate::space::format_migration::is_scratch_space(&path) {
         return;
     }
     // The Space the next launch opens: the one open now, whichever way it

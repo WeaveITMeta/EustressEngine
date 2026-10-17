@@ -73,6 +73,10 @@ pub enum FileAction {
     SaveSpace,
     /// Save Space As: pick a new folder name, then save
     SaveSpaceAs,
+    /// File > Rename: show the Rename dialog with this folder chosen
+    OpenRename(crate::space::rename::RenameTarget),
+    /// Rename the open Space's folder, or its Universe's
+    Rename(crate::space::rename::RenameTarget, String),
     /// Publish to the gallery (after the Publish dialog)
     Publish(PublishRequest),
     /// Import a media asset (image / video / model). Source is the
@@ -109,6 +113,8 @@ pub fn drain_file_events(
             FileEvent::SaveScene       => FileAction::SaveSpace,
             FileEvent::SaveSceneAs     => FileAction::SaveSpaceAs,
             FileEvent::OpenRecent(p)   => FileAction::OpenSpacePath(p.clone()),
+            FileEvent::OpenRename(target) => FileAction::OpenRename(*target),
+            FileEvent::Rename(target, name) => FileAction::Rename(*target, name.clone()),
             FileEvent::Publish(request) => FileAction::Publish(request.clone()),
             FileEvent::ImportAsset(path) => FileAction::ImportAsset(path.clone()),
             FileEvent::ImportRobloxPlace(path) => FileAction::ImportRobloxPlace(path.clone()),
@@ -145,6 +151,8 @@ pub fn execute_file_actions(world: &mut World) {
             FileAction::OpenSpacePath(p) => do_open_space_path(world, p),
             FileAction::SaveSpace        => do_save_space(world),
             FileAction::SaveSpaceAs      => do_save_space_as(world),
+            FileAction::OpenRename(target) => crate::space::rename::open_dialog(world, target),
+            FileAction::Rename(target, name) => crate::space::rename::begin(world, target, &name),
             FileAction::Publish(request) => do_publish(world, &request),
             FileAction::ImportAsset(path) => do_import_asset(world, path),
             FileAction::ImportRobloxPlace(path) => do_import_roblox_place(world, path),

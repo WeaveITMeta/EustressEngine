@@ -38,7 +38,7 @@ fn main() {
         universe_root,
         user_id: None,
         username: Some("mcp-verify".to_string()),
-        luau_executor: None,
+        mlua_executor: None,
         display_unit: None,
         cancelled: None,
         // Local demo binary: insert_gaussian_splats is a Write, so the

@@ -5,9 +5,9 @@
 //!
 //! ## Table of Contents
 //!
-//! 1. **LuauRaycastBridge** — Thread-local callback bridge to engine raycasting
-//! 2. **LuauRaycastResult** — Plain result struct returned to Luau scripts
-//! 3. **LuauRaycastParams** — Filter parameters matching Roblox RaycastParams
+//! 1. **MluaRaycastBridge** — Thread-local callback bridge to engine raycasting
+//! 2. **MluaRaycastResult** — Plain result struct returned to Luau scripts
+//! 3. **MluaRaycastParams** — Filter parameters matching Roblox RaycastParams
 //! 4. **inject_raycast_api** — Enriches the Luau VM workspace table with Raycast methods
 //!
 //! ## Luau Script Usage (Roblox-compatible):
@@ -36,13 +36,13 @@ use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
 // ============================================================================
-// 1. LuauRaycastBridge — Thread-local callback to engine spatial query
+// 1. MluaRaycastBridge — Thread-local callback to engine spatial query
 // ============================================================================
 
 /// Result of a raycast, returned from the engine bridge to Luau.
 /// Language-agnostic (no Avian or Bevy types).
 #[derive(Debug, Clone)]
-pub struct LuauRaycastResult {
+pub struct MluaRaycastResult {
     /// Bevy Entity bits of the hit entity
     pub entity_id: u64,
     /// Name of the hit entity
@@ -59,7 +59,7 @@ pub struct LuauRaycastResult {
 
 /// Filter parameters for raycasts, matching Roblox RaycastParams semantics.
 #[derive(Debug, Clone, Default)]
-pub struct LuauRaycastParams {
+pub struct MluaRaycastParams {
     /// true = exclude listed names, false = include only listed names
     pub exclude_mode: bool,
     /// Entity names to filter
@@ -72,7 +72,7 @@ pub struct LuauRaycastParams {
     pub max_distance: f32,
 }
 
-impl LuauRaycastParams {
+impl MluaRaycastParams {
     pub fn new() -> Self {
         Self {
             exclude_mode: true,
@@ -86,20 +86,20 @@ impl LuauRaycastParams {
 
 /// Callback type for performing a raycast from the engine.
 /// origin: [x,y,z], direction: [x,y,z], params → Option<result>
-pub type RaycastCallback = Arc<dyn Fn([f32; 3], [f32; 3], &LuauRaycastParams) -> Option<LuauRaycastResult> + Send + Sync>;
+pub type RaycastCallback = Arc<dyn Fn([f32; 3], [f32; 3], &MluaRaycastParams) -> Option<MluaRaycastResult> + Send + Sync>;
 
 /// Callback type for performing a raycast-all from the engine.
 /// origin: [x,y,z], direction: [x,y,z], params, max_hits → Vec<result>
-pub type RaycastAllCallback = Arc<dyn Fn([f32; 3], [f32; 3], &LuauRaycastParams, u32) -> Vec<LuauRaycastResult> + Send + Sync>;
+pub type RaycastAllCallback = Arc<dyn Fn([f32; 3], [f32; 3], &MluaRaycastParams, u32) -> Vec<MluaRaycastResult> + Send + Sync>;
 
 /// Thread-local bridge holding engine raycast callbacks.
 /// Set by the engine before Luau script execution, cleared after.
-pub struct LuauRaycastBridge {
+pub struct MluaRaycastBridge {
     pub raycast: Option<RaycastCallback>,
     pub raycast_all: Option<RaycastAllCallback>,
 }
 
-impl Default for LuauRaycastBridge {
+impl Default for MluaRaycastBridge {
     fn default() -> Self {
         Self {
             raycast: None,
@@ -109,12 +109,12 @@ impl Default for LuauRaycastBridge {
 }
 
 thread_local! {
-    static LUAU_RAYCAST_BRIDGE: std::cell::RefCell<LuauRaycastBridge> = std::cell::RefCell::new(LuauRaycastBridge::default());
+    static MLUA_RAYCAST_BRIDGE: std::cell::RefCell<MluaRaycastBridge> = std::cell::RefCell::new(MluaRaycastBridge::default());
 }
 
 /// Install raycast callbacks for the current thread before Luau execution.
-pub fn set_luau_raycast_bridge(raycast: RaycastCallback, raycast_all: RaycastAllCallback) {
-    LUAU_RAYCAST_BRIDGE.with(|cell| {
+pub fn set_mlua_raycast_bridge(raycast: RaycastCallback, raycast_all: RaycastAllCallback) {
+    MLUA_RAYCAST_BRIDGE.with(|cell| {
         let mut bridge = cell.borrow_mut();
         bridge.raycast = Some(raycast);
         bridge.raycast_all = Some(raycast_all);
@@ -122,8 +122,8 @@ pub fn set_luau_raycast_bridge(raycast: RaycastCallback, raycast_all: RaycastAll
 }
 
 /// Clear raycast callbacks after Luau execution.
-pub fn clear_luau_raycast_bridge() {
-    LUAU_RAYCAST_BRIDGE.with(|cell| {
+pub fn clear_mlua_raycast_bridge() {
+    MLUA_RAYCAST_BRIDGE.with(|cell| {
         let mut bridge = cell.borrow_mut();
         bridge.raycast = None;
         bridge.raycast_all = None;
@@ -135,24 +135,24 @@ pub fn clear_luau_raycast_bridge() {
 // ============================================================================
 
 thread_local! {
-    static LUAU_PARAMS_STORE: std::cell::RefCell<Vec<LuauRaycastParams>> = std::cell::RefCell::new(Vec::new());
+    static MLUA_PARAMS_STORE: std::cell::RefCell<Vec<MluaRaycastParams>> = std::cell::RefCell::new(Vec::new());
 }
 
-/// Allocate a new LuauRaycastParams and return its 1-based handle.
+/// Allocate a new MluaRaycastParams and return its 1-based handle.
 fn allocate_params() -> usize {
-    LUAU_PARAMS_STORE.with(|store| {
+    MLUA_PARAMS_STORE.with(|store| {
         let mut store = store.borrow_mut();
-        store.push(LuauRaycastParams::new());
+        store.push(MluaRaycastParams::new());
         store.len() // 1-based
     })
 }
 
 /// Get a clone of params by handle (1-based). Returns default if invalid.
-fn get_params(handle: usize) -> LuauRaycastParams {
+fn get_params(handle: usize) -> MluaRaycastParams {
     if handle == 0 {
-        return LuauRaycastParams::new();
+        return MluaRaycastParams::new();
     }
-    LUAU_PARAMS_STORE.with(|store| {
+    MLUA_PARAMS_STORE.with(|store| {
         let store = store.borrow();
         store.get(handle - 1).cloned().unwrap_or_default()
     })
@@ -161,10 +161,10 @@ fn get_params(handle: usize) -> LuauRaycastParams {
 /// Mutate params by handle (1-based).
 fn with_params_mut<F>(handle: usize, callback: F)
 where
-    F: FnOnce(&mut LuauRaycastParams),
+    F: FnOnce(&mut MluaRaycastParams),
 {
     if handle == 0 { return; }
-    LUAU_PARAMS_STORE.with(|store| {
+    MLUA_PARAMS_STORE.with(|store| {
         let mut store = store.borrow_mut();
         if let Some(params) = store.get_mut(handle - 1) {
             callback(params);
@@ -179,8 +179,8 @@ where
 /// Inject `workspace:Raycast()`, `workspace:RaycastAll()`, and `RaycastParams.new()`
 /// into the given mlua Lua instance.
 ///
-/// Call this after `LuauRuntime::new()` to enrich the workspace table.
-#[cfg(feature = "luau")]
+/// Call this after `MluaRuntime::new()` to enrich the workspace table.
+#[cfg(feature = "mlua")]
 pub fn inject_raycast_api(lua: &mlua::Lua) -> Result<(), String> {
     let globals = lua.globals();
 
@@ -215,7 +215,7 @@ pub fn inject_raycast_api(lua: &mlua::Lua) -> Result<(), String> {
         let params = get_params(params_handle);
 
         // Call through the thread-local bridge
-        let result = LUAU_RAYCAST_BRIDGE.with(|cell| {
+        let result = MLUA_RAYCAST_BRIDGE.with(|cell| {
             let bridge = cell.borrow();
             if let Some(ref raycast_fn) = bridge.raycast {
                 raycast_fn(origin, direction, &params)
@@ -289,7 +289,7 @@ pub fn inject_raycast_api(lua: &mlua::Lua) -> Result<(), String> {
 
         let params = get_params(params_handle);
 
-        let results = LUAU_RAYCAST_BRIDGE.with(|cell| {
+        let results = MLUA_RAYCAST_BRIDGE.with(|cell| {
             let bridge = cell.borrow();
             if let Some(ref raycast_all_fn) = bridge.raycast_all {
                 raycast_all_fn(origin, direction, &params, max_hits)
@@ -371,7 +371,7 @@ pub fn inject_raycast_api(lua: &mlua::Lua) -> Result<(), String> {
 
 /// Parse a Vector3-like Luau value into [f32; 3].
 /// Accepts: table with X/Y/Z or x/y/z or [1]/[2]/[3] keys.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 fn parse_vector3_arg(_lua: &mlua::Lua, value: Option<mlua::Value>) -> Result<[f32; 3], mlua::Error> {
     match value {
         Some(mlua::Value::Table(table)) => {

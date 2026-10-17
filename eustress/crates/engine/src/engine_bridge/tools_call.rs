@@ -98,7 +98,7 @@ pub(crate) fn prepare(world: &World, req: &BridgeRequest) -> Result<PreparedCall
         universe_root,
         user_id,
         username,
-        luau_executor: None,
+        mlua_executor: None,
         display_unit,
         // Nothing can reach a running bridge call to cancel it.
         cancelled: None,

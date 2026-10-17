@@ -42,7 +42,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Instant;
+use bevy::platform::time::Instant;
 use tracing::info;
 
 // ============================================================================
@@ -373,7 +373,7 @@ impl TeleportService {
             destination,
             data: data.unwrap_or_default(),
             status: TeleportStatus::Pending,
-            started_at: std::time::Instant::now(),
+            started_at: bevy::platform::time::Instant::now(),
             party_id: None,
         });
         

@@ -38,7 +38,7 @@ use eustress_common::classes::ClassName;
 use eustress_common::instance_create::{
     create_instance, fresh_uuid_for_create, is_valid_uuid, uuid_bytes_to_hex, InstanceOverrides,
 };
-use eustress_common::luau::compat::{ScriptTransformer, WarningSeverity};
+use eustress_common::mlua::compat::{ScriptTransformer, WarningSeverity};
 use rbx_dom_weak::types::Ref;
 use rbx_dom_weak::WeakDom;
 use uuid::Uuid;
@@ -215,7 +215,7 @@ pub struct Materializer<'dom> {
     /// that read `foo.Value` on a now-folded ValueObject is rewritten to
     /// the attribute accessor. (Populated for the whole DOM, not per node,
     /// because a script anywhere may reference a ValueObject anywhere.)
-    vo_ctx: eustress_common::luau::compat::ValueObjectContext,
+    vo_ctx: eustress_common::mlua::compat::ValueObjectContext,
 
     /// Roblox referent → Eustress uuid map, built during the walk and
     /// used for the second-pass `Ref` resolution.
@@ -367,7 +367,7 @@ impl<'dom> Materializer<'dom> {
             router: Arc::new(router),
             opts,
             salt,
-            vo_ctx: eustress_common::luau::compat::ValueObjectContext::default(),
+            vo_ctx: eustress_common::mlua::compat::ValueObjectContext::default(),
             referent_to_uuid: HashMap::new(),
             poses: HashMap::new(),
             animation_ids: Default::default(),
@@ -2109,7 +2109,7 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
     // ── Script source — written as a sibling file. ──
     if let (Some(body), Some(class)) = (&patch.script_body, &patch.script_class) {
         let script_name = match class {
-            ClassName::LuauScript | ClassName::LuauLocalScript | ClassName::LuauModuleScript => {
+            ClassName::MluaScript | ClassName::MluaLocalScript | ClassName::MluaModuleScript => {
                 "script.luau"
             }
             ClassName::SoulScript => "soul.md",

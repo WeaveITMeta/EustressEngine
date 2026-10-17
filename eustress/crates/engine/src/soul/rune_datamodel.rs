@@ -297,7 +297,7 @@ fn fire(event: i64, message: &str) {
         g.push_event(DmEvent::Fired {
             event: id(event),
             args: vec![DmValue::String(message.to_string())],
-            from_luau: false,
+            from_mlua: false,
         })
     })
 }

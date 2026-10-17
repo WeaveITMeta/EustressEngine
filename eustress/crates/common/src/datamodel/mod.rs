@@ -231,8 +231,8 @@ pub enum DmEvent {
     TextBoxFocusLost { textbox: InstanceId, enter_pressed: bool },
     /// A BindableEvent fired from either language. Luau delivers its own
     /// fires directly (tables and functions intact), so it skips events
-    /// marked `from_luau`; Rune reads them all.
-    Fired { event: InstanceId, args: Vec<DmValue>, from_luau: bool },
+    /// marked `from_mlua`; Rune reads them all.
+    Fired { event: InstanceId, args: Vec<DmValue>, from_mlua: bool },
     /// A named signal on an instance, with its arguments: an AnimationTrack's
     /// `Stopped`, `Ended`, `DidLoop`, `KeyframeReached` and `Marker:<name>`, an
     /// Animator's `AnimationPlayed`, a Humanoid's `Running`, `Jumping`,

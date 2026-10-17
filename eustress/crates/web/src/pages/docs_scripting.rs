@@ -621,7 +621,7 @@ pub fn on_update(dt) {
                     </section>
 
                     // =========================================================
-                    // LUAU
+                    // MLUA
                     // =========================================================
                     <section id="luau" class="docs-section">
                         <h2 class="section-title">

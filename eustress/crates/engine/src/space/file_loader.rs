@@ -2772,10 +2772,10 @@ pub fn spawn_directory_entry(
 
         entity
     } else if folder_arm == FolderLoad::SoulScript {
-        // Script folder — find the .rune/.luau/.soul source file inside and load it.
+        // Script folder — find the .rune/.mlua/.soul source file inside and load it.
         let instance_toml = dir_meta.path.join("_instance.toml");
         // Read the "source" field from _instance.toml to find the script filename,
-        // or scan the folder for the first .rune/.luau/.soul file.
+        // or scan the folder for the first .rune/.mlua/.soul file.
         let script_doc = take_instance_value(&parsed, source, space_path, &instance_toml);
         let source_file = script_doc
             .as_ref()
@@ -2830,12 +2830,12 @@ pub fn spawn_directory_entry(
                     .unwrap_or_else(|| dir_meta.name.clone());
                 // A folder holding a `.luau` source is a Luau script, exactly
                 // like a bare `.luau` file.
-                let is_luau = matches!(src_path.extension().and_then(|x| x.to_str()), Some("luau") | Some("lua"));
+                let is_mlua = matches!(src_path.extension().and_then(|x| x.to_str()), Some("luau") | Some("lua"));
                 // The script's own properties in the tree (`ScriptOrigin`), by
                 // its tree class, as a Player's reader reads them.
-                let tree_class = if is_luau {
+                let tree_class = if is_mlua {
                     let file = src_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                    eustress_common::datamodel::record::luau_script_class(file, &dir_meta.service)
+                    eustress_common::datamodel::record::mlua_script_class(file, &dir_meta.service)
                 } else {
                     "SoulScript"
                 };
@@ -2856,7 +2856,7 @@ pub fn spawn_directory_entry(
                         generated_code: None,
                         build_status: crate::soul::SoulBuildStatus::NotBuilt,
                         errors: Vec::new(),
-                        run_context: if is_luau { crate::soul::SoulRunContext::Luau } else { Default::default() },
+                        run_context: if is_mlua { crate::soul::SoulRunContext::Luau } else { Default::default() },
                     },
                     LoadedFromFile {
                         // The SOURCE FILE, not the folder that holds it.
@@ -2872,7 +2872,7 @@ pub fn spawn_directory_entry(
                         // which is why the failure looked like it belonged to the
                         // scripts rather than to the loader.
                         path: src_path.clone(),
-                        file_type: if is_luau { FileType::Lua } else { FileType::Rune },
+                        file_type: if is_mlua { FileType::Lua } else { FileType::Rune },
                         service: dir_meta.service.clone(),
                     },
                     Name::new(script_name),
@@ -4830,7 +4830,7 @@ mod folder_load_tests {
     /// What the file watcher hands to `spawn_general_entity`, as Space open does.
     #[test]
     fn classes_with_no_loader_of_their_own_are_general() {
-        for class in [C::Folder, C::Model, C::Tool, C::Attachment, C::LuauScript] {
+        for class in [C::Folder, C::Model, C::Tool, C::Attachment, C::MluaScript] {
             assert_eq!(folder_load(class), FolderLoad::General, "{class:?}");
         }
     }

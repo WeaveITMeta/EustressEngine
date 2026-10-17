@@ -86,6 +86,7 @@ import { InsertObjectDialog } from "insert_object_dialog.slint";
 import { ScriptSearchModal, ScriptSearchRow } from "script_search.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
+import { RenameDialog } from "rename_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
 import { AddAttributeDialog } from "add_attribute_dialog.slint";
 import { AddParameterDialog } from "add_parameter_dialog.slint";
@@ -476,6 +477,18 @@ export component StudioWindow inherits Window {
     callback script-search-request();
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
+    // File > Rename (engine/src/space/rename.rs). Rust fills the names and
+    // opens the dialog, shows the error when a rename cannot run, and closes
+    // it when the Space reopens under its new name.
+    in-out property <bool> show-rename-dialog: false;
+    in-out property <string> rename-target: "space";
+    in-out property <string> rename-space-name: "";
+    in-out property <string> rename-universe-name: "";
+    in-out property <string> rename-new-name: "";
+    in-out property <string> rename-error: "";
+    in-out property <bool> rename-busy: false;
+    callback open-rename(/* target */ string);
+    callback rename-confirmed(/* target */ string, /* new name */ string);
     in-out property <bool> show-new-space-dialog: false;
     // A script's purchase prompt during Play (engine/src/ui/purchase_prompt.rs).
     in-out property <bool> show-purchase-prompt: false;
@@ -1144,9 +1157,9 @@ export component StudioWindow inherits Window {
         }
     }
     in-out property <int> soul-rune-count: 0;
-    in-out property <int> soul-luau-server-count: 0;
-    in-out property <int> soul-luau-client-count: 0;
-    in-out property <int> soul-luau-module-count: 0;
+    in-out property <int> soul-mlua-server-count: 0;
+    in-out property <int> soul-mlua-client-count: 0;
+    in-out property <int> soul-mlua-module-count: 0;
     callback soul-build-all();
 
     // Notification settings (mirrored into File > Settings > Notifications)
@@ -1972,6 +1985,7 @@ export component StudioWindow inherits Window {
             on-open-scene => { root.open-scene(); }
             on-save-scene => { root.save-scene(); }
             on-save-scene-as => { root.save-scene-as(); }
+            on-rename => { root.open-rename("space"); }
             on-import-asset => { root.import-asset(); }
             on-import-roblox-place => { root.import-roblox-place(); }
             on-publish-universe => { root.publish-universe(); }
@@ -4559,9 +4573,9 @@ export component StudioWindow inherits Window {
                             selected-script: root.soul-selected-script;
                             api-key-status: root.soul-api-key-status;
                             rune-count: root.soul-rune-count;
-                            luau-server-count: root.soul-luau-server-count;
-                            luau-client-count: root.soul-luau-client-count;
-                            luau-module-count: root.soul-luau-module-count;
+                            mlua-server-count: root.soul-mlua-server-count;
+                            mlua-client-count: root.soul-mlua-client-count;
+                            mlua-module-count: root.soul-mlua-module-count;
                             on-select-script(id) => { root.soul-selected-script = id; }
                             on-build-script(id) => { root.build-script(id); }
                             on-open-script(id) => { root.open-script(id); }
@@ -5439,6 +5453,21 @@ export component StudioWindow inherits Window {
         build-date: root.about-build-date;
         open-url(u) => { root.open-url(u); }
         on-close => { root.show-about-dialog = false; }
+    }
+
+    // File > Rename
+    if root.show-rename-dialog: RenameDialog {
+        target <=> root.rename-target;
+        space-name: root.rename-space-name;
+        universe-name: root.rename-universe-name;
+        new-name <=> root.rename-new-name;
+        error: root.rename-error;
+        busy: root.rename-busy;
+        on-rename(target, name) => { root.rename-confirmed(target, name); }
+        on-cancel => {
+            root.show-rename-dialog = false;
+            root.rename-error = "";
+        }
     }
 
     // New Universe dialog — Step 1: get universe name

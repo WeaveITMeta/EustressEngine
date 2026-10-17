@@ -63,7 +63,7 @@ pub struct GuiTomlFile {
     #[serde(default)]
     pub properties: Option<toml::Value>,
     /// `CollectionService` tags for this GUI instance — written from
-    /// `LuauCreatedInstance.tags` and hydrated into the ECS
+    /// `MluaCreatedInstance.tags` and hydrated into the ECS
     /// [`Tags`](eustress_common::attributes::Tags) component on space load.
     /// Same shape and semantics as `instance_loader::InstanceDefinition.tags`,
     /// so MCP `add_tag` / `get_tagged_entities` see GUI tags identically to

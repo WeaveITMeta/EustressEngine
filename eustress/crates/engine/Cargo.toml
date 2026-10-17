@@ -75,7 +75,7 @@ path = "src/bin/session-baseline.rs"
 arboard = { version = "3", optional = true }
 
 # Workspace members
-eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui", "avatar-profile", "view-look"] }
+eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "mlua", "gui", "avatar-profile", "view-look"] }
 eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
@@ -236,7 +236,7 @@ open = "5"
 rune = "0.14"
 # Luau (mlua) — the engine crate's OWN plugin host (script_plugin_host.rs)
 # writes `mlua::RegistryKey` directly, so mlua must be a direct dependency
-# here too: `eustress-common`'s `luau` feature (enabled above) only makes
+# here too: `eustress-common`'s `mlua` feature (enabled above) only makes
 # mlua resolvable inside common's own source, not engine's. Mirrors the
 # `rune` line right above — both scripting runtimes are optional in
 # common but unconditional, direct deps here since engine's own code
@@ -418,8 +418,8 @@ core = [
     "forge",
     "bliss",
     "clipboard",
-    # Luau in Play. See the `luau` feature below.
-    "luau",
+    # Luau in Play. See the `mlua` feature below.
+    "mlua",
     # LSP server ships inside the engine bundle. `cargo build --release`
     # produces BOTH `eustress-engine` AND `eustress-lsp` automatically —
     # same binary install, no separate download required for external
@@ -451,12 +451,12 @@ core = [
 # Rune scripting with VM pooling and ECS bindings
 realism-scripting = []
 # Luau in Play and hot-reload. REQUIRED even though `eustress-common` is
-# already built with its own `luau` feature above: a `#[cfg(feature = "luau")]`
+# already built with its own `mlua` feature above: a `#[cfg(feature = "luau")]`
 # in THIS crate's source checks THIS crate's features, not common's. With no
-# `luau` here every gated block in `soul/rune_api.rs` compiled to its no-op
+# `mlua` here every gated block in `soul/rune_api.rs` compiled to its no-op
 # fallback, so Luau hot-reload, the Play-start spawn, and `Touched` never ran
 # even though mlua was linked and ready.
-luau = ["eustress-common/luau"]
+mlua = ["eustress-common/mlua"]
 # Hardware ray-traced lighting (Bevy Solari 0.19). Decided per launch and per
 # GPU by crates/engine/src/raytracing/ (Auto by default, guarded); a GPU
 # without ray queries draws exactly as before. Adds bevy_solari (pure Rust and

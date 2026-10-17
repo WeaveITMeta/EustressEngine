@@ -2,14 +2,14 @@
 //!
 //! A script written for Roblox reads and writes lengths in studs, and the
 //! Play VM converts each property by the unit its table gives
-//! (`eustress_common::luau::play::studs::UNITS`). A property the table leaves
+//! (`eustress_common::mlua::play::studs::UNITS`). A property the table leaves
 //! out would cross the boundary unconverted, so this walks every class in
 //! scope and its ancestors, lists each scriptable property whose type could
 //! carry a length, and fails on any the table does not classify.
 
 use std::collections::HashSet;
 
-use eustress_common::luau::play::studs::unit_of;
+use eustress_common::mlua::play::studs::unit_of;
 use rbx_dom_weak::types::VariantType;
 use rbx_reflection::Scriptability;
 

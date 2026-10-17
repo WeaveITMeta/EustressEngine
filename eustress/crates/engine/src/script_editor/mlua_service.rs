@@ -7,21 +7,21 @@
 //! resolves them through, so the editor offers exactly what runs. This file
 //! adapts them to [`LanguageService`].
 //!
-//! Syntax errors come from full-moon ([`luau_parse`]), every one with its
+//! Syntax errors come from full-moon ([`mlua_parse`]), every one with its
 //! span. The VM's own Luau compiler has the last word: code the parser
 //! accepts but the VM refuses still shows the compiler's error. Nothing is
 //! run.
 
-use eustress_common::luau::lang::{self, complete as lc, help};
+use eustress_common::mlua::lang::{self, complete as lc, help};
 
-use super::luau_parse;
+use super::mlua_parse;
 
 use super::language::{
     Access, Analysis, Completion, CompletionContext, CompletionKind, Diagnostic, Hover, LanguageId, LanguageService,
     LineState, Location, Range, ScriptClass, Severity, SignatureHelp, Symbol, SymbolKind, Token, TokenClass,
 };
 
-pub struct LuauService;
+pub struct MluaService;
 
 fn token_class(c: lang::TokenClass) -> TokenClass {
     use lang::TokenClass as L;
@@ -105,7 +105,7 @@ fn line_bytes(source: &str, line: u32) -> (usize, usize) {
     (source.len(), source.len())
 }
 
-impl LanguageService for LuauService {
+impl LanguageService for MluaService {
     fn id(&self) -> LanguageId {
         LanguageId::Luau
     }
@@ -145,7 +145,7 @@ impl LanguageService for LuauService {
             source: "luau",
         };
         let mut diagnostics: Vec<Diagnostic> =
-            luau_parse::syntax_errors(source).into_iter().map(|e| diag(e.start, e.end, e.message)).collect();
+            mlua_parse::syntax_errors(source).into_iter().map(|e| diag(e.start, e.end, e.message)).collect();
         // What the parser accepts, the VM's compiler still checks.
         if diagnostics.is_empty() {
             if let Some(err) = lang::check(source) {
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn a_local_players_methods_complete_after_a_colon() {
         let src = "local p = game:GetService(\"Players\").LocalPlayer\np:";
-        let items = LuauService.complete(&cx(src, Some("game:GetService(\"Players\").LocalPlayer"), Some(Access::Colon)));
+        let items = MluaService.complete(&cx(src, Some("game:GetService(\"Players\").LocalPlayer"), Some(Access::Colon)));
         let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"GetMouse") && labels.contains(&"Kick"), "{labels:?}");
         assert!(!labels.contains(&"FireServer"), "{labels:?}");
@@ -251,21 +251,21 @@ mod tests {
     fn the_receiver_comes_from_the_source_calls_and_all() {
         // The shell's receiver stops at the call: "LocalPlayer" alone.
         let src = "game:GetService(\"Players\").LocalPlayer:";
-        let items = LuauService.complete(&cx(src, Some("LocalPlayer"), Some(Access::Colon)));
+        let items = MluaService.complete(&cx(src, Some("LocalPlayer"), Some(Access::Colon)));
         assert!(items.iter().any(|c| c.label == "GetMouse"), "{items:?}");
     }
 
     #[test]
     fn callbacks_take_no_parentheses() {
         let src = "local f = Instance.new(\"RemoteFunction\")\nf.";
-        let items = LuauService.complete(&cx(src, Some("f"), Some(Access::Dot)));
+        let items = MluaService.complete(&cx(src, Some("f"), Some(Access::Dot)));
         let on = items.iter().find(|c| c.label == "OnServerInvoke").expect("a callback");
         assert_eq!(on.kind, CompletionKind::Property);
     }
 
     #[test]
-    fn luau_files_are_never_offered_rune_words() {
-        let items = LuauService.complete(&cx("", None, None));
+    fn mlua_files_are_never_offered_rune_words() {
+        let items = MluaService.complete(&cx("", None, None));
         for rune in ["fn", "let", "impl", "struct", "pub"] {
             assert!(!items.iter().any(|c| c.label == rune), "{rune} offered in Luau");
         }
@@ -274,21 +274,21 @@ mod tests {
 
     #[test]
     fn a_broken_snippet_reports_its_error_and_a_clean_one_none() {
-        let a = LuauService.analyze("local x = 1\nif x then\n  print(x)\n");
+        let a = MluaService.analyze("local x = 1\nif x then\n  print(x)\n");
         assert!(!a.diagnostics.is_empty(), "a missing `end` is an error");
         assert!(a.diagnostics.iter().all(|d| d.severity == Severity::Error && d.source == "luau"));
         // `continue` outside a loop: whether the parser or the VM's compiler
         // catches it, the editor reports it.
-        assert!(!LuauService.analyze("continue\n").diagnostics.is_empty());
-        let a = LuauService.analyze("local function add(a: number, b: number): number\n  return a + b\nend\n");
+        assert!(!MluaService.analyze("continue\n").diagnostics.is_empty());
+        let a = MluaService.analyze("local function add(a: number, b: number): number\n  return a + b\nend\n");
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
         assert_eq!(a.symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["add"]);
     }
 
     #[test]
     fn tokens_map_one_to_one() {
-        let (tokens, end) = LuauService.tokenize_line("local s = `hi {name}`", LuauService.initial_state());
-        assert_eq!(end, LuauService.initial_state());
+        let (tokens, end) = MluaService.tokenize_line("local s = `hi {name}`", MluaService.initial_state());
+        assert_eq!(end, MluaService.initial_state());
         assert_eq!(tokens[0].class, TokenClass::Keyword);
         assert!(tokens.iter().any(|t| t.class == TokenClass::Interpolation));
     }

@@ -4,9 +4,9 @@
 //!
 //! ## Table of Contents
 //!
-//! 1. **LuauScript** — Server-side script (equivalent to Roblox `Script`)
-//! 2. **LuauLocalScript** — Client-side script (equivalent to Roblox `LocalScript`)
-//! 3. **LuauModuleScript** — Reusable module (equivalent to Roblox `ModuleScript`)
+//! 1. **MluaScript** — Server-side script (equivalent to Roblox `Script`)
+//! 2. **MluaLocalScript** — Client-side script (equivalent to Roblox `LocalScript`)
+//! 3. **MluaModuleScript** — Reusable module (equivalent to Roblox `ModuleScript`)
 //! 4. **RemoteEvent** — Client↔Server one-way event channel
 //! 5. **RemoteFunction** — Client↔Server request-response channel
 //! 6. **BindableEvent** — In-process one-way event (same context)
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Scripts under `Workspace` or `ReplicatedStorage` may replicate.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
-pub struct LuauScript {
+pub struct MluaScript {
     /// Display name in Explorer
     pub name: String,
 
@@ -40,7 +40,7 @@ pub struct LuauScript {
     pub enabled: bool,
 
     /// Run context override (Server, Client, or Legacy — derived from parent)
-    pub run_context: LuauRunContext,
+    pub run_context: MluaRunContext,
 
     /// Has the script been loaded into the VM?
     #[serde(skip)]
@@ -51,21 +51,21 @@ pub struct LuauScript {
     pub error: Option<String>,
 }
 
-impl Default for LuauScript {
+impl Default for MluaScript {
     fn default() -> Self {
         Self {
             name: "Script".to_string(),
             source: String::new(),
             source_path: String::new(),
             enabled: true,
-            run_context: LuauRunContext::Legacy,
+            run_context: MluaRunContext::Legacy,
             loaded: false,
             error: None,
         }
     }
 }
 
-impl LuauScript {
+impl MluaScript {
     /// Create a new server script with name and source
     pub fn new(name: &str, source: &str) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl LuauScript {
 /// Cannot access server-only APIs (DataStoreService, etc.).
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
-pub struct LuauLocalScript {
+pub struct MluaLocalScript {
     /// Display name in Explorer
     pub name: String,
 
@@ -114,7 +114,7 @@ pub struct LuauLocalScript {
     pub error: Option<String>,
 }
 
-impl Default for LuauLocalScript {
+impl Default for MluaLocalScript {
     fn default() -> Self {
         Self {
             name: "LocalScript".to_string(),
@@ -127,7 +127,7 @@ impl Default for LuauLocalScript {
     }
 }
 
-impl LuauLocalScript {
+impl MluaLocalScript {
     /// Create a new local script with name and source
     pub fn new(name: &str, source: &str) -> Self {
         Self {
@@ -145,7 +145,7 @@ impl LuauLocalScript {
 /// Must return exactly one value from its top-level chunk.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
-pub struct LuauModuleScript {
+pub struct MluaModuleScript {
     /// Display name in Explorer
     pub name: String,
 
@@ -164,7 +164,7 @@ pub struct LuauModuleScript {
     pub error: Option<String>,
 }
 
-impl Default for LuauModuleScript {
+impl Default for MluaModuleScript {
     fn default() -> Self {
         Self {
             name: "ModuleScript".to_string(),
@@ -176,7 +176,7 @@ impl Default for LuauModuleScript {
     }
 }
 
-impl LuauModuleScript {
+impl MluaModuleScript {
     /// Create a new module script with name and source
     pub fn new(name: &str, source: &str) -> Self {
         Self {
@@ -191,9 +191,9 @@ impl LuauModuleScript {
 // Run Context
 // ============================================================================
 
-/// Determines where a LuauScript executes
+/// Determines where a MluaScript executes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
-pub enum LuauRunContext {
+pub enum MluaRunContext {
     /// Server-side only
     Server,
     /// Client-side only
@@ -203,13 +203,13 @@ pub enum LuauRunContext {
     Legacy,
 }
 
-impl LuauRunContext {
+impl MluaRunContext {
     /// String representation for display
     pub fn as_str(&self) -> &'static str {
         match self {
-            LuauRunContext::Server => "Server",
-            LuauRunContext::Client => "Client",
-            LuauRunContext::Legacy => "Legacy",
+            MluaRunContext::Server => "Server",
+            MluaRunContext::Client => "Client",
+            MluaRunContext::Legacy => "Legacy",
         }
     }
 }

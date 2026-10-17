@@ -1,6 +1,6 @@
 //! Roblox class name → Eustress [`ClassName`].
 //!
-//! Delegates to [`eustress_common::luau::compat::ClassMapping::map_class`]
+//! Delegates to [`eustress_common::mlua::compat::ClassMapping::map_class`]
 //! for the string-level mapping, then re-resolves to a typed `ClassName`
 //! via [`ClassName::from_str`].
 //!
@@ -13,7 +13,7 @@
 //! Spec ref: `docs/architecture/ROBLOX_IMPORT_SPEC.md` §9.
 
 use eustress_common::classes::ClassName;
-use eustress_common::luau::compat::ClassMapping;
+use eustress_common::mlua::compat::ClassMapping;
 
 /// Map a Roblox class name (e.g. `"Part"`, `"MeshPart"`, `"SpawnLocation"`)
 /// to its Eustress `ClassName` equivalent.
@@ -45,7 +45,7 @@ pub fn roblox_to_eustress_class(rbx_class: &str) -> Option<ClassName> {
     // (e.g. `Folder`, `Sky`, `Atmosphere`, `Camera`, `Beam`,
     // `Attachment`, the constraint and light variants, the GUI
     // primitives). `ClassName::from_str` already understands legacy
-    // aliases (`MeshPart` → `Part`, `Script` → `LuauScript`, etc.) so
+    // aliases (`MeshPart` → `Part`, `Script` → `MluaScript`, etc.) so
     // it doubles as our recovery path for compat-table gaps.
     ClassName::from_str(rbx_class).ok()
 }
@@ -131,15 +131,15 @@ mod tests {
     fn maps_scripts() {
         assert_eq!(
             roblox_to_eustress_class("Script"),
-            Some(ClassName::LuauScript)
+            Some(ClassName::MluaScript)
         );
         assert_eq!(
             roblox_to_eustress_class("LocalScript"),
-            Some(ClassName::LuauLocalScript)
+            Some(ClassName::MluaLocalScript)
         );
         assert_eq!(
             roblox_to_eustress_class("ModuleScript"),
-            Some(ClassName::LuauModuleScript)
+            Some(ClassName::MluaModuleScript)
         );
     }
 

@@ -1,18 +1,18 @@
-//! `LuauScriptSpawner` — Wave 5.C scripting-class spawner.
+//! `MluaScriptSpawner` — Wave 5.C scripting-class spawner.
 //!
-//! Implements [`ClassSpawner`] for [`ClassName::LuauScript`] per
+//! Implements [`ClassSpawner`] for [`ClassName::MluaScript`] per
 //! `docs/architecture/CLASS_REGISTRY.md` §8.12 (scripting row) + §2 (trait).
 //!
 //! ## What this is
 //!
-//! `LuauScript` is the server-side Luau script class — the Eustress
+//! `MluaScript` is the server-side Luau script class — the Eustress
 //! equivalent of Roblox `Script` (`RunContext = Server`). The Wave 4
-//! Roblox importer already routes Roblox `Script` → `LuauScript` via the
-//! `ClassName::from_str` alias (`"Script" | "LuauScript"`), so this is the
+//! Roblox importer already routes Roblox `Script` → `MluaScript` via the
+//! `ClassName::from_str` alias (`"Script" | "MluaScript"`), so this is the
 //! landing class for imported server scripts.
 //!
 //! The entity is a **pure source carrier**: it holds the Luau body on its
-//! [`LuauScript`] component and nothing visual. No mesh, no physics, no
+//! [`MluaScript`] component and nothing visual. No mesh, no physics, no
 //! material, no LOD model.
 //!
 //! ## Execution is NOT this spawner's job
@@ -23,7 +23,7 @@
 //! component and drive load/run themselves. (Note: the legacy cold-load
 //! path at `file_loader.rs:753` currently spawns `.lua` files as
 //! `SoulScript` + `SoulScriptData{run_context: Luau}`; the registry path
-//! introduced here is the more granular `LuauScript` class the spec
+//! introduced here is the more granular `MluaScript` class the spec
 //! mandates. Both store the source body; neither executes it.)
 //!
 //! Bundle attached:
@@ -31,8 +31,8 @@
 //! - [`Transform`] (identity — scripts live in the hierarchy but have no
 //!   spatial intrinsics)
 //! - [`Visibility`] (default — never rendered)
-//! - [`Instance`] (with `class_name = ClassName::LuauScript`)
-//! - [`LuauScript`] (carries the `source` string + `enabled` + run context)
+//! - [`Instance`] (with `class_name = ClassName::MluaScript`)
+//! - [`MluaScript`] (carries the `source` string + `enabled` + run context)
 //! - [`Name`] (mirrors `Instance.name`)
 //!
 //! See [`soul_script`](super::soul_script) for the fully-annotated
@@ -45,18 +45,18 @@ use eustress_common::class_registry::{
     ClassSpawner, ComponentBundle, LodTier, PropertyBag, RobloxInstance, SpawnCtx,
 };
 use eustress_common::classes::{ClassName, Instance, PropertyValue};
-use eustress_common::luau::{LuauRunContext, LuauScript};
+use eustress_common::mlua::{MluaRunContext, MluaScript};
 
 use super::soul_script::SOURCE_KEY;
 
-/// Zero-sized spawner for [`ClassName::LuauScript`]. Stateless; per-spawn
+/// Zero-sized spawner for [`ClassName::MluaScript`]. Stateless; per-spawn
 /// data flows through the [`PropertyBag`].
 #[derive(Default)]
-pub struct LuauScriptSpawner;
+pub struct MluaScriptSpawner;
 
-impl ClassSpawner for LuauScriptSpawner {
+impl ClassSpawner for MluaScriptSpawner {
     fn class_name(&self) -> ClassName {
-        ClassName::LuauScript
+        ClassName::MluaScript
     }
 
     fn spawn(&self, ctx: &mut SpawnCtx, props: &PropertyBag) -> Entity {
@@ -75,18 +75,18 @@ impl ClassSpawner for LuauScriptSpawner {
                 Visibility::default(),
                 Instance {
                     name: name.clone(),
-                    class_name: ClassName::LuauScript,
+                    class_name: ClassName::MluaScript,
                     archivable,
                     id: 0,
                     uuid,
                     ai: false,
                 },
-                LuauScript {
+                MluaScript {
                     name: name.clone(),
                     source,
                     source_path: String::new(),
                     enabled,
-                    run_context: LuauRunContext::Server,
+                    run_context: MluaRunContext::Server,
                     loaded: false,
                     error: None,
                 },
@@ -114,7 +114,7 @@ impl ClassSpawner for LuauScriptSpawner {
                 if let Some(mut name) = entity_mut.get_mut::<Name>() {
                     name.set(new_name.to_string());
                 }
-                if let Some(mut script) = entity_mut.get_mut::<LuauScript>() {
+                if let Some(mut script) = entity_mut.get_mut::<MluaScript>() {
                     script.name = new_name.to_string();
                 }
             }
@@ -123,7 +123,7 @@ impl ClassSpawner for LuauScriptSpawner {
                     instance.archivable = archivable;
                 }
             }
-            if let Some(mut script) = entity_mut.get_mut::<LuauScript>() {
+            if let Some(mut script) = entity_mut.get_mut::<MluaScript>() {
                 if let Some(new_source) = props.get_string(SOURCE_KEY) {
                     script.source = new_source.to_string();
                     script.loaded = false; // force the runtime to re-load
@@ -143,7 +143,7 @@ impl ClassSpawner for LuauScriptSpawner {
     }
 
     fn import_from_roblox(&self, rbx: &dyn RobloxInstance) -> PropertyBag {
-        // Roblox `Script` → `LuauScript`. The body lives in the Roblox
+        // Roblox `Script` → `MluaScript`. The body lives in the Roblox
         // `Source` property; `Enabled` toggles execution.
         let mut bag = PropertyBag::with_capacity(3);
         bag.set("metadata.name", PropertyValue::String(rbx.name().to_string()));
@@ -160,7 +160,7 @@ impl ClassSpawner for LuauScriptSpawner {
         // Mirror the `_instance.toml` shape:
         //
         //     [metadata]
-        //     class_name = "LuauScript"
+        //     class_name = "MluaScript"
         //     name = "ServerMain"
         //
         //     [script]
@@ -212,7 +212,7 @@ impl ClassSpawner for LuauScriptSpawner {
         }
         root.insert("metadata".to_string(), toml::Value::Table(meta));
 
-        if let Some(script) = world.entity(entity).get::<LuauScript>() {
+        if let Some(script) = world.entity(entity).get::<MluaScript>() {
             let mut s = toml::value::Table::new();
             s.insert("source".to_string(), toml::Value::String(script.source.clone()));
             s.insert("enabled".to_string(), toml::Value::Boolean(script.enabled));
@@ -228,19 +228,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn class_name_is_luau_script() {
-        assert_eq!(LuauScriptSpawner.class_name(), ClassName::LuauScript);
+    fn class_name_is_mlua_script() {
+        assert_eq!(MluaScriptSpawner.class_name(), ClassName::MluaScript);
     }
 
     #[test]
-    fn luau_script_spawner_is_object_safe() {
-        let boxed: Box<dyn ClassSpawner> = Box::new(LuauScriptSpawner);
-        assert_eq!(boxed.class_name(), ClassName::LuauScript);
+    fn mlua_script_spawner_is_object_safe() {
+        let boxed: Box<dyn ClassSpawner> = Box::new(MluaScriptSpawner);
+        assert_eq!(boxed.class_name(), ClassName::MluaScript);
     }
 
     #[test]
     fn lod_bundle_is_empty_at_every_tier() {
-        let spawner = LuauScriptSpawner;
+        let spawner = MluaScriptSpawner;
         for tier in [
             LodTier::Hero,
             LodTier::Active,
@@ -280,7 +280,7 @@ mod tests {
                 1
             }
         }
-        let bag = LuauScriptSpawner.import_from_roblox(&Mock);
+        let bag = MluaScriptSpawner.import_from_roblox(&Mock);
         assert_eq!(bag.get_string("metadata.name"), Some("ServerMain"));
         assert_eq!(bag.get_string(SOURCE_KEY), Some("print('hi')"));
         assert_eq!(bag.get_bool("script.enabled"), Some(true));
@@ -298,7 +298,7 @@ mod tests {
             enabled = false
         "#;
         let value: toml::Value = toml::from_str(toml_src).unwrap();
-        let bag = LuauScriptSpawner.import_from_toml(&value);
+        let bag = MluaScriptSpawner.import_from_toml(&value);
         assert_eq!(bag.get_string("metadata.name"), Some("ServerMain"));
         assert_eq!(bag.get_string(SOURCE_KEY), Some("main.luau"));
         assert_eq!(bag.get_bool("script.enabled"), Some(false));
@@ -306,6 +306,6 @@ mod tests {
 
     #[test]
     fn deserialize_empty_returns_empty_bag() {
-        assert!(LuauScriptSpawner.deserialize(&[]).is_empty());
+        assert!(MluaScriptSpawner.deserialize(&[]).is_empty());
     }
 }

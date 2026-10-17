@@ -27,7 +27,7 @@
 //! second VM doesn't fix inter-plugin collisions either (two plugins in one
 //! second VM still share ITS globals) and permanently doubles the ~20
 //! `inject_*` service-exposure functions. The real fix is
-//! `LuauRuntime::build_plugin_environment` (see `common/src/luau/runtime.rs`):
+//! `MluaRuntime::build_plugin_environment` (see `common/src/mlua/runtime.rs`):
 //! each plugin gets its own environment table via `Chunk::set_environment`,
 //! with an `__index` metatable falling through to the real shared globals.
 //!
@@ -43,7 +43,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use eustress_common::luau::LuauRuntimeState;
+use eustress_common::mlua::MluaRuntimeState;
 use eustress_common::script_plugins::{
     new_plugin_bridge, new_selection_cache, CallbackHandle, PendingPluginRegistration, PluginBridge, SelectionCache,
 };
@@ -78,7 +78,7 @@ pub struct ScriptPluginRegistry {
 }
 
 /// Cloned into every plugin's environment closures at discovery time (see
-/// `LuauRuntime::build_plugin_environment`) — the queue a `plugin:AddSection`/
+/// `MluaRuntime::build_plugin_environment`) — the queue a `plugin:AddSection`/
 /// `plugin:AddButton`/`plugin:Notify` call pushes onto, since those closures
 /// run outside Bevy's system-execution context and can't hold `ResMut`.
 #[derive(Resource, Clone)]
@@ -103,7 +103,7 @@ impl Default for SelectionCacheRes {
 /// The single owner of every button callback's [`CallbackHandle`], keyed
 /// by `action_id`, covering BOTH authoring languages. Dispatch looks
 /// callbacks up here; teardown removes them from here AND, for a
-/// `CallbackHandle::Lua`, from the Lua registry itself (`LuauRuntime::
+/// `CallbackHandle::Lua`, from the Lua registry itself (`MluaRuntime::
 /// remove_registry_value`) — a `RegistryKey` dropped without that call
 /// leaks in the VM forever, it does not get garbage-collected on its own.
 /// A `CallbackHandle::Rune` needs no such release — dropping the
@@ -115,7 +115,7 @@ pub struct ScriptPluginCallbacks {
 
 /// One-shot latch, the same pattern as `ThemeInitialized` in `ui/slint_ui.rs`:
 /// discovery can't run at `Startup` (the Luau runtime itself only
-/// initializes on the first `Update` tick, per `LuauPlugin::build`), so this
+/// initializes on the first `Update` tick, per `MluaPlugin::build`), so this
 /// gates a `Update`-schedule system to run its real work exactly once, as
 /// soon as the runtime is ready, however many frames that takes.
 #[derive(Resource, Default)]
@@ -163,13 +163,13 @@ impl Plugin for ScriptPluginHostPlugin {
 /// function. Never runs its body twice — see `ScriptPluginsDiscovered`.
 ///
 /// LAZILY CREATES the Luau VM if it doesn't exist yet: the EDITOR never
-/// adds common's `LuauPlugin`, and Play runs Space scripts in a VM of its
-/// own (`eustress_common::luau::play`), so nothing else creates this one;
+/// adds common's `MluaPlugin`, and Play runs Space scripts in a VM of its
+/// own (`eustress_common::mlua::play`), so nothing else creates this one;
 /// waiting for it would mean script plugins never load in Edit mode.
 /// (`RuneModuleRegistry` needs no such wait — populated at `Startup`.)
 fn discover_script_plugins(
     mut discovered: ResMut<ScriptPluginsDiscovered>,
-    mut runtime_state: ResMut<LuauRuntimeState>,
+    mut runtime_state: ResMut<MluaRuntimeState>,
     module_registry: Res<crate::soul::rune_api::RuneModuleRegistry>,
     bridge: Res<ScriptPluginBridgeRes>,
     selection: Res<SelectionCacheRes>,
@@ -179,14 +179,14 @@ fn discover_script_plugins(
         return;
     }
     if runtime_state.runtime.is_none() {
-        match eustress_common::luau::runtime::LuauRuntime::new() {
+        match eustress_common::mlua::runtime::MluaRuntime::new() {
             Ok(mut rt) => {
                 // Plugins are the user's own installed code, loaded only from
                 // %LOCALAPPDATA%/Eustress/Plugins. Nothing may install one from a Space,
                 // the Gallery, a joined session or an agent's file tools; a plugin from a
                 // future marketplace starts Denied, with a per-plugin grant the person gives.
                 // Their HTTP stays on, as before.
-                rt.set_network_access(eustress_common::luau::runtime::NetworkAccess::Allowed);
+                rt.set_network_access(eustress_common::mlua::runtime::NetworkAccess::Allowed);
                 runtime_state.runtime = Some(rt);
                 runtime_state.initialized = true;
                 info!("script_plugin_host: Luau VM lazily initialized for Edit-mode plugin discovery");
@@ -478,7 +478,7 @@ fn handle_script_plugin_actions(
     mut events: MessageReader<PluginActionEvent>,
     callbacks: Res<ScriptPluginCallbacks>,
     registry: Res<ScriptPluginRegistry>,
-    mut runtime_state: ResMut<LuauRuntimeState>,
+    mut runtime_state: ResMut<MluaRuntimeState>,
     bridge: Res<ScriptPluginBridgeRes>,
     selection: Res<SelectionCacheRes>,
     mut notifications: ResMut<NotificationManager>,
@@ -567,7 +567,7 @@ pub fn handle_reload_plugins_action(
     mut registry: ResMut<ScriptPluginRegistry>,
     mut callbacks: ResMut<ScriptPluginCallbacks>,
     mut discovered: ResMut<ScriptPluginsDiscovered>,
-    mut runtime_state: ResMut<LuauRuntimeState>,
+    mut runtime_state: ResMut<MluaRuntimeState>,
     mut notifications: ResMut<NotificationManager>,
 ) {
     for event in events.read() {

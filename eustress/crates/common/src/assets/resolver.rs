@@ -54,7 +54,7 @@ impl ResolverStats {
 /// LRU cache entry
 struct CacheEntry {
     data: Vec<u8>,
-    last_access: std::time::Instant,
+    last_access: bevy::platform::time::Instant,
     access_count: usize,
 }
 
@@ -129,7 +129,7 @@ impl AssetResolver {
     pub fn resolve_sync(&self, id: &ContentHash) -> Result<Vec<u8>, ResolveError> {
         // Check cache first
         if let Some(mut entry) = self.cache.get_mut(id) {
-            entry.last_access = std::time::Instant::now();
+            entry.last_access = bevy::platform::time::Instant::now();
             entry.access_count += 1;
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(entry.data.clone());
@@ -337,7 +337,7 @@ impl AssetResolver {
         // Insert
         self.cache.insert(id, CacheEntry {
             data,
-            last_access: std::time::Instant::now(),
+            last_access: bevy::platform::time::Instant::now(),
             access_count: 1,
         });
         
@@ -347,7 +347,7 @@ impl AssetResolver {
     /// Evict least recently used entry
     fn evict_lru(&self) {
         let mut oldest_key = None;
-        let mut oldest_time = std::time::Instant::now();
+        let mut oldest_time = bevy::platform::time::Instant::now();
         
         for entry in self.cache.iter() {
             if entry.value().last_access < oldest_time {
@@ -387,7 +387,7 @@ impl AssetResolver {
     
     /// Cleanup old cache entries (called periodically)
     pub fn cleanup(&self) {
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let max_age = std::time::Duration::from_secs(300); // 5 minutes
         
         let mut to_remove = Vec::new();
@@ -420,7 +420,7 @@ impl AssetResolver {
     pub async fn resolve_async(&self, id: &ContentHash) -> Result<Vec<u8>, ResolveError> {
         // Check cache first
         if let Some(mut entry) = self.cache.get_mut(id) {
-            entry.last_access = std::time::Instant::now();
+            entry.last_access = bevy::platform::time::Instant::now();
             entry.access_count += 1;
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(entry.data.clone());

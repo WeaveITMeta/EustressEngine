@@ -144,8 +144,8 @@ fn track_script_space(space_root: Option<Res<crate::space::SpaceRoot>>) {
 }
 
 /// Give Luau's `DataService` its implementation.
-fn install_luau_data_service() {
-    eustress_common::luau::play::instance::set_data_service(std::sync::Arc::new(data_call));
+fn install_mlua_data_service() {
+    eustress_common::mlua::play::instance::set_data_service(std::sync::Arc::new(data_call));
 }
 
 /// Installs the Luau `DataService` and keeps scripts pointed at the open Space.
@@ -154,7 +154,7 @@ pub struct DataScriptingPlugin;
 
 impl Plugin for DataScriptingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, install_luau_data_service)
+        app.add_systems(Startup, install_mlua_data_service)
             .add_systems(Update, track_script_space);
     }
 }

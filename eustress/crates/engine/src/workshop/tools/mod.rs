@@ -23,7 +23,7 @@ pub use eustress_tools::{
 
 // Re-export Luau execution types for the Workshop agent.
 pub use eustress_tools::registry::{
-    LuauCreatedEntity, LuauExecutionResult, LuauExecutor,
+    MluaCreatedEntity, MluaExecutionResult, MluaExecutor,
 };
 
 // Re-export every tool handler module — callers continue to use

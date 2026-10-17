@@ -51,7 +51,7 @@ use bevy::math::{Quat, UVec3, Vec3};
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
 use crate::datamodel::{DataModel, DmValue, EnumItem, InstanceId, OutputLevel};
-use crate::luau::types::{LuauCFrame, LuauColor3, LuauVector3, UserDataPeek};
+use crate::mlua::types::{MluaCFrame, MluaColor3, MluaVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, Vector3};
 use crate::terrain::api::{read_voxels, TerrainCommand, TerrainFill, MAX_SCRIPT_VOXELS};
 use crate::terrain::{
@@ -61,7 +61,7 @@ use crate::terrain::{
 
 use super::convert::enum_item;
 use super::instance::{with_dm, LInst};
-use super::types_ext::{LuauEnumItem, LuauRegion3};
+use super::types_ext::{MluaEnumItem, MluaRegion3};
 
 // ============================================================================
 // The Terrain instance
@@ -213,7 +213,7 @@ fn cell_size() -> f64 {
 pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     t.raw_set(
         "FillBall",
-        lua.create_function(|lua, (_this, center, radius, material): (LInst, LuauVector3, f64, Value)| {
+        lua.create_function(|lua, (_this, center, radius, material): (LInst, MluaVector3, f64, Value)| {
             let fill = material_arg("FillBall", "material", &material)?;
             let center = vector_arg("FillBall", "center", center.0)?;
             let radius = number_arg("FillBall", "radius", radius)?;
@@ -225,7 +225,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     )?;
     t.raw_set(
         "FillBlock",
-        lua.create_function(|lua, (_this, cframe, size, material): (LInst, LuauCFrame, LuauVector3, Value)| {
+        lua.create_function(|lua, (_this, cframe, size, material): (LInst, MluaCFrame, MluaVector3, Value)| {
             let fill = material_arg("FillBlock", "material", &material)?;
             let (center, rotation) = pose_arg("FillBlock", &cframe.0)?;
             let size = vector_arg("FillBlock", "size", size.0)?;
@@ -239,7 +239,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     t.raw_set(
         "FillCylinder",
         lua.create_function(
-            |lua, (_this, cframe, height, radius, material): (LInst, LuauCFrame, f64, f64, Value)| {
+            |lua, (_this, cframe, height, radius, material): (LInst, MluaCFrame, f64, f64, Value)| {
                 let fill = material_arg("FillCylinder", "material", &material)?;
                 let (center, rotation) = pose_arg("FillCylinder", &cframe.0)?;
                 let height = number_arg("FillCylinder", "height", height)?;
@@ -253,7 +253,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     )?;
     t.raw_set(
         "FillRegion",
-        lua.create_function(|lua, (_this, region, resolution, material): (LInst, LuauRegion3, f64, Value)| {
+        lua.create_function(|lua, (_this, region, resolution, material): (LInst, MluaRegion3, f64, Value)| {
             let fill = material_arg("FillRegion", "material", &material)?;
             resolution_arg("FillRegion", resolution)?;
             let (min, max) = region_arg("FillRegion", &region)?;
@@ -271,7 +271,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     t.raw_set(
         "ReplaceMaterial",
         lua.create_function(
-            |lua, (_this, region, resolution, source, target): (LInst, LuauRegion3, f64, Value, Value)| {
+            |lua, (_this, region, resolution, source, target): (LInst, MluaRegion3, f64, Value, Value)| {
                 let sea_level = match (
                     material_arg("ReplaceMaterial", "sourceMaterial", &source),
                     material_arg("ReplaceMaterial", "targetMaterial", &target),
@@ -309,7 +309,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     // or the ground's), occupancies 0 to 1.
     t.raw_set(
         "ReadVoxels",
-        lua.create_function(|lua, (_this, region, resolution): (LInst, LuauRegion3, f64)| {
+        lua.create_function(|lua, (_this, region, resolution): (LInst, MluaRegion3, f64)| {
             let grid = voxel_grid("ReadVoxels", &region, resolution)?;
             let read = if grid.count() == 0 {
                 None
@@ -325,7 +325,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     t.raw_set(
         "WriteVoxels",
         lua.create_function(
-            |lua, (_this, region, resolution, materials, occupancies): (LInst, LuauRegion3, f64, Table, Table)| {
+            |lua, (_this, region, resolution, materials, occupancies): (LInst, MluaRegion3, f64, Table, Table)| {
                 let grid = voxel_grid("WriteVoxels", &region, resolution)?;
                 let count = grid.count();
                 let mut fills = vec![TerrainFill::Air; count];
@@ -389,7 +389,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
         lua.create_function(|_, (_this, x, y, z): (LInst, f64, f64, f64)| {
             let cell = cell_size();
             let center = |n: f64| (n.floor() + 0.5) * cell;
-            Ok(LuauVector3(Vector3::new(center(x), center(y), center(z))))
+            Ok(MluaVector3(Vector3::new(center(x), center(y), center(z))))
         })?,
     )?;
     t.raw_set(
@@ -397,25 +397,25 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
         lua.create_function(|_, (_this, x, y, z): (LInst, f64, f64, f64)| {
             let cell = cell_size();
             let corner = |n: f64| n.floor() * cell;
-            Ok(LuauVector3(Vector3::new(corner(x), corner(y), corner(z))))
+            Ok(MluaVector3(Vector3::new(corner(x), corner(y), corner(z))))
         })?,
     )?;
     t.raw_set(
         "WorldToCell",
-        lua.create_function(|_, (_this, position): (LInst, LuauVector3)| {
-            Ok(LuauVector3(world_to_cell(position.0, cell_size())))
+        lua.create_function(|_, (_this, position): (LInst, MluaVector3)| {
+            Ok(MluaVector3(world_to_cell(position.0, cell_size())))
         })?,
     )?;
     t.raw_set(
         "WorldToCellPreferSolid",
-        lua.create_function(|_, (_this, position): (LInst, LuauVector3)| {
-            Ok(LuauVector3(world_to_cell_preferring(position.0, true)))
+        lua.create_function(|_, (_this, position): (LInst, MluaVector3)| {
+            Ok(MluaVector3(world_to_cell_preferring(position.0, true)))
         })?,
     )?;
     t.raw_set(
         "WorldToCellPreferEmpty",
-        lua.create_function(|_, (_this, position): (LInst, LuauVector3)| {
-            Ok(LuauVector3(world_to_cell_preferring(position.0, false)))
+        lua.create_function(|_, (_this, position): (LInst, MluaVector3)| {
+            Ok(MluaVector3(world_to_cell_preferring(position.0, false)))
         })?,
     )?;
     // The material's swatch: the colour its slot reads as from a distance.
@@ -429,7 +429,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
             };
             let [r, g, b] = read_terrain(|t| t.data.slot_palette.srgb(slot))
                 .unwrap_or_else(|| TerrainSlotPalette::default().srgb(slot));
-            Ok(LuauColor3(Color3::new(f64::from(r), f64::from(g), f64::from(b))))
+            Ok(MluaColor3(Color3::new(f64::from(r), f64::from(g), f64::from(b))))
         })?,
     )?;
     // Material colours come from the Space's material slots and its imported
@@ -438,7 +438,7 @@ pub(super) fn install_methods(lua: &Lua, t: &Table) -> LuaResult<()> {
     // script that themes its terrain at startup keeps running.
     t.raw_set(
         "SetMaterialColor",
-        lua.create_function(|lua, (_this, material, _color): (LInst, Value, LuauColor3)| {
+        lua.create_function(|lua, (_this, material, _color): (LInst, Value, MluaColor3)| {
             if let TerrainFill::Air = material_arg("SetMaterialColor", "material", &material)? {
                 return Err(rt("SetMaterialColor: Air has no colour".into()));
             }
@@ -537,7 +537,7 @@ impl VoxelGrid {
 /// The voxel grid of `region` at `resolution`, rounded up to whole voxels.
 /// Refused past [`MAX_SCRIPT_VOXELS`], an empty axis counting as one voxel
 /// (it still costs a table per row).
-fn voxel_grid(method: &str, region: &LuauRegion3, resolution: f64) -> LuaResult<VoxelGrid> {
+fn voxel_grid(method: &str, region: &MluaRegion3, resolution: f64) -> LuaResult<VoxelGrid> {
     let resolution = resolution_arg(method, resolution)?;
     let (min, max) = region_arg(method, region)?;
     let step = f64::from(resolution);
@@ -588,7 +588,7 @@ fn voxel_tables(lua: &Lua, size: UVec3, fills: &[TerrainFill], occupancies: &[f3
         materials.raw_set(x + 1, material_plane)?;
         occupied.raw_set(x + 1, occupancy_plane)?;
     }
-    let counts = LuauVector3(Vector3::new(nx as f64, ny as f64, nz as f64));
+    let counts = MluaVector3(Vector3::new(nx as f64, ny as f64, nz as f64));
     materials.raw_set("Size", counts)?;
     occupied.raw_set("Size", counts)?;
     Ok((materials, occupied))
@@ -640,7 +640,7 @@ fn rt(message: String) -> mlua::Error {
 /// `"Enum.Material.Rock"`.
 fn material_arg(method: &str, what: &str, value: &Value) -> LuaResult<TerrainFill> {
     let name = match value {
-        Value::UserData(ud) => match ud.peek::<LuauEnumItem>() {
+        Value::UserData(ud) => match ud.peek::<MluaEnumItem>() {
             Ok(item) if item.0.enum_type == "Material" || item.0.enum_type.is_empty() => item.0.name,
             Ok(item) => return Err(rt(format!("{method}: {what} must be an Enum.Material, got {}", item.0))),
             Err(_) => return Err(rt(format!("{method}: {what} must be an Enum.Material, got userdata"))),
@@ -689,7 +689,7 @@ fn pose_arg(method: &str, cframe: &CFrame) -> LuaResult<(Vec3, Quat)> {
 }
 
 /// A region argument's corners.
-fn region_arg(method: &str, region: &LuauRegion3) -> LuaResult<(Vec3, Vec3)> {
+fn region_arg(method: &str, region: &MluaRegion3) -> LuaResult<(Vec3, Vec3)> {
     Ok((vector_arg(method, "region", region.min)?, vector_arg(method, "region", region.max)?))
 }
 
@@ -711,12 +711,12 @@ fn resolution_arg(method: &str, resolution: f64) -> LuaResult<f32> {
 mod tests {
     use super::*;
     use crate::datamodel::{new_shared, OutputLevel, SharedDataModel};
-    use crate::luau::play::{PlayLuau, RaycastFn, ScriptLaunch};
+    use crate::mlua::play::{PlayMlua, RaycastFn, ScriptLaunch};
 
     /// A session tree (Workspace with its Terrain) and a VM bound to it.
     struct Session {
         dm: SharedDataModel,
-        vm: PlayLuau,
+        vm: PlayMlua,
         workspace: InstanceId,
         terrain: InstanceId,
     }
@@ -728,7 +728,7 @@ mod tests {
             let workspace = g.get_service("Workspace").expect("Workspace");
             (workspace, ensure_terrain_instance(&mut g, workspace))
         };
-        let vm = PlayLuau::new(dm.clone()).expect("the Play VM starts");
+        let vm = PlayMlua::new(dm.clone()).expect("the Play VM starts");
         Session { dm, vm, workspace, terrain }
     }
 

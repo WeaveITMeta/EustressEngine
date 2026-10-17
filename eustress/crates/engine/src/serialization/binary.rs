@@ -410,9 +410,9 @@ pub enum ClassId {
     WebFrame = 122,
     // Scripting (140-149)
     SoulScript = 140,
-    LuauScript = 141,
-    LuauLocalScript = 142,
-    LuauModuleScript = 143,
+    MluaScript = 141,
+    MluaLocalScript = 142,
+    MluaModuleScript = 143,
     // Networking Primitives (144-147)
     RemoteEvent = 144,
     RemoteFunction = 145,
@@ -506,9 +506,9 @@ impl ClassId {
             ClassName::WebFrame => ClassId::WebFrame,
             // Scripting
             ClassName::SoulScript => ClassId::SoulScript,
-            ClassName::LuauScript => ClassId::LuauScript,
-            ClassName::LuauLocalScript => ClassId::LuauLocalScript,
-            ClassName::LuauModuleScript => ClassId::LuauModuleScript,
+            ClassName::MluaScript => ClassId::MluaScript,
+            ClassName::MluaLocalScript => ClassId::MluaLocalScript,
+            ClassName::MluaModuleScript => ClassId::MluaModuleScript,
             // Networking Primitives
             ClassName::RemoteEvent => ClassId::RemoteEvent,
             ClassName::RemoteFunction => ClassId::RemoteFunction,
@@ -839,9 +839,9 @@ impl ClassId {
             ClassId::WebFrame => ClassName::WebFrame,
             // Scripting
             ClassId::SoulScript => ClassName::SoulScript,
-            ClassId::LuauScript => ClassName::LuauScript,
-            ClassId::LuauLocalScript => ClassName::LuauLocalScript,
-            ClassId::LuauModuleScript => ClassName::LuauModuleScript,
+            ClassId::MluaScript => ClassName::MluaScript,
+            ClassId::MluaLocalScript => ClassName::MluaLocalScript,
+            ClassId::MluaModuleScript => ClassName::MluaModuleScript,
             // Networking Primitives
             ClassId::RemoteEvent => ClassName::RemoteEvent,
             ClassId::RemoteFunction => ClassName::RemoteFunction,
@@ -921,9 +921,9 @@ impl ClassId {
             122 => Some(ClassId::WebFrame),
             // Scripting (140-149)
             140 => Some(ClassId::SoulScript),
-            141 => Some(ClassId::LuauScript),
-            142 => Some(ClassId::LuauLocalScript),
-            143 => Some(ClassId::LuauModuleScript),
+            141 => Some(ClassId::MluaScript),
+            142 => Some(ClassId::MluaLocalScript),
+            143 => Some(ClassId::MluaModuleScript),
             // Networking Primitives (144-147)
             144 => Some(ClassId::RemoteEvent),
             145 => Some(ClassId::RemoteFunction),

@@ -4,8 +4,8 @@
 //!
 //! ## Table of Contents
 //!
-//! 1. **LuauRuntime** — Manages the mlua Lua VM instance with Luau backend
-//! 2. **LuauRuntimeState** — Bevy resource wrapping the runtime
+//! 1. **MluaRuntime** — Manages the mlua Lua VM instance with Luau backend
+//! 2. **MluaRuntimeState** — Bevy resource wrapping the runtime
 //! 3. **ScriptExecutionQueue** — Queued script chunks awaiting execution
 //! 4. **Events** — Script lifecycle events
 
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 /// Luau and Rune one-shot drains — both languages converge here on the
 /// way to the engine spawner. Field changes affect both pipelines.
 #[derive(Debug, Clone)]
-pub struct LuauCreatedInstance {
+pub struct MluaCreatedInstance {
     pub class_name: String,
     pub name: String,
     pub position: [f32; 3],
@@ -64,7 +64,7 @@ pub struct LuauCreatedInstance {
 
     // Parent tracking
     /// Luau _entityId of this instance (for parent resolution)
-    pub luau_entity_id: i64,
+    pub mlua_entity_id: i64,
     /// Luau _entityId of the Parent instance (for TextLabel → BillboardGui linking)
     pub parent_entity_id: Option<i64>,
 
@@ -92,13 +92,13 @@ pub struct LuauCreatedInstance {
 // Thread-local output buffer for capturing print/warn/error from Luau scripts.
 // Drained after execute_chunk() to return output to the caller.
 thread_local! {
-    static LUAU_OUTPUT: std::cell::RefCell<Vec<(String, bool)>> = std::cell::RefCell::new(Vec::new());
+    static MLUA_OUTPUT: std::cell::RefCell<Vec<(String, bool)>> = std::cell::RefCell::new(Vec::new());
 }
 
 /// Drain all captured Luau output since the last call.
 /// Returns (text, is_error) pairs.
-pub fn drain_luau_output() -> Vec<(String, bool)> {
-    LUAU_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
+pub fn drain_mlua_output() -> Vec<(String, bool)> {
+    MLUA_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
 }
 
 // ============================================================================
@@ -111,7 +111,7 @@ pub fn drain_luau_output() -> Vec<(String, bool)> {
 // follows the SAME snapshot+drain architecture as CollectionService tags
 // (`seed_existing_tags` → script runs → `drain_created_instances`):
 //
-//  * READ:  an engine system (`sync_luau_attribute_snapshot` in
+//  * READ:  an engine system (`sync_mlua_attribute_snapshot` in
 //    `engine/space/instance_loader.rs`) publishes a uuid-keyed snapshot of
 //    every live entity's non-empty `Attributes` component here. The
 //    `GetAttribute`/`GetAttributes` arms fall back to it for any instance
@@ -119,7 +119,7 @@ pub fn drain_luau_output() -> Vec<(String, bool)> {
 //    pre-existing instances — the same field `FindByUUID` resolves).
 //  * WRITE: the `SetAttribute` arm, when the receiver carries a `_uuid`,
 //    pushes a typed [`EngineAttributeWrite`] into a process-global queue.
-//    An engine system (`apply_luau_attribute_writes`) drains it each frame
+//    An engine system (`apply_mlua_attribute_writes`) drains it each frame
 //    and applies the values to the entity's `Attributes` component — whose
 //    `Changed<Attributes>` flag then drives the EXISTING persistence seams
 //    (`save_tags_and_attributes_changes` for TOML entities, the binary-ECS
@@ -130,7 +130,7 @@ pub fn drain_luau_output() -> Vec<(String, bool)> {
 // bits, while a `_uuid` exists ONLY on engine-seeded handles — so the seam
 // can never misroute a VM-local write onto an unrelated ECS entity.
 //
-// `Mutex` statics (not the `LUAU_OUTPUT` thread_local pattern) because seed
+// `Mutex` statics (not the `MLUA_OUTPUT` thread_local pattern) because seed
 // and drain happen in DIFFERENT Bevy systems, which the multithreaded
 // executor may run on different threads from the script execution itself.
 
@@ -218,7 +218,7 @@ fn push_engine_attribute_write(write: EngineAttributeWrite) {
 }
 
 /// Drain all pending script → engine attribute writes (engine side; called
-/// by `apply_luau_attribute_writes` each frame).
+/// by `apply_mlua_attribute_writes` each frame).
 pub fn drain_engine_attribute_writes() -> Vec<EngineAttributeWrite> {
     ENGINE_ATTR_WRITES
         .lock()
@@ -234,26 +234,26 @@ pub fn drain_engine_attribute_writes() -> Vec<EngineAttributeWrite> {
 // instance's `Touched` signal, the engine must map each colliding `Entity`
 // back to the VM `_entityId` of the instance table that represents it. This
 // process-global map is populated when the engine seeds scene parts into the
-// VM at play start (`LuauRuntime::seed_instance` + `register_entity_instance`)
-// and read by the collision system (`entity_luau_id` → `LuauRuntime::fire_touch`).
+// VM at play start (`MluaRuntime::seed_instance` + `register_entity_instance`)
+// and read by the collision system (`entity_mlua_id` → `MluaRuntime::fire_touch`).
 //
 // Keyed by `Entity::to_bits()`. Cleared on stop alongside the VM reset. A
-// `Mutex` (not the `LUAU_OUTPUT` thread-local) because seed and collision-read
+// `Mutex` (not the `MLUA_OUTPUT` thread-local) because seed and collision-read
 // run in different Bevy systems / threads.
-static ENTITY_LUAU_IDS: std::sync::Mutex<Option<HashMap<u64, i64>>> =
+static ENTITY_MLUA_IDS: std::sync::Mutex<Option<HashMap<u64, i64>>> =
     std::sync::Mutex::new(None);
 
 /// Record that the ECS entity (`entity_bits` = `Entity::to_bits()`) is
-/// represented in the VM by the instance with VM id `luau_id`.
-pub fn register_entity_instance(entity_bits: u64, luau_id: i64) {
-    if let Ok(mut g) = ENTITY_LUAU_IDS.lock() {
-        g.get_or_insert_with(HashMap::new).insert(entity_bits, luau_id);
+/// represented in the VM by the instance with VM id `mlua_id`.
+pub fn register_entity_instance(entity_bits: u64, mlua_id: i64) {
+    if let Ok(mut g) = ENTITY_MLUA_IDS.lock() {
+        g.get_or_insert_with(HashMap::new).insert(entity_bits, mlua_id);
     }
 }
 
 /// Look up the VM `_entityId` for an ECS entity, if it has been seeded.
-pub fn entity_luau_id(entity_bits: u64) -> Option<i64> {
-    ENTITY_LUAU_IDS
+pub fn entity_mlua_id(entity_bits: u64) -> Option<i64> {
+    ENTITY_MLUA_IDS
         .lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(&entity_bits).copied()))
@@ -261,7 +261,7 @@ pub fn entity_luau_id(entity_bits: u64) -> Option<i64> {
 
 /// Drop all entity↔instance mappings (call on play stop).
 pub fn clear_entity_instances() {
-    if let Ok(mut g) = ENTITY_LUAU_IDS.lock() {
+    if let Ok(mut g) = ENTITY_MLUA_IDS.lock() {
         if let Some(m) = g.as_mut() {
             m.clear();
         }
@@ -269,12 +269,12 @@ pub fn clear_entity_instances() {
 }
 
 /// [`AttributeValue`](crate::attributes::AttributeValue) → Lua value, using
-/// the SAME conventions the rest of the bindings use (Vector3 → `LuauVector3`
-/// userdata, Color/Color3 → `LuauColor3`, CFrame → `LuauCFrame`, UDim2 →
-/// `LuauUDim2`, BrickColor → integer palette number).
+/// the SAME conventions the rest of the bindings use (Vector3 → `MluaVector3`
+/// userdata, Color/Color3 → `MluaColor3`, CFrame → `MluaCFrame`, UDim2 →
+/// `MluaUDim2`, BrickColor → integer palette number).
 ///
 /// Types with no Lua binding yet map as follows:
-///  * `Vector2` → a plain read-only table `{X=…, Y=…}` (no LuauVector2 type
+///  * `Vector2` → a plain read-only table `{X=…, Y=…}` (no MluaVector2 type
 ///    exists; a table read can't be silently written back as a different
 ///    typed attribute, which a zero-padded Vector3 could).
 ///  * `Object` / `EntityRef` → `nil`. The importer stores instance refs as
@@ -282,7 +282,7 @@ pub fn clear_entity_instances() {
 ///    only appears via engine-internal seeding — unresolvable from the VM.
 ///  * `Rect` / `Font` / `NumberRange` / `NumberSequence` / `ColorSequence`
 ///    → `nil` (no binding types yet).
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 pub fn attribute_value_to_lua(
     lua: &mlua::Lua,
     value: &crate::attributes::AttributeValue,
@@ -298,7 +298,7 @@ pub fn attribute_value_to_lua(
         A::Number(n) => mlua::Value::Number(*n),
         A::String(s) => mlua::Value::String(lua.create_string(s)?),
         A::Vector3(v) => mlua::Value::UserData(lua.create_userdata(
-            super::types::LuauVector3::new(v.x as f64, v.y as f64, v.z as f64),
+            super::types::MluaVector3::new(v.x as f64, v.y as f64, v.z as f64),
         )?),
         A::Vector2(v) => {
             let t = lua.create_table()?;
@@ -308,18 +308,18 @@ pub fn attribute_value_to_lua(
         }
         A::Color(c) | A::Color3(c) => {
             let s = c.to_srgba();
-            mlua::Value::UserData(lua.create_userdata(super::types::LuauColor3::new(
+            mlua::Value::UserData(lua.create_userdata(super::types::MluaColor3::new(
                 s.red as f64,
                 s.green as f64,
                 s.blue as f64,
             ))?)
         }
         A::BrickColor(n) => mlua::Value::Integer(*n as mlua::Integer),
-        A::CFrame(t) => mlua::Value::UserData(lua.create_userdata(super::types::LuauCFrame(
+        A::CFrame(t) => mlua::Value::UserData(lua.create_userdata(super::types::MluaCFrame(
             crate::scripting::CFrame::from_transform(t),
         ))?),
         A::UDim2 { x_scale, x_offset, y_scale, y_offset } => mlua::Value::UserData(
-            lua.create_userdata(super::types::LuauUDim2::new(
+            lua.create_userdata(super::types::MluaUDim2::new(
                 *x_scale as f64,
                 *x_offset as f64,
                 *y_scale as f64,
@@ -345,7 +345,7 @@ pub fn attribute_value_to_lua(
 /// attribute mapping (function, thread, plain table, Instance, unknown
 /// userdata) — the `SetAttribute` arm surfaces that as a Lua error naming
 /// the type, matching Roblox's unsupported-attribute-type error.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 pub fn lua_value_to_attribute(
     value: &mlua::Value,
 ) -> Result<Option<crate::attributes::AttributeValue>, String> {
@@ -357,21 +357,21 @@ pub fn lua_value_to_attribute(
         mlua::Value::Number(n) => Ok(Some(A::Number(*n))),
         mlua::Value::String(s) => Ok(Some(A::String(s.to_string_lossy().to_string()))),
         mlua::Value::UserData(ud) => {
-            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                 Ok(Some(A::Vector3(Vec3::new(
                     v.0.x as f32,
                     v.0.y as f32,
                     v.0.z as f32,
                 ))))
-            } else if let Ok(c) = ud.borrow::<super::types::LuauColor3>() {
+            } else if let Ok(c) = ud.borrow::<super::types::MluaColor3>() {
                 Ok(Some(A::Color3(Color::srgb(
                     c.0.r as f32,
                     c.0.g as f32,
                     c.0.b as f32,
                 ))))
-            } else if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+            } else if let Ok(cf) = ud.borrow::<super::types::MluaCFrame>() {
                 Ok(Some(A::CFrame(cf.0.to_transform())))
-            } else if let Ok(u) = ud.borrow::<super::types::LuauUDim2>() {
+            } else if let Ok(u) = ud.borrow::<super::types::MluaUDim2>() {
                 Ok(Some(A::UDim2 {
                     x_scale: u.x_scale as f32,
                     x_offset: u.x_offset as f32,
@@ -421,22 +421,22 @@ fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
 
 /// Luau virtual machine wrapper built on mlua.
 /// Provides sandboxed execution, module caching, and Eustress API injection.
-pub struct LuauRuntime {
+pub struct MluaRuntime {
     /// The mlua Lua instance (Luau backend)
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     lua: mlua::Lua,
 
     /// Cached module return values (for `require()`)
     module_cache: HashMap<String, Vec<u8>>,
 
     /// Execution statistics
-    pub stats: LuauRuntimeStats,
+    pub stats: MluaRuntimeStats,
 }
 
-/// Whether a script run by a [`LuauRuntime`] may make HTTP requests. A runtime
+/// Whether a script run by a [`MluaRuntime`] may make HTTP requests. A runtime
 /// starts with `Denied`: code an AI wrote, and code from a Space someone else
 /// published or joined, must not reach the network by default. The caller that
-/// runs the user's own code opts in with [`LuauRuntime::set_network_access`].
+/// runs the user's own code opts in with [`MluaRuntime::set_network_access`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkAccess {
     #[default]
@@ -446,17 +446,17 @@ pub enum NetworkAccess {
 
 /// Whether the Lua state this runs in may make HTTP requests. A state with no
 /// setting (never the case for a runtime built by `new`) is denied.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 fn network_allowed(lua: &mlua::Lua) -> bool {
     lua.app_data_ref::<NetworkAccess>().map_or(false, |access| *access == NetworkAccess::Allowed)
 }
 
 /// The error a refused request raises, also written to the Output log, so the
 /// refusal is visible to the user and not only to the script.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 fn refuse_http(what: &str) -> mlua::Error {
     let line = format!("{what} refused: network access is off for this script (SoulService.AllowNetworkAccess)");
-    LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((line.clone(), true)));
+    MLUA_OUTPUT.with(|buf| buf.borrow_mut().push((line.clone(), true)));
     mlua::Error::RuntimeError(line)
 }
 
@@ -464,7 +464,7 @@ fn refuse_http(what: &str) -> mlua::Error {
 /// form every Roblox script uses, `HttpService:GetAsync(url)`, passes the
 /// service as the first argument; the dot form, `HttpService.GetAsync(url)`,
 /// does not.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 fn without_service(lua: &mlua::Lua, mut args: mlua::MultiValue) -> mlua::MultiValue {
     let is_service = match args.front() {
         Some(mlua::Value::Table(table)) => {
@@ -480,7 +480,7 @@ fn without_service(lua: &mlua::Lua, mut args: mlua::MultiValue) -> mlua::MultiVa
 }
 
 /// The next argument as a string, or the error a call with it missing raises.
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 fn string_arg(lua: &mlua::Lua, args: &mut mlua::MultiValue, what: &str, expects: &str) -> mlua::Result<String> {
     match args.pop_front() {
         Some(value) => <String as mlua::FromLua>::from_lua(value, lua),
@@ -490,7 +490,7 @@ fn string_arg(lua: &mlua::Lua, args: &mut mlua::MultiValue, what: &str, expects:
 
 /// Runtime execution statistics
 #[derive(Debug, Clone, Default)]
-pub struct LuauRuntimeStats {
+pub struct MluaRuntimeStats {
     /// Total chunks executed
     pub chunks_executed: u64,
     /// Successful executions
@@ -503,9 +503,9 @@ pub struct LuauRuntimeStats {
     pub modules_loaded: u64,
 }
 
-impl LuauRuntime {
+impl MluaRuntime {
     /// Create a new Luau runtime with sandboxed globals
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn new() -> Result<Self, String> {
         let lua = mlua::Lua::new();
 
@@ -520,31 +520,31 @@ impl LuauRuntime {
         Ok(Self {
             lua,
             module_cache: HashMap::new(),
-            stats: LuauRuntimeStats::default(),
+            stats: MluaRuntimeStats::default(),
         })
     }
 
     /// Without the luau feature there is no network to allow.
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn set_network_access(&self, _access: NetworkAccess) {}
 
     /// Fallback when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn new() -> Result<Self, String> {
         Err("Luau feature is not enabled. Rebuild with --features luau".to_string())
     }
 
     /// Set whether this runtime's scripts may make HTTP requests. A runtime
     /// starts with `NetworkAccess::Denied`.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn set_network_access(&self, access: NetworkAccess) {
         self.lua.set_app_data(access);
     }
 
     /// Execute a chunk of Luau source code
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn execute_chunk(&mut self, source: &str, chunk_name: &str) -> Result<(), String> {
-        let start = std::time::Instant::now();
+        let start = bevy::platform::time::Instant::now();
         self.stats.chunks_executed += 1;
 
         let result = self.lua.load(source)
@@ -586,7 +586,7 @@ impl LuauRuntime {
     /// registration call self-attributes to `plugin_id` by pushing onto
     /// `bridge` (see `crate::script_plugins` module docs for why a closure
     /// can't reach `TabRegistry` directly).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn build_plugin_environment(
         &self,
         bridge: crate::script_plugins::PluginBridge,
@@ -673,9 +673,9 @@ impl LuauRuntime {
     /// Execute a chunk against a CUSTOM environment (a script plugin's own
     /// `env` from [`build_plugin_environment`]) instead of the shared
     /// globals every other `execute_chunk` call uses.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn execute_chunk_with_env(&mut self, source: &str, chunk_name: &str, env: mlua::Table) -> Result<(), String> {
-        let start = std::time::Instant::now();
+        let start = bevy::platform::time::Instant::now();
         self.stats.chunks_executed += 1;
 
         let result = self.lua.load(source)
@@ -698,7 +698,7 @@ impl LuauRuntime {
     /// Remove a plugin's stored Lua callback from the registry (a leaked
     /// `RegistryKey` in a long-lived shared VM is a genuine, permanent leak
     /// — this is called for every stored button callback on plugin reload).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn remove_registry_value(&self, key: mlua::RegistryKey) -> Result<(), String> {
         self.lua.remove_registry_value(key).map_err(|e| format!("remove_registry_value: {e}"))
     }
@@ -707,7 +707,7 @@ impl LuauRuntime {
     /// `pcall` semantics (errors are returned, not propagated as a panic —
     /// one broken plugin button must never take down the engine or another
     /// plugin's buttons).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn call_plugin_callback(&self, key: &mlua::RegistryKey) -> Result<(), String> {
         let callback: mlua::Function = self.lua.registry_value(key)
             .map_err(|e| format!("stale plugin callback: {e}"))?;
@@ -732,7 +732,7 @@ impl LuauRuntime {
     /// Returns `Err` only for a COMPILE error. Runtime errors during the
     /// initial resume are reported through the scheduler's error reporter
     /// (`warn` → Output) and do not abort other scripts.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn spawn_script(&mut self, source: &str, chunk_name: &str) -> Result<(), String> {
         self.stats.chunks_executed += 1;
         let func = self.lua.load(source)
@@ -753,7 +753,7 @@ impl LuauRuntime {
     /// Advance the in-VM scheduler clock to `now` (seconds since play start),
     /// waking due `task.wait`/`task.delay` coroutines and running deferred
     /// ones. Call once per frame BEFORE/AFTER firing the frame signals.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn step_scheduler(&self, now: f64) {
         if let Ok(step) = self.lua.globals().get::<mlua::Function>("__sched_step__") {
             let _ = step.call::<()>(now);
@@ -762,7 +762,7 @@ impl LuauRuntime {
 
     /// Fire `RunService.Heartbeat(deltaTime)` — the after-physics per-frame
     /// signal. Handlers run on the scheduler so they may `task.wait`.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn fire_heartbeat(&self, dt: f64) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
             let _ = f.call::<()>(("Heartbeat", dt));
@@ -770,7 +770,7 @@ impl LuauRuntime {
     }
 
     /// Fire `RunService.Stepped(time, deltaTime)` — the before-physics signal.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn fire_stepped(&self, now: f64, dt: f64) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
             let _ = f.call::<()>(("Stepped", now, dt));
@@ -779,7 +779,7 @@ impl LuauRuntime {
 
     /// Fire `RunService.RenderStepped(deltaTime)` — the before-render signal
     /// (client only in Roblox; fired everywhere here for parity).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn fire_render_stepped(&self, dt: f64) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
             let _ = f.call::<()>(("RenderStepped", dt));
@@ -789,7 +789,7 @@ impl LuauRuntime {
     /// Tear down all coroutines, signal connections, and script-created
     /// instances so a finished Play session leaves no live state behind.
     /// Call on the transition back to Edit (or whenever scripts should stop).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn reset_runtime_state(&self) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__sched_reset__") {
             let _ = f.call::<()>(());
@@ -801,29 +801,29 @@ impl LuauRuntime {
 
     /// Seed a metatable-backed instance table for an existing engine part so
     /// scripts can reference it (e.g. `workspace.Floor`) and collisions can
-    /// fire its `Touched`. Idempotent per `luau_id`. Pair with
+    /// fire its `Touched`. Idempotent per `mlua_id`. Pair with
     /// [`register_entity_instance`] so the collision reader can resolve the
-    /// ECS entity back to this `luau_id`.
-    #[cfg(feature = "luau")]
-    pub fn seed_instance(&self, luau_id: i64, name: &str, uuid: &str, class_name: &str) {
+    /// ECS entity back to this `mlua_id`.
+    #[cfg(feature = "mlua")]
+    pub fn seed_instance(&self, mlua_id: i64, name: &str, uuid: &str, class_name: &str) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__seed_instance__") {
-            let _ = f.call::<()>((luau_id, name, uuid, class_name));
+            let _ = f.call::<()>((mlua_id, name, uuid, class_name));
         }
     }
 
     /// Make a previously [`seed_instance`](Self::seed_instance)d part reachable
     /// as `workspace.<Name>` so scripts can connect its `Touched` idiomatically.
-    #[cfg(feature = "luau")]
-    pub fn workspace_attach(&self, luau_id: i64) {
+    #[cfg(feature = "mlua")]
+    pub fn workspace_attach(&self, mlua_id: i64) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__attach_to_workspace__") {
-            let _ = f.call::<()>(luau_id);
+            let _ = f.call::<()>(mlua_id);
         }
     }
 
     /// Fire a collision-driven `Touched`/`TouchEnded` between two parts,
     /// identified by their VM `_entityId`s (see Phase 4 wiring in the engine).
     /// No-op unless BOTH parts are present in the instance registry.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn fire_touch(&self, entity_id: i64, other_id: i64, ended: bool) {
         if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_touch__") {
             let _ = f.call::<()>((entity_id, other_id, ended));
@@ -834,7 +834,7 @@ impl LuauRuntime {
     /// `IsMouseButtonPressed` / `GetMouseLocation` / `GetMouseDelta`.
     /// `keys_down` / `buttons_down` hold Roblox `KeyCode` / `UserInputType`
     /// names (e.g. `"Space"`, `"MouseButton1"`). Call once per frame.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn update_input_state(
         &self,
         keys_down: &[String],
@@ -855,7 +855,7 @@ impl LuauRuntime {
     /// `which` is the signal name; `input_type` the `UserInputType`
     /// (e.g. `"Keyboard"`, `"MouseButton1"`, `"MouseMovement"`); `key_code`
     /// the Roblox `KeyCode` name for keyboard events (else `"Unknown"`).
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     #[allow(clippy::too_many_arguments)]
     pub fn fire_input(
         &self,
@@ -874,37 +874,37 @@ impl LuauRuntime {
     }
 
     // --- luau-disabled fallbacks (keep call sites compiling) ----------------
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn spawn_script(&mut self, _source: &str, _chunk_name: &str) -> Result<(), String> {
         Err("Luau feature is not enabled".to_string())
     }
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn step_scheduler(&self, _now: f64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn fire_heartbeat(&self, _dt: f64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn fire_stepped(&self, _now: f64, _dt: f64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn fire_render_stepped(&self, _dt: f64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn reset_runtime_state(&self) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn fire_touch(&self, _entity_id: i64, _other_id: i64, _ended: bool) {}
-    #[cfg(not(feature = "luau"))]
-    pub fn seed_instance(&self, _luau_id: i64, _name: &str, _uuid: &str, _class_name: &str) {}
-    #[cfg(not(feature = "luau"))]
-    pub fn workspace_attach(&self, _luau_id: i64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
+    pub fn seed_instance(&self, _mlua_id: i64, _name: &str, _uuid: &str, _class_name: &str) {}
+    #[cfg(not(feature = "mlua"))]
+    pub fn workspace_attach(&self, _mlua_id: i64) {}
+    #[cfg(not(feature = "mlua"))]
     #[allow(clippy::too_many_arguments)]
     pub fn update_input_state(&self, _k: &[String], _b: &[String], _mx: f64, _my: f64, _dx: f64, _dy: f64) {}
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     #[allow(clippy::too_many_arguments)]
     pub fn fire_input(&self, _w: &str, _it: &str, _kc: &str, _gp: bool, _x: f64, _y: f64, _dx: f64, _dy: f64) {}
 
     /// Drain all instances created during script execution.
     /// Returns a list of (class_name, properties) for spawning in ECS.
-    #[cfg(feature = "luau")]
-    pub fn drain_created_instances(&self) -> Vec<LuauCreatedInstance> {
+    #[cfg(feature = "mlua")]
+    pub fn drain_created_instances(&self) -> Vec<MluaCreatedInstance> {
         let mut instances = Vec::new();
         let globals = self.lua.globals();
         let Ok(registry) = globals.get::<mlua::Table>("__INSTANCE_REGISTRY__") else { return instances };
@@ -924,15 +924,15 @@ impl LuauRuntime {
 
             // Extract position from Vector3 userdata or default
             let position = inst.get::<mlua::AnyUserData>("Position").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
+                .and_then(|ud| ud.borrow::<super::types::MluaVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
                 .unwrap_or([0.0, 0.0, 0.0]);
 
             let size = inst.get::<mlua::AnyUserData>("Size").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
+                .and_then(|ud| ud.borrow::<super::types::MluaVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
                 .unwrap_or([4.0, 1.0, 2.0]);
 
             let color = inst.get::<mlua::AnyUserData>("Color").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauColor3>().ok().map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32, 1.0]))
+                .and_then(|ud| ud.borrow::<super::types::MluaColor3>().ok().map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32, 1.0]))
                 .unwrap_or([0.639, 0.635, 0.647, 1.0]);
 
             // Rotation — read from `Orientation` Vector3 (Euler degrees)
@@ -940,17 +940,17 @@ impl LuauRuntime {
             // populated by `apply_class_defaults` for every spawned Part.
             // Identity quaternion when absent.
             let rotation = inst.get::<mlua::AnyUserData>("Orientation").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok()
+                .and_then(|ud| ud.borrow::<super::types::MluaVector3>().ok()
                     .map(|v| euler_deg_to_quat(v.0.x, v.0.y, v.0.z)))
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
             // BillboardGui properties
             let units_offset = inst.get::<mlua::AnyUserData>("StudsOffset").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok()
+                .and_then(|ud| ud.borrow::<super::types::MluaVector3>().ok()
                     .map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]));
 
             let ui_size = inst.get::<mlua::AnyUserData>("Size").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauUDim2>().ok()
+                .and_then(|ud| ud.borrow::<super::types::MluaUDim2>().ok()
                     .map(|s| [s.x_scale as f32, s.x_offset as f32, s.y_scale as f32, s.y_offset as f32]));
 
             let adornee_name = inst.get::<mlua::Value>("Adornee").ok()
@@ -965,12 +965,12 @@ impl LuauRuntime {
             // TextLabel properties
             let text = inst.get::<String>("Text").ok();
             let text_color = inst.get::<mlua::AnyUserData>("TextColor3").ok()
-                .and_then(|ud| ud.borrow::<super::types::LuauColor3>().ok()
+                .and_then(|ud| ud.borrow::<super::types::MluaColor3>().ok()
                     .map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32]));
             let text_size = inst.get::<f64>("TextSize").ok().map(|v| v as f32);
             let font = inst.get::<String>("Font").ok();
 
-            let luau_entity_id: i64 = inst.get("_entityId").unwrap_or(0);
+            let mlua_entity_id: i64 = inst.get("_entityId").unwrap_or(0);
             let parent_entity_id = inst.get::<mlua::Value>("Parent").ok()
                 .and_then(|v| match v {
                     mlua::Value::Table(t) => t.get::<i64>("_entityId").ok(),
@@ -1018,7 +1018,7 @@ impl LuauRuntime {
                 list
             };
 
-            instances.push(LuauCreatedInstance {
+            instances.push(MluaCreatedInstance {
                 class_name,
                 name,
                 position,
@@ -1039,7 +1039,7 @@ impl LuauRuntime {
                 text_color,
                 text_size,
                 font,
-                luau_entity_id,
+                mlua_entity_id,
                 parent_entity_id,
                 tags,
                 attributes,
@@ -1058,7 +1058,7 @@ impl LuauRuntime {
     /// `snapshot`: `tag -> [entity_id_1, entity_id_2, ...]`. Entity ids are
     /// the same i64 values returned by `Instance.entity_id` in Luau, the
     /// engine's ECS Entity (cast to i64), or MCP's `entity_id` field.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn seed_existing_tags(&self, snapshot: &HashMap<String, Vec<i64>>) -> Result<(), String> {
         let globals = self.lua.globals();
         let tbl = self.lua.create_table()
@@ -1081,7 +1081,7 @@ impl LuauRuntime {
     /// Clear the engine-supplied tag snapshot. Defensive — the next seed
     /// call replaces it anyway, but useful at execution boundaries to
     /// avoid scripts seeing stale data.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn clear_existing_tags(&self) -> Result<(), String> {
         let globals = self.lua.globals();
         let empty = self.lua.create_table()
@@ -1092,28 +1092,28 @@ impl LuauRuntime {
     }
 
     /// Fallback when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
-    pub fn drain_created_instances(&self) -> Vec<LuauCreatedInstance> { Vec::new() }
+    #[cfg(not(feature = "mlua"))]
+    pub fn drain_created_instances(&self) -> Vec<MluaCreatedInstance> { Vec::new() }
 
     /// Fallback seed when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn seed_existing_tags(&self, _snapshot: &HashMap<String, Vec<i64>>) -> Result<(), String> {
         Ok(())
     }
 
     /// Fallback clear when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn clear_existing_tags(&self) -> Result<(), String> { Ok(()) }
 
     /// Fallback when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn execute_chunk(&mut self, _source: &str, _chunk_name: &str) -> Result<(), String> {
         Err("Luau feature is not enabled".to_string())
     }
 
     /// Load a ModuleScript and cache its return value in the Lua registry.
     /// The module's return value is stored as a registry key for `require()` resolution.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     pub fn load_module(&mut self, name: &str, source: &str) -> Result<(), String> {
         // Execute the module chunk — it should return exactly one value
         let value = self.lua.load(source)
@@ -1135,7 +1135,7 @@ impl LuauRuntime {
     }
 
     /// Fallback when luau feature is not enabled
-    #[cfg(not(feature = "luau"))]
+    #[cfg(not(feature = "mlua"))]
     pub fn load_module(&mut self, _name: &str, _source: &str) -> Result<(), String> {
         Err("Luau feature is not enabled".to_string())
     }
@@ -1159,7 +1159,7 @@ impl LuauRuntime {
     /// - `wait` / `task` — coroutine scheduling
     /// - `Instance.new()` — entity creation
     /// - `Vector3`, `CFrame`, `Color3` — data types from shared scripting module
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_eustress_globals(lua: &mlua::Lua) -> Result<(), String> {
         // Inject shared scripting types (Vector3, CFrame, Color3)
         super::types::inject_types(lua)
@@ -1203,7 +1203,7 @@ impl LuauRuntime {
     // ========================================================================
     // Signal helper — creates a Roblox-compatible RBXScriptSignal table
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn create_signal(lua: &mlua::Lua) -> Result<mlua::Table, String> {
         let signal = lua.create_table()
             .map_err(|e| format!("Failed to create signal: {}", e))?;
@@ -1293,7 +1293,7 @@ impl LuauRuntime {
     // ========================================================================
     // Core globals: print, warn, game, workspace
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_core_globals(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -1302,7 +1302,7 @@ impl LuauRuntime {
             let output: Vec<String> = args.iter().map(|value| format!("{}", value.to_string().unwrap_or_default())).collect();
             let line = output.join("\t");
             tracing::info!("[Luau] {}", line);
-            LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((line, false)));
+            MLUA_OUTPUT.with(|buf| buf.borrow_mut().push((line, false)));
             Ok(())
         }).map_err(|error| format!("Failed to create print function: {}", error))?;
         globals.set("print", print_function)
@@ -1313,7 +1313,7 @@ impl LuauRuntime {
             let output: Vec<String> = args.iter().map(|value| format!("{}", value.to_string().unwrap_or_default())).collect();
             let line = output.join("\t");
             tracing::warn!("[Luau] {}", line);
-            LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((format!("⚠ {}", line), false)));
+            MLUA_OUTPUT.with(|buf| buf.borrow_mut().push((format!("⚠ {}", line), false)));
             Ok(())
         }).map_err(|error| format!("Failed to create warn function: {}", error))?;
         globals.set("warn", warn_function)
@@ -1337,11 +1337,11 @@ impl LuauRuntime {
                 mlua::Value::Function(_) => "function",
                 mlua::Value::Thread(_) => "thread",
                 mlua::Value::UserData(ud) => {
-                    if ud.is::<super::types::LuauVector3>() { return Ok("Vector3".to_string()); }
-                    if ud.is::<super::types::LuauCFrame>() { return Ok("CFrame".to_string()); }
-                    if ud.is::<super::types::LuauColor3>() { return Ok("Color3".to_string()); }
-                    if ud.is::<super::types::LuauUDim2>() { return Ok("UDim2".to_string()); }
-                    if ud.is::<super::types::LuauTweenInfo>() { return Ok("TweenInfo".to_string()); }
+                    if ud.is::<super::types::MluaVector3>() { return Ok("Vector3".to_string()); }
+                    if ud.is::<super::types::MluaCFrame>() { return Ok("CFrame".to_string()); }
+                    if ud.is::<super::types::MluaColor3>() { return Ok("Color3".to_string()); }
+                    if ud.is::<super::types::MluaUDim2>() { return Ok("UDim2".to_string()); }
+                    if ud.is::<super::types::MluaTweenInfo>() { return Ok("TweenInfo".to_string()); }
                     "userdata"
                 }
                 _ => "userdata",
@@ -1403,8 +1403,8 @@ impl LuauRuntime {
 
         // tick() — Roblox-compatible time function (seconds since Unix epoch)
         let tick_fn = lua.create_function(|_, ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default();
             Ok(now.as_secs_f64())
         }).map_err(|error| format!("Failed to create tick: {}", error))?;
@@ -1437,7 +1437,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Instance API: Instance.new, Clone, Destroy, FindFirstChild, etc.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_instance_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -1487,13 +1487,13 @@ Enum = setmetatable({}, {
             // Add class-specific default properties
             match class_name.as_str() {
                 "Part" | "MeshPart" | "WedgePart" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauVector3::new(4.0, 1.0, 2.0))?)?;
-                    instance.set("CFrame", lua.create_userdata(super::types::LuauCFrame::identity())?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaVector3::new(4.0, 1.0, 2.0))?)?;
+                    instance.set("CFrame", lua.create_userdata(super::types::MluaCFrame::identity())?)?;
                     instance.set("Anchored", false)?;
                     instance.set("CanCollide", true)?;
                     instance.set("Transparency", 0.0f64)?;
-                    instance.set("Color", lua.create_userdata(super::types::LuauColor3::new(0.639, 0.635, 0.647))?)?;
+                    instance.set("Color", lua.create_userdata(super::types::MluaColor3::new(0.639, 0.635, 0.647))?)?;
                     instance.set("Material", "Plastic")?;
                 }
                 "Model" => {
@@ -1540,7 +1540,7 @@ Enum = setmetatable({}, {
                     instance.set("AlwaysOnTop", false)?;
                     instance.set("LightInfluence", 0.0f64)?;
                     instance.set("SizingMode", "FixedSize")?;
-                    instance.set("CanvasSize", lua.create_userdata(super::types::LuauVector3::new(800.0, 600.0, 0.0))?)?;
+                    instance.set("CanvasSize", lua.create_userdata(super::types::MluaVector3::new(800.0, 600.0, 0.0))?)?;
                 }
                 "BillboardGui" => {
                     instance.set("Enabled", true)?;
@@ -1548,18 +1548,18 @@ Enum = setmetatable({}, {
                     instance.set("Adornee", mlua::Value::Nil)?;
                     instance.set("AlwaysOnTop", false)?;
                     instance.set("LightInfluence", 0.0f64)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
-                    instance.set("StudsOffset", lua.create_userdata(super::types::LuauVector3::new(0.0, 2.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("StudsOffset", lua.create_userdata(super::types::MluaVector3::new(0.0, 2.0, 0.0))?)?;
                     instance.set("MaxDistance", 100.0f64)?;
                 }
                 "Frame" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
-                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
-                    instance.set("BorderColor3", lua.create_userdata(super::types::LuauColor3::new(0.105, 0.164, 0.207))?)?;
+                    instance.set("BorderColor3", lua.create_userdata(super::types::MluaColor3::new(0.105, 0.164, 0.207))?)?;
                     instance.set("BorderSizePixel", 1i64)?;
                     instance.set("ClipsDescendants", false)?;
                     instance.set("LayoutOrder", 0i64)?;
@@ -1567,15 +1567,15 @@ Enum = setmetatable({}, {
                     instance.set("Rotation", 0.0f64)?;
                 }
                 "TextLabel" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
-                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
                     instance.set("BorderSizePixel", 1i64)?;
                     instance.set("Text", "")?;
-                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::MluaColor3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("TextSize", 14.0f64)?;
                     instance.set("Font", "SourceSans")?;
                     instance.set("TextWrapped", false)?;
@@ -1589,15 +1589,15 @@ Enum = setmetatable({}, {
                     instance.set("ZIndex", 1i64)?;
                 }
                 "TextButton" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
-                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
                     instance.set("BorderSizePixel", 1i64)?;
                     instance.set("Text", "Button")?;
-                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::MluaColor3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("TextSize", 14.0f64)?;
                     instance.set("Font", "SourceSans")?;
                     instance.set("AutoButtonColor", true)?;
@@ -1606,15 +1606,15 @@ Enum = setmetatable({}, {
                     instance.set("ZIndex", 1i64)?;
                 }
                 "TextBox" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
                     instance.set("Text", "")?;
                     instance.set("PlaceholderText", "")?;
-                    instance.set("PlaceholderColor3", lua.create_userdata(super::types::LuauColor3::new(0.7, 0.7, 0.7))?)?;
-                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("PlaceholderColor3", lua.create_userdata(super::types::MluaColor3::new(0.7, 0.7, 0.7))?)?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::MluaColor3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("TextSize", 14.0f64)?;
                     instance.set("Font", "SourceSans")?;
                     instance.set("ClearTextOnFocus", true)?;
@@ -1624,26 +1624,26 @@ Enum = setmetatable({}, {
                     instance.set("ZIndex", 1i64)?;
                 }
                 "ImageLabel" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
                     instance.set("Image", "")?;
-                    instance.set("ImageColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("ImageColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("ImageTransparency", 0.0f64)?;
                     instance.set("ScaleType", "Stretch")?;
                     instance.set("LayoutOrder", 0i64)?;
                     instance.set("ZIndex", 1i64)?;
                 }
                 "ImageButton" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
                     instance.set("Image", "")?;
-                    instance.set("ImageColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("ImageColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("ImageTransparency", 0.0f64)?;
                     instance.set("AutoButtonColor", true)?;
                     instance.set("Active", true)?;
@@ -1651,15 +1651,15 @@ Enum = setmetatable({}, {
                     instance.set("ZIndex", 1i64)?;
                 }
                 "ScrollingFrame" => {
-                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 200.0))?)?;
+                    instance.set("Position", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::MluaUDim2::new(0.0, 200.0, 0.0, 200.0))?)?;
                     instance.set("Visible", true)?;
-                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::MluaColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
-                    instance.set("CanvasSize", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 2.0, 0.0))?)?;
-                    instance.set("CanvasPosition", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("CanvasSize", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 2.0, 0.0))?)?;
+                    instance.set("CanvasPosition", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("ScrollBarThickness", 12i64)?;
-                    instance.set("ScrollBarImageColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("ScrollBarImageColor3", lua.create_userdata(super::types::MluaColor3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("ScrollingDirection", "XY")?;
                     instance.set("ScrollingEnabled", true)?;
                     instance.set("ElasticBehavior", "WhenScrollable")?;
@@ -1671,12 +1671,12 @@ Enum = setmetatable({}, {
                     instance.set("HorizontalAlignment", "Left")?;
                     instance.set("VerticalAlignment", "Top")?;
                     instance.set("SortOrder", "LayoutOrder")?;
-                    instance.set("Padding", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Padding", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
                     instance.set("Wraps", false)?;
                 }
                 "UIGridLayout" => {
-                    instance.set("CellSize", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
-                    instance.set("CellPadding", lua.create_userdata(super::types::LuauUDim2::new(0.0, 5.0, 0.0, 5.0))?)?;
+                    instance.set("CellSize", lua.create_userdata(super::types::MluaUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("CellPadding", lua.create_userdata(super::types::MluaUDim2::new(0.0, 5.0, 0.0, 5.0))?)?;
                     instance.set("FillDirection", "Horizontal")?;
                     instance.set("FillDirectionMaxCells", 0i64)?;
                     instance.set("HorizontalAlignment", "Left")?;
@@ -1684,16 +1684,16 @@ Enum = setmetatable({}, {
                     instance.set("SortOrder", "LayoutOrder")?;
                 }
                 "UIPadding" => {
-                    instance.set("PaddingTop", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("PaddingBottom", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("PaddingLeft", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
-                    instance.set("PaddingRight", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingTop", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingBottom", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingLeft", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingRight", lua.create_userdata(super::types::MluaUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
                 }
                 "UICorner" => {
-                    instance.set("CornerRadius", lua.create_userdata(super::types::LuauUDim2::new(0.0, 8.0, 0.0, 0.0))?)?;
+                    instance.set("CornerRadius", lua.create_userdata(super::types::MluaUDim2::new(0.0, 8.0, 0.0, 0.0))?)?;
                 }
                 "UIStroke" => {
-                    instance.set("Color", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Color", lua.create_userdata(super::types::MluaColor3::new(0.0, 0.0, 0.0))?)?;
                     instance.set("Thickness", 1.0f64)?;
                     instance.set("Transparency", 0.0f64)?;
                     instance.set("ApplyStrokeMode", "Contextual")?;
@@ -1705,8 +1705,8 @@ Enum = setmetatable({}, {
                     instance.set("DominantAxis", "Width")?;
                 }
                 "UISizeConstraint" => {
-                    instance.set("MaxSize", lua.create_userdata(super::types::LuauVector3::new(f64::MAX, f64::MAX, 0.0))?)?;
-                    instance.set("MinSize", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("MaxSize", lua.create_userdata(super::types::MluaVector3::new(f64::MAX, f64::MAX, 0.0))?)?;
+                    instance.set("MinSize", lua.create_userdata(super::types::MluaVector3::new(0.0, 0.0, 0.0))?)?;
                 }
                 "UITextSizeConstraint" => {
                     instance.set("MaxTextSize", 100i64)?;
@@ -2012,7 +2012,7 @@ Enum = setmetatable({}, {
                         this.raw_set(attrs_key, value)?;
                         // Engine write-back: a `_uuid`-stamped table mirrors a
                         // live ECS entity — queue the typed write for the
-                        // engine drain (`apply_luau_attribute_writes`) and
+                        // engine drain (`apply_mlua_attribute_writes`) and
                         // shadow the snapshot so same-run reads stay coherent.
                         // VM-local instances (no `_uuid`) skip this and flow
                         // through `drain_created_instances().attributes`.
@@ -2443,7 +2443,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // task library: task.wait, task.spawn, task.defer, task.delay
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_task_library(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -2514,7 +2514,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // TweenService
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_tween_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -2525,7 +2525,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to create TweenService table: {}", error))?;
 
         // TweenService:Create(tweenInfo) -> Tween
-        let tween_create = lua.create_function(|lua, info: super::types::LuauTweenInfo| {
+        let tween_create = lua.create_function(|lua, info: super::types::MluaTweenInfo| {
             // Create a tween table with play/pause/cancel methods
             let tween = lua.create_table()?;
             tween.set("_info", info)?;
@@ -2560,7 +2560,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // RunService — frame-based event signals
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_run_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -2645,7 +2645,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // UserInputService
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_user_input_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -2715,7 +2715,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Players Service
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_players_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -2839,7 +2839,7 @@ Enum = setmetatable({}, {
     //                   StarterGui, StarterPlayer, StarterPack, Lighting,
     //                   game:GetService()
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_storage_services(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
         let game: mlua::Table = globals.get("game")
@@ -2924,12 +2924,12 @@ Enum = setmetatable({}, {
         lighting.set("_entityId", 100007i64).map_err(|e| format!("{}", e))?;
         lighting.set("_className", "Lighting").map_err(|e| format!("{}", e))?;
         lighting.set("Name", "Lighting").map_err(|e| format!("{}", e))?;
-        lighting.set("Ambient", lua.create_userdata(super::types::LuauColor3::new(0.5, 0.5, 0.5)).map_err(|e| format!("{}", e))?).map_err(|e| format!("{}", e))?;
+        lighting.set("Ambient", lua.create_userdata(super::types::MluaColor3::new(0.5, 0.5, 0.5)).map_err(|e| format!("{}", e))?).map_err(|e| format!("{}", e))?;
         lighting.set("Brightness", 2.0f64).map_err(|e| format!("{}", e))?;
         lighting.set("ClockTime", 14.0f64).map_err(|e| format!("{}", e))?;
         lighting.set("GeographicLatitude", 41.733f64).map_err(|e| format!("{}", e))?;
         lighting.set("TimeOfDay", "14:00:00").map_err(|e| format!("{}", e))?;
-        lighting.set("FogColor", lua.create_userdata(super::types::LuauColor3::new(0.75, 0.75, 0.75)).map_err(|e| format!("{}", e))?).map_err(|e| format!("{}", e))?;
+        lighting.set("FogColor", lua.create_userdata(super::types::MluaColor3::new(0.75, 0.75, 0.75)).map_err(|e| format!("{}", e))?).map_err(|e| format!("{}", e))?;
         lighting.set("FogEnd", 100000.0f64).map_err(|e| format!("{}", e))?;
         lighting.set("FogStart", 0.0f64).map_err(|e| format!("{}", e))?;
         lighting.set("_children", lua.create_table().map_err(|e| format!("{}", e))?).map_err(|e| format!("{}", e))?;
@@ -2955,7 +2955,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // DataStoreService + Debris (data services)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_data_services(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3072,7 +3072,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // HttpService — HTTP requests, JSON, GUID, URL encoding
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_http_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3259,9 +3259,9 @@ Enum = setmetatable({}, {
     //
     // The same four methods Play's DataService has, over the same
     // implementation (`play::instance::data_service`), so the command bar and
-    // `execute_luau` answer exactly as a running script would.
+    // `execute_mlua` answer exactly as a running script would.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_data_platform(lua: &mlua::Lua) -> Result<(), String> {
         use super::play::instance::data_service;
         use mlua::LuaSerdeExt;
@@ -3321,7 +3321,7 @@ Enum = setmetatable({}, {
     // first arg's shape: a Lua table is treated as an Instance; an integer is
     // treated as a numeric entity-id; a string for `GetTagged` is the tag.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_collection_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3519,7 +3519,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // SoundService
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_sound_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3548,7 +3548,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Camera API (workspace.CurrentCamera)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_camera_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3559,7 +3559,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to create Camera table: {}", error))?;
 
         // Camera.CFrame — current camera position/orientation
-        let camera_cframe = lua.create_userdata(super::types::LuauCFrame::identity())
+        let camera_cframe = lua.create_userdata(super::types::MluaCFrame::identity())
             .map_err(|error| format!("Failed to create Camera.CFrame: {}", error))?;
         camera_table.set("CFrame", camera_cframe)
             .map_err(|error| format!("Failed to set Camera.CFrame: {}", error))?;
@@ -3577,7 +3577,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set Camera.CameraSubject: {}", error))?;
 
         // Camera.Focus — focus point CFrame
-        let focus_cframe = lua.create_userdata(super::types::LuauCFrame::identity())
+        let focus_cframe = lua.create_userdata(super::types::MluaCFrame::identity())
             .map_err(|error| format!("Failed to create Camera.Focus: {}", error))?;
         camera_table.set("Focus", focus_cframe)
             .map_err(|error| format!("Failed to set Camera.Focus: {}", error))?;
@@ -3593,7 +3593,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set Camera.ViewportSize: {}", error))?;
 
         // Camera:WorldToScreenPoint(worldPoint) -> Vector3, bool
-        let world_to_screen = lua.create_function(|lua, point: super::types::LuauVector3| {
+        let world_to_screen = lua.create_function(|lua, point: super::types::MluaVector3| {
             // TODO: Wire to actual camera projection
             let result = lua.create_table()?;
             result.set("X", point.0.x)?;
@@ -3653,7 +3653,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Mouse API
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_mouse_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3670,7 +3670,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set Mouse.Y: {}", error))?;
 
         // Mouse.Hit — CFrame of where mouse ray intersects world
-        let mouse_hit = lua.create_userdata(super::types::LuauCFrame::identity())
+        let mouse_hit = lua.create_userdata(super::types::MluaCFrame::identity())
             .map_err(|error| format!("Failed to create Mouse.Hit: {}", error))?;
         mouse_table.set("Hit", mouse_hit)
             .map_err(|error| format!("Failed to set Mouse.Hit: {}", error))?;
@@ -3721,7 +3721,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Animation API (Animator, AnimationTrack)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_animation_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3813,7 +3813,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Humanoid API (character control)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_humanoid_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3855,7 +3855,7 @@ Enum = setmetatable({}, {
             .map_err(|e| format!("Failed to set TakeDamage: {}", e))?;
         
         // Humanoid:MoveTo(position, part)
-        let move_to = lua.create_function(|_, (_this, position, _part): (mlua::Table, super::types::LuauVector3, Option<mlua::Value>)| {
+        let move_to = lua.create_function(|_, (_this, position, _part): (mlua::Table, super::types::MluaVector3, Option<mlua::Value>)| {
             tracing::info!("[Luau Humanoid] MoveTo: {:?}", position.0);
             // TODO: Wire to character controller pathfinding
             Ok(())
@@ -3864,7 +3864,7 @@ Enum = setmetatable({}, {
             .map_err(|e| format!("Failed to set MoveTo: {}", e))?;
         
         // Humanoid:Move(moveDirection, relativeToCamera)
-        let move_fn = lua.create_function(|_, (_this, direction, _relative): (mlua::Table, super::types::LuauVector3, Option<bool>)| {
+        let move_fn = lua.create_function(|_, (_this, direction, _relative): (mlua::Table, super::types::MluaVector3, Option<bool>)| {
             tracing::info!("[Luau Humanoid] Move: {:?}", direction.0);
             // TODO: Wire to character controller
             Ok(())
@@ -3899,7 +3899,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // MarketplaceService
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_marketplace_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -3966,7 +3966,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // SimulationService — read/write watchpoint values (bridge with MCP tools)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_simulation_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -4008,7 +4008,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // WorkspaceQuery — entity search + file access (bridge with MCP tools)
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_workspace_query(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -4069,7 +4069,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Spatial Queries — workspace:GetPartBoundsInBox/Radius, Blockcast, etc.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_spatial_queries(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
         let workspace: mlua::Table = globals.get("workspace")
@@ -4091,14 +4091,14 @@ Enum = setmetatable({}, {
 
             // Extract query box center from CFrame userdata
             let (qx, qy, qz) = if let mlua::Value::UserData(ref ud) = cframe {
-                if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+                if let Ok(cf) = ud.borrow::<super::types::MluaCFrame>() {
                     (cf.0.position.x, cf.0.position.y, cf.0.position.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
 
             // Extract query half-extents from Size Vector3
             let (hx, hy, hz) = if let mlua::Value::UserData(ref ud) = size {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
@@ -4111,14 +4111,14 @@ Enum = setmetatable({}, {
 
                     // Part position
                     let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                        if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                             (v.0.x, v.0.y, v.0.z)
                         } else { continue; }
                     } else { continue; };
 
                     // Part half-size
                     let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
-                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                        if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                             (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                         } else { (2.0, 0.5, 1.0) }
                     } else { (2.0, 0.5, 1.0) };
@@ -4146,7 +4146,7 @@ Enum = setmetatable({}, {
             let mut idx = 1i64;
 
             let (qx, qy, qz) = if let mlua::Value::UserData(ref ud) = position {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
@@ -4159,7 +4159,7 @@ Enum = setmetatable({}, {
                     if !is_base_part(&class) { continue; }
 
                     let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                        if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                             (v.0.x, v.0.y, v.0.z)
                         } else { continue; }
                     } else { continue; };
@@ -4192,13 +4192,13 @@ Enum = setmetatable({}, {
 
             // Get query part position and half-size
             let (qx, qy, qz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Position") {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { return Ok(result); }
             } else { return Ok(result); };
 
             let (hx, hy, hz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Size") {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                 } else { (2.0, 0.5, 1.0) }
             } else { (2.0, 0.5, 1.0) };
@@ -4210,13 +4210,13 @@ Enum = setmetatable({}, {
                     if !is_base_part(&class) { continue; }
 
                     let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                        if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                             (v.0.x, v.0.y, v.0.z)
                         } else { continue; }
                     } else { continue; };
 
                     let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
-                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                        if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                             (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                         } else { (2.0, 0.5, 1.0) }
                     } else { (2.0, 0.5, 1.0) };
@@ -4244,21 +4244,21 @@ Enum = setmetatable({}, {
 
             // Extract origin from CFrame
             let (ox, oy, oz) = if let mlua::Value::UserData(ref ud) = cframe {
-                if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+                if let Ok(cf) = ud.borrow::<super::types::MluaCFrame>() {
                     (cf.0.position.x, cf.0.position.y, cf.0.position.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
 
             // Extract half-extents from Size
             let (hx, hy, hz) = if let mlua::Value::UserData(ref ud) = size {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
 
             // Extract direction vector
             let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
@@ -4282,13 +4282,13 @@ Enum = setmetatable({}, {
                         if !is_base_part(&class) { continue; }
 
                         let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x, v.0.y, v.0.z)
                             } else { continue; }
                         } else { continue; };
 
                         let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                             } else { (2.0, 0.5, 1.0) }
                         } else { (2.0, 0.5, 1.0) };
@@ -4300,10 +4300,10 @@ Enum = setmetatable({}, {
                             let hit = lua.create_table()?;
                             hit.set("Instance", inst)?;
                             hit.set("Position", lua.create_userdata(
-                                super::types::LuauVector3::new(cx, cy, cz)
+                                super::types::MluaVector3::new(cx, cy, cz)
                             )?)?;
                             hit.set("Normal", lua.create_userdata(
-                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                                super::types::MluaVector3::new(0.0, 1.0, 0.0)
                             )?)?;
                             hit.set("Distance", t * dir_len)?;
                             hit.set("Material", "Plastic")?;
@@ -4323,13 +4323,13 @@ Enum = setmetatable({}, {
             let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
 
             let (ox, oy, oz) = if let mlua::Value::UserData(ref ud) = position {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
 
             let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
@@ -4351,13 +4351,13 @@ Enum = setmetatable({}, {
                         if !is_base_part(&class) { continue; }
 
                         let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x, v.0.y, v.0.z)
                             } else { continue; }
                         } else { continue; };
 
                         let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                             } else { (2.0, 0.5, 1.0) }
                         } else { (2.0, 0.5, 1.0) };
@@ -4376,10 +4376,10 @@ Enum = setmetatable({}, {
                             let hit = lua.create_table()?;
                             hit.set("Instance", inst)?;
                             hit.set("Position", lua.create_userdata(
-                                super::types::LuauVector3::new(closest_x, closest_y, closest_z)
+                                super::types::MluaVector3::new(closest_x, closest_y, closest_z)
                             )?)?;
                             hit.set("Normal", lua.create_userdata(
-                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                                super::types::MluaVector3::new(0.0, 1.0, 0.0)
                             )?)?;
                             hit.set("Distance", t * dir_len)?;
                             hit.set("Material", "Plastic")?;
@@ -4401,19 +4401,19 @@ Enum = setmetatable({}, {
             let part_id: i64 = part.raw_get("_entityId").unwrap_or(0);
 
             let (ox, oy, oz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Position") {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { return Ok(mlua::Value::Nil); }
             } else { return Ok(mlua::Value::Nil); };
 
             let (hx, hy, hz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Size") {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                 } else { (2.0, 0.5, 1.0) }
             } else { (2.0, 0.5, 1.0) };
 
             let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
-                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                     (v.0.x, v.0.y, v.0.z)
                 } else { (0.0, 0.0, 0.0) }
             } else { (0.0, 0.0, 0.0) };
@@ -4435,13 +4435,13 @@ Enum = setmetatable({}, {
                         if !is_base_part(&class) { continue; }
 
                         let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x, v.0.y, v.0.z)
                             } else { continue; }
                         } else { continue; };
 
                         let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
-                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            if let Ok(v) = ud.borrow::<super::types::MluaVector3>() {
                                 (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
                             } else { (2.0, 0.5, 1.0) }
                         } else { (2.0, 0.5, 1.0) };
@@ -4453,10 +4453,10 @@ Enum = setmetatable({}, {
                             let hit = lua.create_table()?;
                             hit.set("Instance", inst)?;
                             hit.set("Position", lua.create_userdata(
-                                super::types::LuauVector3::new(cx, cy, cz)
+                                super::types::MluaVector3::new(cx, cy, cz)
                             )?)?;
                             hit.set("Normal", lua.create_userdata(
-                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                                super::types::MluaVector3::new(0.0, 1.0, 0.0)
                             )?)?;
                             hit.set("Distance", t * dir_len)?;
                             hit.set("Material", "Plastic")?;
@@ -4476,7 +4476,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // GUI Scripting API — Roblox-compatible UI manipulation
     // ========================================================================
-    #[cfg(all(feature = "luau", feature = "gui"))]
+    #[cfg(all(feature = "mlua", feature = "gui"))]
     fn inject_gui_api(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -4576,7 +4576,7 @@ Enum = setmetatable({}, {
     // ========================================================================
     // Event System — instance.Changed, ChildAdded/ChildRemoved, Touched, etc.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_event_system(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
@@ -4686,7 +4686,7 @@ Enum = setmetatable({}, {
     // returns a `__SCHED__` table, and Rust installs every new global entry
     // point from that table. No Lua-side global writes anywhere.
     // ========================================================================
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     fn inject_scheduler(lua: &mlua::Lua) -> Result<(), String> {
         // The scheduler + scheduler-aware signal/event reimplementations.
         // Evaluates to the `__SCHED__` table (no globals written from Lua).
@@ -4750,8 +4750,8 @@ Enum = setmetatable({}, {
 }
 
 /// The cooperative scheduler, written in Luau. Evaluates to the `__SCHED__`
-/// table. See [`LuauRuntime::inject_scheduler`] for why this is Lua, not Rust.
-#[cfg(feature = "luau")]
+/// table. See [`MluaRuntime::inject_scheduler`] for why this is Lua, not Rust.
+#[cfg(feature = "mlua")]
 const SCHEDULER_LUA: &str = r##"
 local pack = table.pack or function(...) return { n = select("#", ...), ... } end
 local unpack = table.unpack or unpack
@@ -5122,15 +5122,15 @@ return Sched
 // ============================================================================
 // Scheduler tests — prove the in-VM coroutine scheduler turns "run once" into
 // live per-frame scripting. These also validate that SCHEDULER_LUA parses and
-// runs (a failure surfaces as `LuauRuntime::new()` returning Err).
+// runs (a failure surfaces as `MluaRuntime::new()` returning Err).
 // ============================================================================
-#[cfg(all(test, feature = "luau"))]
+#[cfg(all(test, feature = "mlua"))]
 mod scheduler_tests {
     use super::*;
 
     /// Collect captured print/warn lines since the last drain.
     fn lines() -> Vec<String> {
-        drain_luau_output().into_iter().map(|(t, _)| t).collect()
+        drain_mlua_output().into_iter().map(|(t, _)| t).collect()
     }
 
     fn count(of: &str) -> usize {
@@ -5140,13 +5140,13 @@ mod scheduler_tests {
     #[test]
     fn scheduler_chunk_loads() {
         // Constructing the runtime evaluates SCHEDULER_LUA end to end.
-        let rt = LuauRuntime::new();
+        let rt = MluaRuntime::new();
         assert!(rt.is_ok(), "runtime init failed: {:?}", rt.err());
     }
 
     #[test]
     fn heartbeat_connection_fires_each_frame() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines(); // clear init noise
         rt.spawn_script(
             r#"RunService.Heartbeat:Connect(function(dt) print("HB") end)"#,
@@ -5165,7 +5165,7 @@ mod scheduler_tests {
 
     #[test]
     fn task_wait_yields_then_resumes() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines();
         rt.spawn_script(
             r#"task.spawn(function() task.wait(0.1) print("WOKE") end)"#,
@@ -5184,7 +5184,7 @@ mod scheduler_tests {
 
     #[test]
     fn task_spawn_runs_immediately_defer_waits_a_step() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines();
         rt.spawn_script(
             r#"
@@ -5203,7 +5203,7 @@ mod scheduler_tests {
 
     #[test]
     fn signal_wait_resumes_on_fire() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines();
         // A coroutine waits on Heartbeat via :Wait(); firing it resumes the body.
         rt.spawn_script(
@@ -5218,7 +5218,7 @@ mod scheduler_tests {
 
     #[test]
     fn reset_drops_connections_and_threads() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         rt.spawn_script(
             r#"
                 RunService.Heartbeat:Connect(function() print("HB") end)
@@ -5238,7 +5238,7 @@ mod scheduler_tests {
 
     #[test]
     fn input_state_reflects_held_keys() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines();
         rt.update_input_state(&["Space".to_string()], &["MouseButton1".to_string()], 12.0, 34.0, 0.0, 0.0);
         rt.spawn_script(
@@ -5259,7 +5259,7 @@ mod scheduler_tests {
 
     #[test]
     fn seeded_parts_fire_touched_with_other_part() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         // Engine seeds two scene parts into the VM (as it would on play start).
         rt.seed_instance(9001, "PartA", "uuid-a", "Part");
         rt.seed_instance(9002, "PartB", "uuid-b", "Part");
@@ -5283,7 +5283,7 @@ mod scheduler_tests {
 
     #[test]
     fn workspace_exposes_seeded_part_by_name_for_touched() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         // Engine seeds two scene parts and exposes the brick under workspace.
         rt.seed_instance(7001, "KillBrick", "uuid-k", "Part");
         rt.workspace_attach(7001);
@@ -5303,7 +5303,7 @@ mod scheduler_tests {
 
     #[test]
     fn input_began_signal_fires() {
-        let mut rt = LuauRuntime::new().unwrap();
+        let mut rt = MluaRuntime::new().unwrap();
         let _ = lines();
         rt.spawn_script(
             r#"UserInputService.InputBegan:Connect(function(input, gp)
@@ -5323,9 +5323,9 @@ mod scheduler_tests {
 
 /// Bevy resource wrapping the Luau runtime state
 #[derive(Resource, Default)]
-pub struct LuauRuntimeState {
+pub struct MluaRuntimeState {
     /// The Luau runtime instance (initialized lazily)
-    pub runtime: Option<LuauRuntime>,
+    pub runtime: Option<MluaRuntime>,
     /// Has the runtime been initialized?
     pub initialized: bool,
 }
@@ -5365,7 +5365,7 @@ impl ScriptExecutionQueue {
 
 /// Message: A Luau script was loaded
 #[derive(Message, Debug, Clone)]
-pub struct LuauScriptLoadEvent {
+pub struct MluaScriptLoadEvent {
     /// Script name
     pub script_name: String,
     /// Entity the script belongs to
@@ -5376,7 +5376,7 @@ pub struct LuauScriptLoadEvent {
 
 /// Message: A Luau script error occurred
 #[derive(Message, Debug, Clone)]
-pub struct LuauScriptErrorEvent {
+pub struct MluaScriptErrorEvent {
     /// Script name
     pub script_name: String,
     /// Error message
@@ -5398,31 +5398,64 @@ fn humanoid_default(key: &str) -> f64 {
 // ============================================================================
 // Network gate tests (HttpService in the legacy runtime)
 // ============================================================================
-#[cfg(all(test, feature = "luau"))]
+#[cfg(all(test, feature = "mlua"))]
 mod network_tests {
     use super::*;
     use std::io::{Read, Write};
 
     /// The lines the last run printed, cleared.
     fn output() -> Vec<String> {
-        drain_luau_output().into_iter().map(|(text, _)| text).collect()
+        drain_mlua_output().into_iter().map(|(text, _)| text).collect()
     }
 
-    /// A one-shot HTTP server on loopback: answers the first request with a
-    /// 200 and `ok`, and sends on the returned channel once it has answered.
-    fn serve_once() -> (u16, std::sync::mpsc::Receiver<()>) {
+    /// A one-shot HTTP server on loopback: reads one whole request, its head
+    /// and the body its Content-Length names, answers 200 and `ok`, and then
+    /// sends the body it read on the returned channel. The body is read before
+    /// the answer: a POST sends its body after its head, and a server that
+    /// answers after one read can close with the body still unsent.
+    fn serve_once() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let mut body = Vec::new();
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request);
+                body = read_request_body(&mut stream);
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
             }
-            let _ = tx.send(());
+            let _ = tx.send(body);
         });
         (port, rx)
+    }
+
+    /// The body of one request: reads its head, then the bytes its
+    /// Content-Length names. Empty when the connection ends first.
+    fn read_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let head_end = loop {
+            if let Some(at) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return Vec::new(),
+                Ok(n) => received.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&received[..head_end]).to_ascii_lowercase();
+        let length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while received.len() < head_end + length {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => received.extend_from_slice(&chunk[..n]),
+            }
+        }
+        received.iter().skip(head_end).take(length).copied().collect()
     }
 
     /// The colon form every Roblox script uses, and the dot form, which passes
@@ -5432,7 +5465,7 @@ mod network_tests {
     #[test]
     fn a_runtime_refuses_http_until_it_is_allowed_in_both_call_forms() {
         for form in FORMS {
-            let mut rt = LuauRuntime::new().unwrap();
+            let mut rt = MluaRuntime::new().unwrap();
             // Port 9 on loopback is closed; a refused request never reaches it.
             let source = format!(
                 "local ok, err = pcall(function() return HttpService{form}GetAsync('http://127.0.0.1:9/') end)\nprint('ok', tostring(ok))\nprint('err', tostring(err))"
@@ -5448,7 +5481,7 @@ mod network_tests {
     fn an_allowed_runtime_reaches_the_network_in_both_call_forms() {
         for form in FORMS {
             let (port, served) = serve_once();
-            let mut rt = LuauRuntime::new().unwrap();
+            let mut rt = MluaRuntime::new().unwrap();
             rt.set_network_access(NetworkAccess::Allowed);
             let source = format!("print('body', HttpService{form}GetAsync('http://127.0.0.1:{port}/'))");
             rt.execute_chunk(&source, "trusted").unwrap();
@@ -5461,11 +5494,12 @@ mod network_tests {
     fn post_and_request_async_take_both_call_forms() {
         for form in FORMS {
             let (port, served) = serve_once();
-            let mut rt = LuauRuntime::new().unwrap();
+            let mut rt = MluaRuntime::new().unwrap();
             rt.set_network_access(NetworkAccess::Allowed);
             let source = format!("print('post', HttpService{form}PostAsync('http://127.0.0.1:{port}/', '{{}}'))");
             rt.execute_chunk(&source, "trusted").unwrap();
-            assert!(served.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "{form}: PostAsync reached the server");
+            let body = served.recv_timeout(std::time::Duration::from_secs(10)).expect("PostAsync reached the server");
+            assert_eq!(body, b"{}", "{form}: the POST body reached the server whole");
             assert!(output().iter().any(|l| l == "post\tok"), "{form}: PostAsync returned the body");
 
             let (port, served) = serve_once();

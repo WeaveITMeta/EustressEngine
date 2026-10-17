@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use eustress_common::datamodel::{new_shared, InstanceId, OutputLevel, SharedDataModel};
-use eustress_common::luau::play::{PlayLuau, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
-use eustress_common::luau::play::studs::{ORIGIN_PROPERTY, ROBLOX_ORIGIN};
+use eustress_common::mlua::play::{PlayMlua, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
+use eustress_common::mlua::play::studs::{ORIGIN_PROPERTY, ROBLOX_ORIGIN};
 use eustress_common::scripting::Vector3;
 use eustress_common::units::Unit;
 use eustress_roblox_import::parser::{RobloxDom, RobloxFormat};
@@ -220,7 +220,7 @@ fn an_imported_place_lines_up_with_its_geometry() {
             .collect()
     };
 
-    let mut vm = PlayLuau::new(dm.clone()).expect("the Play VM starts");
+    let mut vm = PlayMlua::new(dm.clone()).expect("the Play VM starts");
     let rays = |q: &RayQuery| cast(&boxes, q);
     let no_terrain: &TerrainReadFn<'_> = &|_| {};
     vm.run_scripts(

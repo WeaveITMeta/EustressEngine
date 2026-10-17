@@ -258,12 +258,12 @@ pub fn bridge_stream_topic(
 /// EventBus:Disconnect("topic", conn)
 /// local names = EventBus:EventNames()
 /// ```
-#[cfg(feature = "luau")]
+#[cfg(feature = "mlua")]
 #[derive(Clone)]
-pub struct LuauEventBus(pub EventBus);
+pub struct MluaEventBus(pub EventBus);
 
-#[cfg(feature = "luau")]
-impl mlua::UserData for LuauEventBus {
+#[cfg(feature = "mlua")]
+impl mlua::UserData for MluaEventBus {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // EventBus:Connect(name, callback) -> connection_id (integer)
         methods.add_method("Connect", |_lua, this, (name, callback): (String, mlua::Function)| {
@@ -331,15 +331,15 @@ impl mlua::UserData for LuauEventBus {
 }
 
 /// Inject the `EventBus` global into an existing Luau VM.
-/// Call this from your `LuauRuntimeState` setup system, after the
+/// Call this from your `MluaRuntimeState` setup system, after the
 /// `EventBusResource` is available:
 ///
 /// ```rust,ignore
-/// let bus = LuauEventBus(event_bus_resource.0.clone());
+/// let bus = MluaEventBus(event_bus_resource.0.clone());
 /// inject_event_bus_global(&runtime.lua, bus)?;
 /// ```
-#[cfg(feature = "luau")]
-pub fn inject_event_bus_global(lua: &mlua::Lua, bus: LuauEventBus) -> Result<(), String> {
+#[cfg(feature = "mlua")]
+pub fn inject_event_bus_global(lua: &mlua::Lua, bus: MluaEventBus) -> Result<(), String> {
     let userdata = lua.create_userdata(bus)
         .map_err(|e| format!("EventBus userdata creation failed: {e}"))?;
     lua.globals().set("EventBus", userdata)

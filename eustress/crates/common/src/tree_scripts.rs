@@ -23,7 +23,7 @@
 //!
 //! Scripts that arrive later start later. The host owns each player's
 //! `PlayerGui` and replicates it once they have joined, so the launch list is
-//! rebuilt whenever the tree's shape changes, and [`PlayLuau::run_scripts`]
+//! rebuilt whenever the tree's shape changes, and [`PlayMlua::run_scripts`]
 //! skips whatever is already running.
 //!
 //! ## Where this sits in the frame
@@ -55,7 +55,7 @@
 use bevy::prelude::*;
 
 use crate::datamodel::{DataModel, InstanceId, OutputLevel};
-use crate::luau::play::{PlayLuau, RayHit, RayQuery, ScriptLaunch, TerrainView};
+use crate::mlua::play::{PlayMlua, RayHit, RayQuery, ScriptLaunch, TerrainView};
 use crate::play_session::{PlayDataModel, PlayEventCursor, PlayRole, PlayScriptSet};
 
 #[cfg(feature = "physics")]
@@ -70,7 +70,7 @@ use avian3d::prelude::{Sensor, SpatialQuery, SpatialQueryFilter};
 /// The Player's Luau VM, made once a [`PlayDataModel`] exists.
 #[derive(Resource)]
 pub struct TreeScripts {
-    vm: PlayLuau,
+    vm: PlayMlua,
     /// The tree shape and the local character the launch list was built
     /// from. The walk reruns when either moves: a join or a leave changes the
     /// shape, while a respawn points `Player.Character` at a new model, which
@@ -82,7 +82,7 @@ pub struct TreeScripts {
 
 impl TreeScripts {
     /// The VM, for a shell that wants to drive it further.
-    pub fn vm(&mut self) -> &mut PlayLuau {
+    pub fn vm(&mut self) -> &mut PlayMlua {
         &mut self.vm
     }
 }
@@ -225,10 +225,10 @@ fn run_tree_scripts(
         let built = if fail_build.is_some() {
             Err("a build failure the test asked for".to_string())
         } else {
-            PlayLuau::new(tree.dm.clone())
+            PlayMlua::new(tree.dm.clone())
         };
         #[cfg(not(test))]
-        let built = PlayLuau::new(tree.dm.clone());
+        let built = PlayMlua::new(tree.dm.clone());
         match built {
             Ok(vm) => {
                 commands.insert_resource(TreeScripts { vm, seen: (u64::MAX, None) });

@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use crate::datamodel::record::world_cframe;
 use crate::datamodel::{DataModel, DmValue, EnumItem, InputEvent, InputPhase};
-use crate::luau::{bevy_keycode_to_roblox, bevy_mouse_to_roblox};
+use crate::mlua::{bevy_keycode_to_roblox, bevy_mouse_to_roblox};
 use crate::play_session::ViewportBounds;
 use crate::scripting::Vector2;
 
@@ -275,7 +275,7 @@ pub fn write_mouse(
             let on_terrain = colliders.get(h.entity).map_or(false, |(_, _, terrain)| terrain);
             g.mouse.target = match g.by_entity(h.entity.to_bits()) {
                 Some(target) => Some(target),
-                None if on_terrain => crate::luau::play::terrain::terrain_instance(&g),
+                None if on_terrain => crate::mlua::play::terrain::terrain_instance(&g),
                 None => None,
             };
         }
@@ -289,7 +289,7 @@ pub fn write_mouse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::luau::{roblox_to_bevy_keycode, roblox_to_bevy_mouse};
+    use crate::mlua::{roblox_to_bevy_keycode, roblox_to_bevy_mouse};
 
     const RECT: ViewRect = ViewRect { origin: Vec2::new(200.0, 100.0), size: Vec2::new(800.0, 500.0) };
 

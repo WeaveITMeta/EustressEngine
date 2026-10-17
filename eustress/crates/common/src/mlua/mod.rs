@@ -21,7 +21,7 @@
 //! └─────────────┘     └─────────────┘     └─────────────┘
 //!       │                    │                   │
 //!       │ Luau source       │ mlua 0.10         │ Bevy 0.18
-//!       │ (.luau/.lua)      │ + Luau backend    │ + Avian3D
+//!       │ (.mlua/.lua)      │ + Luau backend    │ + Avian3D
 //!       ▼                    ▼                   ▼
 //! ┌─────────────────────────────────────────────────────┐
 //! │              Client-Server Bridge                    │
@@ -62,15 +62,15 @@ use tracing::{info, error};
 
 /// Luau scripting plugin for Bevy
 /// Initializes the Luau VM, registers components, and sets up execution systems.
-pub struct LuauPlugin;
+pub struct MluaPlugin;
 
-impl Plugin for LuauPlugin {
+impl Plugin for MluaPlugin {
     fn build(&self, app: &mut App) {
         // Register script components
         app
-            .register_type::<LuauScript>()
-            .register_type::<LuauLocalScript>()
-            .register_type::<LuauModuleScript>()
+            .register_type::<MluaScript>()
+            .register_type::<MluaLocalScript>()
+            .register_type::<MluaModuleScript>()
             .register_type::<RemoteEvent>()
             .register_type::<RemoteFunction>()
             .register_type::<BindableEvent>()
@@ -78,15 +78,15 @@ impl Plugin for LuauPlugin {
 
         // Initialize resources
         app
-            .init_resource::<LuauRuntimeState>()
+            .init_resource::<MluaRuntimeState>()
             .init_resource::<ScriptExecutionQueue>()
             .init_resource::<RemoteEventBus>()
             .init_resource::<BindableEventBus>();
 
         // Register messages (Bevy 0.18 uses Message, not Event)
         app
-            .add_message::<LuauScriptLoadEvent>()
-            .add_message::<LuauScriptErrorEvent>()
+            .add_message::<MluaScriptLoadEvent>()
+            .add_message::<MluaScriptErrorEvent>()
             .add_message::<RemoteEventFired>()
             .add_message::<RemoteFunctionInvoked>()
             .add_message::<BindableEventFired>()
@@ -94,21 +94,21 @@ impl Plugin for LuauPlugin {
 
         // Add systems
         app.add_systems(Update, (
-            initialize_luau_runtime,
+            initialize_mlua_runtime,
             process_script_execution_queue,
             // Per-frame heartbeat: advance the coroutine scheduler and fire the
             // RunService signals. Ordered AFTER queue processing so a script
             // enqueued this frame is spawned before its first Heartbeat tick.
-            drive_luau_frame.after(process_script_execution_queue),
+            drive_mlua_frame.after(process_script_execution_queue),
             // Pump Bevy keyboard/mouse into UserInputService (live IsKeyDown +
             // InputBegan/Ended/Changed). Runs before the frame driver so a key
             // pressed this frame is observable in the same Heartbeat tick.
-            sync_luau_input.before(drive_luau_frame),
+            sync_mlua_input.before(drive_mlua_frame),
             process_remote_events,
             process_bindable_events,
         ));
 
-        info!("LuauPlugin initialized — Roblox Luau scripting ready");
+        info!("MluaPlugin initialized — Roblox Luau scripting ready");
     }
 }
 
@@ -117,14 +117,14 @@ impl Plugin for LuauPlugin {
 // ============================================================================
 
 /// Initialize the Luau runtime on first run (idempotent)
-fn initialize_luau_runtime(
-    mut state: ResMut<LuauRuntimeState>,
+fn initialize_mlua_runtime(
+    mut state: ResMut<MluaRuntimeState>,
 ) {
     if state.initialized {
         return;
     }
 
-    match LuauRuntime::new() {
+    match MluaRuntime::new() {
         Ok(runtime) => {
             state.runtime = Some(runtime);
             state.initialized = true;
@@ -143,9 +143,9 @@ fn initialize_luau_runtime(
 /// persist across frames. Only a COMPILE error surfaces here; runtime errors
 /// are reported by the in-VM scheduler to the Output log.
 fn process_script_execution_queue(
-    mut state: ResMut<LuauRuntimeState>,
+    mut state: ResMut<MluaRuntimeState>,
     mut queue: ResMut<ScriptExecutionQueue>,
-    mut error_events: MessageWriter<LuauScriptErrorEvent>,
+    mut error_events: MessageWriter<MluaScriptErrorEvent>,
 ) {
     let Some(runtime) = state.runtime.as_mut() else { return };
 
@@ -154,7 +154,7 @@ fn process_script_execution_queue(
     let batch: Vec<_> = queue.pending.drain(..count).collect();
     for request in batch {
         if let Err(err) = runtime.spawn_script(&request.source, &request.script_name) {
-            error_events.write(LuauScriptErrorEvent {
+            error_events.write(MluaScriptErrorEvent {
                 script_name: request.script_name.clone(),
                 error: err.to_string(),
                 line: None,
@@ -172,9 +172,9 @@ fn process_script_execution_queue(
 /// (nominally before physics) and `Heartbeat` (nominally after). Bracketing
 /// the engine's physics step exactly would require splitting across schedules;
 /// a single ordered pass is the documented simplification.
-pub fn drive_luau_frame(
+pub fn drive_mlua_frame(
     time: Res<Time>,
-    mut state: ResMut<LuauRuntimeState>,
+    mut state: ResMut<MluaRuntimeState>,
 ) {
     let Some(runtime) = state.runtime.as_mut() else { return };
     let now = time.elapsed_secs_f64();
@@ -196,12 +196,12 @@ pub fn drive_luau_frame(
 ///
 /// All input resources are optional so the plugin still loads in a headless
 /// app that has no `InputPlugin`.
-pub fn sync_luau_input(
+pub fn sync_mlua_input(
     keyboard: Option<Res<ButtonInput<KeyCode>>>,
     mouse_buttons: Option<Res<ButtonInput<MouseButton>>>,
     mouse_motion: Option<Res<AccumulatedMouseMotion>>,
     windows: Query<&Window>,
-    mut state: ResMut<LuauRuntimeState>,
+    mut state: ResMut<MluaRuntimeState>,
 ) {
     let Some(runtime) = state.runtime.as_mut() else { return };
     let (Some(keyboard), Some(mouse_buttons)) = (keyboard, mouse_buttons) else { return };

@@ -7,9 +7,9 @@
 //! | `ClassName` | Spawner | Source-carrying component | Source today |
 //! |---|---|---|---|
 //! | `SoulScript`           | [`SoulScriptSpawner`]           | `crate::soul::SoulScriptData`        | `file_loader.rs:674` / `:1471` |
-//! | `LuauScript`           | [`LuauScriptSpawner`]           | `eustress_common::luau::LuauScript`  | `file_loader.rs:753` |
-//! | `LuauLocalScript`      | [`LuauLocalScriptSpawner`]      | `eustress_common::luau::LuauLocalScript` | (uses LuauScript path) |
-//! | `LuauModuleScript`     | [`LuauModuleScriptSpawner`]     | `eustress_common::luau::LuauModuleScript` | (uses LuauScript path) |
+//! | `MluaScript`           | [`MluaScriptSpawner`]           | `eustress_common::mlua::MluaScript`  | `file_loader.rs:753` |
+//! | `MluaLocalScript`      | [`MluaLocalScriptSpawner`]      | `eustress_common::mlua::MluaLocalScript` | (uses MluaScript path) |
+//! | `MluaModuleScript`     | [`MluaModuleScriptSpawner`]     | `eustress_common::mlua::MluaModuleScript` | (uses MluaScript path) |
 //! | `WorkshopConversation` | [`WorkshopConversationSpawner`] | `crate::soul::SoulScriptData` (transcript) | `workshop/persistence.rs` (stub) |
 //!
 //! ## The one rule: store the source, never execute it
@@ -57,15 +57,15 @@ use bevy::prelude::*;
 
 use eustress_common::class_registry::RegisterClassExt;
 
-pub mod luau_local_script;
-pub mod luau_module_script;
-pub mod luau_script;
+pub mod mlua_local_script;
+pub mod mlua_module_script;
+pub mod mlua_script;
 pub mod soul_script;
 pub mod workshop_conversation;
 
-pub use luau_local_script::LuauLocalScriptSpawner;
-pub use luau_module_script::LuauModuleScriptSpawner;
-pub use luau_script::LuauScriptSpawner;
+pub use mlua_local_script::MluaLocalScriptSpawner;
+pub use mlua_module_script::MluaModuleScriptSpawner;
+pub use mlua_script::MluaScriptSpawner;
 pub use soul_script::SoulScriptSpawner;
 pub use workshop_conversation::WorkshopConversationSpawner;
 
@@ -90,9 +90,9 @@ impl Plugin for ScriptingSpawnerPlugin {
         // spawner mirrors. All five are `Default`-constructible (zero-sized);
         // `register_class::<S>` handles the instance creation + box + insert.
         app.register_class::<SoulScriptSpawner>()
-            .register_class::<LuauScriptSpawner>()
-            .register_class::<LuauLocalScriptSpawner>()
-            .register_class::<LuauModuleScriptSpawner>()
+            .register_class::<MluaScriptSpawner>()
+            .register_class::<MluaLocalScriptSpawner>()
+            .register_class::<MluaModuleScriptSpawner>()
             .register_class::<WorkshopConversationSpawner>();
     }
 }
@@ -127,9 +127,9 @@ mod tests {
 
         for class in [
             ClassName::SoulScript,
-            ClassName::LuauScript,
-            ClassName::LuauLocalScript,
-            ClassName::LuauModuleScript,
+            ClassName::MluaScript,
+            ClassName::MluaLocalScript,
+            ClassName::MluaModuleScript,
             ClassName::WorkshopConversation,
         ] {
             assert!(

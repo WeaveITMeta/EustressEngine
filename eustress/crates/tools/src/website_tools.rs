@@ -613,7 +613,7 @@ mod tests {
             universe_root: dir.to_path_buf(),
             user_id: None,
             username: None,
-            luau_executor: None,
+            mlua_executor: None,
             display_unit: None,
             cancelled: None,
             // Default grants Read and Write but not Execute, Destructive or

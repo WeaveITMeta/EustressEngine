@@ -17,11 +17,11 @@ edition = "2021"
 description = "Roblox place file (.rbxl/.rbxlx/.rbxm/.rbxmx) → Eustress instance model"
 
 [dependencies]
-# In-tree deps. The `luau` feature pulls in compat::ClassMapping /
+# In-tree deps. The `mlua` feature pulls in compat::ClassMapping /
 # PropertyMapping / ScriptTransformer — the curated Roblox↔Eustress
 # class + property + script translation tables the importer delegates to
 # (per ROBLOX_IMPORT_SPEC.md §5/§6, reuse not duplicate).
-eustress-common = { path = "../common", features = ["luau"] }
+eustress-common = { path = "../common", features = ["mlua"] }
 
 # Workspace-shared utilities
 serde       = { workspace = true }

@@ -272,8 +272,8 @@ impl Default for GenerationRequest {
             generate_textures: true,
             progress: 0.0,
             current_stage: String::new(),
-            requested_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            requested_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         }
@@ -367,8 +367,8 @@ impl GenerationResult {
             mesh_id: Some(mesh_id),
             texture_id: None,
             lod_ids: Vec::new(),
-            completed_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            completed_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             generation_time_ms,
@@ -386,8 +386,8 @@ impl GenerationResult {
             mesh_id: None,
             texture_id: None,
             lod_ids: Vec::new(),
-            completed_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            completed_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             generation_time_ms: 0,

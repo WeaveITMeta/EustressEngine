@@ -1,7 +1,7 @@
 //! The Luau service's parser: every syntax error in a file, with the bytes
 //! it covers, from full-moon. This is the only module that names full-moon.
 
-use eustress_common::luau::lang::{lexer, TokenClass};
+use eustress_common::mlua::lang::{lexer, TokenClass};
 use full_moon::{parse_fallible, LuaVersion};
 
 /// Deeper than this, full-moon is not asked: its parser recurses once per
@@ -51,7 +51,7 @@ pub fn syntax_errors(source: &str) -> Vec<SyntaxError> {
     if nesting_depth(source) > MAX_PARSE_DEPTH {
         return Vec::new();
     }
-    let result = parse_fallible(source, LuaVersion::luau());
+    let result = parse_fallible(source, LuaVersion::mlua());
     let mut out: Vec<SyntaxError> = result
         .errors()
         .iter()
@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn luau_syntax_parses_clean() {
+    fn mlua_syntax_parses_clean() {
         let src = "local t: {number} = {1, 2}\n\
                    local s = `total {#t}`\n\
                    for _, v in t do\n  if v == 1 then continue end\n  v += 1\nend\n\

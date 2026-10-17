@@ -5,7 +5,9 @@
 //!
 //! ## Architecture
 //! - Rune scripts: compiled + executed via RuneRuntimeState (from common)
-//! - Luau scripts: executed via LuauRuntime (from common)
+//! - Luau scripts: a Space's scripts run in the Play runtime's own VM
+//!   (`common::tree_scripts`), made when a session begins; this plugin makes
+//!   none, so a bare launch builds no Luau VM
 //! - GUI bridge: GuiBridgePlugin applies script commands to GuiElementDisplay
 //! - Physics bridge: Avian3D force/velocity commands from scripts
 
@@ -28,7 +30,7 @@ use eustress_common::soul::rune_runtime::{
 // ============================================================================
 
 /// Soul scripting plugin for Eustress Client.
-/// Provides Rune + Luau script execution with GUI and physics bridges.
+/// Provides Rune script execution with GUI and physics bridges.
 pub struct ClientSoulPlugin;
 
 impl Plugin for ClientSoulPlugin {
@@ -39,8 +41,9 @@ impl Plugin for ClientSoulPlugin {
         // GUI bridge — applies gui_set_text etc. to GuiElementDisplay components
         app.add_plugins(eustress_common::gui::GuiBridgePlugin);
 
-        // Luau runtime (from common)
-        app.add_plugins(eustress_common::luau::LuauPlugin);
+        // No `MluaPlugin`: it built a Luau VM on the first frame for a queue
+        // nothing in the Player fills. A Space's scripts run in the Play
+        // runtime's own VM (`common::tree_scripts`).
 
         // Rune runtime resources
         app.init_resource::<RuneRuntimeState>()
@@ -64,7 +67,7 @@ impl Plugin for ClientSoulPlugin {
             watch_hot_reload,
         ));
 
-        info!("ClientSoulPlugin initialized — Rune + Luau + GUI bridge ready");
+        info!("ClientSoulPlugin initialized — Rune + GUI bridge ready");
     }
 }
 
@@ -193,4 +196,23 @@ fn sync_client_gravity(
     mut _gravity: ResMut<Gravity>,
 ) {
     // Will be wired when PhysicsCommand moves to common
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare launch builds no Luau VM: the soul plugin no longer adds
+    /// `MluaPlugin`, whose state, and the VM made for it on the first frame,
+    /// never appear. Adding it back fails this test.
+    #[test]
+    fn the_soul_plugin_adds_no_luau_runtime() {
+        let mut app = App::new();
+        app.add_plugins(ClientSoulPlugin);
+        assert!(app.world().contains_resource::<RuneRuntimeState>(), "the plugin was built");
+        assert!(
+            !app.world().contains_resource::<eustress_common::mlua::MluaRuntimeState>(),
+            "a bare launch must build no Luau VM"
+        );
+    }
 }

@@ -53,6 +53,8 @@ pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;
 pub mod space_ops;
+/// File > Rename: rename the open Space's folder, or its Universe's.
+pub mod rename;
 pub mod space_source;
 /// Runtime-swappable `space://` Bevy asset source (custom `AssetReader` that
 /// re-resolves the Space root on every read, so switching Space at runtime

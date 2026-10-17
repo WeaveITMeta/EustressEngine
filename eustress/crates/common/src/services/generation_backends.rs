@@ -17,7 +17,7 @@ use crate::assets::ContentHash;
 use crate::scene::{NodeCategory, DetailLevel};
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 /// Error type for backend operations
 #[derive(Debug, Clone, thiserror::Error)]

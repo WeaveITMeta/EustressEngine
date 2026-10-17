@@ -329,7 +329,7 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     
     // P2: CollectionService API (tags). Bridges to ECS `Tags` component via
     // the per-instance tag list pulled by `drain_entity_tags` and persisted
-    // through the `LuauCreatedInstance.tags` field.
+    // through the `MluaCreatedInstance.tags` field.
     module.function_meta(collection_add_tag)?;
     module.function_meta(collection_add_tag_by_id)?;
     module.function_meta(collection_remove_tag)?;
@@ -1528,7 +1528,7 @@ fn workspace_raycast_all(
 // There is no synchronous "create a real entity right now" primitive
 // anywhere in this engine to call into. Real materialization for
 // `Instance::new()` results still happens exactly as before — the
-// `LuauCreatedInstance` drain at the end of `execute_rune_oneshot`,
+// `MluaCreatedInstance` drain at the end of `execute_rune_oneshot`,
 // spawned by the caller in `slint_ui.rs` after the script returns.
 //
 // Generic `get(name)`/`set(name, value)` property access (`Instance::get`
@@ -2407,7 +2407,7 @@ fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
     let (sy, cy) = (ry.sin(), ry.cos());
     let (sz, cz) = (rz.sin(), rz.cos());
     // YXZ-intrinsic with Y negated for Roblox-parity. See the matching
-    // helper in `eustress_common::luau::runtime::euler_deg_to_quat`
+    // helper in `eustress_common::mlua::runtime::euler_deg_to_quat`
     // for the full rationale — short version: Bevy/glam and Roblox
     // disagree on the visible direction of positive yaw, and the
     // negation closes that gap so the same script produces the same
@@ -2431,7 +2431,7 @@ fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
 pub fn execute_rune_oneshot(
     source: &str,
     space_root: Option<std::path::PathBuf>,
-) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+) -> Result<Vec<eustress_common::mlua::runtime::MluaCreatedInstance>, String> {
     let instance_registry = std::sync::Arc::new(std::sync::RwLock::new(
         eustress_common::scripting::InstanceRegistry::default()
     ));
@@ -2508,7 +2508,7 @@ pub fn execute_rune_oneshot(
 }
 
 /// Convert everything a script created via `Instance::new()` in the supplied
-/// registry into the engine-facing [`LuauCreatedInstance`] bridge struct, and
+/// registry into the engine-facing [`MluaCreatedInstance`] bridge struct, and
 /// EMPTY the registry.
 ///
 /// Shared by the command-bar one-shot path ([`execute_rune_oneshot`]) and the
@@ -2519,7 +2519,7 @@ pub fn execute_rune_oneshot(
 #[cfg(feature = "realism-scripting")]
 pub fn drain_created_instances(
     instance_registry: &std::sync::Arc<std::sync::RwLock<eustress_common::scripting::InstanceRegistry>>,
-) -> Vec<eustress_common::luau::runtime::LuauCreatedInstance> {
+) -> Vec<eustress_common::mlua::runtime::MluaCreatedInstance> {
     // Tags are taken per created instance below ([`take_entity_tags`]), keyed
     // by the registry id cast to i64, the value `InstanceRune.entity_id`
     // exposes to Rune scripts. Tags a script put on LIVE entities stay in the
@@ -2571,7 +2571,7 @@ pub fn drain_created_instances(
             // `CollectionService::AddTag`.
             let tags = take_entity_tags(*id as i64);
 
-            created.push(eustress_common::luau::runtime::LuauCreatedInstance {
+            created.push(eustress_common::mlua::runtime::MluaCreatedInstance {
                 class_name: inst_data.class_name.clone(),
                 name: inst_data.name.clone(),
                 position: pos, rotation, size, color, material, shape,
@@ -2579,10 +2579,10 @@ pub fn drain_created_instances(
                 units_offset: None, ui_size: None, adornee_name: None,
                 always_on_top: None, max_distance: None,
                 text: None, text_color: None, text_size: None, font: None,
-                luau_entity_id: *id as i64, parent_entity_id: None,
+                mlua_entity_id: *id as i64, parent_entity_id: None,
                 tags,
                 // Rune's InstanceRune has no Get/SetAttribute surface yet —
-                // see the Luau seam in common/src/luau/runtime.rs for the
+                // see the Luau seam in common/src/mlua/runtime.rs for the
                 // pattern when it grows one.
                 attributes: Vec::new(),
             });
@@ -2599,7 +2599,7 @@ pub fn drain_created_instances(
 pub fn execute_rune_oneshot(
     _source: &str,
     _space_root: Option<std::path::PathBuf>,
-) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+) -> Result<Vec<eustress_common::mlua::runtime::MluaCreatedInstance>, String> {
     Err("Rune scripting requires the realism-scripting feature. Use Luau instead.".to_string())
 }
 
@@ -3566,7 +3566,7 @@ fn http_json_decode(json: &str) -> Option<String> {
 //
 // Tags live in a per-execution thread-local indexed by Rune entity-id. At the
 // end of `execute_rune_oneshot`, [`drain_entity_tags`] pulls them and the
-// drain pass attaches them to each `LuauCreatedInstance.tags`. The spawner
+// drain pass attaches them to each `MluaCreatedInstance.tags`. The spawner
 // then writes them to `_instance.toml`'s `tags = [...]` array, which Bevy
 // hydrates into the ECS [`Tags`](eustress_common::attributes::Tags) component
 // — the same storage backing the MCP `add_tag` / `get_tagged_entities`
@@ -3616,7 +3616,7 @@ pub fn seed_existing_tags_shared(snapshot: &RuneTagSnapshot) {
 }
 
 /// Drain all script-set tags keyed by entity-id. Called from the
-/// `execute_rune_oneshot` drain pass to populate `LuauCreatedInstance.tags`
+/// `execute_rune_oneshot` drain pass to populate `MluaCreatedInstance.tags`
 /// before clearing for the next script invocation.
 #[cfg(feature = "realism-scripting")]
 pub fn drain_entity_tags() -> std::collections::HashMap<i64, Vec<String>> {
@@ -4122,7 +4122,7 @@ pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::
     // take the purchases, between the two locks.
     let nothing_to_offer = {
         let g = dm.lock();
-        g.commerce.luau_process_receipt || g.commerce.receipts.is_empty()
+        g.commerce.mlua_process_receipt || g.commerce.receipts.is_empty()
     };
     if nothing_to_offer {
         return;
@@ -4140,7 +4140,7 @@ pub fn process_rune_receipts(runtime: &mut eustress_common::soul::rune_runtime::
     let Some((_, handler)) = handlers.first().copied() else { return };
     let receipts: Vec<eustress_common::datamodel::Receipt> = {
         let mut g = dm.lock();
-        if g.commerce.luau_process_receipt || g.commerce.receipts.is_empty() {
+        if g.commerce.mlua_process_receipt || g.commerce.receipts.is_empty() {
             return;
         }
         g.commerce.receipts.drain(..).collect()
@@ -5389,12 +5389,12 @@ pub fn process_receipt(receipt) {
     /// `ProcessReceipt`, the Rune handler is not called and the purchases are
     /// Luau's to take.
     #[test]
-    fn when_luau_answers_the_purchases_are_left_alone() {
+    fn when_mlua_answers_the_purchases_are_left_alone() {
         let (_slot, tree) = publish();
         let mut runtime = runtime_of(&[GRANTS_PUR_1]);
         {
             let mut g = tree.lock();
-            g.commerce.luau_process_receipt = true;
+            g.commerce.mlua_process_receipt = true;
             g.commerce.receipts.push_back(receipt("pur_1"));
             g.commerce.receipts.push_back(receipt("pur_2"));
         }

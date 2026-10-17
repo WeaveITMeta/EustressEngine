@@ -584,7 +584,7 @@ fn end_replication(
 mod tests {
     use super::*;
     use eustress_common::datamodel::OutputLevel;
-    use eustress_common::luau::play::{PlayLuau, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
+    use eustress_common::mlua::play::{PlayMlua, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
 
     fn no_rays(_: &RayQuery) -> Option<RayHit> {
         None
@@ -604,7 +604,7 @@ mod tests {
             let service = g.get_service("ServerScriptService").expect("ServerScriptService");
             (g.create_virtual("Script", "Builder", Some(service)), place, aim)
         };
-        let mut vm = PlayLuau::new(dm.clone()).expect("the prelude loads");
+        let mut vm = PlayMlua::new(dm.clone()).expect("the prelude loads");
         let source = r#"
             local storage = game:GetService("ReplicatedStorage")
             storage.PlaceBlock:SetArgumentTypes({"Vector3", "number?"})

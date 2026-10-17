@@ -4374,7 +4374,7 @@ mod tests {
             universe_root: universe.to_path_buf(),
             user_id: None,
             username: None,
-            luau_executor: None,
+            mlua_executor: None,
             display_unit: None,
             cancelled: None,
             permissions: eustress_tools::Permissions::standard(),

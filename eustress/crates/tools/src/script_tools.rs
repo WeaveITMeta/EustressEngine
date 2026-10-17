@@ -14,7 +14,7 @@
 //!     cycle_life_test.md            ← canonical summary (<folder>/<folder>.md)
 //! ```
 //!
-//! Both `execute_rune` and `execute_luau` now write this layout. The
+//! Both `execute_rune` and `execute_mlua` now write this layout. The
 //! file watcher + Script-Editor center tab expect exactly these
 //! filenames (see `engine::ui::center_tabs::script_source_path_canonical`
 //! / `script_summary_path_canonical`) — deviating broke hot-reload and
@@ -172,9 +172,9 @@ impl ToolHandler for ExecuteRuneTool {
 // Execute Luau Script
 // ---------------------------------------------------------------------------
 
-pub struct ExecuteLuauTool;
+pub struct ExecuteMluaTool;
 
-impl ToolHandler for ExecuteLuauTool {
+impl ToolHandler for ExecuteMluaTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "execute_luau",
@@ -225,7 +225,7 @@ impl ToolHandler for ExecuteLuauTool {
 
         // If the engine provided a Luau executor, run the script inline
         // and materialize any Instance.new("Part") calls as entity folders.
-        if let Some(ref executor) = ctx.luau_executor {
+        if let Some(ref executor) = ctx.mlua_executor {
             let result = executor(code, script_name);
 
             // Materialize created instances as entity _instance.toml files.
@@ -237,8 +237,8 @@ impl ToolHandler for ExecuteLuauTool {
             let mut spawned = 0;
 
             // Two-pass write: BillboardGui first so TextLabel parent_ids resolve.
-            // Maps luau_entity_id → written folder name for parent linking.
-            let mut luau_id_to_name: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+            // Maps mlua_entity_id → written folder name for parent linking.
+            let mut mlua_id_to_name: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
 
             // Pass 1: BillboardGui
             for entity in result.created_entities.iter().filter(|e| e.class_name == "BillboardGui") {
@@ -277,7 +277,7 @@ max_distance = {md}
                 );
 
                 if std::fs::write(&instance_path, &toml_content).is_ok() {
-                    luau_id_to_name.insert(entity.luau_entity_id, safe_name);
+                    mlua_id_to_name.insert(entity.mlua_entity_id, safe_name);
                     spawned += 1;
                 }
             }
@@ -287,7 +287,7 @@ max_distance = {md}
                 let safe_name = generated_folder_name(&entity.name);
                 // If parented to a BillboardGui, nest inside its folder
                 let entity_dir = if let Some(pid) = entity.parent_entity_id {
-                    if let Some(parent_name) = luau_id_to_name.get(&pid) {
+                    if let Some(parent_name) = mlua_id_to_name.get(&pid) {
                         generated_dir.join(parent_name).join(&safe_name)
                     } else {
                         generated_dir.join(&safe_name)
@@ -332,7 +332,7 @@ text_y_alignment = "Center"
                 );
 
                 if std::fs::write(&instance_path, &toml_content).is_ok() {
-                    luau_id_to_name.insert(entity.luau_entity_id, safe_name);
+                    mlua_id_to_name.insert(entity.mlua_entity_id, safe_name);
                     spawned += 1;
                 }
             }

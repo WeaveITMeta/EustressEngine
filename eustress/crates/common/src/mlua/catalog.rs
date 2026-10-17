@@ -1012,7 +1012,7 @@ pub fn enum_items(ty: &str) -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::datamodel::{class_ancestry, new_shared, InstanceId, OutputLevel, SharedDataModel};
-    use crate::luau::play::{PlayLuau, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
+    use crate::mlua::play::{PlayMlua, RayHit, RayQuery, ScriptLaunch, TerrainReadFn};
 
     /// The VM's two lookups before they read the table, kept to prove the
     /// table answers exactly as they did.
@@ -1196,11 +1196,11 @@ mod tests {
             g.local_player = Some(player);
             // Seeded as a session is: Workspace holds its one Terrain.
             let workspace = g.get_service("Workspace").expect("Workspace");
-            crate::luau::play::terrain::ensure_terrain_instance(&mut g, workspace);
+            crate::mlua::play::terrain::ensure_terrain_instance(&mut g, workspace);
             let sss = g.get_service("ServerScriptService").expect("ServerScriptService");
             g.create_virtual("Script", "Catalog", Some(sss))
         };
-        let mut vm = PlayLuau::new(dm.clone()).expect("the prelude loads");
+        let mut vm = PlayMlua::new(dm.clone()).expect("the prelude loads");
         let no_terrain: &TerrainReadFn<'_> = &|_| {};
         let launch = ScriptLaunch { instance: script, source: source.to_string(), chunk_name: "Catalog".into() };
         vm.run_scripts(vec![launch], &no_rays, no_terrain);

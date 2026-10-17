@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use eustress_common::classes::{BasePart, ClassName, Humanoid, Instance, Part};
-use eustress_common::datamodel::record::{attribute_to_dm, luau_script_class, part_props, strip_script_suffix};
+use eustress_common::datamodel::record::{attribute_to_dm, mlua_script_class, part_props, strip_script_suffix};
 use eustress_common::datamodel::{
     is_base_part, is_storage_service, new_shared, DataModel, DmValue, EnumItem, InstanceId,
 };
 use eustress_common::gui::billboard_renderer::GuiElementDisplay;
-use eustress_common::luau::play::{PlayLuau, ScriptLaunch};
+use eustress_common::mlua::play::{PlayMlua, ScriptLaunch};
 use eustress_common::scripting::{Color3, UDim2, Vector2};
 
-use super::{DataModelSpawned, HiddenForPlay, PlayDataModel, PlayLuauHost};
+use super::{DataModelSpawned, HiddenForPlay, PlayDataModel, PlayMluaHost};
 use crate::space::service_loader::ServiceComponent;
 
 /// OnEnter(Playing): seed the tree (with Workspace's Terrain), set up the
@@ -63,7 +63,7 @@ pub fn seed_session(world: &mut World) {
         let ws = g.get_service("Workspace").unwrap_or(root);
         // `workspace.Terrain`, the scripts' handle on the terrain root. It is
         // never spawned: the root draws and collides the ground.
-        eustress_common::luau::play::terrain::ensure_terrain_instance(&mut g, ws);
+        eustress_common::mlua::play::terrain::ensure_terrain_instance(&mut g, ws);
         // Services scripts reach through GetService.
         for s in ["Players", "RunService", "UserInputService", "TweenService", "Debris", "CollectionService",
                   "HttpService", "SoundService", "ContextActionService", "StarterGui", "StarterPlayer",
@@ -71,7 +71,7 @@ pub fn seed_session(world: &mut World) {
             let _ = g.get_service(s);
         }
         // The player joins after the server scripts have started (see
-        // `drive_luau`), as in Roblox, so `PlayerAdded` plus a
+        // `drive_mlua`), as in Roblox, so `PlayerAdded` plus a
         // `GetPlayers()` sweep sets each player up exactly once.
         let player = g.create_virtual("Player", &display_name, None);
         let _ = g.set_prop(player, "DisplayName", DmValue::String(display_name.clone()));
@@ -133,10 +133,10 @@ pub fn seed_session(world: &mut World) {
     let (server, client) = collect_launches(&dm.lock());
 
     // ── The VM ──────────────────────────────────────────────────────────
-    match PlayLuau::new(dm.clone()) {
+    match PlayMlua::new(dm.clone()) {
         Ok(vm) => {
             let (ns, nc) = (server.len(), client.len());
-            world.insert_resource(PlayLuauHost {
+            world.insert_resource(PlayMluaHost {
                 vm,
                 pending_server: server,
                 pending_client: client,
@@ -222,7 +222,7 @@ pub fn seed_scene(world: &mut World, dm: &eustress_common::datamodel::SharedData
         }
     }
 
-    // A LuauScript folder keeps its code in a child `script.luau` file: fold
+    // A MluaScript folder keeps its code in a child `script.luau` file: fold
     // that child's source into the folder instance and drop the child.
     {
         let mut g = dm.lock();
@@ -384,15 +384,15 @@ fn describe(world: &World, e: Entity) -> Option<(String, String, Vec<(String, Dm
     let loaded = world.get::<crate::space::LoadedFromFile>(e);
     let script = world.get::<crate::soul::SoulScriptData>(e);
     let class = match inst.class_name {
-        ClassName::LuauScript => "Script".to_string(),
-        ClassName::LuauLocalScript => "LocalScript".to_string(),
-        ClassName::LuauModuleScript => "ModuleScript".to_string(),
+        ClassName::MluaScript => "Script".to_string(),
+        ClassName::MluaLocalScript => "LocalScript".to_string(),
+        ClassName::MluaModuleScript => "ModuleScript".to_string(),
         ClassName::SoulScript => {
-            let is_luau = script.map_or(false, |s| s.run_context == crate::soul::SoulRunContext::Luau)
+            let is_mlua = script.map_or(false, |s| s.run_context == crate::soul::SoulRunContext::Luau)
                 || loaded.map_or(false, |l| {
                     matches!(l.path.extension().and_then(|x| x.to_str()), Some("lua") | Some("luau"))
                 });
-            if is_luau {
+            if is_mlua {
                 let file = loaded
                     .and_then(|l| l.path.file_name().and_then(|f| f.to_str()).map(str::to_string))
                     .unwrap_or_default()
@@ -400,7 +400,7 @@ fn describe(world: &World, e: Entity) -> Option<(String, String, Vec<(String, Dm
                 let service = loaded.map(|l| l.service.clone()).unwrap_or_default();
                 // Rojo-style names, by the rule a Player's reader shares.
                 name = strip_script_suffix(&name);
-                luau_script_class(&file, &service).to_string()
+                mlua_script_class(&file, &service).to_string()
             } else {
                 "SoulScript".to_string()
             }
@@ -1076,7 +1076,7 @@ mod parity {
         {
             let mut g = studio.lock();
             let ws = g.find_service("Workspace").expect("the fixture has a Workspace");
-            eustress_common::luau::play::terrain::ensure_terrain_instance(&mut g, ws);
+            eustress_common::mlua::play::terrain::ensure_terrain_instance(&mut g, ws);
         }
         let records: Vec<(String, Vec<u8>)> =
             fixture.iter().map(|(p, t)| (p.clone(), t.as_bytes().to_vec())).collect();

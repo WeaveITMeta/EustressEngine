@@ -1209,6 +1209,14 @@ fn handle_menu_action_events(
             Action::NewUniverse => { file_events.write(crate::ui::FileEvent::NewUniverse); }
             Action::OpenFile   => { file_events.write(crate::ui::FileEvent::OpenScene); }
             Action::SaveSceneAs => { file_events.write(crate::ui::FileEvent::SaveSceneAs); }
+            // File > Rename. Each opens the Rename dialog; `Rename` lets the
+            // person choose, the other two choose for them.
+            Action::Rename | Action::RenameSpace => {
+                file_events.write(crate::ui::FileEvent::OpenRename(crate::space::rename::RenameTarget::Space));
+            }
+            Action::RenameUniverse => {
+                file_events.write(crate::ui::FileEvent::OpenRename(crate::space::rename::RenameTarget::Universe));
+            }
 
             // Undo/Redo walk the ONE edit history (UndoStack, the one the
             // History panel shows). They used to also step the separate

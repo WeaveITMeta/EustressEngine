@@ -34,7 +34,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 use tracing::{info, warn};
 
 #[allow(unused_imports)]

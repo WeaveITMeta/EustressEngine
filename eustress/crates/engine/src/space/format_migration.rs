@@ -496,13 +496,28 @@ pub fn launch_space_or_scratch(requested: PathBuf) -> PathBuf {
     let Some(format) = newer_than_build(&requested) else {
         return requested;
     };
-    let parent = std::env::temp_dir();
-    let name = "Eustress scratch Space";
-    let _ = super::space_ops::scaffold_new_space(&parent, name, "Eustress");
     if let Ok(mut slot) = REFUSED_LAUNCH.lock() {
         *slot = Some(newer_space_message(format));
     }
-    parent.join(name)
+    scratch_space_root()
+}
+
+/// The folder name of the scratch Space, in the system temp folder.
+const SCRATCH_SPACE_NAME: &str = "Eustress scratch Space";
+
+/// A throwaway Space in the system temp folder, made on first use. Studio
+/// stands on it when it may not open the Space it was asked for, and while it
+/// renames the open Space's own folder.
+pub fn scratch_space_root() -> PathBuf {
+    let parent = std::env::temp_dir();
+    let _ = super::space_ops::scaffold_new_space(&parent, SCRATCH_SPACE_NAME, "Eustress");
+    parent.join(SCRATCH_SPACE_NAME)
+}
+
+/// True for the scratch Space. It is never a recent Space or the one the
+/// next launch opens.
+pub fn is_scratch_space(path: &std::path::Path) -> bool {
+    path == std::env::temp_dir().join(SCRATCH_SPACE_NAME)
 }
 
 /// Shows a refused launch's message once, in the notification list.

@@ -186,7 +186,7 @@ impl ClassSpawner for SoulScriptSpawner {
 
     fn import_from_roblox(&self, _rbx: &dyn RobloxInstance) -> PropertyBag {
         // SoulScript has no Roblox cognate — the Wave 4 importer routes
-        // Roblox `Script` → `LuauScript` (see `classes.rs` `from_str`
+        // Roblox `Script` → `MluaScript` (see `classes.rs` `from_str`
         // alias). Per spec §2.1 a class with no Roblox cognate returns an
         // empty bag; the importer emits a warn-level log line if it ever
         // reaches here.
@@ -334,7 +334,7 @@ mod tests {
     }
 
     /// SoulScript has no Roblox cognate → empty bag (importer routes
-    /// Roblox `Script` to `LuauScript` instead).
+    /// Roblox `Script` to `MluaScript` instead).
     #[test]
     fn import_from_roblox_is_empty() {
         struct Mock;

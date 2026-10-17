@@ -19,7 +19,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use bevy::platform::time::Instant;
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 use bytes::Bytes;

@@ -199,7 +199,7 @@ fn contains_webhook(bytes: &[u8]) -> bool {
 /// server-only service) into what players receive and the code only the host
 /// and a Share Source world keep.
 ///
-/// A server Script is a `LuauScript` folder whose `[script] run_context` is
+/// A server Script is a `MluaScript` folder whose `[script] run_context` is
 /// anything but `Client`. Its instance stays with players so paths and clones
 /// still resolve; its `.luau`/`.lua` files move to the second list; an inline
 /// `source` is blanked for players and kept as the folder's `script.luau`,

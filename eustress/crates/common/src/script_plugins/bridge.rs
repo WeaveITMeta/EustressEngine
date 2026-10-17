@@ -35,9 +35,9 @@ use std::sync::{Arc, Mutex};
 /// queue, teardown) is shared.
 pub enum CallbackHandle {
     /// A Luau closure, stored in the `mlua::Lua` registry (see
-    /// `LuauRuntime::build_plugin_environment`). Owned by whichever
+    /// `MluaRuntime::build_plugin_environment`). Owned by whichever
     /// `mlua::Lua` instance created it — never move it across VMs.
-    #[cfg(feature = "luau")]
+    #[cfg(feature = "mlua")]
     Lua(mlua::RegistryKey),
     /// A Rune closure, converted via `Function::into_sync()` at
     /// registration time so it can be stored past the call that created
@@ -54,7 +54,7 @@ impl std::fmt::Debug for CallbackHandle {
     // caller needs; nothing inspects a callback's contents.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(feature = "luau")]
+            #[cfg(feature = "mlua")]
             CallbackHandle::Lua(_) => f.write_str("CallbackHandle::Lua(..)"),
             #[cfg(feature = "realism-scripting")]
             CallbackHandle::Rune(_) => f.write_str("CallbackHandle::Rune(..)"),
@@ -64,7 +64,7 @@ impl std::fmt::Debug for CallbackHandle {
             // exhaustiveness checker treats a reference as always
             // potentially inhabited (rustc E0004), even when its pointee
             // type is not.
-            #[cfg(not(any(feature = "luau", feature = "realism-scripting")))]
+            #[cfg(not(any(feature = "mlua", feature = "realism-scripting")))]
             _ => unreachable!(
                 "CallbackHandle has no variants without the `luau` or `realism-scripting` feature"
             ),

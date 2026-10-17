@@ -255,6 +255,10 @@ pub enum SlintAction {
     OpenScene,
     SaveScene,
     SaveSceneAs,
+    /// File > Rename: open the Rename dialog with "space" or "universe" chosen.
+    OpenRename(String),
+    /// The Rename dialog's Rename: the target ("space" or "universe") and the new name.
+    RenameConfirmed(String, String),
     /// File → Import. Slint signal carries no path; the Rust side opens
     /// the OS file picker (rfd) and forwards the chosen path through
     /// `FileEvent::ImportAsset` for `do_import_asset` to consume. If the
@@ -1935,12 +1939,15 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<super::file_event_handler::PendingFileActions>()
             .init_resource::<super::file_event_handler::PendingUniversePath>()
             .init_resource::<super::file_event_handler::PendingMediaImport>()
+            .init_resource::<crate::space::rename::SpaceRename>()
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
             .add_systems(Update, (
                 super::file_event_handler::drain_file_events,
                 super::file_event_handler::execute_file_actions,
+                // File > Rename's folder rename, tried each frame while one runs.
+                crate::space::rename::pump,
             ).chain())
             // Radial media-import chooser: when a media file is staged
             // (Import pick or Assets double-click), push its wedges to Slint.
@@ -2082,6 +2089,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_save_scene(move || q.push(SlintAction::SaveScene));
     let q = queue.clone();
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
+    let q = queue.clone();
+    ui.on_open_rename(move |target| q.push(SlintAction::OpenRename(target.to_string())));
+    let q = queue.clone();
+    ui.on_rename_confirmed(move |target, name| q.push(SlintAction::RenameConfirmed(target.to_string(), name.to_string())));
     let q = queue.clone();
     ui.on_import_asset(move || q.push(SlintAction::ImportAsset));
     let q = queue.clone();
@@ -2927,21 +2938,21 @@ fn setup_slint_overlay(world: &mut World) {
     let ui_weak_theme = ui.as_weak();
     ui.on_select_theme(move |id| {
         q.push(SlintAction::SelectTheme(id.to_string()));
-        // Direct-apply for the two built-ins: instant visual feedback on the
-        // same frame as the click, no queue-drain latency. Only covers
-        // Classic/Voltec (compile-time presets); user TOML themes and the
-        // mode-accent overlay still go through the queued path only. The
-        // queued action re-applies + persists regardless — idempotent.
+        // Direct-apply for the built-ins: instant visual feedback on the same
+        // frame as the click, no queue-drain latency. Only the built-ins have
+        // compile-time presets; user TOML themes and the mode-accent overlay
+        // go through the queued path only. The queued action re-applies +
+        // persists regardless — idempotent.
         if let Some(w) = ui_weak_theme.upgrade() {
             let th = w.global::<Theme>();
-            if id == "classic" {
-                let p = th.get_preset_classic();
+            let preset = match id.as_str() {
+                "classic" => Some(th.get_preset_classic()),
+                "voltec" => Some(th.get_preset_voltec()),
+                "claude" => Some(th.get_preset_claude()),
+                _ => None,
+            };
+            if let Some(p) = preset {
                 th.set_data(p);
-                th.set_voltec(false);
-            } else if id == "voltec" {
-                let p = th.get_preset_voltec();
-                th.set_data(p);
-                th.set_voltec(true);
             }
         }
     });
@@ -7478,6 +7489,16 @@ fn drain_slint_actions(
             SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
+            SlintAction::OpenRename(target) => {
+                let target = crate::space::rename::RenameTarget::from_key(&target)
+                    .unwrap_or(crate::space::rename::RenameTarget::Space);
+                events.file_events.write(FileEvent::OpenRename(target));
+            }
+            SlintAction::RenameConfirmed(target, name) => {
+                if let Some(target) = crate::space::rename::RenameTarget::from_key(&target) {
+                    events.file_events.write(FileEvent::Rename(target, name));
+                }
+            }
             SlintAction::ImportAsset => {
                 // The SINGLE "Import" button — one unified pipeline for every
                 // importable type: images, videos, Gaussian-splat clouds, AND
@@ -10253,7 +10274,6 @@ fn drain_slint_actions(
                         theme.get_preset_classic()
                     };
                     theme.set_data(palette);
-                    theme.set_voltec(modern); // UI-state mirror for the settings swatch
                 }
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Theme: voltec={}", modern));
@@ -13744,7 +13764,7 @@ fn drain_slint_actions(
             // Script execution from command bar
             SlintAction::ExecuteScript(language, script) => {
                 // Clear stale output
-                eustress_common::luau::runtime::drain_luau_output();
+                eustress_common::mlua::runtime::drain_mlua_output();
                 eustress_common::soul::rune_runtime::drain_rune_output();
 
                 // Build a `tag -> [entity_id, ...]` snapshot of live ECS Tags
@@ -13792,10 +13812,10 @@ fn drain_slint_actions(
 
                 // Execute the script
                 let (result, created_instances) = if language == "luau" {
-                    match eustress_common::luau::runtime::LuauRuntime::new() {
+                    match eustress_common::mlua::runtime::MluaRuntime::new() {
                         Ok(mut runtime) => {
                             // The user's own code: its HTTP stays on, as before.
-                            runtime.set_network_access(eustress_common::luau::runtime::NetworkAccess::Allowed);
+                            runtime.set_network_access(eustress_common::mlua::runtime::NetworkAccess::Allowed);
                             // Best-effort seed; failures shouldn't block execution.
                             if let Err(e) = runtime.seed_existing_tags(&tag_snapshot) {
                                 warn!("Failed to seed CollectionService snapshot for Luau: {}", e);
@@ -13837,7 +13857,7 @@ fn drain_slint_actions(
                     out.push_with_source(LogLevel::Info, format!("[{}] > {}", language, script), src);
 
                     let script_output = if language == "luau" {
-                        eustress_common::luau::runtime::drain_luau_output()
+                        eustress_common::mlua::runtime::drain_mlua_output()
                     } else {
                         eustress_common::soul::rune_runtime::drain_rune_output()
                     };
@@ -13876,13 +13896,13 @@ fn drain_slint_actions(
 
                     // Two-pass spawn: BillboardGui first (so TextLabel can reference parent entity).
                     // Maps Luau entity_id → spawned Bevy Entity for parent resolution.
-                    let mut luau_to_bevy: std::collections::HashMap<i64, Entity> = std::collections::HashMap::new();
+                    let mut mlua_to_bevy: std::collections::HashMap<i64, Entity> = std::collections::HashMap::new();
                     // Maps Luau entity_id → on-disk instance directory so child
                     // entities (TextLabel, Frame, ...) can be persisted INSIDE
                     // the parent's folder. Without this the children land at
                     // workspace root and don't reload as descendants of the
                     // BillboardGui — they vanish from the rebuilt hierarchy.
-                    let mut luau_to_dir: std::collections::HashMap<i64, std::path::PathBuf> = std::collections::HashMap::new();
+                    let mut mlua_to_dir: std::collections::HashMap<i64, std::path::PathBuf> = std::collections::HashMap::new();
 
                     // ── Pass 1: BillboardGui ────────────────────────────────────────
                     for inst in &created_instances {
@@ -13996,8 +14016,8 @@ fn drain_slint_actions(
                                 eustress_common::attributes::Tags(inst.tags.clone()),
                             );
                         }
-                        luau_to_bevy.insert(inst.luau_entity_id, entity);
-                        luau_to_dir.insert(inst.luau_entity_id, instance_dir.clone());
+                        mlua_to_bevy.insert(inst.mlua_entity_id, entity);
+                        mlua_to_dir.insert(inst.mlua_entity_id, instance_dir.clone());
 
                         if let Some(ref mut registry) = res.file_registry {
                             registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
@@ -14044,7 +14064,7 @@ fn drain_slint_actions(
                         // is the workspace itself).
                         let parent_dir: std::path::PathBuf = inst
                             .parent_entity_id
-                            .and_then(|pid| luau_to_dir.get(&pid).cloned())
+                            .and_then(|pid| mlua_to_dir.get(&pid).cloned())
                             .unwrap_or_else(|| workspace_dir.clone());
                         let folder_name = crate::space::instance_loader::unique_entity_name(&parent_dir, &inst.name);
                         let instance_dir = parent_dir.join(&folder_name);
@@ -14106,13 +14126,13 @@ fn drain_slint_actions(
 
                         // Parent to BillboardGui entity if available
                         if let Some(parent_id) = inst.parent_entity_id {
-                            if let Some(&parent_entity) = luau_to_bevy.get(&parent_id) {
+                            if let Some(&parent_entity) = mlua_to_bevy.get(&parent_id) {
                                 commands.entity(parent_entity).add_child(entity);
                             }
                         }
 
-                        luau_to_bevy.insert(inst.luau_entity_id, entity);
-                        luau_to_dir.insert(inst.luau_entity_id, instance_dir.clone());
+                        mlua_to_bevy.insert(inst.mlua_entity_id, entity);
+                        mlua_to_dir.insert(inst.mlua_entity_id, instance_dir.clone());
 
                         if let Some(ref mut registry) = res.file_registry {
                             registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
@@ -17478,7 +17498,7 @@ fn drain_slint_actions(
                     let summary_file = format!("{}.md", script_name);
 
                     // Write _instance.toml with the correct class_name
-                    // (SoulScript / LuauLocalScript / LuauModuleScript).
+                    // (SoulScript / MluaLocalScript / MluaModuleScript).
                     // The `name` override lands only when the folder got
                     // a hex suffix, matching the Block/Model/Folder
                     // inserts.
@@ -17508,8 +17528,8 @@ fn drain_slint_actions(
                     // Rune code path from accidentally trying to compile
                     // Luau source.
                     let instance_class = match class_name {
-                        "LuauLocalScript"  => eustress_common::classes::ClassName::LuauLocalScript,
-                        "LuauModuleScript" => eustress_common::classes::ClassName::LuauModuleScript,
+                        "LuauLocalScript"  => eustress_common::classes::ClassName::MluaLocalScript,
+                        "LuauModuleScript" => eustress_common::classes::ClassName::MluaModuleScript,
                         _                   => eustress_common::classes::ClassName::SoulScript,
                     };
                     let mut entity_cmd = commands.spawn((
@@ -21473,7 +21493,6 @@ fn apply_effective_theme(
         }
     }
     theme.set_data(td.clone());
-    theme.set_voltec(theme_registry.active_id == "voltec"); // legacy UI mirror
 
     // Refresh ribbon-tab colors against the NEW palette immediately — without
     // this, switching Theme (not Mode) would leave tab-pill colors stale
@@ -21878,6 +21897,10 @@ struct ModeSyncSignature {
     registry_signature: u64,
     active_id: String,
     active_submode_id: String,
+    /// The theme registry's signature and active theme: a theme switch or
+    /// a rescan changes the base accent the menu falls back to.
+    theme_signature: u64,
+    theme_id: String,
 }
 
 /// Push the Eustress Modes list (role-filtered) + submenu + the active
@@ -21894,21 +21917,30 @@ fn sync_active_mode_to_slint(
     // mode switch — the live bump in `drain_slint_actions` only touches the
     // model rows that exist right now.
     usage: Option<Res<crate::usage_telemetry::UsageTelemetry>>,
+    themes: Option<Res<crate::studio_theme::ThemeRegistry>>,
 ) {
     let Some(ref ctx) = slint_context else { return };
     let Some(registry) = registry else { return };
     if registry.modes.is_empty() {
         return; // wait until StudioModesPlugin's Startup load ran
     }
+    let (theme_signature, theme_id) = themes
+        .as_deref()
+        .map(|t| (t.signature, t.active_id.as_str()))
+        .unwrap_or((0, ""));
     if pushed.registry_signature == registry.signature
         && pushed.active_id == registry.active_id
         && pushed.active_submode_id == registry.active_submode_id
+        && pushed.theme_signature == theme_signature
+        && pushed.theme_id == theme_id
     {
         return;
     }
     pushed.registry_signature = registry.signature;
     pushed.active_id = registry.active_id.clone();
     pushed.active_submode_id = registry.active_submode_id.clone();
+    pushed.theme_signature = theme_signature;
+    pushed.theme_id = theme_id.to_string();
 
     let empty_roles = crate::studio_modes::UserRoles::default();
     let roles = roles.as_deref().unwrap_or(&empty_roles);
@@ -21916,14 +21948,14 @@ fn sync_active_mode_to_slint(
 
     // The theme's BASE accent (before any mode overlay) — the fallback color
     // for modes without their own accent (e.g. Engineering). Read from the
-    // compile-time presets by the active-theme mirror so it's the un-overlaid
-    // brand accent, not the currently-active mode's overlaid one.
-    let theme_global = ctx.window.global::<Theme>();
-    let base_accent = if theme_global.get_voltec() {
-        theme_global.get_preset_voltec().accent_eustress
-    } else {
-        theme_global.get_preset_classic().accent_eustress
-    };
+    // active theme's own palette, not the live `data`, so it's the
+    // un-overlaid brand accent, not the currently-active mode's overlaid one.
+    let base = ctx.window.global::<Theme>().get_preset_voltec();
+    let base_accent = themes
+        .as_deref()
+        .and_then(|t| t.find(&t.active_id))
+        .map(|p| palette_to_theme_data(p, &base).accent_eustress)
+        .unwrap_or(base.accent_eustress);
     // Dropdown entry color: the mode's explicit menu color if set, else its
     // accent (the color its icon shows when selected), else the theme's base
     // accent. Shared by the dropdown list rows AND the collapsed header
@@ -33234,9 +33266,9 @@ fn sync_keybindings_to_slint(
 fn sync_soul_panel_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     soul_scripts: Query<(Entity, &eustress_common::classes::Instance, &crate::soul::SoulScriptData)>,
-    luau_scripts: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauScript)>,
-    luau_locals: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauLocalScript)>,
-    luau_modules: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauModuleScript)>,
+    mlua_scripts: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::mlua::MluaScript)>,
+    mlua_locals: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::mlua::MluaLocalScript)>,
+    mlua_modules: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::mlua::MluaModuleScript)>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
     state: Option<Res<StudioState>>,
     mut last_hash: Local<u64>,
@@ -33293,9 +33325,9 @@ fn sync_soul_panel_to_slint(
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     soul_scripts.iter().count().hash(&mut hasher);
-    luau_scripts.iter().count().hash(&mut hasher);
-    luau_locals.iter().count().hash(&mut hasher);
-    luau_modules.iter().count().hash(&mut hasher);
+    mlua_scripts.iter().count().hash(&mut hasher);
+    mlua_locals.iter().count().hash(&mut hasher);
+    mlua_modules.iter().count().hash(&mut hasher);
     // The summary indicator reads a file the hash cannot see (a disk stat per
     // row is too much for every frame): the Summarize arm bumps this instead.
     state.as_deref().map_or(0, |s| s.soul_panel_revision).hash(&mut hasher);
@@ -33310,7 +33342,7 @@ fn sync_soul_panel_to_slint(
         std::mem::discriminant(&data.build_status).hash(&mut hasher);
         data.errors.len().hash(&mut hasher);
     }
-    for (e, inst, s) in luau_scripts.iter() {
+    for (e, inst, s) in mlua_scripts.iter() {
         e.index().hash(&mut hasher);
         inst.name.hash(&mut hasher);
         s.source.len().hash(&mut hasher);
@@ -33318,7 +33350,7 @@ fn sync_soul_panel_to_slint(
         s.error.is_some().hash(&mut hasher);
         s.loaded.hash(&mut hasher);
     }
-    for (e, inst, s) in luau_locals.iter() {
+    for (e, inst, s) in mlua_locals.iter() {
         e.index().hash(&mut hasher);
         inst.name.hash(&mut hasher);
         s.source.len().hash(&mut hasher);
@@ -33326,7 +33358,7 @@ fn sync_soul_panel_to_slint(
         s.error.is_some().hash(&mut hasher);
         s.loaded.hash(&mut hasher);
     }
-    for (e, inst, s) in luau_modules.iter() {
+    for (e, inst, s) in mlua_modules.iter() {
         e.index().hash(&mut hasher);
         inst.name.hash(&mut hasher);
         s.source.len().hash(&mut hasher);
@@ -33340,9 +33372,9 @@ fn sync_soul_panel_to_slint(
 
     let mut items: Vec<SoulScriptData> = Vec::new();
     let mut rune_count = 0i32;
-    let mut luau_server_count = 0i32;
-    let mut luau_client_count = 0i32;
-    let mut luau_module_count = 0i32;
+    let mut mlua_server_count = 0i32;
+    let mut mlua_client_count = 0i32;
+    let mut mlua_module_count = 0i32;
 
     for (entity, inst, data) in soul_scripts.iter() {
         use crate::soul::SoulBuildStatus;
@@ -33370,7 +33402,7 @@ fn sync_soul_panel_to_slint(
         });
         rune_count += 1;
     }
-    for (entity, inst, s) in luau_scripts.iter() {
+    for (entity, inst, s) in mlua_scripts.iter() {
         let (status, err) = match (&s.error, s.loaded) {
             (Some(e), _) => ("error", e.clone()),
             (None, true) => ("success", String::new()),
@@ -33393,9 +33425,9 @@ fn sync_soul_panel_to_slint(
             source_exists,
             summary_exists,
         });
-        luau_server_count += 1;
+        mlua_server_count += 1;
     }
-    for (entity, inst, s) in luau_locals.iter() {
+    for (entity, inst, s) in mlua_locals.iter() {
         let (status, err) = match (&s.error, s.loaded) {
             (Some(e), _) => ("error", e.clone()),
             (None, true) => ("success", String::new()),
@@ -33418,9 +33450,9 @@ fn sync_soul_panel_to_slint(
             source_exists,
             summary_exists,
         });
-        luau_client_count += 1;
+        mlua_client_count += 1;
     }
-    for (entity, inst, s) in luau_modules.iter() {
+    for (entity, inst, s) in mlua_modules.iter() {
         let (status, err) = match (&s.error, s.loaded) {
             (Some(e), _) => ("error", e.clone()),
             (None, true) => ("success", String::new()),
@@ -33443,15 +33475,15 @@ fn sync_soul_panel_to_slint(
             source_exists,
             summary_exists,
         });
-        luau_module_count += 1;
+        mlua_module_count += 1;
     }
 
     let model = std::rc::Rc::new(slint::VecModel::from(items));
     ui.set_soul_scripts(slint::ModelRc::from(model));
     ui.set_soul_rune_count(rune_count);
-    ui.set_soul_luau_server_count(luau_server_count);
-    ui.set_soul_luau_client_count(luau_client_count);
-    ui.set_soul_luau_module_count(luau_module_count);
+    ui.set_soul_mlua_server_count(mlua_server_count);
+    ui.set_soul_mlua_client_count(mlua_client_count);
+    ui.set_soul_mlua_module_count(mlua_module_count);
 }
 
 /// Push the notification queue to Slint whenever it changes. Cheap no-op

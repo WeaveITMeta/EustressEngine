@@ -67,7 +67,7 @@ pub struct DataStore {
 struct CachedEntry {
     data: Vec<u8>,
     version: u64,
-    cached_at: std::time::Instant,
+    cached_at: bevy::platform::time::Instant,
     ttl_secs: u64,
 }
 
@@ -224,7 +224,7 @@ impl DataStore {
                 self.cache.write().insert(key.to_string(), CachedEntry {
                     data: data.clone(),
                     version,
-                    cached_at: std::time::Instant::now(),
+                    cached_at: bevy::platform::time::Instant::now(),
                     ttl_secs: 60,
                 });
                 
@@ -256,7 +256,7 @@ impl DataStore {
         self.cache.write().insert(key.to_string(), CachedEntry {
             data,
             version,
-            cached_at: std::time::Instant::now(),
+            cached_at: bevy::platform::time::Instant::now(),
             ttl_secs: 60,
         });
         
@@ -331,7 +331,7 @@ pub struct DataStoreService {
 #[allow(dead_code)]
 struct RequestBudget {
     requests_this_minute: u32,
-    minute_start: Option<std::time::Instant>,
+    minute_start: Option<bevy::platform::time::Instant>,
 }
 
 impl Default for DataStoreService {

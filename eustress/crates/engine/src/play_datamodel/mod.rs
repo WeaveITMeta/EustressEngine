@@ -12,7 +12,7 @@
 //!                   pull::*              poses, input, mouse ray + hit,
 //!                                        camera, collisions, GUI clicks,
 //!                                        the local character
-//!                   luau::drive_luau     scripts run against the tree,
+//!                   mlua::drive_mlua     scripts run against the tree,
 //!                                        reading physics and terrain live
 //!                   apply::apply_frame   tree -> ECS: spawns, reparents,
 //!                                        property writes, destroys,
@@ -48,7 +48,7 @@ pub mod vehicle_seat_input;
 use bevy::prelude::*;
 
 use eustress_common::datamodel::OutputLevel;
-use eustress_common::luau::play::{TerrainReadFn, TerrainView};
+use eustress_common::mlua::play::{TerrainReadFn, TerrainView};
 use eustress_common::terrain::{
     surface_data, TerrainBaked, TerrainChunkCollider, TerrainConfig, TerrainData, TerrainMaterialSlots, TerrainRoot,
     TerrainVolume, TerrainVoxelWater,
@@ -65,10 +65,10 @@ pub use eustress_common::play_session::{DataModelSpawned, PlayDataModel, PlayScr
 /// join (`PlayerAdded`), start the client scripts. The character follows
 /// on the next frame (`CharacterAdded`).
 #[derive(Resource)]
-pub struct PlayLuauHost {
-    pub vm: eustress_common::luau::play::PlayLuau,
-    pub pending_server: Vec<eustress_common::luau::play::ScriptLaunch>,
-    pub pending_client: Vec<eustress_common::luau::play::ScriptLaunch>,
+pub struct PlayMluaHost {
+    pub vm: eustress_common::mlua::play::PlayMlua,
+    pub pending_server: Vec<eustress_common::mlua::play::ScriptLaunch>,
+    pub pending_client: Vec<eustress_common::mlua::play::ScriptLaunch>,
     pub joining_player: Option<eustress_common::datamodel::InstanceId>,
 }
 
@@ -208,7 +208,7 @@ impl Plugin for PlayDataModelPlugin {
                     .chain()
                     .in_set(PlayScriptSet::Pull),
             )
-            .add_systems(Update, drive_luau.in_set(PlayScriptSet::Scripts))
+            .add_systems(Update, drive_mlua.in_set(PlayScriptSet::Scripts))
             .add_systems(Update, sync_play_asset_root.in_set(PlayScriptSet::Pull))
             // The session's side of the Sound player (Studio mounts the player
             // itself, in spawners/audio_vfx).
@@ -245,7 +245,7 @@ impl Plugin for PlayDataModelPlugin {
             .add_systems(Update, end_frame.in_set(PlayScriptSet::End))
             // Stage timing for the profiler, at the seams of the chain.
             .add_systems(Update, stage_open.in_set(PlayScriptSet::Pull).before(pull::pull_frame_state))
-            .add_systems(Update, stage_close::<0>.in_set(PlayScriptSet::Scripts).before(drive_luau))
+            .add_systems(Update, stage_close::<0>.in_set(PlayScriptSet::Scripts).before(drive_mlua))
             // A VehicleSeat's Throttle and Steer from its occupant's keys,
             // once the Pull set has seated this frame's characters.
             .add_systems(
@@ -264,8 +264,8 @@ impl Plugin for PlayDataModelPlugin {
 /// `apply::apply_frame` applies after the scripts have run. Like the Rune
 /// module and `terrain_commands`, they see the Space's one root: none while
 /// two roots coexist mid-replacement.
-pub(crate) fn drive_luau(
-    host: Option<ResMut<PlayLuauHost>>,
+pub(crate) fn drive_mlua(
+    host: Option<ResMut<PlayMluaHost>>,
     spatial: avian3d::prelude::SpatialQuery,
     colliders: Query<(
         Option<&eustress_common::classes::BasePart>,
@@ -280,7 +280,7 @@ pub(crate) fn drive_luau(
     mut seen_shape: Local<(u64, u64)>,
 ) {
     let Some(mut host) = host else { return };
-    let raycaster = |q: &eustress_common::luau::play::RayQuery| pull::cast_ray(&spatial, &colliders, q);
+    let raycaster = |q: &eustress_common::mlua::play::RayQuery| pull::cast_ray(&spatial, &colliders, q);
     let slots = slots.as_deref();
     let terrain_reader: &TerrainReadFn<'_> = &|visit| {
         if let Ok((config, data, volume, baked, water)) = terrain.single() {
@@ -333,7 +333,7 @@ pub(crate) fn drive_luau(
 /// every Script in a player's character, and the LocalScripts in the local
 /// player's own. A character's scripts are the Space's
 /// StarterCharacterScripts, or the default Animate.
-fn character_launches(g: &eustress_common::datamodel::DataModel) -> Vec<eustress_common::luau::play::ScriptLaunch> {
+fn character_launches(g: &eustress_common::datamodel::DataModel) -> Vec<eustress_common::mlua::play::ScriptLaunch> {
     use eustress_common::datamodel::DmValue;
     let mut out = Vec::new();
     let Some(players) = g.find_service("Players") else { return out };
@@ -362,7 +362,7 @@ fn character_launches(g: &eustress_common::datamodel::DataModel) -> Vec<eustress
             if source.trim().is_empty() {
                 continue;
             }
-            out.push(eustress_common::luau::play::ScriptLaunch { instance: id, source, chunk_name: g.full_name(id) });
+            out.push(eustress_common::mlua::play::ScriptLaunch { instance: id, source, chunk_name: g.full_name(id) });
         }
     }
     out.sort_by(|a, b| a.chunk_name.cmp(&b.chunk_name));
@@ -416,11 +416,11 @@ fn drain_output(dm: Option<Res<PlayDataModel>>, mut output: Option<ResMut<crate:
 }
 
 /// Trim events every reader has seen and release destroyed slots.
-fn end_frame(dm: Option<Res<PlayDataModel>>, host: Option<Res<PlayLuauHost>>) {
+fn end_frame(dm: Option<Res<PlayDataModel>>, host: Option<Res<PlayMluaHost>>) {
     let Some(dm) = dm else { return };
     let mut g = dm.dm.lock();
-    let luau_cursor = host.map(|h| h.vm.event_cursor()).unwrap_or_else(|| g.event_cursor());
-    g.trim_events(luau_cursor);
+    let mlua_cursor = host.map(|h| h.vm.event_cursor()).unwrap_or_else(|| g.event_cursor());
+    g.trim_events(mlua_cursor);
     g.end_frame();
 }
 
@@ -428,7 +428,7 @@ fn end_frame(dm: Option<Res<PlayDataModel>>, host: Option<Res<PlayLuauHost>>) {
 /// show the storage services again.
 fn stop_session(
     mut commands: Commands,
-    host: Option<ResMut<PlayLuauHost>>,
+    host: Option<ResMut<PlayMluaHost>>,
     spawned: Query<Entity, With<DataModelSpawned>>,
     mut hidden: Query<(Entity, &HiddenForPlay, &mut Visibility)>,
     touch_reporting: Query<Entity, (With<apply::TouchReportingForPlay>, Without<DataModelSpawned>)>,
@@ -443,7 +443,7 @@ fn stop_session(
         host.vm.stop();
         info!("🧹 Luau Play VM stopped ({} KiB heap)", host.vm.memory_used() / 1024);
     }
-    commands.remove_resource::<PlayLuauHost>();
+    commands.remove_resource::<PlayMluaHost>();
     commands.remove_resource::<PlayDataModel>();
     commands.remove_resource::<particles::PlayParticles>();
     // Nothing a play-test injected stays held into the next session.

@@ -478,6 +478,8 @@ export component Ribbon inherits Rectangle {
     callback on-open-scene();
     callback on-save-scene();
     callback on-save-scene-as();
+    // File > Rename...: rename the open Space's folder, or its Universe's.
+    callback on-rename();
     callback on-import-asset();
     callback on-import-roblox-place();
     callback on-publish-universe();
@@ -1059,6 +1061,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownSeparator {}
                                 DropdownItem { label: "Save Space"; shortcut: root.shortcut-save; clicked => { root.on-save-scene(); } }
                                 DropdownItem { label: "Save Space As..."; shortcut: root.shortcut-save-as; clicked => { root.on-save-scene-as(); } }
+                                DropdownItem { label: "Rename..."; clicked => { root.on-rename(); } }
                                 DropdownItem { label: "Export Selection..."; clicked => { root.on-menu-action("model:export"); } }
                                 if root.snapshot-status != "": DropdownHeader { label: root.snapshot-status; }
                                 DropdownSeparator {}

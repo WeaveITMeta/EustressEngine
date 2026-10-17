@@ -1,24 +1,22 @@
-//! `LuauModuleScriptSpawner` — Wave 5.C scripting-class spawner.
+//! `MluaLocalScriptSpawner` — Wave 5.C scripting-class spawner.
 //!
-//! Implements [`ClassSpawner`] for [`ClassName::LuauModuleScript`] per
+//! Implements [`ClassSpawner`] for [`ClassName::MluaLocalScript`] per
 //! `docs/architecture/CLASS_REGISTRY.md` §8.12 (scripting row) + §2 (trait).
 //!
 //! ## What this is
 //!
-//! `LuauModuleScript` is the reusable Luau module class — the Eustress
-//! equivalent of Roblox `ModuleScript`. It returns a table when `require()`d
-//! and is shared between server and client contexts. The Wave 4 importer
-//! routes Roblox `ModuleScript` → `LuauModuleScript` via the `from_str`
-//! alias.
+//! `MluaLocalScript` is the client-side Luau script class — the Eustress
+//! equivalent of Roblox `LocalScript`. It always runs in client context
+//! regardless of parent service. The Wave 4 importer routes Roblox
+//! `LocalScript` → `MluaLocalScript` via the `from_str` alias.
 //!
-//! Modules have **no `enabled` flag** (they run on demand via `require`),
-//! so the spawner carries only the `source` body + name. Like every
-//! scripting class it is a pure source carrier with no visual, no physics,
-//! no LOD model. Execution / caching belongs to the existing mlua runtime —
-//! this spawner only builds the entity and stores the source.
+//! Like every scripting class it is a **pure source carrier** ([`MluaLocalScript`]
+//! holds the `source` string) with no visual, no physics, no LOD model.
+//! Execution belongs to the existing mlua runtime — this spawner only
+//! builds the entity and stores the source.
 //!
 //! Bundle attached: [`Transform`] + [`Visibility`] + [`Instance`] +
-//! [`LuauModuleScript`] + [`Name`]. See
+//! [`MluaLocalScript`] + [`Name`]. See
 //! [`soul_script`](super::soul_script) for the fully-annotated reference.
 
 use bevy::prelude::*;
@@ -27,27 +25,28 @@ use eustress_common::class_registry::{
     ClassSpawner, ComponentBundle, LodTier, PropertyBag, RobloxInstance, SpawnCtx,
 };
 use eustress_common::classes::{ClassName, Instance, PropertyValue};
-use eustress_common::luau::LuauModuleScript;
+use eustress_common::mlua::MluaLocalScript;
 
 use super::soul_script::SOURCE_KEY;
 
-/// Zero-sized spawner for [`ClassName::LuauModuleScript`]. Stateless.
+/// Zero-sized spawner for [`ClassName::MluaLocalScript`]. Stateless.
 #[derive(Default)]
-pub struct LuauModuleScriptSpawner;
+pub struct MluaLocalScriptSpawner;
 
-impl ClassSpawner for LuauModuleScriptSpawner {
+impl ClassSpawner for MluaLocalScriptSpawner {
     fn class_name(&self) -> ClassName {
-        ClassName::LuauModuleScript
+        ClassName::MluaLocalScript
     }
 
     fn spawn(&self, ctx: &mut SpawnCtx, props: &PropertyBag) -> Entity {
         let name = props
             .get_string("metadata.name")
-            .unwrap_or("ModuleScript")
+            .unwrap_or("LocalScript")
             .to_string();
         let source = props.get_string(SOURCE_KEY).unwrap_or("").to_string();
         let uuid = props.get_uuid().unwrap_or_default().to_string();
         let archivable = props.get_bool("metadata.archivable").unwrap_or(true);
+        let enabled = props.get_bool("script.enabled").unwrap_or(true);
 
         ctx.commands
             .spawn((
@@ -55,16 +54,17 @@ impl ClassSpawner for LuauModuleScriptSpawner {
                 Visibility::default(),
                 Instance {
                     name: name.clone(),
-                    class_name: ClassName::LuauModuleScript,
+                    class_name: ClassName::MluaLocalScript,
                     archivable,
                     id: 0,
                     uuid,
                     ai: false,
                 },
-                LuauModuleScript {
+                MluaLocalScript {
                     name: name.clone(),
                     source,
                     source_path: String::new(),
+                    enabled,
                     loaded: false,
                     error: None,
                 },
@@ -90,7 +90,7 @@ impl ClassSpawner for LuauModuleScriptSpawner {
                 if let Some(mut name) = entity_mut.get_mut::<Name>() {
                     name.set(new_name.to_string());
                 }
-                if let Some(mut script) = entity_mut.get_mut::<LuauModuleScript>() {
+                if let Some(mut script) = entity_mut.get_mut::<MluaLocalScript>() {
                     script.name = new_name.to_string();
                 }
             }
@@ -99,12 +99,13 @@ impl ClassSpawner for LuauModuleScriptSpawner {
                     instance.archivable = archivable;
                 }
             }
-            if let Some(mut script) = entity_mut.get_mut::<LuauModuleScript>() {
+            if let Some(mut script) = entity_mut.get_mut::<MluaLocalScript>() {
                 if let Some(new_source) = props.get_string(SOURCE_KEY) {
                     script.source = new_source.to_string();
-                    // Invalidate the module cache so the next `require`
-                    // re-evaluates. The runtime owns the actual cache.
                     script.loaded = false;
+                }
+                if let Some(enabled) = props.get_bool("script.enabled") {
+                    script.enabled = enabled;
                 }
             }
         }
@@ -117,17 +118,19 @@ impl ClassSpawner for LuauModuleScriptSpawner {
     }
 
     fn import_from_roblox(&self, rbx: &dyn RobloxInstance) -> PropertyBag {
-        // Modules carry only `Source` (no `Enabled` — they run on require).
-        let mut bag = PropertyBag::with_capacity(2);
+        let mut bag = PropertyBag::with_capacity(3);
         bag.set("metadata.name", PropertyValue::String(rbx.name().to_string()));
         if let Some(source) = rbx.property("Source").and_then(|p| p.as_str().map(str::to_owned)) {
             bag.set(SOURCE_KEY, PropertyValue::String(source));
+        }
+        if let Some(enabled) = rbx.property("Enabled").and_then(|p| p.as_bool()) {
+            bag.set("script.enabled", PropertyValue::Bool(enabled));
         }
         bag
     }
 
     fn import_from_toml(&self, toml_value: &toml::Value) -> PropertyBag {
-        let mut bag = PropertyBag::with_capacity(4);
+        let mut bag = PropertyBag::with_capacity(5);
 
         if let Some(meta) = toml_value.get("metadata") {
             if let Some(name) = meta.get("name").and_then(|v| v.as_str()) {
@@ -144,6 +147,9 @@ impl ClassSpawner for LuauModuleScriptSpawner {
             if let Some(source) = script.get("source").and_then(|v| v.as_str()) {
                 bag.set(SOURCE_KEY, PropertyValue::String(source.to_string()));
             }
+            if let Some(enabled) = script.get("enabled").and_then(|v| v.as_bool()) {
+                bag.set("script.enabled", PropertyValue::Bool(enabled));
+            }
         }
 
         bag
@@ -155,7 +161,7 @@ impl ClassSpawner for LuauModuleScriptSpawner {
 
         meta.insert(
             "class_name".to_string(),
-            toml::Value::String("LuauModuleScript".to_string()),
+            toml::Value::String("LuauLocalScript".to_string()),
         );
 
         if let Some(instance) = world.entity(entity).get::<Instance>() {
@@ -170,9 +176,10 @@ impl ClassSpawner for LuauModuleScriptSpawner {
         }
         root.insert("metadata".to_string(), toml::Value::Table(meta));
 
-        if let Some(script) = world.entity(entity).get::<LuauModuleScript>() {
+        if let Some(script) = world.entity(entity).get::<MluaLocalScript>() {
             let mut s = toml::value::Table::new();
             s.insert("source".to_string(), toml::Value::String(script.source.clone()));
+            s.insert("enabled".to_string(), toml::Value::Boolean(script.enabled));
             root.insert("script".to_string(), toml::Value::Table(s));
         }
 
@@ -185,22 +192,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn class_name_is_luau_module_script() {
+    fn class_name_is_mlua_local_script() {
         assert_eq!(
-            LuauModuleScriptSpawner.class_name(),
-            ClassName::LuauModuleScript
+            MluaLocalScriptSpawner.class_name(),
+            ClassName::MluaLocalScript
         );
     }
 
     #[test]
-    fn luau_module_script_spawner_is_object_safe() {
-        let boxed: Box<dyn ClassSpawner> = Box::new(LuauModuleScriptSpawner);
-        assert_eq!(boxed.class_name(), ClassName::LuauModuleScript);
+    fn mlua_local_script_spawner_is_object_safe() {
+        let boxed: Box<dyn ClassSpawner> = Box::new(MluaLocalScriptSpawner);
+        assert_eq!(boxed.class_name(), ClassName::MluaLocalScript);
     }
 
     #[test]
     fn lod_bundle_is_empty_at_every_tier() {
-        let spawner = LuauModuleScriptSpawner;
+        let spawner = MluaLocalScriptSpawner;
         for tier in [
             LodTier::Hero,
             LodTier::Active,
@@ -215,20 +222,20 @@ mod tests {
     fn import_from_toml_reads_source() {
         let toml_src = r#"
             [metadata]
-            class_name = "LuauModuleScript"
-            name = "MathUtils"
+            class_name = "LuauLocalScript"
+            name = "ClientHud"
 
             [script]
-            source = "math_utils.luau"
+            source = "hud.luau"
         "#;
         let value: toml::Value = toml::from_str(toml_src).unwrap();
-        let bag = LuauModuleScriptSpawner.import_from_toml(&value);
-        assert_eq!(bag.get_string("metadata.name"), Some("MathUtils"));
-        assert_eq!(bag.get_string(SOURCE_KEY), Some("math_utils.luau"));
+        let bag = MluaLocalScriptSpawner.import_from_toml(&value);
+        assert_eq!(bag.get_string("metadata.name"), Some("ClientHud"));
+        assert_eq!(bag.get_string(SOURCE_KEY), Some("hud.luau"));
     }
 
     #[test]
     fn deserialize_empty_returns_empty_bag() {
-        assert!(LuauModuleScriptSpawner.deserialize(&[]).is_empty());
+        assert!(MluaLocalScriptSpawner.deserialize(&[]).is_empty());
     }
 }

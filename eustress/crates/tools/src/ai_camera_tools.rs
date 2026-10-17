@@ -216,7 +216,7 @@ mod tests {
             universe_root: universe.clone(),
             user_id: None,
             username: None,
-            luau_executor: None,
+            mlua_executor: None,
             display_unit: None,
             cancelled: None,
             permissions: crate::Permissions::standard(),

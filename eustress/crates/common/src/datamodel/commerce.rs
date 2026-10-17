@@ -141,7 +141,7 @@ pub struct CommerceState {
     /// A Luau script set `MarketplaceService.ProcessReceipt`. A simulation has
     /// one receipt handler, as in Roblox: when Luau has one, Rune's
     /// `process_receipt` is not called.
-    pub luau_process_receipt: bool,
+    pub mlua_process_receipt: bool,
     /// Scripts to engine: what `ProcessReceipt` decided.
     pub decisions: Vec<ReceiptDecision>,
     /// Engine to scripts: prompts that closed.

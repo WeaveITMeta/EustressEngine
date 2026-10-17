@@ -352,7 +352,7 @@ fn start_cloud_noise(mut noise: ResMut<CloudNoise>) {
     let spawned = std::thread::Builder::new()
         .name("eustress-cloud-noise".into())
         .spawn(move || {
-            let started = std::time::Instant::now();
+            let started = bevy::platform::time::Instant::now();
             let shape = noise_image(build_shape_noise(SHAPE_NOISE_SIZE), SHAPE_NOISE_SIZE);
             let detail = noise_image(build_detail_noise(DETAIL_NOISE_SIZE), DETAIL_NOISE_SIZE);
             info!("☁️ Cloud noise built in {:.2?}", started.elapsed());

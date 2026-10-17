@@ -46,8 +46,8 @@ use eustress_common::class_registry::{
 use eustress_common::classes::{ClassName, Instance, PropertyValue};
 // Data-only Component `RemoteFunction` (NOT the crate-root signal-object
 // re-export from `scripting::events`). See `remote_event.rs` module docs
-// for why the explicit `luau::components` path is required.
-use eustress_common::luau::components::RemoteFunction;
+// for why the explicit `mlua::components` path is required.
+use eustress_common::mlua::components::RemoteFunction;
 use eustress_common::{Attributes, Tags};
 
 /// Zero-sized spawner for [`ClassName::RemoteFunction`].

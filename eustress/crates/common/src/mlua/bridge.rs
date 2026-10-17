@@ -5,7 +5,7 @@
 //!
 //! ## Table of Contents
 //!
-//! 1. **LuauValue** — Serializable value type for cross-boundary data
+//! 1. **MluaValue** — Serializable value type for cross-boundary data
 //! 2. **RemoteEventBus** — Queues RemoteEvent fires for network replication
 //! 3. **RemoteEventFired** — Bevy event when a RemoteEvent is fired
 //! 4. **RemoteFunctionInvoked** — Bevy event when a RemoteFunction is called
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 /// Maps to Luau types: nil, bool, number, string, table (as HashMap).
 /// Intentionally limited — no functions, userdata, or threads cross the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LuauValue {
+pub enum MluaValue {
     /// Luau `nil`
     Nil,
     /// Luau `boolean`
@@ -38,9 +38,9 @@ pub enum LuauValue {
     /// Luau integer (i64) — Luau supports integer subtype
     Integer(i64),
     /// Luau `table` (dictionary form)
-    Table(HashMap<String, LuauValue>),
+    Table(HashMap<String, MluaValue>),
     /// Luau `table` (array form)
-    Array(Vec<LuauValue>),
+    Array(Vec<MluaValue>),
     /// Vector3 (common in game scripts)
     Vector3(f32, f32, f32),
     /// CFrame (position + rotation, serialized as 12 floats)
@@ -49,9 +49,9 @@ pub enum LuauValue {
     EntityRef(u64),
 }
 
-impl Default for LuauValue {
+impl Default for MluaValue {
     fn default() -> Self {
-        LuauValue::Nil
+        MluaValue::Nil
     }
 }
 
@@ -82,7 +82,7 @@ pub struct RemoteEventBus {
 
 impl RemoteEventBus {
     /// Queue a remote event fire from script code
-    pub fn fire(&mut self, event_name: &str, direction: BridgeDirection, args: Vec<LuauValue>) {
+    pub fn fire(&mut self, event_name: &str, direction: BridgeDirection, args: Vec<MluaValue>) {
         self.pending.push(RemoteEventFired {
             event_name: event_name.to_string(),
             direction,
@@ -92,7 +92,7 @@ impl RemoteEventBus {
     }
 
     /// Queue a remote event fire targeting a specific player
-    pub fn fire_to_client(&mut self, event_name: &str, player_entity: Entity, args: Vec<LuauValue>) {
+    pub fn fire_to_client(&mut self, event_name: &str, player_entity: Entity, args: Vec<MluaValue>) {
         self.pending.push(RemoteEventFired {
             event_name: event_name.to_string(),
             direction: BridgeDirection::ServerToClient,
@@ -112,7 +112,7 @@ pub struct RemoteEventFired {
     /// Sender entity (player for client→server, None for server→all)
     pub sender: Option<Entity>,
     /// Arguments passed with the event
-    pub args: Vec<LuauValue>,
+    pub args: Vec<MluaValue>,
 }
 
 /// Bevy message fired when a RemoteFunction is invoked
@@ -125,7 +125,7 @@ pub struct RemoteFunctionInvoked {
     /// Invoker entity (player for client→server)
     pub invoker: Option<Entity>,
     /// Arguments passed to the function
-    pub args: Vec<LuauValue>,
+    pub args: Vec<MluaValue>,
     /// Unique request ID for correlating responses
     pub request_id: u64,
 }
@@ -136,7 +136,7 @@ pub struct RemoteFunctionResponse {
     /// Unique request ID matching the invocation
     pub request_id: u64,
     /// Return value (or error)
-    pub result: Result<LuauValue, String>,
+    pub result: Result<MluaValue, String>,
 }
 
 // ============================================================================
@@ -152,7 +152,7 @@ pub struct BindableEventBus {
 
 impl BindableEventBus {
     /// Queue a bindable event fire from script code
-    pub fn fire(&mut self, event_name: &str, args: Vec<LuauValue>) {
+    pub fn fire(&mut self, event_name: &str, args: Vec<MluaValue>) {
         self.pending.push(BindableEventFired {
             event_name: event_name.to_string(),
             args,
@@ -166,7 +166,7 @@ pub struct BindableEventFired {
     /// Name of the BindableEvent entity
     pub event_name: String,
     /// Arguments passed with the event
-    pub args: Vec<LuauValue>,
+    pub args: Vec<MluaValue>,
 }
 
 /// Bevy message fired when a BindableFunction is invoked (in-process)
@@ -175,7 +175,7 @@ pub struct BindableFunctionInvoked {
     /// Name of the BindableFunction entity
     pub function_name: String,
     /// Arguments passed to the function
-    pub args: Vec<LuauValue>,
+    pub args: Vec<MluaValue>,
     /// Unique request ID for correlating responses
     pub request_id: u64,
 }
@@ -187,13 +187,13 @@ pub struct BindableFunctionInvoked {
 /// Wire format for remote event/function messages sent over QUIC.
 /// Used by the play server for client↔server Luau communication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LuauNetworkPacket {
+pub enum MluaNetworkPacket {
     /// RemoteEvent fire
     RemoteEventFire {
         /// Event name
         event_name: String,
         /// Serialized arguments
-        args: Vec<LuauValue>,
+        args: Vec<MluaValue>,
     },
 
     /// RemoteFunction invocation request
@@ -201,7 +201,7 @@ pub enum LuauNetworkPacket {
         /// Function name
         function_name: String,
         /// Serialized arguments
-        args: Vec<LuauValue>,
+        args: Vec<MluaValue>,
         /// Request ID for response correlation
         request_id: u64,
     },
@@ -211,6 +211,6 @@ pub enum LuauNetworkPacket {
         /// Request ID matching the invocation
         request_id: u64,
         /// Return value or error string
-        result: Result<LuauValue, String>,
+        result: Result<MluaValue, String>,
     },
 }

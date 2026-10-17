@@ -677,7 +677,7 @@ fn spawn_created_instances(
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
     bridges: &mut RunePlayBridges,
-    created: Vec<eustress_common::luau::runtime::LuauCreatedInstance>,
+    created: Vec<eustress_common::mlua::runtime::MluaCreatedInstance>,
 ) {
     use eustress_common::attributes::Tags;
 
@@ -743,14 +743,14 @@ fn spawn_created_instances(
         if !inst.tags.is_empty() {
             commands.entity(entity).insert(Tags(inst.tags.clone()));
         }
-        rune_to_bevy.insert(inst.luau_entity_id, entity);
+        rune_to_bevy.insert(inst.mlua_entity_id, entity);
         spawned += 1;
     }
 
     // Second pass: parent within the batch.
     for inst in &created {
         let (Some(&child), Some(parent_id)) =
-            (rune_to_bevy.get(&inst.luau_entity_id), inst.parent_entity_id)
+            (rune_to_bevy.get(&inst.mlua_entity_id), inst.parent_entity_id)
         else {
             continue;
         };

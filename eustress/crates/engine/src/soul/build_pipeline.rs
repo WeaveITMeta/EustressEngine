@@ -1203,7 +1203,7 @@ pub fn apply_build_results(
                     if let Some(lff) = loaded_from {
                         let dir = if lff.path.is_dir() { lff.path.clone() }
                             else { lff.path.parent().unwrap_or(&lff.path).to_path_buf() };
-                        // Find the source file (.rune/.luau/.lua) inside the folder
+                        // Find the source file (.rune/.mlua/.lua) inside the folder
                         if let Ok(entries) = std::fs::read_dir(&dir) {
                             for entry in entries.flatten() {
                                 let n = entry.file_name().to_string_lossy().to_string();

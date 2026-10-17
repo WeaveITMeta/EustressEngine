@@ -33,8 +33,8 @@ pub fn trash_destination_in(space_root: &Path, source: &Path) -> PathBuf {
     if !base.exists() {
         return base;
     }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     dir.join(format!("{name}-{ms:x}"))

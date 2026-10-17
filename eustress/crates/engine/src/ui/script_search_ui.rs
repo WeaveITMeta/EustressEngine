@@ -26,7 +26,7 @@
 //! | Component | Holds | Where its text comes from |
 //! |---|---|---|
 //! | [`SoulScriptData`] | Rune, Luau, Lua and Soul markdown (`run_context`) | `source` |
-//! | [`LuauScript`], [`LuauLocalScript`], [`LuauModuleScript`] | Luau | `source` |
+//! | [`MluaScript`], [`MluaLocalScript`], [`MluaModuleScript`] | Luau | `source` |
 //!
 //! A script open in a tab is searched as the tab shows it, unsaved edits
 //! included, so a result's line is the line the editor opens at. A Workshop
@@ -46,7 +46,7 @@ use crate::script_editor::script_search::{
 use crate::soul::SoulScriptData;
 use crate::space::LoadedFromFile;
 use eustress_common::classes::{ClassName, Instance};
-use eustress_common::luau::{LuauLocalScript, LuauModuleScript, LuauScript};
+use eustress_common::mlua::{MluaLocalScript, MluaModuleScript, MluaScript};
 
 /// A script the modal can search, with what opening it takes.
 struct Gathered {
@@ -63,9 +63,9 @@ struct Gathered {
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct ScriptSources<'w, 's> {
     soul: Query<'w, 's, (Entity, &'static Instance, &'static SoulScriptData, Option<&'static LoadedFromFile>)>,
-    luau: Query<'w, 's, (Entity, &'static Instance, &'static LuauScript, Option<&'static LoadedFromFile>)>,
-    local: Query<'w, 's, (Entity, &'static Instance, &'static LuauLocalScript, Option<&'static LoadedFromFile>)>,
-    module: Query<'w, 's, (Entity, &'static Instance, &'static LuauModuleScript, Option<&'static LoadedFromFile>)>,
+    mlua: Query<'w, 's, (Entity, &'static Instance, &'static MluaScript, Option<&'static LoadedFromFile>)>,
+    local: Query<'w, 's, (Entity, &'static Instance, &'static MluaLocalScript, Option<&'static LoadedFromFile>)>,
+    module: Query<'w, 's, (Entity, &'static Instance, &'static MluaModuleScript, Option<&'static LoadedFromFile>)>,
 }
 
 impl ScriptSources<'_, '_> {
@@ -96,7 +96,7 @@ impl ScriptSources<'_, '_> {
                 take(entity, instance, &data.source, None, loaded);
             }
         }
-        for (entity, instance, script, loaded) in self.luau.iter() {
+        for (entity, instance, script, loaded) in self.mlua.iter() {
             take(entity, instance, &script.source, Some(&script.source_path), loaded);
         }
         for (entity, instance, script, loaded) in self.local.iter() {

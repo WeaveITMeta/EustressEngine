@@ -22,8 +22,8 @@ impl LogService {
     
     pub fn log(&mut self, level: LogLevel, message: String) {
         let entry = LogEntry {
-            timestamp_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            timestamp_ms: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
             level,

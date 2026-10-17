@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_luau_error_loses_its_own_path_and_line() {
+    fn a_mlua_error_loses_its_own_path_and_line() {
         let s = "ServerScriptService.AbilityDirector";
         assert_eq!(strip_script_prefix("ServerScriptService.AbilityDirector:88: attempt to index nil", s), "attempt to index nil");
         assert_eq!(strip_script_prefix("[ServerScriptService.AbilityDirector] ServerScriptService.AbilityDirector:88: boom", s), "boom");

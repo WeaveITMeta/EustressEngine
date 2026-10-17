@@ -1,11 +1,11 @@
-//! Value types the Play VM adds on top of `luau::types`: Vector2, EnumItem,
+//! Value types the Play VM adds on top of `mlua::types`: Vector2, EnumItem,
 //! Random, NumberRange, NumberSequence, ColorSequence, Ray, RaycastParams,
 //! Region3 and BrickColor.
 
 use mlua::{FromLua, Lua, MetaMethod, Result as LuaResult, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::datamodel::{format_number, EnumItem, InstanceId};
-use crate::luau::types::{userdata_eq, LuauCFrame, LuauColor3, LuauVector3, UserDataPeek};
+use crate::mlua::types::{userdata_eq, MluaCFrame, MluaColor3, MluaVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, NumberRange, Vector2, Vector3};
 
 // ============================================================================
@@ -13,48 +13,48 @@ use crate::scripting::{CFrame, Color3, NumberRange, Vector2, Vector3};
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LuauVector2(pub Vector2);
+pub struct MluaVector2(pub Vector2);
 
-impl UserData for LuauVector2 {
+impl UserData for MluaVector2 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "Vector2");
         fields.add_field_method_get("X", |_, this| Ok(this.0.x));
         fields.add_field_method_get("Y", |_, this| Ok(this.0.y));
         fields.add_field_method_get("Magnitude", |_, this| Ok(this.0.magnitude()));
-        fields.add_field_method_get("Unit", |_, this| Ok(LuauVector2(this.0.unit())));
+        fields.add_field_method_get("Unit", |_, this| Ok(MluaVector2(this.0.unit())));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("Dot", |_, this, o: LuauVector2| Ok(this.0.dot(&o.0)));
-        methods.add_method("Cross", |_, this, o: LuauVector2| Ok(this.0.cross(&o.0)));
-        methods.add_method("Lerp", |_, this, (o, a): (LuauVector2, f64)| Ok(LuauVector2(this.0.lerp(&o.0, a))));
-        methods.add_method("Max", |_, this, o: LuauVector2| Ok(LuauVector2(this.0.max(&o.0))));
-        methods.add_method("Min", |_, this, o: LuauVector2| Ok(LuauVector2(this.0.min(&o.0))));
-        methods.add_method("Abs", |_, this, ()| Ok(LuauVector2(this.0.abs())));
-        methods.add_method("Floor", |_, this, ()| Ok(LuauVector2(this.0.floor())));
-        methods.add_method("Ceil", |_, this, ()| Ok(LuauVector2(this.0.ceil())));
-        methods.add_meta_method(MetaMethod::Add, |_, this, o: LuauVector2| Ok(LuauVector2(this.0 + o.0)));
-        methods.add_meta_method(MetaMethod::Sub, |_, this, o: LuauVector2| Ok(LuauVector2(this.0 - o.0)));
-        methods.add_meta_method(MetaMethod::Unm, |_, this, ()| Ok(LuauVector2(-this.0)));
+        methods.add_method("Dot", |_, this, o: MluaVector2| Ok(this.0.dot(&o.0)));
+        methods.add_method("Cross", |_, this, o: MluaVector2| Ok(this.0.cross(&o.0)));
+        methods.add_method("Lerp", |_, this, (o, a): (MluaVector2, f64)| Ok(MluaVector2(this.0.lerp(&o.0, a))));
+        methods.add_method("Max", |_, this, o: MluaVector2| Ok(MluaVector2(this.0.max(&o.0))));
+        methods.add_method("Min", |_, this, o: MluaVector2| Ok(MluaVector2(this.0.min(&o.0))));
+        methods.add_method("Abs", |_, this, ()| Ok(MluaVector2(this.0.abs())));
+        methods.add_method("Floor", |_, this, ()| Ok(MluaVector2(this.0.floor())));
+        methods.add_method("Ceil", |_, this, ()| Ok(MluaVector2(this.0.ceil())));
+        methods.add_meta_method(MetaMethod::Add, |_, this, o: MluaVector2| Ok(MluaVector2(this.0 + o.0)));
+        methods.add_meta_method(MetaMethod::Sub, |_, this, o: MluaVector2| Ok(MluaVector2(this.0 - o.0)));
+        methods.add_meta_method(MetaMethod::Unm, |_, this, ()| Ok(MluaVector2(-this.0)));
         // Functions, not methods: `2 * v` arrives as (2, v).
         methods.add_meta_function(MetaMethod::Mul, |_, (a, b): (Value, Value)| {
             match (vector2_operand(&a), vector2_operand(&b), number_operand(&a), number_operand(&b)) {
-                (Some(x), Some(y), _, _) => Ok(LuauVector2(x * y)),
-                (Some(x), None, _, Some(n)) => Ok(LuauVector2(x * n)),
-                (None, Some(y), Some(n), _) => Ok(LuauVector2(y * n)),
+                (Some(x), Some(y), _, _) => Ok(MluaVector2(x * y)),
+                (Some(x), None, _, Some(n)) => Ok(MluaVector2(x * n)),
+                (None, Some(y), Some(n), _) => Ok(MluaVector2(y * n)),
                 _ => Err(mlua::Error::RuntimeError("Vector2 * expects a number or Vector2".into())),
             }
         });
         methods.add_meta_function(MetaMethod::Div, |_, (a, b): (Value, Value)| {
             match (vector2_operand(&a), vector2_operand(&b), number_operand(&a), number_operand(&b)) {
-                (Some(x), Some(y), _, _) => Ok(LuauVector2(x / y)),
-                (Some(x), None, _, Some(n)) => Ok(LuauVector2(x / n)),
-                (None, Some(y), Some(n), _) => Ok(LuauVector2(Vector2::new(n / y.x, n / y.y))),
+                (Some(x), Some(y), _, _) => Ok(MluaVector2(x / y)),
+                (Some(x), None, _, Some(n)) => Ok(MluaVector2(x / n)),
+                (None, Some(y), Some(n), _) => Ok(MluaVector2(Vector2::new(n / y.x, n / y.y))),
                 _ => Err(mlua::Error::RuntimeError("Vector2 / expects a number or Vector2".into())),
             }
         });
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
-            Ok(userdata_eq::<LuauVector2>(&a, &b, |p, q| p.0 == q.0))
+            Ok(userdata_eq::<MluaVector2>(&a, &b, |p, q| p.0 == q.0))
         });
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(format!("{}, {}", this.0.x, this.0.y)));
     }
@@ -62,7 +62,7 @@ impl UserData for LuauVector2 {
 
 fn vector2_operand(v: &Value) -> Option<Vector2> {
     match v {
-        Value::UserData(ud) => ud.peek::<LuauVector2>().ok().map(|x| x.0),
+        Value::UserData(ud) => ud.peek::<MluaVector2>().ok().map(|x| x.0),
         _ => None,
     }
 }
@@ -75,10 +75,10 @@ fn number_operand(v: &Value) -> Option<f64> {
     }
 }
 
-impl FromLua for LuauVector2 {
+impl FromLua for MluaVector2 {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauVector2>()?),
+            Value::UserData(ud) => Ok(ud.peek::<MluaVector2>()?),
             other => Err(conversion_error(&other, "Vector2")),
         }
     }
@@ -89,9 +89,9 @@ impl FromLua for LuauVector2 {
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LuauEnumItem(pub EnumItem);
+pub struct MluaEnumItem(pub EnumItem);
 
-impl UserData for LuauEnumItem {
+impl UserData for MluaEnumItem {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "EnumItem");
         fields.add_field_method_get("Name", |_, this| Ok(this.0.name.clone()));
@@ -102,16 +102,16 @@ impl UserData for LuauEnumItem {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("IsA", |_, this, ty: String| Ok(this.0.enum_type == ty));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
-            Ok(userdata_eq::<LuauEnumItem>(&a, &b, |p, q| p.0 == q.0))
+            Ok(userdata_eq::<MluaEnumItem>(&a, &b, |p, q| p.0 == q.0))
         });
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(this.0.to_string()));
     }
 }
 
-impl FromLua for LuauEnumItem {
+impl FromLua for MluaEnumItem {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauEnumItem>()?.clone()),
+            Value::UserData(ud) => Ok(ud.peek::<MluaEnumItem>()?.clone()),
             other => Err(conversion_error(&other, "EnumItem")),
         }
     }
@@ -149,12 +149,12 @@ pub fn enum_value(item: &EnumItem) -> f64 {
 
 /// Roblox `Random`: a seeded PCG32 generator per object.
 #[derive(Debug, Clone)]
-pub struct LuauRandom {
+pub struct MluaRandom {
     state: u64,
     inc: u64,
 }
 
-impl LuauRandom {
+impl MluaRandom {
     pub fn new(seed: u64) -> Self {
         let mut r = Self { state: 0, inc: (seed << 1) | 1 };
         r.next_u32();
@@ -179,7 +179,7 @@ impl LuauRandom {
     }
 }
 
-impl UserData for LuauRandom {
+impl UserData for MluaRandom {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "Random");
     }
@@ -199,7 +199,7 @@ impl UserData for LuauRandom {
             let z = 2.0 * this.next_f64() - 1.0;
             let t = std::f64::consts::TAU * this.next_f64();
             let r = (1.0 - z * z).max(0.0).sqrt();
-            Ok(LuauVector3(Vector3::new(r * t.cos(), r * t.sin(), z)))
+            Ok(MluaVector3(Vector3::new(r * t.cos(), r * t.sin(), z)))
         });
         methods.add_method_mut("Shuffle", |_, this, tbl: mlua::Table| {
             let n = tbl.raw_len();
@@ -221,9 +221,9 @@ impl UserData for LuauRandom {
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LuauNumberRange(pub NumberRange);
+pub struct MluaNumberRange(pub NumberRange);
 
-impl UserData for LuauNumberRange {
+impl UserData for MluaNumberRange {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "NumberRange");
         fields.add_field_method_get("Min", |_, this| Ok(this.0.min));
@@ -234,21 +234,21 @@ impl UserData for LuauNumberRange {
     }
 }
 
-impl FromLua for LuauNumberRange {
+impl FromLua for MluaNumberRange {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauNumberRange>()?),
-            Value::Number(n) => Ok(LuauNumberRange(NumberRange::single(n))),
-            Value::Integer(i) => Ok(LuauNumberRange(NumberRange::single(i as f64))),
+            Value::UserData(ud) => Ok(ud.peek::<MluaNumberRange>()?),
+            Value::Number(n) => Ok(MluaNumberRange(NumberRange::single(n))),
+            Value::Integer(i) => Ok(MluaNumberRange(NumberRange::single(i as f64))),
             other => Err(conversion_error(&other, "NumberRange")),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LuauNumberSequence(pub Vec<(f64, f64)>);
+pub struct MluaNumberSequence(pub Vec<(f64, f64)>);
 
-impl UserData for LuauNumberSequence {
+impl UserData for MluaNumberSequence {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "NumberSequence");
         fields.add_field_method_get("Keypoints", |lua, this| {
@@ -266,9 +266,9 @@ impl UserData for LuauNumberSequence {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LuauColorSequence(pub Vec<(f64, Color3)>);
+pub struct MluaColorSequence(pub Vec<(f64, Color3)>);
 
-impl UserData for LuauColorSequence {
+impl UserData for MluaColorSequence {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "ColorSequence");
         fields.add_field_method_get("Keypoints", |lua, this| {
@@ -276,7 +276,7 @@ impl UserData for LuauColorSequence {
             for (i, (time, c)) in this.0.iter().enumerate() {
                 let k = lua.create_table()?;
                 k.set("Time", *time)?;
-                k.set("Value", LuauColor3(*c))?;
+                k.set("Value", MluaColor3(*c))?;
                 t.set(i + 1, k)?;
             }
             Ok(t)
@@ -289,27 +289,27 @@ impl UserData for LuauColorSequence {
 // ============================================================================
 
 #[derive(Debug, Clone, Copy)]
-pub struct LuauRay {
+pub struct MluaRay {
     pub origin: Vector3,
     pub direction: Vector3,
 }
 
-impl UserData for LuauRay {
+impl UserData for MluaRay {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "Ray");
-        fields.add_field_method_get("Origin", |_, this| Ok(LuauVector3(this.origin)));
-        fields.add_field_method_get("Direction", |_, this| Ok(LuauVector3(this.direction)));
+        fields.add_field_method_get("Origin", |_, this| Ok(MluaVector3(this.origin)));
+        fields.add_field_method_get("Direction", |_, this| Ok(MluaVector3(this.direction)));
         fields.add_field_method_get("Unit", |_, this| {
-            Ok(LuauRay { origin: this.origin, direction: this.direction.unit() })
+            Ok(MluaRay { origin: this.origin, direction: this.direction.unit() })
         });
     }
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("ClosestPoint", |_, this, p: LuauVector3| {
+        methods.add_method("ClosestPoint", |_, this, p: MluaVector3| {
             let d = this.direction.unit();
             let t = (p.0 - this.origin).dot(&d).max(0.0);
-            Ok(LuauVector3(this.origin + d * t))
+            Ok(MluaVector3(this.origin + d * t))
         });
-        methods.add_method("Distance", |_, this, p: LuauVector3| {
+        methods.add_method("Distance", |_, this, p: MluaVector3| {
             let d = this.direction.unit();
             let t = (p.0 - this.origin).dot(&d).max(0.0);
             Ok((p.0 - (this.origin + d * t)).magnitude())
@@ -317,10 +317,10 @@ impl UserData for LuauRay {
     }
 }
 
-impl FromLua for LuauRay {
+impl FromLua for MluaRay {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauRay>()?),
+            Value::UserData(ud) => Ok(ud.peek::<MluaRay>()?),
             other => Err(conversion_error(&other, "Ray")),
         }
     }
@@ -331,7 +331,7 @@ impl FromLua for LuauRay {
 // ============================================================================
 
 #[derive(Debug, Clone)]
-pub struct LuauRaycastParams {
+pub struct MluaRaycastParams {
     /// `Exclude` (default) or `Include`.
     pub include: bool,
     pub filter: Vec<InstanceId>,
@@ -340,7 +340,7 @@ pub struct LuauRaycastParams {
     pub collision_group: String,
 }
 
-impl Default for LuauRaycastParams {
+impl Default for MluaRaycastParams {
     fn default() -> Self {
         Self {
             include: false,
@@ -352,15 +352,15 @@ impl Default for LuauRaycastParams {
     }
 }
 
-impl UserData for LuauRaycastParams {
+impl UserData for MluaRaycastParams {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "RaycastParams");
         fields.add_field_method_get("FilterType", |_, this| {
-            Ok(LuauEnumItem(EnumItem::new("RaycastFilterType", if this.include { "Include" } else { "Exclude" })))
+            Ok(MluaEnumItem(EnumItem::new("RaycastFilterType", if this.include { "Include" } else { "Exclude" })))
         });
         fields.add_field_method_set("FilterType", |_, this, v: Value| {
             let name = match &v {
-                Value::UserData(ud) => ud.peek::<LuauEnumItem>()?.0.name.clone(),
+                Value::UserData(ud) => ud.peek::<MluaEnumItem>()?.0.name.clone(),
                 Value::String(s) => s.to_str()?.to_string(),
                 _ => String::new(),
             };
@@ -429,10 +429,10 @@ impl UserData for LuauRaycastParams {
     }
 }
 
-impl FromLua for LuauRaycastParams {
+impl FromLua for MluaRaycastParams {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauRaycastParams>()?.clone()),
+            Value::UserData(ud) => Ok(ud.peek::<MluaRaycastParams>()?.clone()),
             other => Err(conversion_error(&other, "RaycastParams")),
         }
     }
@@ -445,12 +445,12 @@ impl FromLua for LuauRaycastParams {
 /// Roblox `Region3`: the axis-aligned box between two corners, in world
 /// units. `Region3.new` takes the corners in either order.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LuauRegion3 {
+pub struct MluaRegion3 {
     pub min: Vector3,
     pub max: Vector3,
 }
 
-impl LuauRegion3 {
+impl MluaRegion3 {
     /// The box spanning corners `a` and `b`.
     pub fn new(a: Vector3, b: Vector3) -> Self {
         Self { min: a.min(&b), max: a.max(&b) }
@@ -477,11 +477,11 @@ impl LuauRegion3 {
     }
 }
 
-impl UserData for LuauRegion3 {
+impl UserData for MluaRegion3 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "Region3");
-        fields.add_field_method_get("CFrame", |_, this| Ok(LuauCFrame(CFrame::from_position(this.center()))));
-        fields.add_field_method_get("Size", |_, this| Ok(LuauVector3(this.size())));
+        fields.add_field_method_get("CFrame", |_, this| Ok(MluaCFrame(CFrame::from_position(this.center()))));
+        fields.add_field_method_get("Size", |_, this| Ok(MluaVector3(this.size())));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -492,7 +492,7 @@ impl UserData for LuauRegion3 {
             Ok(this.expand_to_grid(resolution))
         });
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
-            Ok(userdata_eq::<LuauRegion3>(&a, &b, |p, q| p == q))
+            Ok(userdata_eq::<MluaRegion3>(&a, &b, |p, q| p == q))
         });
         // The centre's CFrame components, then the size.
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
@@ -510,10 +510,10 @@ impl UserData for LuauRegion3 {
     }
 }
 
-impl FromLua for LuauRegion3 {
+impl FromLua for MluaRegion3 {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauRegion3>()?),
+            Value::UserData(ud) => Ok(ud.peek::<MluaRegion3>()?),
             other => Err(conversion_error(&other, "Region3")),
         }
     }
@@ -524,7 +524,7 @@ impl FromLua for LuauRegion3 {
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LuauBrickColor {
+pub struct MluaBrickColor {
     pub name: String,
     pub color: Color3,
 }
@@ -562,7 +562,7 @@ const BRICK_COLORS: &[(&str, u8, u8, u8)] = &[
     ("Gold", 239, 184, 56),
 ];
 
-impl LuauBrickColor {
+impl MluaBrickColor {
     pub fn named(name: &str) -> Self {
         for (n, r, g, b) in BRICK_COLORS {
             if n.eq_ignore_ascii_case(name) {
@@ -589,11 +589,11 @@ impl LuauBrickColor {
     }
 }
 
-impl UserData for LuauBrickColor {
+impl UserData for MluaBrickColor {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_meta_field("__type", "BrickColor");
         fields.add_field_method_get("Name", |_, this| Ok(this.name.clone()));
-        fields.add_field_method_get("Color", |_, this| Ok(LuauColor3(this.color)));
+        fields.add_field_method_get("Color", |_, this| Ok(MluaColor3(this.color)));
         fields.add_field_method_get("r", |_, this| Ok(this.color.r));
         fields.add_field_method_get("g", |_, this| Ok(this.color.g));
         fields.add_field_method_get("b", |_, this| Ok(this.color.b));
@@ -601,16 +601,16 @@ impl UserData for LuauBrickColor {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(this.name.clone()));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
-            Ok(userdata_eq::<LuauBrickColor>(&a, &b, |p, q| p.name == q.name))
+            Ok(userdata_eq::<MluaBrickColor>(&a, &b, |p, q| p.name == q.name))
         });
     }
 }
 
-impl FromLua for LuauBrickColor {
+impl FromLua for MluaBrickColor {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
-            Value::UserData(ud) => Ok(ud.peek::<LuauBrickColor>()?.clone()),
-            Value::String(s) => Ok(LuauBrickColor::named(&s.to_str()?)),
+            Value::UserData(ud) => Ok(ud.peek::<MluaBrickColor>()?.clone()),
+            Value::String(s) => Ok(MluaBrickColor::named(&s.to_str()?)),
             other => Err(conversion_error(&other, "BrickColor")),
         }
     }
@@ -629,31 +629,31 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
     // Vector2
     let v2 = lua.create_table()?;
     v2.set("new", lua.create_function(|_, (x, y): (Option<f64>, Option<f64>)| {
-        Ok(LuauVector2(Vector2::new(x.unwrap_or(0.0), y.unwrap_or(0.0))))
+        Ok(MluaVector2(Vector2::new(x.unwrap_or(0.0), y.unwrap_or(0.0))))
     })?)?;
-    v2.set("zero", LuauVector2(Vector2::ZERO))?;
-    v2.set("one", LuauVector2(Vector2::ONE))?;
-    v2.set("xAxis", LuauVector2(Vector2::X_AXIS))?;
-    v2.set("yAxis", LuauVector2(Vector2::Y_AXIS))?;
+    v2.set("zero", MluaVector2(Vector2::ZERO))?;
+    v2.set("one", MluaVector2(Vector2::ONE))?;
+    v2.set("xAxis", MluaVector2(Vector2::X_AXIS))?;
+    v2.set("yAxis", MluaVector2(Vector2::Y_AXIS))?;
     globals.set("Vector2", v2)?;
 
     // Random
     let random = lua.create_table()?;
     random.set("new", lua.create_function(|_, seed: Option<f64>| {
         let seed = seed.map(|s| s as i64 as u64).unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x5eed)
         });
-        Ok(LuauRandom::new(seed))
+        Ok(MluaRandom::new(seed))
     })?)?;
     globals.set("Random", random)?;
 
     // NumberRange
     let nr = lua.create_table()?;
     nr.set("new", lua.create_function(|_, (a, b): (f64, Option<f64>)| {
-        Ok(LuauNumberRange(NumberRange::new(a, b.unwrap_or(a))))
+        Ok(MluaNumberRange(NumberRange::new(a, b.unwrap_or(a))))
     })?)?;
     globals.set("NumberRange", nr)?;
 
@@ -669,10 +669,10 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
         match args.as_slice() {
             [a] if num(a).is_some() => {
                 let a = num(a).unwrap_or(0.0);
-                Ok(LuauNumberSequence(vec![(0.0, a), (1.0, a)]))
+                Ok(MluaNumberSequence(vec![(0.0, a), (1.0, a)]))
             }
             [a, b] if num(a).is_some() && num(b).is_some() => {
-                Ok(LuauNumberSequence(vec![(0.0, num(a).unwrap_or(0.0)), (1.0, num(b).unwrap_or(0.0))]))
+                Ok(MluaNumberSequence(vec![(0.0, num(a).unwrap_or(0.0)), (1.0, num(b).unwrap_or(0.0))]))
             }
             [Value::Table(t)] => {
                 let mut keys = Vec::new();
@@ -680,7 +680,7 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
                     let k = k?;
                     keys.push((k.get::<f64>("Time")?, k.get::<f64>("Value")?));
                 }
-                Ok(LuauNumberSequence(keys))
+                Ok(MluaNumberSequence(keys))
             }
             _ => Err(mlua::Error::RuntimeError("NumberSequence.new: bad arguments".into())),
         }
@@ -701,16 +701,16 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
     cs.set("new", lua.create_function(|_, args: mlua::Variadic<Value>| {
         let args: Vec<Value> = args.into_iter().collect();
         let col = |v: &Value| match v {
-            Value::UserData(ud) => ud.peek::<LuauColor3>().ok().map(|c| c.0),
+            Value::UserData(ud) => ud.peek::<MluaColor3>().ok().map(|c| c.0),
             _ => None,
         };
         match args.as_slice() {
             [a] if col(a).is_some() => {
                 let a = col(a).unwrap_or_default();
-                Ok(LuauColorSequence(vec![(0.0, a), (1.0, a)]))
+                Ok(MluaColorSequence(vec![(0.0, a), (1.0, a)]))
             }
             [a, b] if col(a).is_some() && col(b).is_some() => {
-                Ok(LuauColorSequence(vec![(0.0, col(a).unwrap_or_default()), (1.0, col(b).unwrap_or_default())]))
+                Ok(MluaColorSequence(vec![(0.0, col(a).unwrap_or_default()), (1.0, col(b).unwrap_or_default())]))
             }
             [Value::Table(t)] => {
                 let mut keys = Vec::new();
@@ -719,14 +719,14 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
                     let c: Value = k.get("Value")?;
                     keys.push((k.get::<f64>("Time")?, col(&c).unwrap_or_default()));
                 }
-                Ok(LuauColorSequence(keys))
+                Ok(MluaColorSequence(keys))
             }
             _ => Err(mlua::Error::RuntimeError("ColorSequence.new: bad arguments".into())),
         }
     })?)?;
     globals.set("ColorSequence", cs)?;
     let csk = lua.create_table()?;
-    csk.set("new", lua.create_function(|lua, (time, color): (f64, crate::luau::types::LuauColor3)| {
+    csk.set("new", lua.create_function(|lua, (time, color): (f64, crate::mlua::types::MluaColor3)| {
         let k = lua.create_table()?;
         k.set("Time", time)?;
         k.set("Value", color)?;
@@ -736,43 +736,43 @@ pub fn install(lua: &Lua, globals: &mlua::Table) -> LuaResult<()> {
 
     // Ray
     let ray = lua.create_table()?;
-    ray.set("new", lua.create_function(|_, (o, d): (LuauVector3, LuauVector3)| {
-        Ok(LuauRay { origin: o.0, direction: d.0 })
+    ray.set("new", lua.create_function(|_, (o, d): (MluaVector3, MluaVector3)| {
+        Ok(MluaRay { origin: o.0, direction: d.0 })
     })?)?;
     globals.set("Ray", ray)?;
 
     // RaycastParams
     let rp = lua.create_table()?;
-    rp.set("new", lua.create_function(|_, ()| Ok(LuauRaycastParams::default()))?)?;
+    rp.set("new", lua.create_function(|_, ()| Ok(MluaRaycastParams::default()))?)?;
     globals.set("RaycastParams", rp)?;
 
     // Region3.new(min, max); omitted corners are the origin.
     let region3 = lua.create_table()?;
-    region3.set("new", lua.create_function(|_, (a, b): (Option<LuauVector3>, Option<LuauVector3>)| {
-        let corner = |v: Option<LuauVector3>| v.map_or(Vector3::ZERO, |v| v.0);
-        Ok(LuauRegion3::new(corner(a), corner(b)))
+    region3.set("new", lua.create_function(|_, (a, b): (Option<MluaVector3>, Option<MluaVector3>)| {
+        let corner = |v: Option<MluaVector3>| v.map_or(Vector3::ZERO, |v| v.0);
+        Ok(MluaRegion3::new(corner(a), corner(b)))
     })?)?;
     globals.set("Region3", region3)?;
 
     // BrickColor
     let bc = lua.create_table()?;
     bc.set("new", lua.create_function(|_, v: Value| match v {
-        Value::String(s) => Ok(LuauBrickColor::named(&s.to_str()?)),
-        Value::UserData(ud) => Ok(LuauBrickColor::nearest(ud.peek::<LuauColor3>()?.0)),
-        _ => Ok(LuauBrickColor::named("Medium stone grey")),
+        Value::String(s) => Ok(MluaBrickColor::named(&s.to_str()?)),
+        Value::UserData(ud) => Ok(MluaBrickColor::nearest(ud.peek::<MluaColor3>()?.0)),
+        _ => Ok(MluaBrickColor::named("Medium stone grey")),
     })?)?;
     bc.set("Random", lua.create_function(|_, ()| {
-        let i = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let i = (web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0) as usize)
             % BRICK_COLORS.len();
-        Ok(LuauBrickColor::named(BRICK_COLORS[i].0))
+        Ok(MluaBrickColor::named(BRICK_COLORS[i].0))
     })?)?;
     for (name, _, _, _) in BRICK_COLORS.iter().take(8) {
         let key = name.replace(' ', "");
         let n = name.to_string();
-        bc.set(key, lua.create_function(move |_, ()| Ok(LuauBrickColor::named(&n)))?)?;
+        bc.set(key, lua.create_function(move |_, ()| Ok(MluaBrickColor::named(&n)))?)?;
     }
     globals.set("BrickColor", bc)?;
     Ok(())

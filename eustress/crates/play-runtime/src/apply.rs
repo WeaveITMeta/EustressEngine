@@ -1743,7 +1743,7 @@ mod tests {
         }
     }
     use eustress_common::datamodel::DataModel;
-    use eustress_common::luau::play::terrain::ensure_terrain_instance;
+    use eustress_common::mlua::play::terrain::ensure_terrain_instance;
 
     #[test]
     fn the_terrain_never_spawns_a_part() {

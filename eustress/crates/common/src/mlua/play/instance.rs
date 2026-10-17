@@ -12,12 +12,12 @@ use crate::datamodel::{
     class_is_a, is_base_part, DataModel, PART_DENSITY, DmValue, EnumItem, HumanoidCommand, InstanceId, OutputLevel,
     PhysicsCommand, SharedDataModel, DmEvent, SOUND_LOOPS,
 };
-use crate::luau::types::{userdata_eq, LuauCFrame, LuauVector3, UserDataPeek};
+use crate::mlua::types::{userdata_eq, MluaCFrame, MluaVector3, UserDataPeek};
 use crate::scripting::{CFrame, Vector2, Vector3};
 
 use super::convert::{enum_item, enum_name_arg, from_lua, to_lua};
 use super::terrain;
-use super::types_ext::{LuauRay, LuauRaycastParams, LuauVector2};
+use super::types_ext::{MluaRay, MluaRaycastParams, MluaVector2};
 
 pub(crate) const HANDLES: &str = "__eus_handles";
 pub(crate) const METHODS: &str = "__eus_methods";
@@ -148,7 +148,7 @@ fn tag_target(this: LInst, first: Value, second: Option<String>) -> LuaResult<(I
 
 /// Events every instance exposes, plus the class-specific ones.
 fn is_event(class: &str, key: &str) -> bool {
-    crate::luau::catalog::is_event(class, key)
+    crate::mlua::catalog::is_event(class, key)
 }
 
 fn run_service_signal(key: &str) -> bool {
@@ -416,7 +416,7 @@ pub fn set_data_service(f: DataServiceFn) {
 
 /// One DataService call: the argument as JSON to the installed
 /// implementation, and its reply back as Lua. The one-shot runtime's
-/// DataService (command bar, `execute_luau`) calls this too.
+/// DataService (command bar, `execute_mlua`) calls this too.
 pub(crate) fn data_service(lua: &Lua, op: &str, arg: Value) -> LuaResult<Value> {
     use mlua::LuaSerdeExt;
     let json: serde_json::Value = lua.from_value(arg)?;
@@ -435,7 +435,7 @@ pub(crate) fn data_service(lua: &Lua, op: &str, arg: Value) -> LuaResult<Value> 
 /// Whether `key` names a method on `class`, so a child called "Play" is not
 /// shadowed on a Part.
 fn method_applies(class: &str, key: &str) -> bool {
-    crate::luau::catalog::method_applies(class, key)
+    crate::mlua::catalog::method_applies(class, key)
 }
 
 // ============================================================================
@@ -604,11 +604,11 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         let cf = with_dm(lua, |dm| pivot_of(dm, this.0))?;
         Ok(LuaCFrameOut(super::studs::scale_frame(cf, 1.0 / k)))
     });
-    method!(lua, t, "PivotTo", |lua, (this, cf): (LInst, LuauCFrame)| {
+    method!(lua, t, "PivotTo", |lua, (this, cf): (LInst, MluaCFrame)| {
         let k = scale(lua)?;
         with_dm(lua, |dm| pivot_to(dm, this.0, super::studs::scale_frame(cf.0, k)))?.map_err(mlua::Error::RuntimeError)
     });
-    method!(lua, t, "SetPrimaryPartCFrame", |lua, (this, cf): (LInst, LuauCFrame)| {
+    method!(lua, t, "SetPrimaryPartCFrame", |lua, (this, cf): (LInst, MluaCFrame)| {
         let k = scale(lua)?;
         with_dm(lua, |dm| pivot_to(dm, this.0, super::studs::scale_frame(cf.0, k)))?.map_err(mlua::Error::RuntimeError)
     });
@@ -622,7 +622,7 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         let cf = with_dm(lua, |dm| pivot_of(dm, this.0))?;
         Ok(LuaCFrameOut(super::studs::scale_frame(cf, 1.0 / k)))
     });
-    method!(lua, t, "TranslateBy", |lua, (this, v): (LInst, LuauVector3)| {
+    method!(lua, t, "TranslateBy", |lua, (this, v): (LInst, MluaVector3)| {
         let k = scale(lua)?;
         with_dm(lua, |dm| {
             let cf = pivot_of(dm, this.0);
@@ -633,17 +633,17 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     method!(lua, t, "GetBoundingBox", |lua, this: LInst| {
         let k = scale(lua)?;
         let (center, size) = with_dm(lua, |dm| bounding_box(dm, this.0))?;
-        Ok((LuauCFrame(CFrame::from_position(center * (1.0 / k))), LuauVector3(size * (1.0 / k))))
+        Ok((MluaCFrame(CFrame::from_position(center * (1.0 / k))), MluaVector3(size * (1.0 / k))))
     });
     method!(lua, t, "GetExtentsSize", |lua, this: LInst| {
         let k = scale(lua)?;
         let (_, size) = with_dm(lua, |dm| bounding_box(dm, this.0))?;
-        Ok(LuauVector3(size * (1.0 / k)))
+        Ok(MluaVector3(size * (1.0 / k)))
     });
 
     // `MoveTo` is shared by Model (teleport the pivot) and Humanoid (walk).
-    method!(lua, t, "MoveTo", |lua, (this, target, _part): (LInst, LuauVector3, Option<Value>)| {
-        let target = LuauVector3(target.0 * scale(lua)?);
+    method!(lua, t, "MoveTo", |lua, (this, target, _part): (LInst, MluaVector3, Option<Value>)| {
+        let target = MluaVector3(target.0 * scale(lua)?);
         with_dm(lua, |dm| {
             if dm.class_of(this.0) == Some("Humanoid") {
                 dm.humanoid_commands.push(HumanoidCommand::MoveTo { humanoid: this.0, target: target.0 });
@@ -659,15 +659,15 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     });
 
     // ── BasePart ─────────────────────────────────────────────────────────
-    method!(lua, t, "ApplyImpulse", |lua, (this, v): (LInst, LuauVector3)| {
+    method!(lua, t, "ApplyImpulse", |lua, (this, v): (LInst, MluaVector3)| {
         with_dm(lua, |dm| dm.physics_commands.push(PhysicsCommand::ApplyImpulse { part: this.0, impulse: v.0 }))?;
         Ok(())
     });
-    method!(lua, t, "ApplyImpulseAtPosition", |lua, (this, v, _p): (LInst, LuauVector3, LuauVector3)| {
+    method!(lua, t, "ApplyImpulseAtPosition", |lua, (this, v, _p): (LInst, MluaVector3, MluaVector3)| {
         with_dm(lua, |dm| dm.physics_commands.push(PhysicsCommand::ApplyImpulse { part: this.0, impulse: v.0 }))?;
         Ok(())
     });
-    method!(lua, t, "ApplyAngularImpulse", |lua, (this, v): (LInst, LuauVector3)| {
+    method!(lua, t, "ApplyAngularImpulse", |lua, (this, v): (LInst, MluaVector3)| {
         with_dm(lua, |dm| dm.physics_commands.push(PhysicsCommand::ApplyAngularImpulse { part: this.0, impulse: v.0 }))?;
         Ok(())
     });
@@ -705,7 +705,7 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         })?
         .map_err(mlua::Error::RuntimeError)
     });
-    method!(lua, t, "Move", |lua, (this, dir, _relative): (LInst, LuauVector3, Option<bool>)| {
+    method!(lua, t, "Move", |lua, (this, dir, _relative): (LInst, MluaVector3, Option<bool>)| {
         with_dm(lua, |dm| dm.humanoid_commands.push(HumanoidCommand::Move { humanoid: this.0, direction: dir.0 }))?;
         Ok(())
     });
@@ -858,7 +858,7 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         })?;
         Ok(())
     });
-    method!(lua, t, "DistanceFromCharacter", |lua, (this, p): (LInst, LuauVector3)| {
+    method!(lua, t, "DistanceFromCharacter", |lua, (this, p): (LInst, MluaVector3)| {
         let k = scale(lua)?;
         let metres = with_dm(lua, |dm| {
             let ch = dm.get_prop(this.0, "Character").and_then(|v| v.as_instance());
@@ -879,51 +879,51 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     method!(lua, t, "ViewportPointToRay", |lua, (_this, x, y, _depth): (LInst, f64, f64, Option<f64>)| {
         let k = scale(lua)?;
         let (o, d) = with_dm(lua, |dm| dm.viewport_point_to_ray(x, y))?;
-        Ok(LuauRay { origin: o * (1.0 / k), direction: d })
+        Ok(MluaRay { origin: o * (1.0 / k), direction: d })
     });
     method!(lua, t, "ScreenPointToRay", |lua, (_this, x, y, _depth): (LInst, f64, f64, Option<f64>)| {
         let k = scale(lua)?;
         let (o, d) = with_dm(lua, |dm| dm.viewport_point_to_ray(x, y))?;
-        Ok(LuauRay { origin: o * (1.0 / k), direction: d })
+        Ok(MluaRay { origin: o * (1.0 / k), direction: d })
     });
-    method!(lua, t, "WorldToViewportPoint", |lua, (_this, p): (LInst, LuauVector3)| {
+    method!(lua, t, "WorldToViewportPoint", |lua, (_this, p): (LInst, MluaVector3)| {
         let k = scale(lua)?;
         let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0 * k))?;
-        Ok((LuauVector3(Vector3::new(v.x, v.y, v.z / k)), on))
+        Ok((MluaVector3(Vector3::new(v.x, v.y, v.z / k)), on))
     });
-    method!(lua, t, "WorldToScreenPoint", |lua, (_this, p): (LInst, LuauVector3)| {
+    method!(lua, t, "WorldToScreenPoint", |lua, (_this, p): (LInst, MluaVector3)| {
         let k = scale(lua)?;
         let (v, on) = with_dm(lua, |dm| dm.world_to_viewport_point(p.0 * k))?;
-        Ok((LuauVector3(Vector3::new(v.x, v.y, v.z / k)), on))
+        Ok((MluaVector3(Vector3::new(v.x, v.y, v.z / k)), on))
     });
 
     // ── Workspace ────────────────────────────────────────────────────────
-    method!(lua, t, "Raycast", |lua, (_this, origin, direction, params): (LInst, LuauVector3, LuauVector3, Option<LuauRaycastParams>)| {
+    method!(lua, t, "Raycast", |lua, (_this, origin, direction, params): (LInst, MluaVector3, MluaVector3, Option<MluaRaycastParams>)| {
         let k = scale(lua)?;
         raycast(lua, origin.0 * k, direction.0 * k, params.unwrap_or_default(), k)
     });
     method!(lua, t, "GetServerTimeNow", |lua, _this: LInst| with_dm(lua, |dm| dm.frame.time));
     method!(lua, t, "GetRealPhysicsFPS", |_, _this: LInst| Ok(60.0));
-    method!(lua, t, "GetPartBoundsInRadius", |lua, (_this, center, radius, params): (LInst, LuauVector3, f64, Option<LuauRaycastParams>)| {
+    method!(lua, t, "GetPartBoundsInRadius", |lua, (_this, center, radius, params): (LInst, MluaVector3, f64, Option<MluaRaycastParams>)| {
         let k = scale(lua)?;
         let hits = with_dm(lua, |dm| parts_in_radius(dm, center.0 * k, radius * k, params.as_ref()))?;
         handle_list(lua, &hits)
     });
-    method!(lua, t, "GetPartBoundsInBox", |lua, (_this, cf, size, params): (LInst, LuauCFrame, LuauVector3, Option<LuauRaycastParams>)| {
+    method!(lua, t, "GetPartBoundsInBox", |lua, (_this, cf, size, params): (LInst, MluaCFrame, MluaVector3, Option<MluaRaycastParams>)| {
         let k = scale(lua)?;
         let hits = with_dm(lua, |dm| parts_in_box(dm, super::studs::scale_frame(cf.0, k), size.0 * k, params.as_ref()))?;
         handle_list(lua, &hits)
     });
-    method!(lua, t, "FindPartOnRay", |lua, (_this, ray, ignore): (LInst, LuauRay, Option<LInst>)| {
-        let mut params = LuauRaycastParams::default();
+    method!(lua, t, "FindPartOnRay", |lua, (_this, ray, ignore): (LInst, MluaRay, Option<LInst>)| {
+        let mut params = MluaRaycastParams::default();
         if let Some(i) = ignore {
             params.filter.push(i.0);
         }
         let k = scale(lua)?;
         legacy_find_part(lua, ray, params, k)
     });
-    method!(lua, t, "FindPartOnRayWithIgnoreList", |lua, (_this, ray, ignore): (LInst, LuauRay, Option<Table>)| {
-        let mut params = LuauRaycastParams::default();
+    method!(lua, t, "FindPartOnRayWithIgnoreList", |lua, (_this, ray, ignore): (LInst, MluaRay, Option<Table>)| {
+        let mut params = MluaRaycastParams::default();
         if let Some(t) = ignore {
             for v in t.sequence_values::<Value>() {
                 if let Value::UserData(ud) = v? {
@@ -963,11 +963,11 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
     });
     method!(lua, t, "GetMouseLocation", |lua, _this: LInst| {
         let (x, y) = with_dm(lua, |dm| (dm.input.mouse_x, dm.input.mouse_y))?;
-        Ok(LuauVector2(Vector2::new(x, y)))
+        Ok(MluaVector2(Vector2::new(x, y)))
     });
     method!(lua, t, "GetMouseDelta", |lua, _this: LInst| {
         let (x, y) = with_dm(lua, |dm| (dm.input.mouse_dx, dm.input.mouse_dy))?;
-        Ok(LuauVector2(Vector2::new(x, y)))
+        Ok(MluaVector2(Vector2::new(x, y)))
     });
     method!(lua, t, "GetKeysPressed", |lua, _this: LInst| {
         let keys: Vec<String> = with_dm(lua, |dm| dm.input.keys.iter().cloned().collect())?;
@@ -1085,9 +1085,9 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
         lua.to_value(&json)
     });
     method!(lua, t, "GenerateGUID", |_, (_this, wrap): (LInst, Option<bool>)| {
-        let mut r = super::types_ext::LuauRandom::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+        let mut r = super::types_ext::MluaRandom::new(
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(7),
         );
@@ -1177,7 +1177,7 @@ struct LuaCFrameOut(CFrame);
 
 impl mlua::IntoLua for LuaCFrameOut {
     fn into_lua(self, lua: &Lua) -> LuaResult<Value> {
-        Ok(Value::UserData(lua.create_userdata(LuauCFrame(self.0))?))
+        Ok(Value::UserData(lua.create_userdata(MluaCFrame(self.0))?))
     }
 }
 
@@ -1376,7 +1376,7 @@ pub fn bounding_box(dm: &DataModel, id: InstanceId) -> (Vector3, Vector3) {
     ((min + max) * 0.5, max - min)
 }
 
-fn filter_rejects(dm: &DataModel, id: InstanceId, params: Option<&LuauRaycastParams>) -> bool {
+fn filter_rejects(dm: &DataModel, id: InstanceId, params: Option<&MluaRaycastParams>) -> bool {
     let Some(p) = params else { return false };
     let listed = p.filter.iter().any(|f| *f == id || dm.is_descendant_of(id, *f));
     if p.include {
@@ -1386,7 +1386,7 @@ fn filter_rejects(dm: &DataModel, id: InstanceId, params: Option<&LuauRaycastPar
     }
 }
 
-fn parts_in_radius(dm: &DataModel, center: Vector3, radius: f64, params: Option<&LuauRaycastParams>) -> Vec<InstanceId> {
+fn parts_in_radius(dm: &DataModel, center: Vector3, radius: f64, params: Option<&MluaRaycastParams>) -> Vec<InstanceId> {
     let Some(ws) = dm.find_service("Workspace") else { return Vec::new() };
     dm.descendants(ws)
         .into_iter()
@@ -1403,7 +1403,7 @@ fn parts_in_radius(dm: &DataModel, center: Vector3, radius: f64, params: Option<
         .collect()
 }
 
-fn parts_in_box(dm: &DataModel, cf: CFrame, size: Vector3, params: Option<&LuauRaycastParams>) -> Vec<InstanceId> {
+fn parts_in_box(dm: &DataModel, cf: CFrame, size: Vector3, params: Option<&MluaRaycastParams>) -> Vec<InstanceId> {
     let Some(ws) = dm.find_service("Workspace") else { return Vec::new() };
     let h = size * 0.5;
     dm.descendants(ws)
@@ -1490,7 +1490,7 @@ fn cast(query: &RayQuery) -> Option<RayHit> {
 
 /// `origin` and `direction` in metres; the result's Position and Distance in
 /// the caller's units, metres divided by `k` (see `studs::script_scale`).
-fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastParams, k: f64) -> LuaResult<Value> {
+fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastParams, k: f64) -> LuaResult<Value> {
     let query = with_dm(lua, |dm| {
         let mut filter = Vec::new();
         for f in &params.filter {
@@ -1529,8 +1529,8 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastPa
     };
     let result = lua.create_table()?;
     result.raw_set("Instance", opt_handle(lua, inst)?)?;
-    result.raw_set("Position", LuauVector3(hit.position * (1.0 / k)))?;
-    result.raw_set("Normal", LuauVector3(hit.normal))?;
+    result.raw_set("Position", MluaVector3(hit.position * (1.0 / k)))?;
+    result.raw_set("Normal", MluaVector3(hit.normal))?;
     result.raw_set("Distance", hit.distance / k)?;
     result.raw_set("Material", to_lua(lua, &material)?)?;
     let meta = lua.create_table()?;
@@ -1540,16 +1540,16 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: LuauRaycastPa
 }
 
 /// `ray` in the caller's units, `k` metres each.
-fn legacy_find_part(lua: &Lua, ray: LuauRay, params: LuauRaycastParams, k: f64) -> LuaResult<(Value, LuauVector3, LuauVector3)> {
+fn legacy_find_part(lua: &Lua, ray: MluaRay, params: MluaRaycastParams, k: f64) -> LuaResult<(Value, MluaVector3, MluaVector3)> {
     let end = ray.origin + ray.direction;
     let hit = raycast(lua, ray.origin * k, ray.direction * k, params, k)?;
     if let Value::Table(t) = hit {
         let inst: Value = t.raw_get("Instance")?;
-        let pos: LuauVector3 = t.raw_get("Position")?;
-        let n: LuauVector3 = t.raw_get("Normal")?;
+        let pos: MluaVector3 = t.raw_get("Position")?;
+        let n: MluaVector3 = t.raw_get("Normal")?;
         return Ok((inst, pos, n));
     }
-    Ok((Value::Nil, LuauVector3(end), LuauVector3(Vector3::ZERO)))
+    Ok((Value::Nil, MluaVector3(end), MluaVector3(Vector3::ZERO)))
 }
 
 /// `Instance.new(class, parent?)`.

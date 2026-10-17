@@ -228,7 +228,7 @@ pub fn hot_recompile_dirty_rune_scripts(
 /// `rune` source so the panel's filter chips work. After drain the
 /// vec is cleared — same error doesn't re-push every frame.
 ///
-/// Luau errors arrive via `LuauScriptErrorEvent` messages (emitted by
+/// Luau errors arrive via `MluaScriptErrorEvent` messages (emitted by
 /// the common crate's Luau runtime). We drain those too.
 ///
 /// Both paths include the script name and the full error text; the
@@ -237,7 +237,7 @@ pub fn hot_recompile_dirty_rune_scripts(
 /// without extra parsing on our end.
 pub fn drain_script_errors_to_output(
     mut runtime: ResMut<RuneRuntimeState>,
-    mut luau_errors: MessageReader<eustress_common::luau::runtime::LuauScriptErrorEvent>,
+    mut mlua_errors: MessageReader<eustress_common::mlua::runtime::MluaScriptErrorEvent>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     analysis: Option<Res<crate::script_editor::ScriptAnalysis>>,
     mut last_analysis_gen: Local<u64>,
@@ -349,7 +349,7 @@ pub fn drain_script_errors_to_output(
     }
 
     // Luau: message-driven, one event per error.
-    for event in luau_errors.read() {
+    for event in mlua_errors.read() {
         if let Some(ref mut out) = output {
             let line_suffix = event
                 .line

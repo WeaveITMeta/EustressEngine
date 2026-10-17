@@ -20,7 +20,8 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 use serde_json::{json, Value};

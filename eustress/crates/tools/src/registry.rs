@@ -106,10 +106,10 @@ pub trait ToolHandler: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// An entity created by a Luau script via `Instance.new(...)`.
-/// Returned by the `LuauExecutor` callback so `execute_luau` can
+/// Returned by the `MluaExecutor` callback so `execute_mlua` can
 /// materialize the instances as on-disk entity folders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LuauCreatedEntity {
+pub struct MluaCreatedEntity {
     pub class_name: String,
     pub name: String,
     pub position: [f32; 3],
@@ -148,7 +148,8 @@ pub struct LuauCreatedEntity {
 
     // Parent tracking for GUI hierarchy
     #[serde(default)]
-    pub luau_entity_id: i64,
+    #[serde(rename = "luau_entity_id")]
+    pub mlua_entity_id: i64,
     #[serde(default)]
     pub parent_entity_id: Option<i64>,
 }
@@ -157,19 +158,19 @@ fn default_shape() -> String { "Block".to_string() }
 
 /// Result of running a Luau script via the executor callback.
 #[derive(Debug, Clone)]
-pub struct LuauExecutionResult {
+pub struct MluaExecutionResult {
     /// Whether the script ran without errors.
     pub success: bool,
     /// Human-readable output or error message.
     pub message: String,
     /// Entities created during execution via Instance.new().
-    pub created_entities: Vec<LuauCreatedEntity>,
+    pub created_entities: Vec<MluaCreatedEntity>,
 }
 
 /// Callback type for inline Luau execution. The engine provides this;
 /// the MCP server leaves it `None`. Takes (source_code, chunk_name)
 /// and returns the execution result with any created instances.
-pub type LuauExecutor = Arc<dyn Fn(&str, &str) -> LuauExecutionResult + Send + Sync>;
+pub type MluaExecutor = Arc<dyn Fn(&str, &str) -> MluaExecutionResult + Send + Sync>;
 
 /// Context passed to handlers during execution. Carries paths + auth
 /// identity; all fields are `Send + Sync + 'static` so the context
@@ -185,11 +186,11 @@ pub struct ToolContext {
     /// Current username.
     pub username: Option<String>,
     /// Optional Luau VM executor — populated by the engine when the
-    /// `luau` feature is enabled. When present, `execute_luau` runs
+    /// `mlua` feature is enabled. When present, `execute_mlua` runs
     /// the script inline and materializes created instances as entity
     /// folders. When `None`, the tool only writes the script file for
     /// later hot-reload.
-    pub luau_executor: Option<LuauExecutor>,
+    pub mlua_executor: Option<MluaExecutor>,
     /// User-selected display unit symbol — what the user is currently
     /// working in (status-bar dropdown). Workshop/Soul/MCP callers use
     /// it as the fallback when their `unit` arg is omitted, so an AI

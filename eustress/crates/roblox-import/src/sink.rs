@@ -246,15 +246,15 @@ impl ImportSink for TomlSink {
 /// hand because that function is engine-side and unreachable from this crate.
 /// Driven by the resolved Eustress [`ClassName`] (the importer's typed class)
 /// rather than the raw string, so it covers the legacy-alias remaps
-/// `class_map` performs (e.g. `Script` → `LuauScript`).
+/// `class_map` performs (e.g. `Script` → `MluaScript`).
 pub fn is_file_natured_node(class: ClassName) -> bool {
     matches!(
         class,
         // Scripts + AI artifacts — backed by `.luau`/`.rune`/transcript files.
         ClassName::SoulScript
-            | ClassName::LuauScript
-            | ClassName::LuauLocalScript
-            | ClassName::LuauModuleScript
+            | ClassName::MluaScript
+            | ClassName::MluaLocalScript
+            | ClassName::MluaModuleScript
             | ClassName::WorkshopConversation
             // Explicit document / imported-file nodes.
             | ClassName::Document
@@ -665,9 +665,9 @@ mod tests {
     #[test]
     fn file_natured_classes_are_never_binary() {
         for class in [
-            ClassName::LuauScript,
-            ClassName::LuauLocalScript,
-            ClassName::LuauModuleScript,
+            ClassName::MluaScript,
+            ClassName::MluaLocalScript,
+            ClassName::MluaModuleScript,
             ClassName::SoulScript,
             ClassName::ScreenGui,
             ClassName::TextLabel,

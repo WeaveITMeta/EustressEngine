@@ -717,7 +717,7 @@ fn vm_error(e: &rune::runtime::VmError, compiled: &CompiledScript, during: &str)
 /// callback drivers below, and the engine's other Rune callers (button
 /// clicks, purchase receipts).
 #[cfg(feature = "realism-scripting")]
-pub fn profile_step(compiled: &CompiledScript, step: &str, started: std::time::Instant) {
+pub fn profile_step(compiled: &CompiledScript, step: &str, started: bevy::platform::time::Instant) {
     let elapsed = started.elapsed();
     let label = crate::utils::script_profile::file_label(&compiled.name, compiled.file.as_deref());
     crate::utils::script_profile::record("rune", label, step, elapsed);
@@ -749,7 +749,7 @@ pub fn call_script_init(runtime: &mut RuneRuntimeState) {
                 continue;
             }
             runtime.initialized.insert(idx, true);
-            let started = profile.then(std::time::Instant::now);
+            let started = profile.then(bevy::platform::time::Instant::now);
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
@@ -793,7 +793,7 @@ pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
                 continue;
             }
             runtime.initialized.insert(ready_key, true);
-            let started = profile.then(std::time::Instant::now);
+            let started = profile.then(bevy::platform::time::Instant::now);
 
             let compiled = &runtime.compiled[&idx];
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
@@ -826,7 +826,7 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
         let profile = crate::utils::script_profile::armed();
 
         for (_idx, compiled) in runtime.compiled.iter() {
-            let started = profile.then(std::time::Instant::now);
+            let started = profile.then(bevy::platform::time::Instant::now);
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
             let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             if let Err(e) = vm.call(["on_update"], (dt,)) {
@@ -855,7 +855,7 @@ pub fn call_script_exit(runtime: &RuneRuntimeState) {
     {
         let profile = crate::utils::script_profile::armed();
         for (_idx, compiled) in runtime.compiled.iter() {
-            let started = profile.then(std::time::Instant::now);
+            let started = profile.then(bevy::platform::time::Instant::now);
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
             let _scope = crate::gui::script_scope(&compiled.name, compiled.file.as_deref());
             match vm.call(["on_exit"], ()) {

@@ -361,9 +361,12 @@ pub enum ClassName {
     /// Workshop conversation session stored in SoulService/Workshop/
     WorkshopConversation,
     // Luau Scripting - Roblox-compatible script types
-    LuauScript,         // Server-side Luau script
-    LuauLocalScript,    // Client-side Luau script
-    LuauModuleScript,   // Reusable Luau module
+    #[serde(rename = "LuauScript")]
+    MluaScript,         // Server-side Luau script
+    #[serde(rename = "LuauLocalScript")]
+    MluaLocalScript,    // Client-side Luau script
+    #[serde(rename = "LuauModuleScript")]
+    MluaModuleScript,   // Reusable Luau module
     // Networking Primitives - Client↔Server communication
     RemoteEvent,        // One-way event channel (client↔server)
     RemoteFunction,     // Request-response channel (client↔server)
@@ -687,9 +690,9 @@ impl ClassName {
             ClassName::UnionOperation => "UnionOperation",
             ClassName::SoulScript => "SoulScript",
             ClassName::WorkshopConversation => "WorkshopConversation",
-            ClassName::LuauScript => "LuauScript",
-            ClassName::LuauLocalScript => "LuauLocalScript",
-            ClassName::LuauModuleScript => "LuauModuleScript",
+            ClassName::MluaScript => "LuauScript",
+            ClassName::MluaLocalScript => "LuauLocalScript",
+            ClassName::MluaModuleScript => "LuauModuleScript",
             ClassName::RemoteEvent => "RemoteEvent",
             ClassName::RemoteFunction => "RemoteFunction",
             ClassName::BindableEvent => "BindableEvent",
@@ -985,9 +988,9 @@ impl ClassName {
             "UnionOperation" => Ok(ClassName::UnionOperation),
             "SoulScript" => Ok(ClassName::SoulScript),
             "WorkshopConversation" => Ok(ClassName::WorkshopConversation),
-            "LuauScript" | "Script" => Ok(ClassName::LuauScript),
-            "LuauLocalScript" | "LocalScript" => Ok(ClassName::LuauLocalScript),
-            "LuauModuleScript" | "ModuleScript" => Ok(ClassName::LuauModuleScript),
+            "LuauScript" | "Script" => Ok(ClassName::MluaScript),
+            "LuauLocalScript" | "LocalScript" => Ok(ClassName::MluaLocalScript),
+            "LuauModuleScript" | "ModuleScript" => Ok(ClassName::MluaModuleScript),
             "RemoteEvent" => Ok(ClassName::RemoteEvent),
             "RemoteFunction" => Ok(ClassName::RemoteFunction),
             "BindableEvent" => Ok(ClassName::BindableEvent),

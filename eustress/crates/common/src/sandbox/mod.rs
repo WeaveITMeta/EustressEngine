@@ -63,7 +63,8 @@ use crate::scene_delta::SceneDelta;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bevy::platform::time::Instant;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Property
