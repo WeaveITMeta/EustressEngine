@@ -47,7 +47,8 @@
 //      matching (the same picture re-encoded, resized or cropped) is NOT done.
 //   4. The author of each listing is told, with the case reference and how to
 //      ask a person to review it, and never who asked. The requester gets a
-//      receipt with the reference. Staff are emailed.
+//      receipt with the reference. Staff are emailed, on staff mail's own allowance (src/staff_alerts.mjs): past it an
+//      alert waits on the over-cap list for the hourly digest, and nothing is dropped. Possible CSAM has its own lane.
 //
 // No silent failure. Each of those is a named step (`lock:{sim}`, `case:{sim}`,
 // `hashes:{sim}`, `notice:{sim}`, `receipt`, `staff`, ...). A step that fails
@@ -115,6 +116,7 @@ import {
 } from './moderation.mjs';
 import { assignCaseReference } from './case_reference.mjs';
 import { sendNotice, scrubAddresses } from './account_notices.mjs';
+import { sendStaffAlert, sendStaffDigests } from './staff_alerts.mjs';
 import { renderEmail, html, paragraph, note as noteLine, facts, formatWhen } from './email_shell.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { accountTimeZone } from './account_time_zone.mjs';
@@ -512,10 +514,10 @@ const STEPS = {
     rec.receipt = await sendRequester(env, rec, renderMail('receipt', receiptFacts(rec, ctx)), 'receipt');
   },
   staff: async (env, rec, _, ctx) => {
-    rec.staff_told = await alertStaff(env, renderMail(rec.possible_csam ? 'staff_csam' : 'staff_new', staffFacts(rec, ctx)), { required: true });
+    rec.staff_told = await alertStaff(env, rec.possible_csam ? 'staff_csam' : 'staff_new', staffFacts(rec, ctx), { required: true, alertId: `takedown:${rec.id}:staff` });
   },
   staff_review: async (env, rec, _, ctx) => {
-    await alertStaff(env, renderMail('staff_review', staffFacts(rec, ctx)), { required: true });
+    await alertStaff(env, 'staff_review', staffFacts(rec, ctx), { required: true, alertId: `takedown:${rec.id}:staff_review:${(rec.reviews || []).length}` });
   },
   // After a person's decision.
   restore: async (env, rec, simId, ctx) => {
@@ -966,7 +968,7 @@ export async function refuseBlockedUpload(env, hashes, { json, cors, accountId =
     const attempt = { sha256: hit.sha256, cases: hit.entry.cases || [], possible_csam: !!hit.entry.possible_csam, account_id: accountId || null, sim_id: simId || null, route, at: nowIso() };
     await env.SOCIAL.put(`ncii-attempt:${attempt.at}:${crypto.randomUUID().slice(0, 8)}`, JSON.stringify(attempt));
     console.error(`takedown: an upload of a blocked file was refused (${route})`);
-    await alertStaff(env, renderMail('staff_attempt', { ...attempt, references: await referencesOf(env, attempt.cases) }), { required: false });
+    await alertStaff(env, 'staff_attempt', { ...attempt, references: await referencesOf(env, attempt.cases) }, { required: false });
   } catch (e) {
     console.error('takedown: recording a refused upload failed:', e?.message || e);
   }
@@ -1111,7 +1113,7 @@ async function copyFound(env, ctx, sim, sha, kind, out) {
       out.candidates += 1;
       if (!rec.candidates_alerted_at) {
         rec.candidates_alerted_at = nowIso();
-        await alertStaff(env, renderMail('staff_candidates', { reference: rec.reference })).catch((e) => console.error('takedown: alert failed:', e?.message || e));
+        await alertStaff(env, 'staff_candidates', { reference: rec.reference }).catch((e) => console.error('takedown: alert failed:', e?.message || e));
       }
       if (!open) await saveTakedown(env, rec, prev);
       return;
@@ -1214,39 +1216,62 @@ async function staffAddresses(env) {
   return [...out];
 }
 
-/// Emails staff. `required`: a send that reached nobody, with a mail binding present, throws so the step is retried. With no mail
-/// binding the log is all there is, and it says so.
-async function alertStaff(env, rendered, { required = false } = {}) {
+/// The lane a staff alert goes in (src/staff_alerts.mjs). Possible CSAM is never in the general lane: a request whose filer
+/// says the person shown is a minor (any anonymous filer can), a member's csam report of a forum post, a blocked possible-CSAM
+/// file uploaded again, an evidence seal that failed, and every alert about a possible-CSAM case have the priority lane's own
+/// allowance. A legal report and a stuck report debt, which only the legal report path writes, are not capped.
+export const STAFF_PRIORITY_KINDS = Object.freeze(['staff_csam', 'staff_forum_csam', 'staff_evidence_failure']);
+export const STAFF_LEGAL_KINDS = Object.freeze(['staff_legal_report', 'staff_legal_stuck']);
+export function staffLaneOf(kind, facts) {
+  if (STAFF_LEGAL_KINDS.includes(kind)) return 'legal';
+  if (STAFF_PRIORITY_KINDS.includes(kind) || facts?.possible_csam === true) return 'priority';
+  return 'general';
+}
+
+/// Emails staff an alert of `kind` (renderMail) with `facts`, in its lane (staffLaneOf), never under any account's notice
+/// allowance. `required`: an alert no staff address has (not sent now, and not carried by a digest that sent) throws, so the
+/// step is retried; past the lane's allowance it waits on the over-cap list for the hourly digest (src/staff_alerts.mjs), and
+/// `alertId` (stable across retries) is how the retry finds that a digest carried it. With no mail binding nothing can be
+/// sent and the log is all there is: a required alert throws then too, so the step stays owed.
+async function alertStaff(env, kind, facts, { required = false, alertId = null } = {}) {
+  const rendered = renderMail(kind, facts);
   console.error(`takedown staff alert: ${rendered.subject}`);
-  const results = await sendNotice(env, await staffAddresses(env), rendered, { kind: 'notice', accountId: 'takedown-alerts', fromName: FROM_NAME });
-  const sent = results.filter((r) => r.sent).length;
-  if (required && !sent && results.some((r) => r.reason === 'send_failed')) throw new Error('no staff address could be emailed');
-  return { at: nowIso(), sent };
+  const reference = facts?.reference || (Array.isArray(facts?.references) && facts.references.length ? facts.references.join(', ') : null) || facts?.id || (facts?.case_id ? `${facts.case_kind || 'case'} ${facts.case_id}` : null);
+  const r = await sendStaffAlert(env, await staffAddresses(env), rendered, { lane: staffLaneOf(kind, facts), alertId, kind, reference, required, fromName: FROM_NAME });
+  if (required && !r.delivered) {
+    throw new Error(r.queued ? 'the staff alert is past the daily allowance and waits for the hourly digest' : 'no staff address could be emailed');
+  }
+  return { at: nowIso(), sent: r.sent, queued: r.queued, digested: r.digested };
+}
+
+/// From the hourly sweep (sweepTakedowns, first): the over-cap digest to each staff address (src/staff_alerts.mjs).
+export async function sendStaffDigest(env, { now = Date.now() } = {}) {
+  return sendStaffDigests(env, await staffAddresses(env), (d) => renderMail('staff_digest', { ...d, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
 }
 
 /// A forum post reported as csam (src/moderation.mjs fileForumReport), on this module's staff alert path: the same mailboxes,
 /// the staff-only possible-CSAM notice. `facts`: reference, post_id, thread_id, at, queue_url. Never a reporter or a note.
 export async function alertStaffForumReport(env, facts) {
-  return alertStaff(env, renderMail('staff_forum_csam', facts), { required: false });
+  return alertStaff(env, 'staff_forum_csam', facts, { required: false });
 }
 
 /// A seal into the evidence vault failed (src/evidence_vault.mjs), on this module's staff alert path. `facts`: reference,
 /// case_kind, case_id, item, category, attempts, error, material_kept. Never the content, the uploader or an address.
 export async function alertStaffEvidence(env, facts) {
-  return alertStaff(env, renderMail('staff_evidence_failure', facts), { required: false });
+  return alertStaff(env, 'staff_evidence_failure', facts, { required: false });
 }
 
 /// A legal report is queued or held (src/legal_reports.mjs), on this module's staff alert path. `facts`: id, kind, status,
 /// reference, destination, reason, admin_url. Never the content and never the reported account's identity.
 export async function alertStaffLegalReport(env, facts) {
-  return alertStaff(env, renderMail('staff_legal_report', facts), { required: false });
+  return alertStaff(env, 'staff_legal_report', facts, { required: false });
 }
 
 /// A legal report debt is stuck (src/legal_reports.mjs recordStuckReport), on this module's staff alert path, at once and then
 /// daily while it stands. `facts`: reference, case_kind, case_id, report_kind, reason, since, stuck_at, alerts, admin_url.
 /// Never the content, the account or an address.
 export async function alertStaffStuckReport(env, facts) {
-  return alertStaff(env, renderMail('staff_legal_stuck', facts), { required: false });
+  return alertStaff(env, 'staff_legal_stuck', facts, { required: false });
 }
 
 function staffFacts(rec, ctx) {
@@ -1443,6 +1468,15 @@ export function renderMail(kind, d) {
         ],
         rows: [['Report', d.id], ['Kind', d.kind], ['Case', d.reference || 'not yet referenced'], ['Destination', d.destination || 'none set'], ['Status', d.status], ['Why it waits', d.reason || 'the sender is off']],
       });
+    case 'staff_digest':
+      return mail({
+        subject: `Staff alerts past the day's allowance: ${d.total}${d.at_least ? ' or more' : ''} waiting`, heading: 'Staff alerts past the allowance', label: 'Staff Notice',
+        paragraphs: [
+          `${d.total}${d.at_least ? ' or more' : ''} staff alert(s) went past the day's allowance for this address and were not sent one by one. Each is named below by its kind and reference; open the queue for the case.`,
+          ...(d.more ? [`${d.more} more are waiting and are named in the next digest, within the hour.`] : []),
+        ],
+        rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}`]),
+      });
     case 'staff_legal_stuck':
       return mail({
         subject: `A legal report is stuck and needs a person: ${d.reference || `${d.case_kind} ${d.case_id}`}`, heading: 'A legal report is stuck', label: 'Staff Notice',
@@ -1515,7 +1549,7 @@ async function fileRequest(request, url, env, cors, deps) {
   await saveTakedown(env, rec, 'received');
   if (ctx.locksWritten) await refreshServingCaches(env, ctx);
   // A removal step that failed is the one thing staff must hear about now; the rest is retried by the sweep first.
-  if (rec.pending.some(LOCK_STEP)) await alertStaff(env, renderMail('staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) })).catch(() => {});
+  if (rec.pending.some(LOCK_STEP)) await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }).catch(() => {});
   try { await deps.auditLog?.(env, 'TAKEDOWN_RECEIVED', 'system', rec.reference, { case_id: rec.id, listings: rec.targets.length, removed_at: rec.removed_at, possible_csam: rec.possible_csam }); }
   catch (e) { console.error('takedown: the audit log write failed:', e?.message || e); }
 
@@ -1723,6 +1757,9 @@ async function adminRoute(request, url, env, cors, deps) {
 /// on. It finishes what a request or a person's decision started; it never restores anything on its own.
 export async function sweepTakedowns(env, deps = {}, { cases = 50, scanPages = 6 } = {}) {
   const out = { cases: 0, completed: 0, still_pending: 0, removal_owed: 0, copies_locked: 0, copy_candidates: 0, scan_done: null };
+  // The staff alerts past the day's allowance go out first, so a required alert the digest carries is delivered when its step
+  // runs again below.
+  try { out.digest = await sendStaffDigest(env); } catch (e) { console.error('takedown: the staff digest failed:', e?.name || 'Error'); }
   const ctx = contextFor(env, deps, null);
   const listed = await env.SOCIAL.list({ prefix: 'tdpending:', limit: cases });
   for (const k of listed?.keys || []) {
@@ -1739,7 +1776,7 @@ export async function sweepTakedowns(env, deps = {}, { cases = 50, scanPages = 6
     const removalOwed = rec.pending.some(LOCK_STEP);
     if (removalOwed) out.removal_owed += 1;
     if (removalOwed || [3, 12, 24].includes(rec.attempts) || rec.attempts % 24 === 0) {
-      await alertStaff(env, renderMail('staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) })).catch((e) => console.error('takedown: alert failed:', e?.message || e));
+      await alertStaff(env, 'staff_failure', { ...staffFacts(rec, ctx), deadline: deadlineOf(rec) }).catch((e) => console.error('takedown: alert failed:', e?.message || e));
     }
   }
   ctx.open = new Map();
@@ -1790,7 +1827,7 @@ async function enforceLocks(env, ctx, limit = 200) {
     ctx.open = new Map([[rec.id, rec]]);
     await runSteps(env, rec, ctx);
     await saveTakedown(env, rec, prev);
-    await alertStaff(env, renderMail('staff_relocked', staffFacts(rec, ctx))).catch((e) => console.error('takedown: alert failed:', e?.message || e));
+    await alertStaff(env, 'staff_relocked', staffFacts(rec, ctx)).catch((e) => console.error('takedown: alert failed:', e?.message || e));
   }
   ctx.open = new Map();
   return relocked;

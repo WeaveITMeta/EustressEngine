@@ -526,7 +526,9 @@ async function alertStuck(env, rec, nowMs) {
   try {
     const { alertStaffStuckReport } = await import('./takedown.mjs');
     const api = String(env.PUBLIC_API_ORIGIN || 'https://api.eustress.dev').replace(/\/$/, '');
-    await alertStaffStuckReport(env, { reference: rec.reference, case_kind: rec.case_kind, case_id: rec.case_id, report_kind: rec.report_kind, reason: rec.reason, since: rec.since, stuck_at: rec.stuck_at, alerts: (rec.alerts || 0) + 1, admin_url: `${api}/api/admin/legal/stuck` });
+    const told = await alertStaffStuckReport(env, { reference: rec.reference, case_kind: rec.case_kind, case_id: rec.case_id, report_kind: rec.report_kind, reason: rec.reason, since: rec.since, stuck_at: rec.stuck_at, alerts: (rec.alerts || 0) + 1, admin_url: `${api}/api/admin/legal/stuck` });
+    // Recorded as alerted only when a staff address has it: an alert not sent is tried again on the next run.
+    if (!(told?.sent > 0 || told?.digested > 0)) return false;
     rec.alerted_at = new Date(nowMs).toISOString();
     rec.alerts = (rec.alerts || 0) + 1;
     // A debt a person cleared meanwhile is not written back.

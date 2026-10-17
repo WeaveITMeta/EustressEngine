@@ -28,14 +28,25 @@
 ///            counter per address is kept, for an admin to see a flood; it never
 ///            suppresses anything. Each account is bounded already (3 key
 ///            replacements and 5 address changes a day).
-export const MAIL_PER_DAY = { verify: 5, pending: 5, notice: 30 };
+///   staff    a staff alert in the general lane (src/staff_alerts.mjs), counted per staff
+///            address and never against any account's 'notice' bucket. Past it the alert
+///            goes on the over-cap list for the hourly digest; nothing is dropped.
+///   staff_priority   a possible-CSAM staff alert: a bucket of its own, so the general lane
+///            filling up never delays one.
+/// Two kinds are counted for an admin to see (mailcap-flood) and never refused: 'staff_legal'
+/// (a legal report or a stuck report debt; only the system's legal report path writes them)
+/// and 'staff_digest' (at most one an hour per staff address).
+export const STAFF_ALERTS_PER_DAY = 200;
+export const STAFF_PRIORITY_ALERTS_PER_DAY = 1000;
+export const MAIL_PER_DAY = { verify: 5, pending: 5, notice: 30, staff: STAFF_ALERTS_PER_DAY, staff_priority: STAFF_PRIORITY_ALERTS_PER_DAY };
+export const UNCAPPED_MAIL_KINDS = Object.freeze(['staff_legal', 'staff_digest']);
 
 async function sha256Hex(text) {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/// Spend one send of `kind` ('verify', 'pending' or 'notice') to `address`; false when the
+/// Spend one send of `kind` ('verify', 'pending', 'notice', 'staff' or 'staff_priority') to `address`; false when the
 /// day's allowance is used up. A 'notice' is counted for `accountId` and the address; one
 /// sent with no account named gets the smallest allowance, like an unknown kind.
 export async function takeMailSlot(env, address, kind, accountId = null) {
@@ -44,6 +55,13 @@ export async function takeMailSlot(env, address, kind, accountId = null) {
   const day = new Date().toISOString().slice(0, 10);
   let scope = kind;
   let cap = MAIL_PER_DAY[kind] ?? MAIL_PER_DAY.verify;
+  if (UNCAPPED_MAIL_KINDS.includes(kind)) {
+    // Counted for an admin to see a flood; never a reason to refuse.
+    const floodKey = `mailcap-flood:${kind}:${hash}:${day}`;
+    const flood = parseInt((await env.USERS.get(floodKey)) || '0', 10) || 0;
+    await env.USERS.put(floodKey, String(flood + 1), { expirationTtl: 2 * 86400 });
+    return true;
+  }
   if (kind === 'notice') {
     if (typeof accountId === 'string' && accountId) {
       scope = `notice:${accountId}`;
