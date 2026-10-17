@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Player test page</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #101014; color: #e8e8ee; font-family: system-ui, sans-serif; }
+    #stage { position: fixed; inset: 0; }
+    #panel { position: fixed; left: 16px; top: 16px; display: grid; gap: 8px; width: min(560px, calc(100vw - 32px));
+             padding: 12px; background: rgba(0, 0, 0, 0.7); border-radius: 8px; }
+    #panel input, #panel select, #panel button { font: inherit; padding: 6px 8px; }
+    #status { position: fixed; left: 16px; bottom: 16px; padding: 8px 12px; background: rgba(0, 0, 0, 0.6); border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <form id="panel" autocomplete="off">
+    <!-- For the localhost proof: paste the join link Studio prints in its
+         Output. A session not listed on the gallery admits by its join key
+         alone, with no ticket. The link is never read from the address bar,
+         kept, or shown. -->
+    <label>Join link (from Studio's Output)
+      <input id="join" type="password" spellcheck="false" placeholder="eustress-player://join/...">
+    </label>
+    <label>Or a published world's Gallery id (solo)
+      <input id="sim" type="text" spellcheck="false" placeholder="07d084d8-...">
+    </label>
+    <label>API
+      <select id="api">
+        <option value="https://api-staging.eustress.dev">staging</option>
+        <option value="https://api.eustress.dev">production</option>
+      </select>
+    </label>
+    <button type="submit">Start</button>
+  </form>
+  <div id="status">Paste a join link or a Gallery id, then Start.</div>
+  <script type="module">
+    import { start } from "./host.js";
+    const stage = document.getElementById("stage");
+    const status = document.getElementById("status");
+    const panel = document.getElementById("panel");
+    stage.addEventListener("eustress-player-status", (e) => {
+      status.textContent = e.detail.message;
+    });
+    panel.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const joinField = document.getElementById("join");
+      const join = joinField.value.trim() || undefined;
+      joinField.value = ""; // nothing keeps the link once it is handed over
+      const simId = document.getElementById("sim").value.trim() || undefined;
+      const apiBase = document.getElementById("api").value;
+      panel.hidden = true;
+      start({ container: stage, simId, apiBase, join }).catch(() => {
+        status.textContent = "Check the link or the Gallery id.";
+        panel.hidden = false;
+      });
+    });
+  </script>
+</body>
+</html>

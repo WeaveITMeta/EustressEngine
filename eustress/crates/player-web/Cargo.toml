@@ -1,0 +1,95 @@
+[package]
+name = "eustress-player-web"
+version = "0.1.0"
+edition = "2021"
+description = "The browser Player: the Player's replica of a joined world, drawn into a web page's canvas and joined over the browser's WebTransport."
+authors = ["EustressEngine Contributors"]
+license = "PolyForm-Shield-1.0.0"
+
+[lib]
+# `/player/host.js` loads the wasm-bindgen glue as `eustress_player.js`.
+name = "eustress_player"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The two browser builds, one per graphics API: `webgpu` for /player/webgpu/
+# and `webgl2` for /player/webgl2/ (host.js picks). Bevy with both always picks
+# WebGPU and never falls back, so each build turns on exactly one.
+#
+# Each is named on the Bevy render crates it changes, never through bevy's own
+# `webgpu` or `webgl2`: bevy_internal's carry "bevy_feathers?/..." entries, and
+# cargo's resolver puts an optional crate a weak feature names into Cargo.lock,
+# so bevy's features would add bevy_feathers (and what it pulls) to the
+# workspace lock. Name both again on any Bevy render crate this graph gains
+# (bevy_gizmos_render, bevy_anti_alias, bevy_post_process, ...). WebGL2 brings
+# one crate of its own, wgpu-core-deps-wasm, through wgpu-core's `webgl`.
+webgpu = ["bevy_render/webgpu", "bevy_core_pipeline/webgpu", "bevy_pbr/webgpu"]
+webgl2 = ["bevy_render/webgl", "bevy_core_pipeline/webgl", "bevy_pbr/webgl"]
+
+[dependencies]
+# Reading the join link, and the fixed states the page is told: compiled on
+# every target, so their tests run natively without the browser's graph.
+eustress-networking = { path = "../common/eustress-networking", default-features = false }
+
+# Everything else is the browser's alone, so a native build of the workspace
+# compiles none of it and nothing here joins a desktop build's features.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Default features stay off: `streaming` pulls tokio's rt-multi-thread and fs,
+# which tokio refuses on wasm32.
+#
+# THE units_v1 TRAP: `units_v1` is one of common's default features, so taking
+# common without its defaults drops it, and it must be named again here. It
+# gates the conversion of a Space's authored units into metres
+# (space_read.rs:416-424, datamodel/record.rs:1492-1521). Without it this
+# Player's tree holds authored studs where the host's holds metres, every
+# replicated write lands in a different world, and nothing fails to compile.
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1"] }
+eustress-play-runtime = { path = "../play-runtime" }
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
+    # The browser's event loop, canvas and input.
+    "web",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_asset",
+    "bevy_color",
+    "bevy_log",
+    "keyboard",
+    "mouse",
+    # The Space's sounds, as the desktop Player decodes them.
+    "bevy_audio",
+    "audio-all-formats",
+    "png",
+    # Camera3d's default tonemapping (TonyMcMapface) needs its LUT, or the
+    # view is magenta; the LUT is KTX2 with zstd, decoded in pure Rust.
+    "tonemapping_luts",
+    "zstd_rust",
+] }
+# The render crates the graphics features name; bevy already brings each (its
+# bevy_pbr feature), so these add no crate, only the features' names.
+bevy_render = { version = "0.19", default-features = false }
+bevy_core_pipeline = { version = "0.19", default-features = false }
+bevy_pbr = { version = "0.19", default-features = false }
+# Exact, and together: the build is packaged by wasm-bindgen-cli 0.2.128, which
+# reads only the schema these versions write (wasm-bindgen-shared
+# SCHEMA_VERSION), and js-sys, web-sys and wasm-bindgen-futures each pin the
+# wasm-bindgen they were released with.
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "=0.4.78"
+js-sys = "=0.3.105"
+web-sys = { version = "=0.3.105", features = [
+    "AddEventListenerOptions",
+    "CssStyleDeclaration",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Node",
+    "Window",
+] }
+console_error_panic_hook = "0.1"
