@@ -61,7 +61,10 @@
 //   legalabsent:{accountId}                     when a report first found no user record for the account (two reads at least
 //                                               ACCOUNT_ABSENCE_CONFIRM_MS apart before a report says 'deleted')
 //   R2 locks/legalcase/{kind}/{caseKind}/{caseId}.json   the report a case is getting, claimed create-if-absent before it is
-//                                               written, so two writers (the sweep and a live decision) never write two
+//                                               written, so two writers (the sweep and a live decision) never write two; the
+//                                               save is fenced on the claim's etag, and a later try finding the claim's
+//                                               report repairs its case index and its queue key before counting it paid
+//   legalunconfirmed:{reportId}                 a CSAM report written with account_status 'unconfirmed', for the confirmation
 //
 // Report debts. A case that owes a report keeps the debt until it is paid, and nothing clears or drops one silently. What a
 // try at the report comes to (reportDebtOutcome): `paid` (written, or the case has one); `settled` (a decision that no report
@@ -84,12 +87,15 @@
 // settles the debt is counsel's call; the code does not decide it.
 //
 // A CSAM report is written when the account is not known (no account id on the case) or was deleted: the duty in 2258A comes
-// from knowing of the content, not from knowing who posted it. `who.account_status` says which: 'unknown' (no account id, or
-// no account store to ask) with every field the account would give empty; 'deleted' (the store answered that no user record
-// exists, on two reads at least ACCOUNT_ABSENCE_CONFIRM_MS apart, across tries: one negative read can be a stale one just
-// after the account was made) with the account id kept, the email empty, and whatever the identity record (KYC_STATUS) still
-// holds (the verified name, the date of birth, the country). A read that fails is never reported as a fact: the report is
-// not written, and the debt stays owed for the next try. NEEDS LEGAL REVIEW: counsel should confirm this reading.
+// from knowing of the content, not from knowing who posted it, and a CSAM report is never held on the account's status.
+// `who.account_status` says which: 'unknown' (no account id, or no account store to ask) with every field the account would
+// give empty; 'unconfirmed' (the store answered that no user record exists, once: one negative read can be a stale one just
+// after the account was made), written at once and confirmed by the hourly sweep (confirmUnconfirmedAccounts) through an
+// amendment, as 'deleted' on a second read at least ACCOUNT_ABSENCE_CONFIRM_MS later or as 'known' when the record is found;
+// 'deleted' with the account id kept, the email empty, and whatever the identity record (KYC_STATUS) still holds (the verified
+// name, the date of birth, the country). A threat report waits for the second read instead (account_unconfirmed, owed). A
+// read that fails is never reported as a fact: the report is not written, and the debt stays owed for the next try. NEEDS
+// LEGAL REVIEW: counsel should confirm this reading.
 // =============================================================================
 
 import { assignCaseReference } from './case_reference.mjs';
@@ -413,15 +419,55 @@ async function claimReport(env, finding, id, nowMs) {
   const key = reportClaimKey(finding.kind, finding.caseKind, finding.caseId);
   const body = JSON.stringify({ id, at: new Date(nowMs).toISOString() });
   const meta = { httpMetadata: { contentType: 'application/json' } };
-  if (await env.SCENES.put(key, body, { ...meta, onlyIf: { etagDoesNotMatch: '*' } })) return {};
+  const mine = await env.SCENES.put(key, body, { ...meta, onlyIf: { etagDoesNotMatch: '*' } });
+  if (mine) return { etag: mine.etag || null };
   const held = await env.SCENES.get(key);
   const claim = held ? parse(await held.text()) : null;
   if (claim?.id) {
     const rep = await loadLegalReport(env, claim.id);
     if (rep) return { written: false, reason: 'already_reported', id: rep.id, status: rep.status };
   }
-  if (held && nowMs - (Date.parse(claim?.at || '') || 0) >= REPORT_CLAIM_MS && (await env.SCENES.put(key, body, { ...meta, onlyIf: { etagMatches: held.etag } }))) return {};
+  if (held && nowMs - (Date.parse(claim?.at || '') || 0) >= REPORT_CLAIM_MS) {
+    const taken = await env.SCENES.put(key, body, { ...meta, onlyIf: { etagMatches: held.etag } });
+    if (taken) return { etag: taken.etag || null };
+  }
   return { written: false, reason: 'busy' };
+}
+
+// The fence: the claim is put again on the etag this writer holds (compare-and-swap); false when another writer has it now.
+async function refreshClaim(env, claimed) {
+  const held = await env.SCENES.get(claimed.key);
+  if (!held || held.etag !== claimed.etag || parse(await held.text())?.id !== claimed.id) return false;
+  const again = await env.SCENES.put(claimed.key, JSON.stringify({ id: claimed.id, at: new Date().toISOString() }), { httpMetadata: { contentType: 'application/json' }, onlyIf: { etagMatches: claimed.etag } });
+  if (!again) return false;
+  claimed.etag = again.etag || claimed.etag;
+  return true;
+}
+
+const unconfirmedKey = (id) => `legalunconfirmed:${id}`;
+
+// A try that finds the case's report already written (its claim or its case index names it) makes sure it is recorded as a
+// report is (B-1, R-1): the case index names it, its queue key is there (by its status, unless sent), and a report that was
+// never queued is dispatched (sent, or its staff alert) now. Only then is it answered already_reported (paid); a repair that
+// fails is answered unavailable, so the debt stays owed.
+async function repairClaimedReport(env, claim, finding, deps) {
+  try {
+    const rep = await loadLegalReport(env, claim.id);
+    if (!rep) return { written: false, reason: 'busy' };
+    const idx = caseIndexKey(finding.kind, finding.caseKind, finding.caseId);
+    if ((await env.SOCIAL.get(idx)) !== rep.id) await env.SOCIAL.put(idx, rep.id);
+    let requeued = false;
+    if (rep.status !== 'sent' && !(await env.SOCIAL.get(legalQueueKey(rep.status, rep.id)))) {
+      await env.SOCIAL.put(legalQueueKey(rep.status, rep.id), rep.updated_at || new Date().toISOString());
+      rep.history = [...(rep.history || []), { at: new Date().toISOString(), event: 'requeued' }];
+      requeued = true;
+    }
+    if (requeued) await dispatch(env, rep, deps);
+    return { written: false, reason: 'already_reported', id: rep.id, status: rep.status, ...(requeued ? { repaired: true } : {}) };
+  } catch (e) {
+    console.error('legal reports: the written report was not repaired:', e?.name || 'Error');
+    return { written: false, reason: 'unavailable' };
+  }
 }
 
 /// Writes the report of one illegal finding and queues it. Never throws. `finding`:
@@ -452,23 +498,32 @@ export async function writeLegalReport(env, finding, deps = {}) {
     if (!accountKnown && finding.kind !== 'csam') return { written: false, reason: 'no_account' };
     const idx = caseIndexKey(finding.kind, finding.caseKind, finding.caseId);
     const existing = await env.SOCIAL.get(idx);
-    if (existing) { const rep = await loadLegalReport(env, existing); if (rep) return { written: false, reason: 'already_reported', id: rep.id, status: rep.status }; }
+    if (existing) { const rep = await loadLegalReport(env, existing); if (rep) return await repairClaimedReport(env, { id: rep.id }, finding, deps); }
     const nowMs = typeof deps.now === 'function' ? deps.now() : Date.now();
-    // An account id with no user record is 'deleted' only once two reads, ACCOUNT_ABSENCE_CONFIRM_MS apart, both found none.
-    if (accountKnown && env.USERS && !(await readOrThrow(env.USERS, `user:${accountId}`, 'user record'))) {
-      const first = Date.parse((await env.SOCIAL.get(absentKey(accountId))) || '');
-      if (!Number.isFinite(first)) {
+    // An account id with no user record is 'deleted' only once two reads, ACCOUNT_ABSENCE_CONFIRM_MS apart, both found none. A
+    // CSAM report is not held for it (R-3): it is written now, 'unconfirmed', and confirmed later by an amendment. A threat waits.
+    let absence = 'none';
+    if (accountKnown && env.USERS) {
+      const present = !!(await readOrThrow(env.USERS, `user:${accountId}`, 'user record'));
+      const firstRaw = await env.SOCIAL.get(absentKey(accountId));
+      const first = Date.parse(firstRaw || '');
+      if (present) {
+        if (firstRaw) await env.SOCIAL.delete(absentKey(accountId)).catch(() => {});
+      } else if (!Number.isFinite(first)) {
         await env.SOCIAL.put(absentKey(accountId), new Date(nowMs).toISOString(), { expirationTtl: 2 * 86400 });
-        return { written: false, reason: 'account_unconfirmed' };
+        absence = 'unconfirmed';
+      } else {
+        absence = nowMs - first < ACCOUNT_ABSENCE_CONFIRM_MS ? 'unconfirmed' : 'confirmed';
       }
-      if (nowMs - first < ACCOUNT_ABSENCE_CONFIRM_MS) return { written: false, reason: 'account_unconfirmed' };
+      if (absence === 'unconfirmed' && finding.kind !== 'csam') return { written: false, reason: 'account_unconfirmed' };
     }
     // The case's report is claimed before it is written (R2, create-if-absent): two writers of one case's report (the hourly
     // sweep and a live decision) never both write one. A claim whose report never appeared is taken over after REPORT_CLAIM_MS.
     const id = crypto.randomUUID();
     const claim = await claimReport(env, finding, id, nowMs);
+    if (claim.reason === 'already_reported') return await repairClaimedReport(env, claim, finding, deps);
     if (claim.reason) return claim;
-    claimed = { key: reportClaimKey(finding.kind, finding.caseKind, finding.caseId), id };
+    claimed = { key: reportClaimKey(finding.kind, finding.caseKind, finding.caseId), id, etag: claim.etag || null };
 
     const settings = legalSettingsFrom(env);
     let reference = finding.caseRef || null;
@@ -476,7 +531,7 @@ export async function writeLegalReport(env, finding, deps = {}) {
     const who = accountKnown ? await reportedAccount(env, accountId) : unknownAccount();
     // Whether the account is known: 'known', 'deleted' (the store answered that the id has no user record), or 'unknown' (no
     // id, or no store to ask). A read that fails throws (AccountReadError): the report is owed, never written on a guess.
-    const accountStatus = !accountKnown || !env.USERS ? 'unknown' : (await readOrThrow(env.USERS, `user:${accountId}`, 'user record')) ? 'known' : 'deleted';
+    const accountStatus = !accountKnown || !env.USERS ? 'unknown' : absence === 'unconfirmed' ? 'unconfirmed' : (await readOrThrow(env.USERS, `user:${accountId}`, 'user record')) ? 'known' : 'deleted';
     const ips = uploadIpsOf(finding.uploader?.upload_ips);
     const view = recordedViewOf(finding.detection);
     const viewed = !!view;
@@ -505,9 +560,13 @@ export async function writeLegalReport(env, finding, deps = {}) {
       notice: finding.kind === 'csam' && finding.subject?.kind !== 'forum_post' ? { withheld: true, released_at: null, released_by: null } : null,
       attempts: 0, last_error: null, sent_at: null, history: [{ at: now, event: 'written' }],
     };
+    // Fenced: saved only while the claim is still this writer's (a writer that stalled past REPORT_CLAIM_MS and was taken over
+    // saves nothing, and the one that took over writes the report).
+    if (claimed.etag && !(await refreshClaim(env, claimed))) { claimed = null; return { written: false, reason: 'busy' }; }
     await saveLegalReport(env, rep);
     await env.SOCIAL.put(idx, rep.id);
     claimed = null;
+    if (accountStatus === 'unconfirmed') await env.SOCIAL.put(unconfirmedKey(rep.id), new Date(nowMs).toISOString()).catch(() => {});
     await dispatch(env, rep, deps, settings);
     return { written: true, id: rep.id, status: rep.status };
   } catch (e) {
@@ -529,11 +588,29 @@ export async function writeLegalReport(env, finding, deps = {}) {
 /// recorded as an addendum (`addenda: [{ at, kind, upload_ips, items, sent: false }]`), and staff are told it waits to be
 /// sent. Never throws. `{ amended: true, id, status, how: 'amended' | 'addendum', upload_ips, items }` (the counts added), or
 /// `{ amended: false, reason }`: no_report, nothing_new, unavailable.
-export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps = [], items = [], sealed = false } = {}) {
+export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps = [], items = [], sealed = false, account = null, reportId = null } = {}) {
   try {
-    const id = await env.SOCIAL.get(caseIndexKey(kind, caseKind, caseId));
+    const id = reportId || await env.SOCIAL.get(caseIndexKey(kind, caseKind, caseId));
     const rep = id ? await loadLegalReport(env, id) : null;
     if (!rep) return { amended: false, reason: 'no_report' };
+    // The account's status, confirmed after the report was written ('unconfirmed' at the time): in place before it is sent,
+    // as an addendum after.
+    if (account && typeof account === 'object' && ['known', 'deleted'].includes(account.account_status) && rep.who?.account_status !== account.account_status) {
+      const at = new Date().toISOString();
+      const prev = rep.status;
+      if (rep.status === 'sent') {
+        rep.addenda = [...(rep.addenda || []), { at, kind: 'account_status', account: { ...account }, sent: false }];
+        rep.history.push({ at, event: 'addendum', detail: { account_status: account.account_status } });
+        await saveLegalReport(env, rep, prev);
+        await alertAddendum(env, rep);
+        return { amended: true, id: rep.id, status: rep.status, how: 'addendum', account_status: account.account_status };
+      }
+      const fields = account.account_status === 'known' ? { ...account } : { account_status: 'deleted' };
+      rep.who = { ...rep.who, ...fields, upload_ips: rep.who?.upload_ips || [], upload_ip_unknown_items: rep.who?.upload_ip_unknown_items || [] };
+      rep.history.push({ at, event: 'amended', detail: { account_status: account.account_status } });
+      await saveLegalReport(env, rep, prev);
+      return { amended: true, id: rep.id, status: rep.status, how: 'amended', account_status: account.account_status };
+    }
     const knownIps = new Set([...(rep.who?.upload_ips || []), ...(rep.addenda || []).flatMap((a) => a.upload_ips || [])].map((x) => uploadIpKey({ ip: x.ip, at: x.at || null, item_id: x.item_id || null })));
     const freshIps = uploadIpsOf(uploadIps).filter((x) => !knownIps.has(uploadIpKey(x)));
     const knownItems = new Set([...(rep.evidence?.items || []), ...(rep.addenda || []).flatMap((a) => a.items || [])]);
@@ -567,6 +644,37 @@ export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps 
   }
 }
 
+/// From the hourly sweep: every CSAM report written with account_status 'unconfirmed' has its account read again: found, it is
+/// amended to 'known' with the account's fields; still absent ACCOUNT_ABSENCE_CONFIRM_MS after the first read, 'deleted'.
+/// A read that fails waits for the next run. At most `limit` a run. Never throws. `{ confirmed }`.
+export async function confirmUnconfirmedAccounts(env, { now = Date.now(), limit = 50 } = {}) {
+  const out = { confirmed: 0 };
+  try {
+    const listed = await env.SOCIAL.list({ prefix: 'legalunconfirmed:', limit });
+    for (const k of listed?.keys || []) {
+      try {
+        const id = k.name.slice('legalunconfirmed:'.length);
+        const rep = await loadLegalReport(env, id);
+        if (!rep || rep.who?.account_status !== 'unconfirmed') { await env.SOCIAL.delete(k.name); continue; }
+        const accountId = rep.who.account_id;
+        const present = !!(await readOrThrow(env.USERS, `user:${accountId}`, 'user record'));
+        const first = Date.parse((await env.SOCIAL.get(absentKey(accountId))) || (await env.SOCIAL.get(k.name)) || '');
+        let account = null;
+        if (present) account = { ...(await reportedAccount(env, accountId)), account_status: 'known' };
+        else if (Number.isFinite(first) && now - first >= ACCOUNT_ABSENCE_CONFIRM_MS) account = { account_status: 'deleted' };
+        if (!account) continue;
+        const r = await amendLegalReport(env, { reportId: id, account });
+        if (r.amended) { await env.SOCIAL.delete(k.name); out.confirmed += 1; if (present) await env.SOCIAL.delete(absentKey(accountId)).catch(() => {}); }
+      } catch (e) {
+        console.error('legal reports: an account was not confirmed:', e?.name || 'Error');
+      }
+    }
+  } catch (e) {
+    console.error('legal reports: the unconfirmed accounts were not read:', e?.name || 'Error');
+  }
+  return out;
+}
+
 /// The addresses-only form of amendLegalReport (kept for its callers): `{ kind, caseKind, caseId, uploadIps }`.
 export const amendLegalReportUploadIps = (env, { kind, caseKind, caseId, uploadIps } = {}) => amendLegalReport(env, { kind, caseKind, caseId, uploadIps });
 
@@ -587,6 +695,8 @@ export const REPORT_DEBT_MAX_TRIES = 24;
 export const RETRIES_EXHAUSTED = 'retries_exhausted';
 /// A debt stuck as RETRIES_EXHAUSTED is still tried this often (a long outage ends, and the report is then written).
 export const STUCK_RETRY_EVERY_MS = 86400000;
+/// The most stuck alerts one run of the re-alert sends, so it leaves room for the cron's later steps.
+export const STUCK_ALERTS_PER_RUN = 50;
 /// The stuck debts GET /api/admin/legal/stuck answers per request.
 export const STUCK_LIST_PAGE = 200;
 
@@ -689,7 +799,11 @@ export async function recordStuckReport(env, { caseKind, caseId, reportKind = nu
       last_reason: clean(lastReason, 60), reference: clean(reference, 80), since: clean(since, 40), stuck_at: new Date(now).toISOString(), alerted_at: null, alerts: 0,
     };
     const current = parse(await env.SOCIAL.get(key));
-    if (current && sameSince(current.since, rec.since) && current.reason === rec.reason) return { ok: true, already: true };
+    if (current && sameSince(current.since, rec.since) && current.reason === rec.reason) {
+      // The same debt failing for a new reason: the record says so (no new alert).
+      if (rec.last_reason && current.last_reason !== rec.last_reason) await env.SOCIAL.put(key, JSON.stringify({ ...current, last_reason: rec.last_reason }));
+      return { ok: true, already: true };
+    }
     await writeAuditRecord(env, 'LEGAL_REPORT_STUCK', 'system', rec.reference || `${caseKind}:${caseId}`, { case_kind: caseKind, case_id: caseId, report_kind: rec.report_kind, category: rec.category, reason: rec.reason, last_reason: rec.last_reason, since: rec.since, ...(current ? { replaces: { since: current.since || null, reason: current.reason || null } } : {}) });
     await env.SOCIAL.put(key, JSON.stringify(rec));
     // A record of the same kind still at the key records had before they were kept per kind is this one's: it goes.
@@ -711,9 +825,10 @@ export const stuckCursorKey = (caseKind) => `legalstuck-cursor:${caseKind}`;
 /// again. A page of `limit` at a time, one page a run per kind by default (`maxPages`), carrying on from where the last run stopped
 /// (legalstuck-cursor:{caseKind}), so every stuck debt is reached however many there are; the run that reaches the end starts
 /// the next from the beginning. Never throws. `{ stuck, alerted }` (the debts read this run).
-export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 1, caseKinds = DEBT_CASE_KINDS } = {}) {
-  const out = { stuck: 0, alerted: 0 };
+export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 1, caseKinds = DEBT_CASE_KINDS, maxAlerts = STUCK_ALERTS_PER_RUN } = {}) {
+  const out = { stuck: 0, alerted: 0, capped: false };
   for (const caseKind of caseKinds.filter((k) => DEBT_CASE_KINDS.includes(k))) {
+    if (out.capped) break;
     try {
       let cursor;
       try { cursor = (await env.SOCIAL.get(stuckCursorKey(caseKind))) || undefined; } catch { cursor = undefined; }
@@ -724,6 +839,8 @@ export async function alertStuckReports(env, { now = Date.now(), limit = 200, ma
         catch { if (!cursor) break; cursor = undefined; continue; }
         pages += 1;
         for (const k of listed?.keys || []) {
+          // Capped: the page is read again next run (the ones alerted now are not due for a day).
+          if (out.alerted >= maxAlerts) { out.capped = true; break; }
           const rec = parse(await env.SOCIAL.get(k.name));
           if (!rec) continue;
           out.stuck += 1;
@@ -731,6 +848,7 @@ export async function alertStuckReports(env, { now = Date.now(), limit = 200, ma
           if (Number.isFinite(last) && now - last < STUCK_ALERT_EVERY_MS) continue;
           if (await alertStuck(env, rec, now, k.name)) out.alerted += 1;
         }
+        if (out.capped) break;
         if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; break; }
         cursor = listed.cursor;
       }
@@ -770,11 +888,14 @@ export async function alertReportOwed(env, { caseKind, caseId, reference = null,
 // `since` when it is given. `{ record }` or `{ code }`: not_stuck, kind_required (the case has several and none was named),
 // record_changed (the record is now of another debt than the one shown).
 async function stuckRecordNamed(env, caseKind, caseId, reportKind, since) {
+  // The row a person acts on names its debt in full (R-2): its since always, and its report kind whenever the record has one.
+  if (since === undefined) return { code: 'since_required' };
   const records = await loadStuckReports(env, caseKind, caseId);
   const named = reportKind ? records.filter((r) => r.report_kind === reportKind) : records;
   if (!named.length) return { code: 'not_stuck' };
   if (named.length > 1) return { code: 'kind_required' };
-  if (since !== undefined && since !== null && !sameSince(named[0].since, since)) return { code: 'record_changed' };
+  if (named[0].report_kind && !reportKind) return { code: 'kind_required' };
+  if (!sameSince(named[0].since, since)) return { code: 'record_changed' };
   return { record: named[0] };
 }
 
@@ -792,7 +913,7 @@ function personAct(by, rationale) {
 /// (src/moderation.mjs clearReportDebt, which never touches the evidence). A record whose debt is no longer that one is
 /// refused (`debt_changed`) and refreshed, so the list shows the debt as it is. Never throws. `{ ok }` or `{ ok: false, code }`:
 /// bad_case, person_required, rationale_required, not_stuck, kind_required, record_changed, debt_changed, busy, unavailable.
-export async function clearStuckReport(env, { caseKind, caseId, by, rationale, reportKind = null, since = null } = {}) {
+export async function clearStuckReport(env, { caseKind, caseId, by, rationale, reportKind = null, since = undefined } = {}) {
   try {
     if (!DEBT_CASE_KINDS.includes(caseKind) || typeof caseId !== 'string' || !STUCK_CASE_ID.test(caseId)) return { ok: false, code: 'bad_case' };
     const refused = personAct(by, rationale);
@@ -818,14 +939,17 @@ export async function clearStuckReport(env, { caseKind, caseId, by, rationale, r
 /// payable again (its stuck mark and try count go, its stuck record is closed) and tried once at once (src/moderation.mjs
 /// retryReportDebt). Only a person, with a rationale, audited by the route first. Never throws. `{ ok, outcome }` or
 /// `{ ok: false, code }`, as clearStuckReport.
-export async function retryStuckReport(env, { caseKind, caseId, by, rationale, reportKind = null, since = null, deps = {} } = {}) {
+export async function retryStuckReport(env, { caseKind, caseId, by, rationale, reportKind = null, since = undefined, deps = {} } = {}) {
   try {
     if (!DEBT_CASE_KINDS.includes(caseKind) || typeof caseId !== 'string' || !STUCK_CASE_ID.test(caseId)) return { ok: false, code: 'bad_case' };
     const refused = personAct(by, rationale);
     if (refused) return { ok: false, code: refused };
+    if (since === undefined) return { ok: false, code: 'since_required' };
+    // A stuck debt is named by its record; an owed one (not stuck) by its kind and since, as the case shows it.
     const named = await stuckRecordNamed(env, caseKind, caseId, reportKind, since);
-    if (!named.record) return { ok: false, code: named.code };
-    const r = await (await import('./moderation.mjs')).retryReportDebt(env, { caseKind, caseId, by, reportKind: named.record.report_kind || null, since: named.record.since ?? null, deps });
+    if (!named.record && named.code !== 'not_stuck') return { ok: false, code: named.code };
+    const kind = named.record ? named.record.report_kind || null : reportKind;
+    const r = await (await import('./moderation.mjs')).retryReportDebt(env, { caseKind, caseId, by, reportKind: kind, since: named.record ? named.record.since ?? null : since, owed: !named.record, deps });
     return r?.ok ? { ok: true, outcome: r.outcome } : { ok: false, code: r?.code || 'unavailable' };
   } catch (e) {
     console.error('legal reports: the stuck report was not retried:', e?.name || 'Error');
@@ -1157,6 +1281,7 @@ export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date
   // no stuck index is read and no stuck mail is sent.
   const stuckKinds = [...(settings.forum_owed_sweep ? ['forum'] : []), ...(settings.listing_owed_sweep ? ['moderation'] : [])];
   out.stuck = stuckKinds.length ? await alertStuckReports(env, { now, caseKinds: stuckKinds }) : 'off';
+  out.accounts = await confirmUnconfirmedAccounts(env, { now });
   out.scam_batch = await weeklyScamBatch(env, now, deps);
   return out;
 }
@@ -1276,16 +1401,20 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
     const note = await noteOf();
     if (!note) return deps.json({ error: 'note is required: 10 to 2000 characters saying why', code: 'note_required' }, 400, cors);
     const body = await bodyOf();
-    // The record the person was shown: its report kind and the debt's since, as GET /stuck lists them.
+    const retry = m[3] === 'retry';
+    // The row the person was shown names its debt (R-2): `since` is required (null for a record that has none), and
+    // `report_kind` whenever the record has one.
+    if (!Object.prototype.hasOwnProperty.call(body, 'since') || (body.since !== null && typeof body.since !== 'string')) return deps.json({ error: 'since is required: the debt\'s since, as the list shows it', code: 'since_required' }, 400, cors);
     const reportKind = typeof body.report_kind === 'string' && /^[a-z_]{1,40}$/.test(body.report_kind) ? body.report_kind : null;
-    const since = typeof body.since === 'string' ? body.since.slice(0, 40) : null;
+    const since = body.since === null ? null : body.since.slice(0, 40);
     const named = await stuckRecordNamed(env, m[1], m[2], reportKind, since);
-    if (!named.record) {
+    if (!named.record && !(retry && named.code === 'not_stuck')) {
       if (named.code === 'not_stuck') return deps.json({ error: 'No stuck report debt for this case.', code: 'not_stuck' }, 404, cors);
+      if (named.code === 'kind_required' && !reportKind) return deps.json({ error: 'report_kind is required: the record names one.', code: 'report_kind_required' }, 400, cors);
       return deps.json({ error: named.code === 'kind_required' ? 'This case has more than one stuck debt: name its report_kind.' : 'The stuck record is now of another debt: reload the list.', code: named.code }, 409, headers);
     }
-    const stuck = named.record;
-    const retry = m[3] === 'retry';
+    // A retry of an owed debt (not stuck) names it by its kind and since, as the case shows it.
+    const stuck = named.record || { report_kind: reportKind, since, reason: 'owed', reference: null };
     // Only a person clears or retries a debt, and never unaudited: the attempt is audited first, or nothing changes; then its
     // outcome, as it came out (LEGAL_STUCK_CLEARED only for a clear that was made, LEGAL_STUCK_CLEAR_FAILED with the code
     // otherwise; LEGAL_STUCK_RETRIED with the try's outcome, or LEGAL_STUCK_RETRY_FAILED).
@@ -1296,7 +1425,7 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
     const args = { caseKind: m[1], caseId: m[2], by: adminId, rationale: note, reportKind: stuck.report_kind || null, since: stuck.since ?? null };
     const r = retry ? await retryStuckReport(env, { ...args, deps: deps.reportDeps || {} }) : await clearStuckReport(env, args);
     await audit(retry ? (r.ok ? 'LEGAL_STUCK_RETRIED' : 'LEGAL_STUCK_RETRY_FAILED') : (r.ok ? 'LEGAL_STUCK_CLEARED' : 'LEGAL_STUCK_CLEAR_FAILED'), target, { ...facts, ...(r.ok ? (retry ? { outcome: r.outcome } : {}) : { code: r.code }) });
-    return deps.json(r.ok ? { ok: true, ...(retry ? { outcome: r.outcome } : {}) } : { error: r.code, code: r.code }, r.ok ? 200 : r.code === 'busy' || r.code === 'unavailable' ? 503 : 409, headers);
+    return deps.json(r.ok ? { ok: true, ...(retry ? { outcome: r.outcome } : {}) } : { error: r.code, code: r.code }, r.ok ? 200 : r.code === 'busy' || r.code === 'unavailable' ? 503 : r.code === 'not_owed' ? 404 : 409, headers);
   }
   m = /^\/api\/admin\/legal\/notices\/(moderation|forum)\/([A-Za-z0-9-]{1,64})\/release$/.exec(url.pathname);
   if (m) {

@@ -36,7 +36,12 @@ test('a forum threshold set to 5 uses its default; a valid one in [0, 1] is take
   assert.deepEqual([t.forum_refuse, t.forum_borderline], [DEFAULT_THRESHOLDS.forum_refuse, DEFAULT_THRESHOLDS.forum_borderline]);
   assert.equal((await forum(env, 0.9)).verdict, 'refuse', 'scam at 0.9 still refuses at the default 0.85');
   assert.equal((await quiet(() => thresholdsFrom(envWith({ forum_refuse: 0.6 })))).forum_refuse, 0.6);
-  assert.equal((await quiet(() => thresholdsFrom(envWith({ guest_chat_refuse: 0 })))).guest_chat_refuse, 0, 'the bounds themselves are valid');
+  // R-6: a refusal threshold is strictly inside (0, 1): at 1 nothing is refused, at 0 everything is.
+  for (const edge of [0, 1]) assert.equal((await quiet(() => thresholdsFrom(envWith({ guest_chat_refuse: edge })))).guest_chat_refuse, DEFAULT_THRESHOLDS.guest_chat_refuse, String(edge));
+  assert.equal((await quiet(() => thresholdsFrom(envWith({ forum_refuse: 1 })))).forum_refuse, DEFAULT_THRESHOLDS.forum_refuse);
+  assert.equal((await quiet(() => thresholdsFrom(envWith({ guest_chat_refuse: 0.01 })))).guest_chat_refuse, 0.01);
+  // A rate may be 0 or 1.
+  assert.deepEqual([(await quiet(() => thresholdsFrom(envWith({ audit_rate: 0 })))).audit_rate, (await quiet(() => thresholdsFrom(envWith({ audit_rate: 1 })))).audit_rate], [0, 1]);
 });
 
 test('every probability field of every battery is clamped, and a count or a time may not be negative', async () => {
@@ -49,4 +54,18 @@ test('every probability field of every battery is clamped, and a count or a time
   assert.equal(thresholdValueOk('guest_chat_refuse', Number.NaN), false);
   assert.equal(thresholdValueOk('not_a_field', 0.5), false);
   assert.deepEqual(await quiet(() => thresholdsFrom(envWith('not json'))), { ...DEFAULT_THRESHOLDS });
+});
+
+test('R-6: lease_seconds is at least 30, and each high threshold stays at or above its lower one (else both defaults)', async () => {
+  const t = (x) => quiet(() => thresholdsFrom(envWith(x)));
+  assert.equal((await t({ lease_seconds: 29 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds);
+  assert.equal((await t({ lease_seconds: 30 })).lease_seconds, 30);
+  const crossed = await t({ guest_chat_refuse: 0.9, guest_chat_high: 0.6 });
+  assert.deepEqual([crossed.guest_chat_refuse, crossed.guest_chat_high], [DEFAULT_THRESHOLDS.guest_chat_refuse, DEFAULT_THRESHOLDS.guest_chat_high], 'the guest chat pair');
+  const forum = await t({ forum_borderline: 0.9, forum_refuse: 0.6 });
+  assert.deepEqual([forum.forum_borderline, forum.forum_refuse], [DEFAULT_THRESHOLDS.forum_borderline, DEFAULT_THRESHOLDS.forum_refuse], 'the forum pair');
+  const profile = await t({ profile_review: 0.9 });
+  assert.deepEqual([profile.profile_review, profile.profile_refuse], [DEFAULT_THRESHOLDS.profile_review, DEFAULT_THRESHOLDS.profile_refuse], 'the profile pair, a lower one raised past the default higher one');
+  const ok = await t({ guest_chat_refuse: 0.4, guest_chat_high: 0.4 });
+  assert.deepEqual([ok.guest_chat_refuse, ok.guest_chat_high], [0.4, 0.4], 'equal is allowed');
 });

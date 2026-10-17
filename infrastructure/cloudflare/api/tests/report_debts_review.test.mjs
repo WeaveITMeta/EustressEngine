@@ -17,7 +17,7 @@ import {
 } from '../src/moderation.mjs';
 import {
   loadLegalReport, sweepLegalReports, writeLegalReport, loadStuckReport, legalStuckKey, alertStuckReports, handleLegalReportRoute,
-  REPORT_DEBT_MAX_TRIES, RETRIES_EXHAUSTED,
+  REPORT_DEBT_MAX_TRIES, RETRIES_EXHAUSTED, confirmUnconfirmedAccounts,
 } from '../src/legal_reports.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 
@@ -131,6 +131,9 @@ const route = async (env, method, path, body, deps = routeDeps()) => {
   return { status: res.status, body: await res.json() };
 };
 
+// The row GET /stuck shows for a case's stuck record of `kind`: what a clear or a retry must name (its report kind and since).
+const rowOf = async (env, caseKind, caseId, kind = null) => { const r = await loadStuckReport(env, caseKind, caseId, kind); return r ? { report_kind: r.report_kind || null, since: r.since ?? null } : { since: null }; };
+
 // -- D-1 -----------------------------------------------------------------------------------------------------------------
 
 test('D-1 (zz_debt_1): a csam check removal owes its report from the removal\'s own write; no failure after it loses the debt', async () => {
@@ -222,12 +225,22 @@ test('D-3 (zz_debt_5): a failed account read is never reported as a deleted acco
   const ok = await quiet(() => writeLegalReport(env, finding(`${'b'.repeat(24)}-7`)));
   assert.equal((await loadLegalReport(env, ok.id)).who.account_status, 'known');
   const absent = { ...finding(`${'b'.repeat(24)}-8`), uploader: { account_id: 'user-never-was' } };
-  const once = await quiet(() => writeLegalReport(env, absent));
-  assert.deepEqual([once.written, once.reason], [false, 'account_unconfirmed'], 'one read that finds no record is not a fact');
-  const soon = await quiet(() => writeLegalReport(env, absent, { now: () => Date.now() + 30_000 }));
-  assert.equal(soon.reason, 'account_unconfirmed', 'nor are two reads within the minute');
-  const gone = await quiet(() => writeLegalReport(env, absent, { now: () => Date.now() + 61_000 }));
+  // R-3: a csam report is never held on the account's status: written at once, 'unconfirmed', and confirmed by an amendment.
+  const gone = await quiet(() => writeLegalReport(env, absent));
+  assert.equal(gone.written, true, 'written at once');
+  assert.equal((await loadLegalReport(env, gone.id)).who.account_status, 'unconfirmed', 'one read that finds no record is not a fact');
+  await quiet(() => confirmUnconfirmedAccounts(env, { now: Date.now() + 30_000 }));
+  assert.equal((await loadLegalReport(env, gone.id)).who.account_status, 'unconfirmed', 'nor are two reads within the minute');
+  await quiet(() => confirmUnconfirmedAccounts(env, { now: Date.now() + 61_000 }));
   assert.equal((await loadLegalReport(env, gone.id)).who.account_status, 'deleted', 'deleted only on a confirmed absent record');
+  // The account found on the second read: amended to known, its fields filled, and the absence forgotten.
+  const back = { ...finding(`${'b'.repeat(24)}-10`), uploader: { account_id: 'user-came-back' } };
+  const w = await quiet(() => writeLegalReport(env, back));
+  await env.USERS.put('user:user-came-back', JSON.stringify({ id: 'user-came-back', username: 'back', email: 'back@example.com', created_at: '2026-10-01T00:00:00.000Z' }));
+  await quiet(() => confirmUnconfirmedAccounts(env, { now: Date.now() + 61_000 }));
+  const found = await loadLegalReport(env, w.id);
+  assert.deepEqual([found.who.account_status, found.who.email], ['known', 'back@example.com']);
+  assert.equal(await env.SOCIAL.get('legalabsent:user-came-back'), null);
   const noStore = { ...env, USERS: undefined };
   const u = await quiet(() => writeLegalReport(noStore, finding(`${'b'.repeat(24)}-9`)));
   assert.equal((await loadLegalReport(env, u.id)).who.account_status, 'unknown', 'unknown when it cannot be told');
@@ -256,7 +269,7 @@ test('D-4 (zz_debt_3): clearing a stale stuck alert never clears a newer, payabl
   // The stale record was closed when the person's finding replaced its debt (F1): there is nothing stale to clear.
   assert.equal(await loadStuckReport(env, 'moderation', SIM), null);
   assert.ok(auditsOf(env, 'LEGAL_REPORT_STUCK_CLOSED').some((a) => a.details.why === 'replaced'));
-  const done = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Old quarantine with no detection on record; reviewed.' });
+  const done = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Old quarantine with no detection on record; reviewed.', report_kind: 'csam', since: '2026-09-01T00:00:00.000Z' });
   assert.equal(done.status, 404, JSON.stringify(done));
   const rec = await loadCase(env, SIM);
   assert.deepEqual([!!rec.report_owed, rec.report_owed?.actor], [true, 'admin'], 'the payable debt is still owed after the clear');
@@ -268,7 +281,7 @@ test('D-4 (zz_debt_3): clearing a stale stuck alert never clears a newer, payabl
 test('D-4 (zz_debt_3b): a person\'s audited clear of a stuck listing debt stands; the heal does not re-open it', async () => {
   const env = await environment();
   await staleStuckListing(env);
-  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed with counsel: filed by hand under reference X-9.' })).status, 200);
+  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed with counsel: filed by hand under reference X-9.', ...(await rowOf(env, 'moderation', SIM)) })).status, 200);
   const mails = env.mail.length;
   for (let i = 0; i < 2; i++) await quiet(() => sweepLegalReports(env));
   assert.equal(await loadStuckReport(env, 'moderation', SIM), null, 'not re-opened');
@@ -280,13 +293,14 @@ test('D-4: a forum clear removes only the stuck debt its record names; a payable
   const env = await environment();
   await threatRemoval(env);
   // The threat debt is stuck for a person (a defect), and a csam debt is owed beside it.
+  const since = new Date().toISOString();
   await env.SCENES.rewriteCase(POST, (r) => {
-    r.report_owed = { since: new Date().toISOString(), category: 'threat', reason: 'check_removal', by: null, stuck: { reason: 'no_account', at: new Date().toISOString() } };
+    r.report_owed = { since, category: 'threat', reason: 'check_removal', by: null, stuck: { reason: 'no_account', at: new Date().toISOString() } };
     r.report_owed_more = { csam: { since: new Date().toISOString(), category: 'csam', reason: 'check_removal', by: null, detection: { source: 'forum_check', checks: [{ kind: 'classifier', source: 'jev:forum', category: 'csam', confidence: 0.97, band: 'high' }], band: 'high', viewed_by_staff: false } } };
   });
-  await env.SOCIAL.put(legalStuckKey('forum', POST), JSON.stringify({ case_kind: 'forum', case_id: POST, report_kind: 'threat', reason: 'no_account', stuck_at: new Date().toISOString(), alerted_at: null, alerts: 0 }));
+  await env.SOCIAL.put(legalStuckKey('forum', POST), JSON.stringify({ case_kind: 'forum', case_id: POST, report_kind: 'threat', reason: 'no_account', since, stuck_at: new Date().toISOString(), alerted_at: null, alerts: 0 }));
   await env.SOCIAL.put(forumReportOwedKey(POST), new Date().toISOString());
-  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: the threat was handled by hand.' })).status, 200);
+  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: the threat was handled by hand.', report_kind: 'threat', since })).status, 200);
   const rec = await loadForumCase(env, POST);
   assert.deepEqual(forumDebts(rec).map((d) => [d.category, !!d.stuck]), [['csam', false]], 'only the stuck threat debt went');
   assert.ok(await env.SOCIAL.get(forumReportOwedKey(POST)), 'the payable csam debt stays indexed');
@@ -472,7 +486,7 @@ test('notes: a clear that fails is audited as attempted and failed, never as cle
   await env.SOCIAL.put(legalStuckKey('forum', POST), JSON.stringify({ case_kind: 'forum', case_id: POST, report_kind: 'threat', reason: 'no_account', stuck_at: new Date().toISOString(), alerts: 0 }));
   // The case's lease is held by another writer: the clear answers busy (503).
   await env.SCENES.put(`locks/forum/${POST}.json`, JSON.stringify({ holder: 'someone-else', expires_at: Date.now() + 3600_000 }));
-  const res = await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: this one was filed by hand.' });
+  const res = await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: this one was filed by hand.', report_kind: 'threat', since: null });
   assert.equal(res.status, 503);
   assert.equal(auditsOf(env, 'LEGAL_STUCK_CLEARED').length, 0, 'no audit says it was cleared');
   assert.equal(auditsOf(env, 'LEGAL_STUCK_CLEAR_REQUESTED').length, 1);

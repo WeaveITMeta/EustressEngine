@@ -13,7 +13,7 @@ import {
   POLICY_HASH_ANCHORED,
 } from '../src/moderation.mjs';
 import { VAULT_PREFIX } from '../src/evidence_vault.mjs';
-import { writeLegalReport, loadLegalReport, sweepLegalReports } from '../src/legal_reports.mjs';
+import { writeLegalReport, loadLegalReport, sweepLegalReports, confirmUnconfirmedAccounts } from '../src/legal_reports.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 
 function kv() {
@@ -164,10 +164,12 @@ test('a csam report is written when the account is not known or was deleted, and
   assert.equal(unknown.written, true, JSON.stringify(unknown));
   const u = await loadLegalReport(env, unknown.id);
   assert.deepEqual([u.who.account_id, u.who.account_status, u.who.email, u.takeover.account_state_read], [null, 'unknown', null, false]);
-  // 'deleted' rests on two reads that found no user record, at least a minute apart: the first try is owed.
-  const first = await quiet(() => writeLegalReport(env, finding(`${'e'.repeat(24)}-2`, 'user-gone-0902')));
-  assert.deepEqual([first.written, first.reason], [false, 'account_unconfirmed']);
-  const deleted = await quiet(() => writeLegalReport(env, finding(`${'e'.repeat(24)}-2`, 'user-gone-0902'), { now: () => Date.now() + 61_000 }));
+  // 'deleted' rests on two reads that found no user record, at least a minute apart. A csam report is not held for it: it is
+  // written at once, 'unconfirmed', and the hourly confirmation amends it.
+  const deleted = await quiet(() => writeLegalReport(env, finding(`${'e'.repeat(24)}-2`, 'user-gone-0902')));
+  assert.equal(deleted.written, true);
+  assert.equal((await loadLegalReport(env, deleted.id)).who.account_status, 'unconfirmed');
+  await quiet(() => confirmUnconfirmedAccounts(env, { now: Date.now() + 61_000 }));
   assert.equal((await loadLegalReport(env, deleted.id)).who.account_status, 'deleted');
   const known = await quiet(() => writeLegalReport(env, finding(`${'e'.repeat(24)}-3`, AUTHOR)));
   assert.equal((await loadLegalReport(env, known.id)).who.account_status, 'known');
@@ -210,10 +212,10 @@ test('deleting an account leaves a forum case that owes a report, and its sealed
   assert.ok(await env.SOCIAL.get(forumReportOwedKey(post)));
   // The debt is still paid: the sweep writes the report, with the account marked deleted.
   env.FORUM_LEGAL_OWED_SWEEP = 'on';
-  // The first sweep finds no user record and waits to read it again (two reads a minute apart); the next one writes it.
+  // The first sweep writes it at once, 'unconfirmed' (one read found no user record); a sweep a minute later confirms it.
   await quiet(() => sweepLegalReports(env));
-  assert.equal([...env.SOCIAL.store.keys()].filter((k) => k.startsWith('legalreport:')).length, 0, 'not on one read');
-  await quiet(() => sweepLegalReports(env, { now: () => Date.now() + 61_000 }));
+  assert.equal(JSON.parse(env.SOCIAL.store.get([...env.SOCIAL.store.keys()].find((k) => k.startsWith('legalreport:')))).who.account_status, 'unconfirmed', 'not deleted on one read');
+  await quiet(() => sweepLegalReports(env, {}, { now: Date.now() + 61_000 }));
   const reports = [...env.SOCIAL.store.keys()].filter((k) => k.startsWith('legalreport:'));
   assert.equal(reports.length, 1);
   assert.equal(JSON.parse(env.SOCIAL.store.get(reports[0])).who.account_status, 'deleted');

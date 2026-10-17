@@ -131,6 +131,9 @@ const route = async (env, method, path, body, deps = routeDeps()) => {
   return { status: res.status, body: await res.json() };
 };
 
+// The row GET /stuck shows for a case's stuck record of `kind`: what a clear or a retry must name (its report kind and since).
+const rowOf = async (env, caseKind, caseId, kind = null) => { const r = await loadStuckReport(env, caseKind, caseId, kind); return r ? { report_kind: r.report_kind || null, since: r.since ?? null } : { since: null }; };
+
 // -- helpers of this round -------------------------------------------------------------------------------------------------
 
 const stuckSubjects = (env) => subjects(env).filter((s) => s.startsWith('A legal report is stuck'));
@@ -192,11 +195,11 @@ test('F1: a clear whose record names another debt than the case holds is refused
   await env.SOCIAL.put(`modcase:${SIM}`, JSON.stringify(rec));
   // The record names an older debt (another since) than the stuck one the case holds.
   await env.SOCIAL.put(legalStuckKey('moderation', SIM, 'csam'), JSON.stringify({ case_kind: 'moderation', case_id: SIM, report_kind: 'csam', reason: 'no_detection_recorded', since: '2026-01-01T00:00:00.000Z', stuck_at: new Date().toISOString(), alerts: 0 }));
-  const done = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed the old quarantine.' });
+  const done = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed the old quarantine.', report_kind: 'csam', since: '2026-01-01T00:00:00.000Z' });
   assert.deepEqual([done.status, done.body.code], [409, 'debt_changed']);
   assert.ok((await loadCase(env, SIM)).report_owed, 'nothing was cleared');
   assert.equal((await loadStuckReport(env, 'moderation', SIM, 'csam')).since, rec.report_owed.since, 'the record now names the case\'s debt');
-  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed the current debt.', since: rec.report_owed.since })).status, 200);
+  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Reviewed the current debt.', report_kind: 'csam', since: rec.report_owed.since })).status, 200);
 });
 
 // -- F2 ------------------------------------------------------------------------------------------------------------------
@@ -215,8 +218,8 @@ test('F2 (zz_dfix_2): a csam debt stuck beside a stuck threat debt on one post h
   assert.deepEqual(listed, [['csam', RETRIES_EXHAUSTED], ['threat', 'no_account']], 'each kind is listed');
   assert.equal(stuckSubjects(env).length, 2, 'and alerted');
   // The threat's clear names its kind and leaves the csam debt.
-  assert.deepEqual([(await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: two records here.' })).body.code], ['kind_required']);
-  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: the threat was filed by hand.', report_kind: 'threat' })).status, 200);
+  assert.deepEqual([(await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: two records here.', since: null })).body.code], ['report_kind_required']);
+  assert.equal((await route(env, 'POST', `/api/admin/legal/stuck/forum/${POST}/clear`, { note: 'Reviewed: the threat was filed by hand.', ...(await rowOf(env, 'forum', POST, 'threat')) })).status, 200);
   assert.deepEqual(forumDebts(await loadForumCase(env, POST)).map((d) => d.category), ['csam']);
   assert.ok(await loadStuckReport(env, 'forum', POST, 'csam'));
 });
@@ -298,10 +301,11 @@ test('F4: a person can try a stuck debt again now, audited first and fail-closed
   for (let hour = 0; hour < REPORT_DEBT_MAX_TRIES; hour++) await quiet(() => writeOwedListingReports(env));
   restore();
   const path = `/api/admin/legal/stuck/moderation/${SIM}/retry`;
-  const blocked = await route(env, 'POST', path, { note: 'The store is back; try it now.' }, routeDeps({ auditLog: async () => { throw new Error('down'); } }));
+  const row = await rowOf(env, 'moderation', SIM, 'csam');
+  const blocked = await route(env, 'POST', path, { note: 'The store is back; try it now.', ...row }, routeDeps({ auditLog: async () => { throw new Error('down'); } }));
   assert.deepEqual([blocked.status, blocked.body.code], [503, 'audit_unavailable']);
   assert.equal((await loadCase(env, SIM)).report_owed.stuck?.reason, RETRIES_EXHAUSTED, 'nothing changed');
-  const done = await route(env, 'POST', path, { note: 'The store is back; try it now.' });
+  const done = await route(env, 'POST', path, { note: 'The store is back; try it now.', ...row });
   assert.deepEqual([done.status, done.body.outcome], [200, 'paid']);
   assert.equal((await reportsOf(env)).filter((r) => r.kind === 'csam').length, 1);
   assert.equal(await loadStuckReport(env, 'moderation', SIM), null);

@@ -335,11 +335,20 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
 /// Whether `v` may stand for the threshold `k`: a finite number, within [0, 1] for every field whose default is a probability
 /// or a rate (every battery's: listing, forum, profile, guest_chat), and not below 0 for a count or a time. Anything else
 /// falls back to the default, so a typo never makes a battery refuse nothing (or everything).
+// Rates may be 0 (none) or 1 (all); every other probability is a threshold that decides, and is strictly inside (0, 1): at 1
+// nothing reaches it (a battery that refuses nothing), at 0 everything does.
+const THRESHOLD_RATES = new Set(['audit_rate']);
+// The lease must outlast a slow step.
+const THRESHOLD_MINIMUMS = Object.freeze({ lease_seconds: 30 });
+// Each pair is (lower, higher): the higher threshold at or above the lower, or both fall back to their defaults.
+export const THRESHOLD_PAIRS = Object.freeze([['guest_chat_refuse', 'guest_chat_high'], ['forum_borderline', 'forum_refuse'], ['profile_review', 'profile_refuse']]);
+
 export function thresholdValueOk(k, v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return false;
   const d = DEFAULT_THRESHOLDS[k];
   if (typeof d !== 'number') return false;
-  return d >= 0 && d <= 1 ? v >= 0 && v <= 1 : v >= 0;
+  if (d >= 0 && d <= 1) return THRESHOLD_RATES.has(k) ? v >= 0 && v <= 1 : v > 0 && v < 1;
+  return v >= (THRESHOLD_MINIMUMS[k] ?? 0);
 }
 
 export function thresholdsFrom(env) {
@@ -352,6 +361,13 @@ export function thresholdsFrom(env) {
         if (!Object.hasOwn(out, k)) continue;
         if (thresholdValueOk(k, v)) out[k] = v;
         else console.error(`MODERATION_THRESHOLDS.${k} is not a valid value; its default is kept`);
+      }
+      for (const [lo, hi] of THRESHOLD_PAIRS) {
+        if (out[hi] < out[lo]) {
+          console.error(`MODERATION_THRESHOLDS.${hi} is below ${lo}; both defaults are kept`);
+          out[lo] = DEFAULT_THRESHOLDS[lo];
+          out[hi] = DEFAULT_THRESHOLDS[hi];
+        }
       }
     } catch (e) {
       console.error('MODERATION_THRESHOLDS is not valid JSON; defaults kept:', e?.message);
@@ -2980,6 +2996,12 @@ const forumPayable = rec => forumDebts(rec).some(d => !d.stuck);
 const RETRY_STUCK = 'retries_exhausted';
 const stuckRetryable = d => d?.stuck?.reason === RETRY_STUCK;
 const forumNeedsIndex = rec => forumDebts(rec).some(d => !d.stuck || stuckRetryable(d));
+// Its daily try has come: at next_try_at, or now when it has none (a debt stuck before next_try_at was written).
+const stuckDue = (d, nowMs) => { const next = Date.parse(d?.stuck?.next_try_at || ''); return !Number.isFinite(next) || next <= nowMs; };
+// A debt whose detection nobody recorded (the heal found the quarantine and did not guess its actor): no automated try acts on
+// it, and only a stronger new finding replaces it (R-4).
+const NO_DETECTION = 'no_detection_recorded';
+const unrecordedDebt = d => !!d && !d.detection && (d.actor ?? null) === null;
 function oweForumDebt(rec, debt) {
   if (forumDebtOf(rec, debt.category)) return false;
   if (!rec.report_owed) rec.report_owed = debt;
@@ -3578,12 +3600,15 @@ async function noteForumOwedTry(env, postId, category, reason) {
     const last = String(reason || 'unknown').slice(0, 60);
     const next = new Date(Date.now() + legal.STUCK_RETRY_EVERY_MS).toISOString();
     if (d.stuck) {
-      if (stuckRetryable(d)) await updateForumCase(env, postId, async current => {
-        const x = forumDebtOf(current, category);
-        if (!stuckRetryable(x)) return null;
-        setForumDebt(current, category, { ...x, last_reason: last, last_tried_at: at, stuck: { ...x.stuck, last_reason: last, next_try_at: next } });
-        return current;
-      });
+      if (stuckRetryable(d)) {
+        await updateForumCase(env, postId, async current => {
+          const x = forumDebtOf(current, category);
+          if (!stuckRetryable(x)) return null;
+          setForumDebt(current, category, { ...x, last_reason: last, last_tried_at: at, stuck: { ...x.stuck, last_reason: last, next_try_at: next } });
+          return current;
+        });
+        await legal.recordStuckReport(env, { caseKind: 'forum', caseId: postId, reportKind: category, category, reason: legal.RETRIES_EXHAUSTED, lastReason: last, reference: rec.reference || null, since: d.since || null });
+      }
       return 'owed';
     }
     const tries = d.last_reason === last ? (Number.isInteger(d.tries) ? d.tries : 0) + 1 : 1;
@@ -3706,7 +3731,7 @@ async function writeOneOwedForumReport(env, deps, key, out, { deadline, now }) {
         // person; one stuck on its tries is tried again once its next_try_at has come (F4).
         const kept = await legal.recordStuckReport(env, { caseKind: 'forum', caseId: postId, reportKind: owed.category, category: owed.category, reason: owed.stuck.reason, lastReason: owed.stuck.last_reason || null, reference: rec.reference || null, since: owed.since || null });
         if (!kept.ok) unrecorded = true;
-        if (!stuckRetryable(owed) || !(Date.parse(owed.stuck.next_try_at || '') <= now())) continue;
+        if (!stuckRetryable(owed) || !stuckDue(owed, now())) continue;
       }
       if (now() > deadline) {
         if (triedHere) { out.stopped = true; return 'stop_done'; }
@@ -5620,8 +5645,12 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
     const start = (await loadCase(env, rec.sim_id)) || rec;
     const asFinding = (c, d) => ({ actor: d.actor ?? null, detection: d.detection || listingDetection(c, category, d.actor ?? null, thresholdsOfDebt(d, t)), thresholds: d.thresholds || null, debt: d });
     const priorDebt = debtOf(start);
-    const prior = priorDebt ? asFinding(start, priorDebt) : null;
     const found = { actor, detection: listingDetection(start, category, actor, t), thresholds: { hard_quarantine: t.hard_quarantine }, debt: null };
+    // A debt whose detection nobody recorded is not ranked with a guess (R-4): a confident new finding replaces it; a weaker
+    // one leaves it exactly as it is (not tried, not settled, its stuck record kept).
+    const unrecorded = unrecordedDebt(priorDebt);
+    const priorStands = unrecorded && detectionRank(found.detection) < 2;
+    const prior = priorDebt && !unrecorded ? asFinding(start, priorDebt) : null;
     const chosen = prior && detectionRank(prior.detection) >= detectionRank(found.detection) ? prior : found;
     const detection = chosen.detection;
     const uploader = { account_id: rec.author_id, uploaded_at: sim?.updated_at || sim?.published_at || null, upload_ip: null, upload_ip_note: 'The Worker does not record the address a listing was uploaded from.' };
@@ -5632,7 +5661,7 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
       out.sealed = seal.ok ? 'sealed' : 'pending';
     }
     let report = null;
-    if (vaultCategory === 'csam') {
+    if (vaultCategory === 'csam' && !priorStands) {
       report = await legal.writeLegalReport(env, {
         kind: 'csam', caseKind: 'moderation', caseId: rec.sim_id, caseRef: rec.reference || seal?.case_ref || null, category: 'csam', article: 'A1', subject, detection,
         uploader: { account_id: rec.author_id, uploaded_at: uploader.uploaded_at, upload_ips: [] },
@@ -5651,14 +5680,16 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
     // Once more, after the try: a debt recorded meanwhile that is stronger than this try's finding stands (F6).
     const fresh = await loadCase(env, rec.sim_id);
     const latestDebt = debtOf(fresh);
-    const overtaken = outcome !== 'paid' && !!latestDebt && (latestDebt.since ?? null) !== (priorDebt?.since ?? null)
-      && detectionRank(asFinding(fresh, latestDebt).detection) > detectionRank(detection);
+    const overtaken = priorStands || (outcome !== 'paid' && !!latestDebt && (latestDebt.since ?? null) !== (priorDebt?.since ?? null)
+      && (unrecordedDebt(latestDebt) || detectionRank(asFinding(fresh, latestDebt).detection) > detectionRank(detection)));
     // The debt this try leaves: the same debt (its since, its count, a stuck-on-tries mark moved a day on) when the finding is
     // the one on record, else a new one at the quarantine's own time.
     const same = chosen === prior && priorDebt;
     const since = same ? (priorDebt.since || start.legal_hold?.at || at) : (start.legal_hold?.at || at);
     const carryStuck = same && stuckRetryable(priorDebt) && outcome === 'owed'
       ? { ...priorDebt.stuck, last_reason: reason, next_try_at: new Date(Date.now() + legal.STUCK_RETRY_EVERY_MS).toISOString() } : null;
+    // A daily try of a debt stuck on its tries that fails again: its record says the reason it failed for now.
+    if (carryStuck && !overtaken) await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: rec.sim_id, reportKind: 'csam', category, reason: legal.RETRIES_EXHAUSTED, lastReason: reason, reference: rec.reference || seal?.case_ref || null, since });
     const stuck = !overtaken && outcome === 'stuck' ? (await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: rec.sim_id, reportKind: 'csam', category, reason, reference: rec.reference || seal?.case_ref || null, since })).ok : false;
     if (!overtaken && (outcome === 'owed' || (outcome === 'stuck' && !stuck))) await indexListingReportOwed(env, rec.sim_id, since);
     if (fresh) {
@@ -5689,6 +5720,8 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
       const lastLane = [...(fresh.history || [])].reverse().find(h => h?.event === 'legal_lane');
       if (!lastLane || JSON.stringify(lastLane.detail || null) !== JSON.stringify(lane)) pushHistory(fresh, 'legal_lane', lane);
       if (rec[HUMAN]) fresh[HUMAN] = true;
+      // Under the caller's lease: a lease that lapsed and was taken refuses the write (LeaseLost), and nothing is written.
+      if (rec[LEASE]) fresh[LEASE] = rec[LEASE];
       await saveCase(env, fresh);
     }
     if (!overtaken) {
@@ -5787,13 +5820,13 @@ async function writeOneOwedListingReport(env, deps, key, out, { now = Date.now }
     const legal = await import('./legal_reports.mjs');
     lease = await acquireLease(env, simId, thresholdsFrom(env), 'owed_report');
     if (!lease) { out.still_owed += 1; return; }
-    const rec = await loadCase(env, simId);
+    const rec = adoptLease(await loadCase(env, simId), lease);
     const owed = rec?.report_owed;
     if (!owed) { await env.SOCIAL.delete(key).catch(() => {}); return; }
     if (owed.stuck) {
       const kept = await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: simId, reportKind: 'csam', category: owed.category, reason: owed.stuck.reason, lastReason: owed.stuck.last_reason || null, reference: rec.reference || null, since: owed.since || null });
       if (!stuckRetryable(owed)) { if (kept.ok) await env.SOCIAL.delete(key).catch(() => {}); return; }
-      if (!(Date.parse(owed.stuck.next_try_at || '') <= now())) return;
+      if (!stuckDue(owed, now())) return;
     }
     out.tried += 1;
     tried = true;
@@ -5802,11 +5835,11 @@ async function writeOneOwedListingReport(env, deps, key, out, { now = Date.now }
     if (closed && r.outcome === 'paid') out.written += 1;
     else if (closed && r.outcome === 'settled') out.settled += 1;
     else if (closed && r.outcome === 'stuck') out.stuck += 1;
-    else if ((await noteListingOwedTry(env, simId, r.outcome ? r.report : (r.sealed === 'error' ? 'exception' : 'not_closed'))) === 'stuck') out.stuck += 1;
+    else if ((await noteListingOwedTry(env, simId, r.outcome ? r.report : (r.sealed === 'error' ? 'exception' : 'not_closed'), lease)) === 'stuck') out.stuck += 1;
     else out.still_owed += 1;
   } catch (e) {
     console.error('moderation: an owed report was not written:', e?.name || 'Error');
-    if (tried && (await noteListingOwedTry(env, simId, e?.name || 'exception')) === 'stuck') out.stuck += 1;
+    if (tried && (await noteListingOwedTry(env, simId, e?.name || 'exception', lease)) === 'stuck') out.stuck += 1;
     else out.still_owed += 1;
   } finally {
     if (lease) await releaseLease(env, lease);
@@ -5818,10 +5851,10 @@ async function writeOneOwedListingReport(env, deps, key, out, { now = Date.now }
 // REPORT_DEBT_MAX_TRIES in a row the debt is stuck as RETRIES_EXHAUSTED with that reason as `last_reason`, recorded in the stuck
 // index first; it keeps its owed index and is tried once every STUCK_RETRY_EVERY_MS. Returns 'stuck' when it was moved there
 // now, else 'owed'. Never throws.
-async function noteListingOwedTry(env, simId, reason) {
+async function noteListingOwedTry(env, simId, reason, lease = null) {
   try {
     const legal = await import('./legal_reports.mjs');
-    const rec = await loadCase(env, simId);
+    const rec = adoptLease(await loadCase(env, simId), lease);
     const d = rec?.report_owed;
     if (!d || d.stuck) return 'owed';
     const last = String(reason || 'unknown').slice(0, 60);
@@ -5867,14 +5900,15 @@ export async function healListingReportDebts(env, { limit = 50, maxPages = 2, de
       const simId = k.name.slice('modq:quarantined:'.length);
       try {
         if (await env.SOCIAL.get(listingReportOwedKey(simId))) continue;
-        if (await legal.loadStuckReport(env, 'moderation', simId)) continue;
         const rec = await loadCase(env, simId);
         const category = rec?.legal_hold?.category;
         if (!rec || rec.status !== 'quarantined' || SEALED_LISTING_CATEGORIES[category] !== 'csam') continue;
         if (rec.report_owed) {
-          if (!rec.report_owed.stuck && (await indexListingReportOwed(env, simId, rec.report_owed.since || rec.legal_hold.at))) out.healed += 1;
+          // A payable debt, or one stuck on its tries (tried daily), with no index: indexed again.
+          if ((!rec.report_owed.stuck || stuckRetryable(rec.report_owed)) && (await indexListingReportOwed(env, simId, rec.report_owed.since || rec.legal_hold.at))) out.healed += 1;
           continue;
         }
+        if (await legal.loadStuckReport(env, 'moderation', simId)) continue;
         // Settled for THIS quarantine only: a settlement of an earlier quarantine (another hold_at, or older than this hold) is
         // an earlier finding's and does not stand for this one (F7).
         const settledThis = rec.report_settled && (rec.report_settled.hold_at
@@ -5889,7 +5923,7 @@ export async function healListingReportDebts(env, { limit = 50, maxPages = 2, de
         const lease = await acquireLease(env, simId, thresholdsFrom(env), 'owed_heal');
         if (!lease) continue;
         try {
-          const fresh = await loadCase(env, simId);
+          const fresh = adoptLease(await loadCase(env, simId), lease);
           if (!fresh || fresh.report_owed) continue;
           const actor = [...(fresh.decision?.reasons || [])].reverse().find(r => r?.action === 'quarantine' && r.code === category)?.by || null;
           const since = fresh.legal_hold?.at || new Date().toISOString();
@@ -5926,12 +5960,14 @@ export async function healListingReportDebts(env, { limit = 50, maxPages = 2, de
 /// not that one (payable, or another finding's) is answered `debt_changed` and nothing is cleared. The evidence and its legal
 /// hold are never touched. Called only from that path. `{ ok }` or `{ ok: false, code }`: bad_case, person_required, busy,
 /// debt_changed, unavailable.
-export async function clearReportDebt(env, { caseKind, caseId, by, rationale, reportKind = null, since = null } = {}) {
+export async function clearReportDebt(env, { caseKind, caseId, by, rationale, reportKind = null, since = undefined } = {}) {
   if (typeof by !== 'string' || !by || by === 'system' || typeof rationale !== 'string' || !rationale.trim()) return { ok: false, code: 'person_required' };
+  // The debt is named in full (R-2): its since always (null for a debt that has none).
+  if (since === undefined) return { ok: false, code: 'since_required' };
   const at = new Date().toISOString();
   const cleared = owed => ({ by: by.slice(0, 64), at, rationale: clip(rationale.trim(), 2000), reason: owed?.stuck?.reason || owed?.reason || null, category: owed?.category || null, since: owed?.since || null });
-  // The debt the record names: stuck, of its kind, and (when the record names one) of its since.
-  const named = d => !!d?.stuck && (since === null || (d.since ?? null) === since);
+  // The debt the record names: stuck, of its kind, and of its since.
+  const named = d => !!d?.stuck && (d.since ?? null) === since;
   let lease = null;
   try {
     if (caseKind === 'forum') {
@@ -5956,7 +5992,7 @@ export async function clearReportDebt(env, { caseKind, caseId, by, rationale, re
       if (typeof caseId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(caseId)) return { ok: false, code: 'bad_case' };
       lease = await acquireLease(env, caseId, thresholdsFrom(env), 'debt_clear');
       if (!lease) return { ok: false, code: 'busy' };
-      const rec = await loadCase(env, caseId);
+      const rec = adoptLease(await loadCase(env, caseId), lease);
       if (!named(rec?.report_owed)) return { ok: false, code: 'debt_changed' };
       rec.report_cleared = cleared(rec.report_owed);
       rec.report_owed = null;
@@ -5994,10 +6030,14 @@ export async function refreshStuckRecord(env, { caseKind, caseId, reportKind = n
 /// record names (its kind and since) is made payable again (its stuck mark and its try count go), its stuck record is closed,
 /// it is indexed, and it is tried once at once. `{ ok, outcome }` (paid, settled, stuck, owed) or `{ ok: false, code }`:
 /// person_required, bad_case, busy, debt_changed, unavailable.
-export async function retryReportDebt(env, { caseKind, caseId, by, reportKind = null, since = null, deps = {} } = {}) {
+export async function retryReportDebt(env, { caseKind, caseId, by, reportKind = null, since = undefined, owed = false, deps = {} } = {}) {
   if (typeof by !== 'string' || !by || by === 'system') return { ok: false, code: 'person_required' };
+  if (since === undefined) return { ok: false, code: 'since_required' };
   const legal = await import('./legal_reports.mjs');
-  const named = d => !!d?.stuck && (since === null || (d.since ?? null) === since);
+  // The debt named: stuck (or, for `owed`, payable), of its kind, and of its since. A debt whose detection nobody recorded is
+  // not retried (a retry would decide it on a guess, R-4): a person quarantines the listing again, or clears it.
+  const named = d => (owed ? !!d && !d.stuck : !!d?.stuck) && (d.since ?? null) === since;
+  const refuseUnrecorded = d => (d?.stuck?.reason === NO_DETECTION || unrecordedDebt(d) ? { ok: false, code: 'no_detection_recorded' } : null);
   const unstick = d => { const { stuck, tries, ...rest } = d; void stuck; void tries; return { ...rest, retried_by: by.slice(0, 64), retried_at: new Date().toISOString() }; };
   let lease = null;
   try {
@@ -6006,7 +6046,11 @@ export async function retryReportDebt(env, { caseKind, caseId, by, reportKind = 
       lease = await forumLease(env, caseId, thresholdsFrom(env), 'debt_retry');
       if (!lease) return { ok: false, code: 'busy' };
       let kind = null;
-      const { written } = await updateForumCase(env, caseId, async current => {
+      const current0 = await loadForumCase(env, caseId);
+      const target = forumDebts(current0).find(x => named(x) && (!reportKind || (x.category ?? null) === reportKind));
+      if (!target) return { ok: false, code: owed ? 'not_owed' : 'debt_changed' };
+      if (!owed && target.stuck?.reason === NO_DETECTION) return { ok: false, code: 'no_detection_recorded' };
+      const { written } = owed ? { written: true } : await updateForumCase(env, caseId, async current => {
         const d = forumDebts(current).find(x => named(x) && (!reportKind || (x.category ?? null) === reportKind));
         if (!d) return null;
         kind = d.category ?? null;
@@ -6014,6 +6058,7 @@ export async function retryReportDebt(env, { caseKind, caseId, by, reportKind = 
         forumHistory(current, 'legal_report_retried', { by: by.slice(0, 64), category: kind });
         return current;
       });
+      if (owed) kind = target.category ?? null;
       if (!written) return { ok: false, code: 'debt_changed' };
       await env.SOCIAL.put(forumReportOwedKey(caseId), since || new Date().toISOString());
       await legal.closeStuckReport(env, { caseKind: 'forum', caseId, reportKind: kind, since, why: 'retried_by_a_person' });
@@ -6027,10 +6072,12 @@ export async function retryReportDebt(env, { caseKind, caseId, by, reportKind = 
       if (typeof caseId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(caseId)) return { ok: false, code: 'bad_case' };
       lease = await acquireLease(env, caseId, thresholdsFrom(env), 'debt_retry');
       if (!lease) return { ok: false, code: 'busy' };
-      const rec = await loadCase(env, caseId);
-      if (!named(rec?.report_owed)) return { ok: false, code: 'debt_changed' };
-      rec.report_owed = unstick(rec.report_owed);
-      pushHistory(rec, 'legal_report_retried', { by: by.slice(0, 64) });
+      const rec = adoptLease(await loadCase(env, caseId), lease);
+      if (!named(rec?.report_owed)) return { ok: false, code: owed ? 'not_owed' : 'debt_changed' };
+      const unrecorded = refuseUnrecorded(rec.report_owed);
+      if (unrecorded) return unrecorded;
+      rec.report_owed = owed ? { ...rec.report_owed, retried_by: by.slice(0, 64), retried_at: new Date().toISOString() } : unstick(rec.report_owed);
+      pushHistory(rec, 'legal_report_retried', { by: by.slice(0, 64), ...(owed ? { owed: true } : {}) });
       await saveCase(env, rec);
       await indexListingReportOwed(env, caseId, rec.report_owed.since || new Date().toISOString());
       await legal.closeStuckReport(env, { caseKind: 'moderation', caseId, reportKind: 'csam', since, why: 'retried_by_a_person' });
@@ -7366,7 +7413,7 @@ async function routeModeration(request, url, env, ctx, deps) {
       if (r.code === 'audit_unavailable') return auditRefused();
       // 202: the decision is recorded and a step it owes is still pending (moderation_forum_resolve). A refusal may carry
       // its own status (409 check_removed); anything else refused is 400.
-      const status = r.ok ? (Array.isArray(r.pending) && r.pending.length ? 202 : 200) : (Number.isInteger(r.status) && r.status >= 400 && r.status < 600 ? r.status : 400);
+      const status = r.ok ? (Array.isArray(r.pending) && r.pending.length ? 202 : 200) : (Number.isInteger(r.status) && r.status >= 400 && r.status < 600 ? r.status : r.code === 'busy' ? 409 : 400);
       return json(r, status, cors);
     }
     // The review's model costs: tokens and dollars per MB, per model and overall, the average and spread of a first review

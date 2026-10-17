@@ -136,6 +136,9 @@ function readMail(m) {
 }
 const stuckMails = (env) => env.mail.map(readMail).filter((m) => /A legal report is stuck/.test(m.subject));
 
+// The row GET /stuck shows for a case's stuck record of `kind`: what a clear or a retry must name (its report kind and since).
+const rowOf = async (env, caseKind, caseId, kind = null) => { const r = await loadStuckReport(env, caseKind, caseId, kind); return r ? { report_kind: r.report_kind || null, since: r.since ?? null } : { since: null }; };
+
 // -- R9-12: the owed index, its retry and the heal --------------------------------------------------------------------------
 
 test('R9-12: a csam removal whose owed index and report both fail in one KV outage is reported by the next owed sweep', async () => {
@@ -452,7 +455,9 @@ test('only a person clears a stuck debt, with a rationale audited before anythin
   // No rationale: refused.
   assert.equal((await route(env, 'POST', path, {})).status, 400);
   // The audit cannot be written: nothing changes.
-  const broken = await route(env, 'POST', path, { note: 'Reviewed: the account was never recorded.' }, routeDeps({ auditLog: async () => { throw new Error('down'); } }));
+  const row = await rowOf(env, 'forum', POST, 'threat');
+  assert.deepEqual([(await route(env, 'POST', path, { note: 'Reviewed: the account was never recorded.' })).body.code, (await route(env, 'POST', path, { note: 'Reviewed: the account was never recorded.', since: row.since })).body.code], ['since_required', 'report_kind_required'], 'the row is named in full');
+  const broken = await route(env, 'POST', path, { note: 'Reviewed: the account was never recorded.', ...row }, routeDeps({ auditLog: async () => { throw new Error('down'); } }));
   assert.deepEqual([broken.status, broken.body.code], [503, 'audit_unavailable']);
   assert.ok(await loadStuckReport(env, 'forum', POST), 'still stuck');
   assert.ok((await loadForumCase(env, POST)).report_owed, 'still owed');
@@ -468,7 +473,7 @@ test('only a person clears a stuck debt, with a rationale audited before anythin
   await quiet(() => sweepLegalReports(env));
   assert.ok(await loadStuckReport(env, 'forum', POST));
   // A person, with a rationale: audited, then cleared.
-  const done = await route(env, 'POST', path, { note: 'Reviewed with counsel: filed by hand under reference X-1.' });
+  const done = await route(env, 'POST', path, { note: 'Reviewed with counsel: filed by hand under reference X-1.', ...row });
   assert.deepEqual([done.status, done.body.ok], [200, true]);
   assert.equal(await loadStuckReport(env, 'forum', POST), null);
   const rec = await loadForumCase(env, POST);
@@ -478,5 +483,5 @@ test('only a person clears a stuck debt, with a rationale audited before anythin
   const cleared = auditsOf(env, 'LEGAL_STUCK_CLEARED');
   assert.deepEqual(cleared.map((a) => [a.admin_id, a.details.case_id]), [[ADMIN, POST]]);
   assert.equal(vaultSnapshot(env), vault, 'the sealed evidence is untouched');
-  assert.equal((await route(env, 'POST', path, { note: 'A second clear of the same case.' })).status, 404);
+  assert.equal((await route(env, 'POST', path, { note: 'A second clear of the same case.', ...row })).status, 404);
 });
