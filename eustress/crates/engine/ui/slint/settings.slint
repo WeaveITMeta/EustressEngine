@@ -570,7 +570,7 @@ export component SettingsDialog inherits Rectangle {
                                 }
                                 SettingRow {
                                     label: "Ray tracing";
-                                    description: "Ray-traced sun, sky, bounce light and glowing surfaces (experimental). Auto turns it on where this GPU runs it well. Off applies at once; Auto and On at the next launch. " + Preferences.ray-tracing-note;
+                                    description: "Ray-traced sun, sky, bounce light and glowing surfaces (experimental). Auto turns it on where this GPU runs it well and DLSS Ray Reconstruction can denoise it. Off applies at once; Auto and On at the next launch. " + Preferences.ray-tracing-note;
                                     KitSegmented {
                                         managed: true;
                                         options: ["Auto", "On", "Off"];

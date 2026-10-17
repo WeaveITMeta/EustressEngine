@@ -12,11 +12,12 @@
 //! inside a session.
 //!
 //! - Auto (the default): ray tracing when the build has it, the GPU passes
-//!   the gate, the GPU is real hardware, and no guard below has turned it off
+//!   the gate, the GPU is real hardware, DLSS Ray Reconstruction is there to
+//!   denoise it ([`Gate::denoiser`]), and no guard below has turned it off
 //!   for this GPU.
-//! - On: ray tracing whenever the build and the GPU can run it, whatever the
-//!   guards recorded. A run that survives clears a crash record, so Auto can
-//!   use ray tracing again afterwards.
+//! - On: ray tracing whenever the build and the GPU can run it, denoised or
+//!   not, whatever the guards recorded. A run that survives clears a crash
+//!   record, so Auto can use ray tracing again afterwards.
 //! - Off: never.
 //!
 //! # The guards
@@ -98,10 +99,11 @@ pub const SETTINGS_KEY: &str = "ray_tracing";
 /// The ray-tracing choice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RayTracingMode {
-    /// Ray tracing where the GPU can run it well. The default.
+    /// Ray tracing where the GPU can run it well, denoised by DLSS Ray
+    /// Reconstruction. The default.
     #[default]
     Auto,
-    /// Ray tracing whenever the build and the GPU can run it.
+    /// Ray tracing whenever the build and the GPU can run it, denoised or not.
     On,
     /// Never.
     Off,
@@ -243,11 +245,17 @@ pub struct Gate {
     /// A software rasterizer (wgpu's `DeviceType::Cpu`: WARP, llvmpipe,
     /// lavapipe). Some report ray queries, at a speed no one would choose.
     pub software: bool,
+    /// DLSS Ray Reconstruction can denoise Solari's output: the build
+    /// compiles DLSS and the device reported it when it was made. Bevy Solari
+    /// 0.19 has no denoiser of its own, so Auto ray traces only with this.
+    pub denoiser: bool,
 }
 
 impl Gate {
-    pub fn of(caps: &GpuCapabilities) -> Self {
-        Self { supported: caps.ray_tracing, software: caps.device_type == "Cpu" }
+    /// `denoiser`: the device's report of DLSS Ray Reconstruction, false in a
+    /// build without DLSS.
+    pub fn of(caps: &GpuCapabilities, denoiser: bool) -> Self {
+        Self { supported: caps.ray_tracing, software: caps.device_type == "Cpu", denoiser }
     }
 }
 
@@ -275,6 +283,9 @@ impl RaytracingStatus {
         }
         if gate.software {
             return Self::SoftwareGpu;
+        }
+        if !gate.denoiser {
+            return Self::NoDenoiser;
         }
         match verdict {
             Some(VerdictKind::Crashed) => Self::AfterCrash,
@@ -1454,6 +1465,11 @@ pub enum FallbackReason {
     TooManyTextures { distinct: usize },
     /// Settings > Graphics > Ray tracing: Off, which applies at once.
     TurnedOff,
+    /// Auto, and DLSS Ray Reconstruction did not start although the device
+    /// reported it (Bevy's `DlssPlugin` could not start DLSS, as when its
+    /// libraries are missing beside the exe), so nothing would denoise
+    /// Solari. Decided in `RaytracingPlugin::finish`, before the first frame.
+    NoDenoiser,
 }
 
 impl FallbackReason {
@@ -1463,6 +1479,9 @@ impl FallbackReason {
                 "the materials use {distinct} distinct textures; ray tracing can bind {SOLARI_TEXTURE_LIMIT}"
             ),
             Self::TurnedOff => "turned off in Settings".to_string(),
+            Self::NoDenoiser => {
+                "DLSS Ray Reconstruction did not start, and Auto ray traces only with a denoiser".to_string()
+            }
         }
     }
 
@@ -1475,7 +1494,9 @@ impl FallbackReason {
                  the {SOLARI_TEXTURE_LIMIT} ray tracing can bind, so Eustress switched to standard lighting to \
                  keep running. It opens without ray tracing next time."
             )),
-            Self::TurnedOff => None,
+            // DLSS not starting changes nothing on screen: the session falls
+            // back before its first frame.
+            Self::TurnedOff | Self::NoDenoiser => None,
         }
     }
 }
@@ -1725,14 +1746,19 @@ mod tests {
     fn decision_table() {
         use RaytracingStatus as S;
         use VerdictKind::{Crashed, TooSlow};
-        let rtx = Some(Gate { supported: true, software: false });
-        let lavapipe = Some(Gate { supported: true, software: true });
-        let pascal = Some(Gate { supported: false, software: false });
+        // A `dlss` build on an RTX GPU whose driver offers Ray Reconstruction.
+        let rtx = Some(Gate { supported: true, software: false, denoiser: true });
+        // The same GPU with no denoiser: a build without DLSS, or a driver
+        // without Ray Reconstruction.
+        let raw_rtx = Some(Gate { supported: true, software: false, denoiser: false });
+        let lavapipe = Some(Gate { supported: true, software: true, denoiser: false });
+        let pascal = Some(Gate { supported: false, software: false, denoiser: false });
         #[rustfmt::skip]
         let table: &[(RayTracingMode, bool, Option<Gate>, Option<VerdictKind>, RaytracingStatus)] = &[
             // Off wins over everything.
             (Off,  true,  rtx,      None,          S::Off),
             (Off,  false, None,     Some(Crashed), S::Off),
+            (Off,  true,  raw_rtx,  None,          S::Off),
             // The build, then the hardware, for Auto and On alike.
             (Auto, false, rtx,      None,          S::NotInBuild),
             (On,   false, rtx,      None,          S::NotInBuild),
@@ -1746,10 +1772,15 @@ mod tests {
             (Auto, true,  rtx,      Some(Crashed), S::AfterCrash),
             (Auto, true,  rtx,      Some(TooSlow), S::TooSlow),
             (Auto, true,  lavapipe, Some(Crashed), S::SoftwareGpu),
+            // Auto traces only with a denoiser, whatever the guards recorded.
+            (Auto, true,  raw_rtx,  None,          S::NoDenoiser),
+            (Auto, true,  raw_rtx,  Some(Crashed), S::NoDenoiser),
+            (Auto, true,  raw_rtx,  Some(TooSlow), S::NoDenoiser),
             // On forces it past both.
             (On,   true,  rtx,      Some(Crashed), S::Active),
             (On,   true,  rtx,      Some(TooSlow), S::Active),
             (On,   true,  lavapipe, None,          S::Active),
+            (On,   true,  raw_rtx,  None,          S::Active),
         ];
         for &(mode, compiled, gate, verdict, want) in table {
             assert_eq!(
@@ -1758,6 +1789,27 @@ mod tests {
                 "{mode:?} compiled={compiled} gate={gate:?} verdict={verdict:?}"
             );
         }
+    }
+
+    #[test]
+    fn auto_traces_only_with_a_denoiser_and_on_without_one() {
+        use RaytracingStatus as S;
+        let mut rtx = GpuCapabilities { adapter: "NVIDIA GeForce RTX 2080 Ti".into(), ..Default::default() };
+        rtx.set_features(super::super::required_features());
+        let with = Some(Gate::of(&rtx, true));
+        let without = Some(Gate::of(&rtx, false));
+        let no_denoiser = RaytracingStatus::decide(Auto, true, without, None);
+        assert_eq!(no_denoiser, S::NoDenoiser);
+        assert!(!no_denoiser.is_active(), "no denoiser, yet the launch ray traces");
+        assert_eq!(
+            no_denoiser.after_space_verdict(Auto, false).after_arming(Auto, true),
+            S::NoDenoiser,
+            "a later step turned it back on"
+        );
+        assert_eq!(RaytracingStatus::decide(Auto, true, with, None), S::Active);
+        assert_eq!(RaytracingStatus::decide(On, true, without, None), S::Active, "On traces denoised or not");
+        assert_eq!(RaytracingStatus::decide(Off, true, without, None), S::Off);
+        assert_eq!(RaytracingStatus::decide(Off, true, with, None), S::Off);
     }
 
     #[test]
@@ -1885,7 +1937,8 @@ mod tests {
         assert!(check.crash_found);
         assert_eq!(check.verdict.as_ref().map(|v| v.kind), Some(VerdictKind::Crashed));
         assert_eq!(dir.markers(), 0, "the stale marker was not taken");
-        let status = RaytracingStatus::decide(Auto, true, Some(Gate { supported: true, software: false }), check.verdict.map(|v| v.kind));
+        let gate = Gate { supported: true, software: false, denoiser: true };
+        let status = RaytracingStatus::decide(Auto, true, Some(gate), check.verdict.map(|v| v.kind));
         assert_eq!(status, RaytracingStatus::AfterCrash);
         // The next launch still knows, but did not find the crash itself.
         let again = dir.store().launch_check(&id, None, 12).unwrap();
@@ -2324,6 +2377,8 @@ mod tests {
         assert!(heavy.notice().unwrap().starts_with("Ray tracing is off for this session. "));
         assert!(heavy.describe().contains("4812") && heavy.describe().contains("5000"));
         assert_eq!(FallbackReason::TurnedOff.notice(), None);
+        assert_eq!(FallbackReason::NoDenoiser.notice(), None);
+        assert!(FallbackReason::NoDenoiser.describe().starts_with("DLSS Ray Reconstruction did not start"));
     }
 
     #[test]

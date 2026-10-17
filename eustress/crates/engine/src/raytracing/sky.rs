@@ -818,7 +818,12 @@ mod tests {
 
     #[test]
     fn nothing_traced_unless_ray_tracing_is_active() {
-        for status in [RaytracingStatus::Off, RaytracingStatus::NotInBuild, RaytracingStatus::Unsupported] {
+        for status in [
+            RaytracingStatus::Off,
+            RaytracingStatus::NotInBuild,
+            RaytracingStatus::Unsupported,
+            RaytracingStatus::NoDenoiser,
+        ] {
             let mut app = rt_app(status);
             app.update();
             app.update();

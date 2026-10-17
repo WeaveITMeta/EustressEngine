@@ -1,17 +1,32 @@
 //! Hardware ray-traced lighting with Bevy Solari: decided at launch, on by
-//! default wherever the GPU can run it well.
+//! default wherever the GPU can run it well and DLSS Ray Reconstruction can
+//! denoise it.
 //!
 //! # The switch and the guards
 //!
 //! Auto (the default), On or Off, from `EUSTRESS_RAYTRACING` or Settings >
 //! Graphics, read once before the app exists because the renderer is made
 //! before any plugin. Auto ray traces when the build has the `raytracing`
-//! feature, the GPU passes the gate below, the GPU is real hardware, and no
-//! guard has turned it off for this GPU: a launch that crashed before it had
-//! drawn its first frames, a render error, or frames measured over budget.
-//! On ray traces whenever the build and the GPU can. [`policy`] holds the
-//! switch, the guards and their records. The renderer is never switched
-//! inside a session; every change applies at the next launch.
+//! feature, the GPU passes the gate below, the GPU is real hardware, DLSS Ray
+//! Reconstruction is there to denoise it, and no guard has turned it off for
+//! this GPU: a launch that crashed before it had drawn its first frames, a
+//! render error, or frames measured over budget. On ray traces whenever the
+//! build and the GPU can, denoised or not. [`policy`] holds the switch, the
+//! guards and their records. The renderer is never switched inside a
+//! session; every change applies at the next launch.
+//!
+//! # The denoiser
+//!
+//! Bevy Solari 0.19 has no denoiser of its own. Its one denoising path is
+//! DLSS Ray Reconstruction (the `dlss` branches of bevy_solari's
+//! `realtime/node.rs`); without it the image is grainy. So Auto ray traces
+//! only in a build that compiles DLSS (the `dlss` feature without
+//! `force_disable_dlss`, [`DLSS_IN_BUILD`]), on a device that reports DLSS
+//! Ray Reconstruction when [`render_creation`] makes it
+//! ([`policy::Gate::denoiser`]). Bevy starts DLSS itself later, in
+//! `DlssPlugin::finish`; when it does not start there, an Auto session falls
+//! back to raster before its first frame ([`require_denoiser`]). Everywhere
+//! else Auto draws in raster, as Off does.
 //!
 //! # The gate
 //!
@@ -49,6 +64,11 @@
 //!   to deferred, under ray tracing or SSR.
 //! - Each scene mesh is traced through a copy laid out the way Solari reads
 //!   it ([`conform`]); the mesh the raster path draws is never changed.
+//! - A part whose material waited on a texture map is specialized again in
+//!   every view once its maps are in ([`LateMaps`]). Bevy 0.19 otherwise
+//!   leaves it out of a Solari camera's deferred prepass for good: no depth
+//!   and no G-buffer texel, so nothing is drawn there and the sky shows
+//!   through.
 //! - A part these rules take out of the traced scene leaves Solari's render
 //!   world too ([`add_untrace_sync`]): bevy_solari 0.19's extraction only
 //!   ever inserts its marker.
@@ -109,7 +129,7 @@ use bevy::pbr::ExtractedDirectionalLight;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureUsages;
 use bevy::render::renderer::{RenderAdapterInfo, RenderDevice};
-use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
+use bevy::render::settings::{RenderCreation, RenderResources, WgpuFeatures, WgpuSettings};
 use bevy::render::sync_world::RenderEntity;
 use bevy::render::view::Msaa;
 use bevy::render::{ExtractSchedule, MainWorld, Render, RenderApp, RenderSystems};
@@ -149,6 +169,9 @@ pub enum RaytracingStatus {
     Unsupported,
     /// Auto, on a software rasterizer.
     SoftwareGpu,
+    /// Auto, and nothing can denoise Solari's output: the build does not
+    /// compile DLSS, or the GPU and driver offer no DLSS Ray Reconstruction.
+    NoDenoiser,
     /// Auto, and a launch with ray tracing on crashed on this GPU.
     AfterCrash,
     /// Auto, and ray tracing was measured too slow on this GPU.
@@ -173,6 +196,7 @@ impl RaytracingStatus {
             Self::NotInBuild => "Not in this build",
             Self::Unsupported => "Not supported by this GPU",
             Self::SoftwareGpu => "Off on a software GPU",
+            Self::NoDenoiser => "Off, no denoiser (DLSS Ray Reconstruction)",
             Self::AfterCrash => "Off after a crash at launch",
             Self::TooSlow => "Off, too slow on this GPU",
             Self::NoGuard => "Off, crash guard unavailable",
@@ -338,6 +362,10 @@ pub fn settings_note(launch: &RaytracingLaunch, caps: Option<&GpuCapabilities>, 
              it opens without ray tracing next time.",
             policy::SOLARI_TEXTURE_LIMIT
         ),
+        (Some(FallbackReason::NoDenoiser), _) => format!(
+            "Auto: off, DLSS Ray Reconstruction did not start on {gpu}, so nothing would denoise it; \
+             turn On to use it anyway."
+        ),
         (None, status) => match status {
         S::Active if auto && slow_recorded => {
             format!("Auto: on ({gpu}) for now, but too slow here, so off from the next launch. Choose On to keep it.")
@@ -356,6 +384,12 @@ pub fn settings_note(launch: &RaytracingLaunch, caps: Option<&GpuCapabilities>, 
         S::Unsupported if auto => format!("Auto: off, {}.", lacks(caps)),
         S::Unsupported => format!("On, but {}, so it draws without it.", lacks(caps)),
         S::SoftwareGpu => format!("Auto: off, {gpu} is a software renderer."),
+        S::NoDenoiser if DLSS_IN_BUILD => {
+            format!("Auto: off, {gpu} offers no DLSS Ray Reconstruction to denoise it; turn On to use it anyway.")
+        }
+        S::NoDenoiser => {
+            "Auto: off, this build has no DLSS Ray Reconstruction to denoise it; turn On to use it anyway.".to_string()
+        }
         S::AfterCrash => "Auto: off after a crash at launch; turn On to retry.".to_string(),
         S::TooSlow => "Auto: off, too slow on this GPU; turn On to use it anyway.".to_string(),
         S::NoGuard => "Auto: off, the crash guard could not be saved; turn On to use it anyway.".to_string(),
@@ -433,6 +467,33 @@ fn raw_vulkan_init_settings() -> bevy::render::renderer::raw_vulkan_init::RawVul
     RawVulkanInitSettings::default()
 }
 
+/// The build compiles DLSS: the `dlss` feature, without `force_disable_dlss`.
+pub const DLSS_IN_BUILD: bool = cfg!(all(feature = "dlss", not(feature = "force_disable_dlss")));
+
+/// Whether the device [`render_creation`] just made offers DLSS Ray
+/// Reconstruction, as Bevy's own DLSS callbacks (`DlssInitPlugin`, passed in
+/// by `raw_vulkan_init_settings`) recorded it while they created the Vulkan
+/// instance and device. Always false in a build that does not compile DLSS.
+fn ray_reconstruction_reported(resources: &RenderResources) -> bool {
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    return reported_by_device(&resources.5);
+    #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
+    {
+        let _ = resources;
+        false
+    }
+}
+
+/// The two DLSS features the callbacks record per device, both of which
+/// Bevy's `DlssPlugin::finish` requires before it starts DLSS and inserts
+/// `DlssRayReconstructionSupported` (bevy_anti_alias 0.19, `dlss/mod.rs`:
+/// Super Resolution first, then Ray Reconstruction).
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+fn reported_by_device(features: &bevy::render::renderer::raw_vulkan_init::AdditionalVulkanFeatures) -> bool {
+    use bevy::anti_alias::dlss::{DlssRayReconstructionSupported, DlssSuperResolutionSupported};
+    features.has::<DlssSuperResolutionSupported>() && features.has::<DlssRayReconstructionSupported>()
+}
+
 // ============================================================================
 // The renderer
 // ============================================================================
@@ -448,7 +509,8 @@ fn raw_vulkan_init_settings() -> bevy::render::renderer::raw_vulkan_init::RawVul
 ///   `initialize_renderer`, the same backends and `settings`, and no window
 ///   surface, as `RenderPlugin`'s automatic path does on desktop. It goes to
 ///   `RenderPlugin` as `RenderCreation::Manual`, so the features the gate
-///   reads are the features of the device Bevy renders with. The guard
+///   reads are the features of the device Bevy renders with, and so is its
+///   report of DLSS Ray Reconstruction, which Auto needs. The guard
 ///   records for this GPU are read, and a launch that will ray trace puts up
 ///   its crash marker before returning, so before Solari builds a pipeline.
 ///   A missing GPU panics here exactly as it would in `RenderPlugin::build`.
@@ -478,6 +540,7 @@ pub fn render_creation(settings: WgpuSettings, space_root: &Path) -> (RenderCrea
         raw_vulkan_init_settings(),
     ));
     let caps = GpuCapabilities::read(&resources.2, &resources.0);
+    let denoiser = ray_reconstruction_reported(&resources);
     let identity = policy::GpuIdentity::of(&caps);
     let store = policy::GuardStore::default_location();
     let check = match &store {
@@ -493,7 +556,7 @@ pub fn render_creation(settings: WgpuSettings, space_root: &Path) -> (RenderCrea
     let status = RaytracingStatus::decide(
         mode,
         true,
-        Some(policy::Gate::of(&caps)),
+        Some(policy::Gate::of(&caps, denoiser)),
         check.verdict.as_ref().map(|verdict| verdict.kind),
     )
     .after_space_verdict(mode, check.space_verdict.is_some());
@@ -556,6 +619,10 @@ impl Plugin for RaytracingPlugin {
         if !self.launch.status.is_active() {
             return;
         }
+        // Bevy's `DlssPlugin` is in DefaultPlugins, so its `finish` has run:
+        // DLSS has started, or failed to.
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        require_denoiser::<bevy::anti_alias::dlss::DlssRayReconstructionSupported>(app, &self.launch);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -637,8 +704,8 @@ fn sweep_traced_scene<M: TraceMarker, L: Component>(
 /// while the resource `R` that says the GPU supports `D` exists. Generic so
 /// it compiles and is tested in every build; a `dlss` build uses it for DLSS
 /// Ray Reconstruction on Solari cameras, which Bevy's Solari example calls
-/// highly recommended (Solari's own denoising is far noisier). Cameras without
-/// `L` (raster cameras, the AI capture camera) never get it.
+/// highly recommended (Solari 0.19 has no denoiser of its own). Cameras
+/// without `L` (raster cameras, the AI capture camera) never get it.
 pub fn add_denoiser_systems<L: Component, D: Component, R: Resource>(app: &mut App, make: fn() -> D) {
     app.add_systems(
         Last,
@@ -659,6 +726,20 @@ pub fn add_denoiser_systems<L: Component, D: Component, R: Resource>(app: &mut A
             },
         ),
     );
+}
+
+/// Auto ray traces only with a denoiser. [`render_creation`] decided on the
+/// device's report of DLSS Ray Reconstruction; DLSS itself starts later, in
+/// Bevy's `DlssPlugin::finish`, which inserts `R`
+/// (`DlssRayReconstructionSupported`) only when it started. Without `R`, an
+/// Auto session falls back to raster ([`FallbackReason::NoDenoiser`]) before
+/// its first frame, so nothing is ever traced or drawn grainy. On keeps
+/// tracing, for testing. Called from `RaytracingPlugin::finish`, after
+/// `DlssPlugin`'s; generic so it compiles and is tested in every build.
+pub fn require_denoiser<R: Resource>(app: &mut App, launch: &RaytracingLaunch) {
+    if launch.mode == RayTracingMode::Auto && launch.status.is_active() && !app.world().contains_resource::<R>() {
+        app.insert_resource(RasterFallback { reason: FallbackReason::NoDenoiser });
+    }
 }
 
 /// Log the GPU once, check it against the launch decision, and keep it.
@@ -709,6 +790,11 @@ fn report_gpu(
             if caps.missing.is_empty() { "a required backend" } else { caps.missing.as_str() }
         ),
         RaytracingStatus::SoftwareGpu => info!("Ray tracing (Auto): off on a software renderer"),
+        RaytracingStatus::NoDenoiser => info!(
+            "Ray tracing (Auto): off; Solari needs a denoiser (DLSS Ray Reconstruction), which this {} lacks. \
+             Settings On turns it on anyway.",
+            if DLSS_IN_BUILD { "GPU or its driver" } else { "build" }
+        ),
         RaytracingStatus::AfterCrash => warn!("Ray tracing (Auto): off on this GPU after a crash ({detail})"),
         RaytracingStatus::TooSlow => info!("Ray tracing (Auto): off on this GPU, recorded too slow ({detail})"),
         RaytracingStatus::NoGuard => warn!("Ray tracing (Auto): off, the crash guard could not be saved"),
@@ -1539,6 +1625,339 @@ fn guard_emissive_limit<M: TraceMarker>(
 }
 
 // ============================================================================
+// Parts whose maps arrive after them
+// ============================================================================
+
+/// Frames between the last map of a waiting material settling and its parts
+/// being touched. A map enters `Assets<Image>` (`LoadState::Loaded`) in a
+/// main-world frame, is extracted at the end of that frame, and is prepared,
+/// with the material that waited on it, in the render frame that follows,
+/// which pipelined rendering runs beside the next main-world frame. The
+/// touch made two frames later is extracted after the material is ready.
+pub const LATE_MAPS_TOUCH_AFTER_FRAMES: u32 = 2;
+
+/// Materials whose texture maps were still loading when they were added or
+/// changed, and the parts to put back in every view once the maps are in.
+///
+/// Under Solari a part draws in a ray-traced view only through that view's
+/// deferred prepass: its depth and G-buffer texel are where Solari lights it.
+/// Bevy 0.19 specializes and queues every part per view and keeps what it
+/// decided until the part changes. A part first specialized for a Solari
+/// camera while its material still waited on a map (a library material's
+/// 2048-pixel base color map takes seconds to decode and mip on the IO pool)
+/// stays out of that camera's deferred prepass after the map arrives: no
+/// depth, no G-buffer texel, nothing lit, the sky behind it shows. The same
+/// part draws in a camera that starts rendering later (the AI camera), a new
+/// part with the same material draws at once, and the part itself draws after
+/// any change to it. Raster deferred (SSR) on the same build keeps none of
+/// these parts out.
+///
+/// So each material whose maps were loading when it was added or changed is
+/// watched. When the last of them settles (loaded, or failed, so nothing
+/// waits on it any more), every part drawn with it has its `MeshMaterial3d`
+/// marked changed, [`LATE_MAPS_TOUCH_AFTER_FRAMES`] frames later. Bevy then
+/// specializes and queues those parts again in every view, as it does for a
+/// part whose material was just swapped. The handle stays the same; the other
+/// readers of that change (texture hydration, the trace rules here) find
+/// nothing to do.
+#[derive(Resource, Default, Debug)]
+pub struct LateMaps {
+    /// Materials with a map still loading.
+    waiting: HashSet<AssetId<StandardMaterial>>,
+    /// Materials whose maps have settled, with the frames left before their
+    /// parts are touched.
+    due: HashMap<AssetId<StandardMaterial>, u32>,
+}
+
+impl LateMaps {
+    /// `material` was added or changed while one of its maps was loading.
+    pub fn wait_for(&mut self, material: AssetId<StandardMaterial>) {
+        self.waiting.insert(material);
+        self.due.remove(&material);
+    }
+
+    /// Every map of `material` has settled: its parts are touched after the
+    /// margin. Nothing happens for a material that was not waiting.
+    pub fn settled(&mut self, material: AssetId<StandardMaterial>) {
+        if self.waiting.remove(&material) {
+            self.due.insert(material, LATE_MAPS_TOUCH_AFTER_FRAMES);
+        }
+    }
+
+    /// `material` is gone.
+    pub fn forget(&mut self, material: AssetId<StandardMaterial>) {
+        self.waiting.remove(&material);
+        self.due.remove(&material);
+    }
+
+    /// One frame: the materials whose parts are touched this frame.
+    pub fn tick(&mut self) -> HashSet<AssetId<StandardMaterial>> {
+        let mut now = HashSet::new();
+        self.due.retain(|&material, frames| {
+            if *frames == 0 {
+                now.insert(material);
+                false
+            } else {
+                *frames -= 1;
+                true
+            }
+        });
+        now
+    }
+}
+
+/// The maps of a `StandardMaterial` the engine loads: base color, normal,
+/// metallic-roughness, emissive, occlusion and depth.
+fn material_maps(material: &StandardMaterial) -> [Option<AssetId<Image>>; 6] {
+    [
+        &material.base_color_texture,
+        &material.normal_map_texture,
+        &material.metallic_roughness_texture,
+        &material.emissive_texture,
+        &material.occlusion_texture,
+        &material.depth_map,
+    ]
+    .map(|map| map.as_ref().map(Handle::id))
+}
+
+/// Whether one of `material`'s maps is still loading, by `loading`.
+pub fn maps_loading(material: &StandardMaterial, loading: &dyn Fn(AssetId<Image>) -> bool) -> bool {
+    material_maps(material).into_iter().flatten().any(loading)
+}
+
+/// Note each material added or changed while a map of it loads, and move
+/// each waiting material whose maps have settled to [`LateMaps`]'s due list.
+/// A map the asset server does not track (made in code) holds nothing up.
+fn watch_late_maps(
+    mut events: MessageReader<AssetEvent<StandardMaterial>>,
+    materials: Res<Assets<StandardMaterial>>,
+    server: Res<AssetServer>,
+    mut late: ResMut<LateMaps>,
+) {
+    let loading =
+        |map: AssetId<Image>| matches!(server.get_load_state(map), Some(bevy::asset::LoadState::Loading));
+    for event in events.read() {
+        match *event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => {
+                if materials.get(id).is_some_and(|m| maps_loading(m, &loading)) {
+                    late.wait_for(id);
+                }
+            }
+            AssetEvent::Removed { id } => late.forget(id),
+            _ => {}
+        }
+    }
+    if late.waiting.is_empty() {
+        return;
+    }
+    let settled: Vec<AssetId<StandardMaterial>> = late
+        .waiting
+        .iter()
+        .copied()
+        .filter(|&id| materials.get(id).is_none_or(|m| !maps_loading(m, &loading)))
+        .collect();
+    for id in settled {
+        late.settled(id);
+    }
+}
+
+/// Mark the `MeshMaterial3d` of every part drawn with a material that is due
+/// this frame as changed. Scans the parts only in a frame that has one.
+fn touch_late_map_parts(
+    mut late: ResMut<LateMaps>,
+    mut parts: Query<&mut MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
+) {
+    if late.due.is_empty() {
+        return;
+    }
+    let now = late.tick();
+    if now.is_empty() {
+        return;
+    }
+    for mut material in &mut parts {
+        if now.contains(&material.id()) {
+            material.set_changed();
+        }
+    }
+}
+
+/// [`LateMaps`] and its systems, while ray tracing is active. Added with
+/// Solari only, so the raster path never runs them.
+pub fn add_late_map_systems(app: &mut App) {
+    app.init_resource::<LateMaps>().add_systems(
+        Update,
+        (watch_late_maps, touch_late_map_parts).chain().run_if(raytracing_active),
+    );
+}
+
+#[cfg(test)]
+mod late_map_tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+
+    fn material_id(n: u128) -> AssetId<StandardMaterial> {
+        AssetId::Uuid { uuid: Uuid::from_u128(n) }
+    }
+
+    #[test]
+    fn a_waiting_material_is_due_once_its_maps_settle_and_not_before() {
+        let mut late = LateMaps::default();
+        let a = material_id(1);
+        late.wait_for(a);
+        for _ in 0..10 {
+            assert!(late.tick().is_empty(), "nothing is touched while a map loads");
+        }
+        late.settled(a);
+        for _ in 0..LATE_MAPS_TOUCH_AFTER_FRAMES {
+            assert!(late.tick().is_empty(), "the margin passes first");
+        }
+        assert_eq!(late.tick(), HashSet::from([a]));
+        assert!(late.tick().is_empty(), "touched once");
+    }
+
+    #[test]
+    fn only_a_waiting_material_is_ever_due() {
+        let mut late = LateMaps::default();
+        late.settled(material_id(2));
+        late.wait_for(material_id(3));
+        late.forget(material_id(3));
+        late.settled(material_id(3));
+        for _ in 0..(LATE_MAPS_TOUCH_AFTER_FRAMES + 3) {
+            assert!(late.tick().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_material_changed_while_due_waits_again() {
+        let mut late = LateMaps::default();
+        let a = material_id(4);
+        late.wait_for(a);
+        late.settled(a);
+        late.wait_for(a);
+        for _ in 0..(LATE_MAPS_TOUCH_AFTER_FRAMES + 3) {
+            assert!(late.tick().is_empty(), "its new maps are still loading");
+        }
+    }
+
+    #[test]
+    fn maps_loading_reads_every_map_the_engine_loads() {
+        let map: Handle<Image> = Handle::default();
+        let id = map.id();
+        let with = |set: fn(&mut StandardMaterial, Handle<Image>)| {
+            let mut material = StandardMaterial::default();
+            set(&mut material, map.clone());
+            material
+        };
+        let materials = [
+            with(|m, h| m.base_color_texture = Some(h)),
+            with(|m, h| m.normal_map_texture = Some(h)),
+            with(|m, h| m.metallic_roughness_texture = Some(h)),
+            with(|m, h| m.emissive_texture = Some(h)),
+            with(|m, h| m.occlusion_texture = Some(h)),
+            with(|m, h| m.depth_map = Some(h)),
+        ];
+        for material in &materials {
+            assert!(maps_loading(material, &|m| m == id));
+            assert!(!maps_loading(material, &|_| false));
+        }
+        assert!(!maps_loading(&StandardMaterial::default(), &|_| true), "no maps, nothing to wait for");
+    }
+
+    #[derive(Resource, Default)]
+    struct Touched(Vec<Vec<Entity>>);
+
+    fn record_touched(
+        parts: Query<Entity, Changed<MeshMaterial3d<StandardMaterial>>>,
+        mut touched: ResMut<Touched>,
+    ) {
+        let mut now: Vec<Entity> = parts.iter().collect();
+        now.sort();
+        touched.0.push(now);
+    }
+
+    fn app(status: RaytracingStatus) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>()
+            .insert_resource(RaytracingLaunch::for_status(status))
+            .init_resource::<Touched>()
+            .add_systems(PostUpdate, record_touched);
+        add_late_map_systems(&mut app);
+        app
+    }
+
+    /// A part drawn with a material whose base color map is loading, and a
+    /// part drawn with a plain material. Returns (material, waiting part,
+    /// plain part). The map's load never finishes.
+    fn scene(app: &mut App) -> (Handle<StandardMaterial>, Entity, Entity) {
+        let map: Handle<Image> = app
+            .world()
+            .resource::<AssetServer>()
+            .add_async(std::future::pending::<Result<Image, std::convert::Infallible>>());
+        let (textured, plain) = {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            (
+                materials.add(StandardMaterial { base_color_texture: Some(map), ..default() }),
+                materials.add(StandardMaterial::default()),
+            )
+        };
+        let waiting = app.world_mut().spawn((Mesh3d(Handle::default()), MeshMaterial3d(textured.clone()))).id();
+        let other = app.world_mut().spawn((Mesh3d(Handle::default()), MeshMaterial3d(plain))).id();
+        (textured, waiting, other)
+    }
+
+    #[test]
+    fn parts_of_a_material_are_touched_once_after_its_maps_settle() {
+        let mut app = app(RaytracingStatus::Active);
+        let (textured, waiting, _) = scene(&mut app);
+        // The spawn frame marks both parts changed; the map loads from then on.
+        app.update();
+        let loading_from = app.world().resource::<Touched>().0.len();
+        for _ in 0..10 {
+            app.update();
+        }
+        let touched = &app.world().resource::<Touched>().0;
+        assert!(touched[loading_from..].iter().all(Vec::is_empty), "touched while its map loads: {touched:?}");
+        assert!(app.world().resource::<LateMaps>().waiting.contains(&textured.id()));
+
+        // Its map settles: here the material drops it, the one change that
+        // ends the wait in a test (the load itself never finishes).
+        app.world_mut().resource_mut::<Assets<StandardMaterial>>().get_mut(&textured).unwrap().base_color_texture =
+            None;
+        let settled_from = app.world().resource::<Touched>().0.len();
+        for _ in 0..(LATE_MAPS_TOUCH_AFTER_FRAMES + 4) {
+            app.update();
+        }
+        let frames = &app.world().resource::<Touched>().0[settled_from..];
+        for (n, frame) in frames.iter().enumerate() {
+            if n == LATE_MAPS_TOUCH_AFTER_FRAMES as usize {
+                assert_eq!(frame, &vec![waiting], "frame {n}: {frames:?}");
+            } else {
+                assert!(frame.is_empty(), "frame {n}: {frames:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_touched_unless_ray_tracing_is_active() {
+        let mut app = app(RaytracingStatus::Off);
+        let (textured, _, _) = scene(&mut app);
+        app.update();
+        app.world_mut().resource_mut::<LateMaps>().wait_for(textured.id());
+        app.world_mut().resource_mut::<Assets<StandardMaterial>>().get_mut(&textured).unwrap().base_color_texture =
+            None;
+        let from = app.world().resource::<Touched>().0.len();
+        for _ in 0..(LATE_MAPS_TOUCH_AFTER_FRAMES + 4) {
+            app.update();
+        }
+        let touched = &app.world().resource::<Touched>().0[from..];
+        assert!(touched.iter().all(Vec::is_empty), "{touched:?}");
+    }
+}
+
+// ============================================================================
 // Solari (only with the `raytracing` feature)
 // ============================================================================
 
@@ -1573,6 +1992,7 @@ mod solari {
         super::sky::add_systems::<RaytracingMesh3d>(app);
         super::lights::add_systems::<RaytracingMesh3d>(app);
         super::surfaces::add_systems::<RaytracingMesh3d>(app);
+        super::add_late_map_systems(app);
         // DLSS Ray Reconstruction denoises (and upscales) Solari's output.
         // `DlssRayReconstructionSupported` exists only when `DlssPlugin` found
         // the driver, the GPU and the DLSS libraries able to run it.
@@ -1610,6 +2030,22 @@ mod solari {
             use super::super::tests::{exercise_untrace, render_test_app};
             let mut app = render_test_app::<RaytracingMesh3d>(super::super::add_untrace_sync::<RaytracingMesh3d>);
             exercise_untrace::<RaytracingMesh3d>(&mut app);
+        }
+
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        #[test]
+        fn denoiser_reported_only_with_both_dlss_features() {
+            use super::super::reported_by_device;
+            use bevy::anti_alias::dlss::{DlssRayReconstructionSupported, DlssSuperResolutionSupported};
+            use bevy::render::renderer::raw_vulkan_init::AdditionalVulkanFeatures;
+            let mut features = AdditionalVulkanFeatures::default();
+            assert!(!reported_by_device(&features));
+            features.insert::<DlssRayReconstructionSupported>();
+            assert!(!reported_by_device(&features), "DlssPlugin starts nothing without Super Resolution");
+            features.insert::<DlssSuperResolutionSupported>();
+            assert!(reported_by_device(&features));
+            features.remove::<DlssRayReconstructionSupported>();
+            assert!(!reported_by_device(&features), "Super Resolution alone is no denoiser");
         }
     }
 }
@@ -1697,6 +2133,18 @@ mod tests {
         let mut cpu = rtx();
         cpu.adapter = "llvmpipe".into();
         assert_eq!(note(Auto, S::SoftwareGpu, Some(&cpu)), "Auto: off, llvmpipe is a software renderer.");
+        let no_denoiser = note(Auto, S::NoDenoiser, Some(&rtx()));
+        if DLSS_IN_BUILD {
+            assert_eq!(
+                no_denoiser,
+                "Auto: off, NVIDIA GeForce RTX 2080 Ti offers no DLSS Ray Reconstruction to denoise it; turn On to use it anyway."
+            );
+        } else {
+            assert_eq!(
+                no_denoiser,
+                "Auto: off, this build has no DLSS Ray Reconstruction to denoise it; turn On to use it anyway."
+            );
+        }
         assert_eq!(note(Off, S::Off, Some(&pascal())), "Off. NVIDIA GeForce GTX 1080 Ti does not support it.");
         assert!(note(Off, S::Off, Some(&rtx())).starts_with("Off. NVIDIA GeForce RTX 2080 Ti supports it"));
         assert_eq!(note(Off, S::Off, None), "Off.");
@@ -1720,6 +2168,12 @@ mod tests {
         assert!(heavy_note.starts_with("Auto: off now. This Space uses 4812 distinct textures"), "{heavy_note}");
         let off = policy::GuardEvents { fallback: Some(FallbackReason::TurnedOff), ..default() };
         assert_eq!(settings_note(&probed, None, &off), "Off now, for the rest of this session. Auto and On apply at the next launch.");
+        let unstarted = policy::GuardEvents { fallback: Some(FallbackReason::NoDenoiser), ..default() };
+        assert_eq!(
+            settings_note(&probed, None, &unstarted),
+            "Auto: off, DLSS Ray Reconstruction did not start on NVIDIA GeForce RTX 2080 Ti, so nothing would denoise it; \
+             turn On to use it anyway."
+        );
     }
 
     #[test]
@@ -1743,6 +2197,9 @@ mod tests {
         app.insert_resource(launch(RayTracingMode::Auto, RaytracingStatus::TooSlow));
         app.update();
         assert_eq!(app.world().resource::<Ran>().0, 0, "ran with ray tracing off");
+        app.insert_resource(launch(RayTracingMode::Auto, RaytracingStatus::NoDenoiser));
+        app.update();
+        assert_eq!(app.world().resource::<Ran>().0, 0, "ran with no denoiser");
         app.insert_resource(launch(RayTracingMode::Auto, RaytracingStatus::Active));
         app.update();
         assert_eq!(app.world().resource::<Ran>().0, 1);
@@ -2569,6 +3026,61 @@ mod tests {
         app.world_mut().write_message(RasterFallbackRequest(FallbackReason::TurnedOff));
         app.update();
         assert!(app.world().get_resource::<RasterFallback>().is_none());
+    }
+
+    #[test]
+    fn auto_without_a_started_denoiser_falls_back_before_the_first_frame() {
+        use eustress_common::plugins::lighting_plugin::SkyMode;
+        // The device reported Ray Reconstruction (the launch is Active), but
+        // DLSS did not start: `DenoiserSupported` stands for Bevy's
+        // `DlssRayReconstructionSupported`, and is absent.
+        let mut app = fallback_app(RaytracingStatus::Active);
+        let launch = app.world().resource::<RaytracingLaunch>().clone();
+        let mesh = add_mesh(&mut app, quad());
+        let material = add_material(&mut app, StandardMaterial::default());
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), StudioCamera, SkyCamera { mode: SkyMode::Atmosphere }))
+            .id();
+        let part = part(&mut app, &mesh, &material);
+        require_denoiser::<DenoiserSupported>(&mut app, &launch);
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get_resource::<RasterFallback>().map(|f| f.reason.clone()),
+            Some(FallbackReason::NoDenoiser)
+        );
+        assert!(app.world().get::<TestLighting>(camera).is_none(), "Solari reached a camera with no denoiser");
+        assert!(app.world().get::<SyncedTrace>(part).is_none(), "a part was traced with no denoiser");
+        assert!(app.world().get::<Mesh3d>(part).is_some(), "the part stopped being drawn");
+        assert_eq!(render_traced_count(&mut app), 0, "the render world traces something");
+        assert_eq!(
+            app.world().resource::<policy::GuardEvents>().fallback,
+            Some(FallbackReason::NoDenoiser),
+            "the fallback was never announced"
+        );
+    }
+
+    #[test]
+    fn a_started_denoiser_or_on_keeps_tracing() {
+        // Auto with the denoiser started, and On with none: both trace.
+        for (mode, started) in [(RayTracingMode::Auto, true), (RayTracingMode::On, false)] {
+            let mut app = fallback_app(RaytracingStatus::Active);
+            let launch = RaytracingLaunch::new(mode, SwitchSource::Settings, RaytracingStatus::Active);
+            app.insert_resource(launch.clone());
+            if started {
+                app.insert_resource(DenoiserSupported);
+            }
+            require_denoiser::<DenoiserSupported>(&mut app, &launch);
+            assert!(app.world().get_resource::<RasterFallback>().is_none(), "{mode:?} fell back");
+            // Lights a camera and traces a part, or fails.
+            traced_scene(&mut app);
+        }
+        // A launch that already draws in raster gets no fallback.
+        let mut app = fallback_app(RaytracingStatus::NoDenoiser);
+        let launch = app.world().resource::<RaytracingLaunch>().clone();
+        require_denoiser::<DenoiserSupported>(&mut app, &launch);
+        assert!(app.world().get_resource::<RasterFallback>().is_none(), "a raster launch got a fallback");
     }
 
     #[test]

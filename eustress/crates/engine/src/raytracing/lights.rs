@@ -1418,7 +1418,12 @@ mod tests {
 
     #[test]
     fn nothing_runs_without_ray_tracing() {
-        for launch in [None, Some(RaytracingStatus::Off), Some(RaytracingStatus::Unsupported)] {
+        for launch in [
+            None,
+            Some(RaytracingStatus::Off),
+            Some(RaytracingStatus::Unsupported),
+            Some(RaytracingStatus::NoDenoiser),
+        ] {
             let mut app = bare_app();
             if let Some(status) = launch {
                 app.insert_resource(RaytracingLaunch::for_status(status));
