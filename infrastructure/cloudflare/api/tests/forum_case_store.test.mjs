@@ -125,7 +125,7 @@ test('the case is kept in R2 at moderation/forumcase/{postId}.json, with its fla
   assert.equal(FORUM_CASE_PREFIX, 'moderation/forumcase/');
   const rec = stored(env, forumCaseR2Key(POST));
   assert.deepEqual([rec.post_id, rec.reporters, rec.hidden, rec.seq], [POST, [REPORTERS[0]], true, 1]);
-  assert.deepEqual(env.SCENES.objects.get(forumCaseR2Key(POST)).customMetadata, { seq: '1', round: '0', reference: rec.reference, hidden: '1', gated: '0', removed: '0', waiting: '1' });
+  assert.deepEqual(env.SCENES.objects.get(forumCaseR2Key(POST)).customMetadata, { seq: '1', round: '0', reference: rec.reference, hidden: '1', gated: '0', removed: '0', waiting: '1', owed: '0' });
   assert.equal(await env.SOCIAL.get(forumCaseKey(POST)), null, 'nothing is written to the old KV key');
   // Every case write is conditional: create-if-absent, then replace-if-unchanged on the etag that was read.
   const writes = env.SCENES.hooks.puts.filter((p) => p.key === forumCaseR2Key(POST));
@@ -1177,7 +1177,7 @@ test('R8-2: a failure after the decision answers ok with pending; report_owed is
   const off = await quiet(() => sweepLegalReports(env));
   env.SOCIAL.list = list;
   assert.equal(off.owed_reports, 'off');
-  assert.ok(listed.length > 0 && !listed.some((p) => String(p).startsWith('legalowed:')), 'the forum index is never listed while the setting is off');
+  assert.ok(listed.length > 0 && !listed.some((p) => String(p).startsWith('legalowed:forum:')), 'the forum index is never listed while the setting is off');
   assert.equal((await reportsOf(env)).length, 0, 'and no report is written');
   assert.ok(await env.SOCIAL.get(`legalowed:forum:${POST}`), 'the debt is kept');
   // On, the hourly legal sweep writes it, and the debt goes.

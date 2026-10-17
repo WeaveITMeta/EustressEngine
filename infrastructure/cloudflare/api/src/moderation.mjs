@@ -2721,6 +2721,8 @@ const uploadIpKey = e => `${e.ip}|${e.at || ''}|${e.item_id || ''}`;
 /// FORUM_UPLOAD_IP_MAX_AGE_DAYS before it, and `item_id`, when given, a sealed text item id. Anything else is dropped, never
 /// refused, and never given a time.
 export function forumUploadIpsOf(list, now = Date.now()) {
+  // A clock that is not a number (NaN, null) would keep a pair of any age, a future one too: the machine's clock is used.
+  if (!Number.isFinite(now)) now = Date.now();
   if (!Array.isArray(list)) return [];
   const out = [];
   const seen = new Set();
@@ -2858,10 +2860,13 @@ async function readForumCase(env, postId) {
   throw new ForumCaseConflict(postId);
 }
 
-// The case's flags as R2 customMetadata, so a list can tell an open case without reading it. Strings only.
+// The case's flags as R2 customMetadata, so a list can tell an open case without reading it. Strings only. `owed` is the
+// legal report debt (`report_owed`): '1' owed, 'stuck' owed and stuck, '0' none. It is written in the same put as the debt,
+// so the owed sweep's heal (healForumReportDebts) finds a debt whose KV index was never written.
 const forumCaseMeta = rec => ({
   seq: String(rec.seq), round: String(rec.round || 0), reference: rec.reference || '',
   hidden: rec.hidden ? '1' : '0', gated: rec.gated ? '1' : '0', removed: rec.removed ? '1' : '0', waiting: rec.waiting ? '1' : '0',
+  owed: rec.report_owed ? (rec.report_owed.stuck ? 'stuck' : '1') : '0',
 });
 
 // One conditional write: replace the case whose etag was read, or create it when there was none. Returns R2's object, or null
@@ -3169,7 +3174,8 @@ async function alertStaffOfForumCsam(env, rec, at) {
 
 /// A person's decision on a forum case, from the admin tool path (moderation_forum_resolve). Records it, settles the reports
 /// before it (the next report starts a new round), clears the queue entry, and answers the action the forum route applies:
-/// `{ ok: true, action, reference, case_version }`, action 'restore' (show the post again), 'remove' (remove it, tombstone "Removed by a
+/// `{ ok: true, action, reference, case_version, decided_at }` (decided_at: the decision's own recorded time, ISO 8601, on a
+/// pending answer too), action 'restore' (show the post again), 'remove' (remove it, tombstone "Removed by a
 /// moderator"), 'gate' (only behind the Adult content gate) or 'ungate'. `category` is the category the person found; 'remove'
 /// needs one of FORUM_REMOVABLE_CATEGORIES, or a TAKE IT DOWN lock on the post. `uploadIps`, optional, are the addresses the
 /// post was written and edited from, `[{ ip, at, item_id }]` (forumUploadIpsOf; an invalid entry is dropped, never refused, and
@@ -3246,7 +3252,7 @@ export async function resolveForumCase({ env, postId, decision, category = null,
       return await afterForumDecision(env, { postId, decision, category, reviewerId, at, rec: decided.rec, lease, personFinding, keepsIp, textItem, sealedIps, uploadIps, uploadIp, needsReport, deps, now, released: () => { lease = null; } });
     } catch (e) {
       console.error('forum case: a step after the decision failed:', e?.name || 'Error');
-      return { ok: true, action: decision, reference: decided.rec.reference || null, case_version: forumCaseVersion(decided.rec), pending: ['case_write', ...(needsReport ? ['legal_report'] : [])], follow_up: 'pending' };
+      return { ok: true, action: decision, reference: decided.rec.reference || null, case_version: forumCaseVersion(decided.rec), decided_at: at, pending: ['case_write', ...(needsReport ? ['legal_report'] : [])], follow_up: 'pending' };
     }
   } catch (e) {
     if (e instanceof ForumCaseConflict) return forumBusy('This case is being written. Try again in a moment.');
@@ -3260,8 +3266,24 @@ export async function resolveForumCase({ env, postId, decision, category = null,
 /// The KV index of a forum case that owes a legal report (`rec.report_owed`), for the hourly sweep (writeOwedForumReports).
 export const forumReportOwedKey = postId => `legalowed:forum:${postId}`;
 
+// The owed index is tried this many times before the answer names the report as pending. A debt whose index was never written
+// is still on the case and in its R2 metadata (`owed`), where the owed sweep's heal finds it (healForumReportDebts).
+const FORUM_OWED_INDEX_ATTEMPTS = 3;
+
+// Writes the owed index, tried FORUM_OWED_INDEX_ATTEMPTS times. `true` when it was written.
+async function indexForumReportOwed(env, postId, since) {
+  for (let attempt = 0; attempt < FORUM_OWED_INDEX_ATTEMPTS; attempt++) {
+    try { await env.SOCIAL.put(forumReportOwedKey(postId), since); return true; }
+    catch (e) {
+      console.error('forum case: the owed report was not indexed:', e?.name || 'Error');
+      if (attempt + 1 < FORUM_OWED_INDEX_ATTEMPTS) await sleep(25 * 2 ** attempt);
+    }
+  }
+  return false;
+}
+
 // Everything after a person's decision is recorded. Never throws: each step that fails is named in `pending` ('case_write',
-// 'legal_report', 'push'), and the answer is `{ ok: true, action, reference, case_version, pending, follow_up? }`.
+// 'legal_report', 'push'), and the answer is `{ ok: true, action, reference, case_version, decided_at, pending, follow_up? }`.
 async function afterForumDecision(env, o) {
   const { postId, decision, category, reviewerId, at, personFinding, keepsIp, textItem, sealedIps, uploadIps, uploadIp, needsReport, deps, now = null } = o;
   let rec = o.rec;
@@ -3273,10 +3295,9 @@ async function afterForumDecision(env, o) {
   // report the decision owes (the legal sweep's index).
   try { await env.SOCIAL.put(forumDecisionKey(postId), JSON.stringify({ action: decision, decided_at: at, reference: rec.reference || null })); }
   catch (e) { console.error('forum case: the decision record was not written:', e?.name || 'Error'); owe('push'); }
-  if (needsReport) {
-    try { await env.SOCIAL.put(forumReportOwedKey(postId), at); }
-    catch (e) { console.error('forum case: the owed report was not indexed:', e?.name || 'Error'); owe('legal_report'); }
-  }
+  // The index is written before the report is tried, and tried again on a failure: one that still fails leaves the report
+  // pending in the answer, and the debt on the case, where the sweep's heal finds it.
+  const indexed = needsReport ? await indexForumReportOwed(env, postId, at) : true;
   // The lease is released before the push: the forum's applier seals the post (sealForumEvidence), which takes this same
   // lease, and a lease held through the push would answer it busy and fail every removal's push. Nothing below needs the
   // lease: each write to the case is a compare-and-swap (updateForumCase).
@@ -3316,12 +3337,60 @@ async function afterForumDecision(env, o) {
   if (decision === 'remove') {
     const after = await forumRemovalAfter(env, rec, { category, detection: personFinding, removedAt: rec.removed_at || at, uploadIps: reportIps, deps });
     if (needsReport) {
-      if (after.report_written) {
-        if (!(await clearForumReportOwed(env, postId))) owe('case_write');
-      } else owe('legal_report');
+      const debt = await closeForumReportDebt(env, postId, after.report);
+      if (debt.outcome === 'paid' && !debt.closed) owe('case_write');
+      // Settled is closed; owed and stuck stay pending (a stuck debt waits for a person).
+      if (debt.outcome !== 'paid' && !(debt.outcome === 'settled' && debt.closed)) owe('legal_report');
+      if (!indexed && !debt.closed) owe('legal_report');
     }
+  } else if (needsReport && !indexed) owe('legal_report');
+  return { ok: true, action: decision, reference: rec.reference || null, case_version: decisionVersion, decided_at: at, pending, ...(pending.length ? { follow_up: 'pending' } : {}) };
+}
+
+// What the report a forum case owes came to, and the debt closed to match (src/legal_reports.mjs reportDebtOutcome): 'paid'
+// (written, or the case already has one) clears it; 'settled' (a decision that no report is owed: not a reported kind,
+// borderline, or the threat criteria not met) clears it with its reason recorded, audited first, so no debt is closed
+// unaudited; 'stuck' (a defect no retry can mend) moves it to the stuck index (legalstuck:forum:{postId}), staff are alerted,
+// and only a person clears it (clearReportDebt); 'owed' (unavailable, busy, budget) keeps it for the next sweep. The evidence
+// is never touched. Never throws. `{ outcome, closed }`, closed when the debt left the owed list as the outcome says.
+async function closeForumReportDebt(env, postId, report) {
+  let outcome = 'owed';
+  try {
+    const legal = await import('./legal_reports.mjs');
+    outcome = legal.reportDebtOutcome(report);
+    if (outcome === 'paid') return { outcome, closed: await clearForumReportOwed(env, postId) };
+    if (outcome === 'owed') return { outcome, closed: false };
+    const rec = await loadForumCase(env, postId);
+    const owed = rec?.report_owed;
+    if (!owed) return { outcome, closed: true };
+    const reason = String(report?.reason || 'unknown').slice(0, 60);
+    const at = new Date().toISOString();
+    if (outcome === 'settled') {
+      await writeAuditRecord(env, 'LEGAL_REPORT_SETTLED', 'system', rec.reference || postId, { case_kind: 'forum', case_id: postId, category: owed.category || null, reason });
+      await updateForumCase(env, postId, async current => {
+        if (!current?.report_owed) return null;
+        current.report_settled = { reason, category: current.report_owed.category || null, since: current.report_owed.since || null, at };
+        current.report_owed = null;
+        forumHistory(current, 'legal_report_settled', { reason });
+        return current;
+      });
+      await env.SOCIAL.delete(forumReportOwedKey(postId));
+      return { outcome, closed: true };
+    }
+    const stuck = await legal.recordStuckReport(env, { caseKind: 'forum', caseId: postId, reportKind: owed.category, category: owed.category, reason, reference: rec.reference || null, since: owed.since || null });
+    if (!stuck.ok) return { outcome, closed: false };
+    await updateForumCase(env, postId, async current => {
+      if (!current?.report_owed || current.report_owed.stuck) return null;
+      current.report_owed = { ...current.report_owed, stuck: { reason, at } };
+      forumHistory(current, 'legal_report_stuck', { reason });
+      return current;
+    });
+    await env.SOCIAL.delete(forumReportOwedKey(postId));
+    return { outcome, closed: true };
+  } catch (e) {
+    console.error('forum case: the report debt was not closed:', e?.name || 'Error');
+    return { outcome, closed: false };
   }
-  return { ok: true, action: decision, reference: rec.reference || null, case_version: decisionVersion, pending, ...(pending.length ? { follow_up: 'pending' } : {}) };
 }
 
 // The report a case owed is written: the debt and its index go. `true` when both did.
@@ -3346,42 +3415,149 @@ export class OwedReportBudgetSpent extends Error {
   constructor() { super('the owed-report sweep spent its time budget'); this.name = 'OwedReportBudgetSpent'; }
 }
 
+/// Where the owed sweep left off in its index (the KV list cursor of the next page), and where its heal left off in the cases
+/// (R2's list cursor). Absent: from the start.
+export const FORUM_OWED_CURSOR_KEY = 'legalowed-cursor:forum';
+export const FORUM_OWED_HEAL_CURSOR_KEY = 'legalowed-heal-cursor:forum';
+const FORUM_OWED_PREFIX = 'legalowed:forum:';
+
 /// The hourly legal sweep's part for forum cases (src/legal_reports.mjs sweepLegalReports): every case that owes a legal report
-/// (`report_owed`, indexed at forumReportOwedKey) has it written, and the debt is cleared once it is. Each case is worked under
-/// its lease, released in a finally whatever happens, a spent budget included. Stops when `budgetMs` is spent (the remaining
-/// cases wait for the next run). Never throws. `{ tried, written, still_owed, stopped }`.
-export async function writeOwedForumReports(env, deps = {}, { limit = 25, budgetMs = 20_000, now = Date.now } = {}) {
-  const out = { tried: 0, written: 0, still_owed: 0, stopped: false };
+/// (`report_owed`, indexed at forumReportOwedKey) has it written, and the debt is closed as the report's outcome says
+/// (closeForumReportDebt: paid, settled, stuck, or still owed). First the heal (healForumReportDebts) indexes any debt whose
+/// index was never written. The index is read a page of `limit` at a time with a cursor, at most `maxPages` pages a run, as
+/// retryPendingEvidence reads its pending seals: a run that stops keeps its cursor (FORUM_OWED_CURSOR_KEY; a run its budget
+/// stops mid-page keeps the cursor that page started at), the run that reaches the end starts the next from the beginning, and
+/// a cursor KV no longer takes is dropped and the index read from the start. Each case is worked under its lease, released in a
+/// finally whatever happens, a spent budget included. Stops when `budgetMs` is spent. Never throws.
+/// `{ tried, written, settled, stuck, still_owed, stopped, pages, complete, healed }`.
+export async function writeOwedForumReports(env, deps = {}, { limit = 25, maxPages = 4, budgetMs = 20_000, now = Date.now } = {}) {
+  const out = { tried: 0, written: 0, settled: 0, stuck: 0, still_owed: 0, stopped: false, pages: 0, complete: false, healed: 0 };
   const deadline = now() + budgetMs;
-  let listed;
-  try { listed = await env.SOCIAL.list({ prefix: 'legalowed:forum:', limit }); } catch { return out; }
-  for (const k of listed?.keys || []) {
-    const postId = k.name.slice('legalowed:forum:'.length);
-    if (!FORUM_POST_ID.test(postId)) continue;
-    let lease = null;
-    try {
-      if (now() > deadline) throw new OwedReportBudgetSpent();
-      lease = await forumLease(env, postId, thresholdsFrom(env), 'owed_report');
-      if (!lease) { out.still_owed += 1; continue; }
-      const rec = await loadForumCase(env, postId);
-      if (!rec?.report_owed) { await env.SOCIAL.delete(k.name).catch(() => {}); continue; }
-      out.tried += 1;
-      if (now() > deadline) throw new OwedReportBudgetSpent();
-      const owed = rec.report_owed;
-      const detection = forumPersonFinding(rec, { by: owed.by, category: owed.category, source: 'moderation_forum_resolve' });
-      const items = (rec.sealed_items || []).filter(i => TEXT_ITEM_ID.test(i));
-      const reportIps = FORUM_SEALED_CATEGORIES.includes(owed.category) ? await forumPostIpEntriesOf(env, postId, items) : [];
-      const after = await forumRemovalAfter(env, rec, { category: owed.category, detection, removedAt: rec.removed_at || owed.since, uploadIps: reportIps, deps });
-      if (after.report_written && (await clearForumReportOwed(env, postId))) out.written += 1;
-      else out.still_owed += 1;
-    } catch (e) {
-      if (e instanceof OwedReportBudgetSpent) { out.stopped = true; break; }
-      console.error('forum case: an owed report was not written:', e?.name || 'Error');
-      out.still_owed += 1;
-    } finally {
-      if (lease) await releaseLease(env, lease);
+  try { out.healed = (await healForumReportDebts(env, { deadline, now })).healed; } catch { /* the next run heals */ }
+  let cursor;
+  try { cursor = (await env.SOCIAL.get(FORUM_OWED_CURSOR_KEY)) || undefined; } catch { cursor = undefined; }
+  while (out.pages < maxPages && !out.stopped) {
+    let listed;
+    try { listed = await env.SOCIAL.list({ prefix: FORUM_OWED_PREFIX, limit, ...(cursor ? { cursor } : {}) }); }
+    catch {
+      if (!cursor) break;
+      cursor = undefined;
+      continue;
     }
+    out.pages += 1;
+    for (const k of listed?.keys || []) {
+      if (await writeOneOwedForumReport(env, deps, k.name, out, { deadline, now })) break;
+    }
+    // Stopped mid-page: the cursor this page started at is kept, so the next run reads it again.
+    if (out.stopped) break;
+    if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; out.complete = true; break; }
+    cursor = listed.cursor;
   }
+  try {
+    if (cursor) await env.SOCIAL.put(FORUM_OWED_CURSOR_KEY, cursor);
+    else await env.SOCIAL.delete(FORUM_OWED_CURSOR_KEY);
+  } catch { /* the next run reads from where KV says, or from the start */ }
+  return out;
+}
+
+// One indexed case of the owed sweep. Returns true when the budget is spent (the sweep stops).
+async function writeOneOwedForumReport(env, deps, key, out, { deadline, now }) {
+  const postId = key.slice(FORUM_OWED_PREFIX.length);
+  if (!FORUM_POST_ID.test(postId)) return false;
+  let lease = null;
+  try {
+    if (now() > deadline) throw new OwedReportBudgetSpent();
+    lease = await forumLease(env, postId, thresholdsFrom(env), 'owed_report');
+    if (!lease) { out.still_owed += 1; return false; }
+    const rec = await loadForumCase(env, postId);
+    if (!rec?.report_owed) { await env.SOCIAL.delete(key).catch(() => {}); return false; }
+    const owed = rec.report_owed;
+    // A stuck debt is not retried: it is in its own index (staff are alerted there) until a person clears it.
+    if (owed.stuck) {
+      const legal = await import('./legal_reports.mjs');
+      const kept = await legal.recordStuckReport(env, { caseKind: 'forum', caseId: postId, reportKind: owed.category, category: owed.category, reason: owed.stuck.reason, reference: rec.reference || null, since: owed.since || null });
+      if (kept.ok) await env.SOCIAL.delete(key).catch(() => {});
+      return false;
+    }
+    out.tried += 1;
+    if (now() > deadline) throw new OwedReportBudgetSpent();
+    // A check removal's debt carries its own detection; a person's removal is that person's finding.
+    const detection = owed.detection || forumPersonFinding(rec, { by: owed.by, category: owed.category, source: 'moderation_forum_resolve' });
+    const items = (rec.sealed_items || []).filter(i => TEXT_ITEM_ID.test(i));
+    const reportIps = FORUM_SEALED_CATEGORIES.includes(owed.category) ? await forumPostIpEntriesOf(env, postId, items) : [];
+    const after = await forumRemovalAfter(env, rec, { category: owed.category, detection, removedAt: rec.removed_at || owed.since, uploadIps: reportIps, threatContent: owed.threat_content || null, deps });
+    const debt = await closeForumReportDebt(env, postId, after.report);
+    if (debt.closed && debt.outcome === 'paid') out.written += 1;
+    else if (debt.closed && debt.outcome === 'settled') out.settled += 1;
+    else if (debt.closed && debt.outcome === 'stuck') out.stuck += 1;
+    else out.still_owed += 1;
+    return false;
+  } catch (e) {
+    if (e instanceof OwedReportBudgetSpent) { out.stopped = true; return true; }
+    console.error('forum case: an owed report was not written:', e?.name || 'Error');
+    out.still_owed += 1;
+    return false;
+  } finally {
+    if (lease) await releaseLease(env, lease);
+  }
+}
+
+/// The heal: a bounded pass over the forum cases' R2 metadata (`owed`, written in the same put as the debt, forumCaseMeta)
+/// that writes the index of any debt whose index is missing (an owed debt's legalowed:forum:{postId}, a stuck one's
+/// legalstuck:forum:{postId}). `limit` cases a page, at most `maxPages` pages a run, from a cursor kept at
+/// FORUM_OWED_HEAL_CURSOR_KEY, so every case is reached over the runs and no run reads them all. A case written before the
+/// metadata carried `owed` is read only when it is removed (only a removed case can owe). Never throws. `{ healed, pages,
+/// complete }`.
+export async function healForumReportDebts(env, { limit = 100, maxPages = 2, deadline = Infinity, now = Date.now } = {}) {
+  const out = { healed: 0, pages: 0, complete: false };
+  let cursor;
+  try { cursor = (await env.SOCIAL.get(FORUM_OWED_HEAL_CURSOR_KEY)) || undefined; } catch { cursor = undefined; }
+  while (out.pages < maxPages && now() <= deadline) {
+    let page;
+    try { page = await env.SCENES.list({ prefix: FORUM_CASE_PREFIX, limit, include: ['customMetadata'], ...(cursor ? { cursor } : {}) }); }
+    catch {
+      if (!cursor) break;
+      cursor = undefined;
+      continue;
+    }
+    out.pages += 1;
+    for (const o of page?.objects || []) {
+      const postId = o.key.slice(FORUM_CASE_PREFIX.length).replace(/\.json$/, '');
+      if (!FORUM_POST_ID.test(postId)) continue;
+      const meta = o.customMetadata || {};
+      if (meta.owed === '0') continue;
+      if (meta.owed === undefined && meta.seq && meta.removed !== '1') continue;
+      try {
+        let rec = null;
+        let state = meta.owed;
+        if (state !== '1' && state !== 'stuck') {
+          rec = await loadForumCase(env, postId);
+          state = rec?.report_owed ? (rec.report_owed.stuck ? 'stuck' : '1') : '0';
+        }
+        if (state === '1') {
+          if (!(await env.SOCIAL.get(forumReportOwedKey(postId)))) {
+            rec = rec || await loadForumCase(env, postId);
+            if (rec?.report_owed && !rec.report_owed.stuck) { await env.SOCIAL.put(forumReportOwedKey(postId), rec.report_owed.since || new Date().toISOString()); out.healed += 1; }
+          }
+        } else if (state === 'stuck') {
+          const legal = await import('./legal_reports.mjs');
+          if (!(await legal.loadStuckReport(env, 'forum', postId))) {
+            rec = rec || await loadForumCase(env, postId);
+            const owed = rec?.report_owed;
+            if (owed?.stuck && (await legal.recordStuckReport(env, { caseKind: 'forum', caseId: postId, reportKind: owed.category, category: owed.category, reason: owed.stuck.reason, reference: rec.reference || null, since: owed.since || null })).ok) out.healed += 1;
+          }
+        }
+      } catch (e) {
+        console.error('forum case: a report debt was not healed:', e?.name || 'Error');
+      }
+    }
+    if (!page?.truncated || !page.cursor) { cursor = undefined; out.complete = true; break; }
+    cursor = page.cursor;
+  }
+  try {
+    if (cursor) await env.SOCIAL.put(FORUM_OWED_HEAL_CURSOR_KEY, cursor);
+    else await env.SOCIAL.delete(FORUM_OWED_HEAL_CURSOR_KEY);
+  } catch { /* the next run starts where KV says, or from the start */ }
   return out;
 }
 
@@ -3747,6 +3923,26 @@ async function forumRemovalAfter(env, rec, { category, detection, removedAt, upl
   return out;
 }
 
+// A check removal's report that was due and was not written (owed: unavailable, busy; or stuck: a defect) becomes a debt on the
+// case, as a person's removal's is: `report_owed` with the detection and the threat signals the report reads, indexed for the
+// owed sweep (or found by its heal). A settled outcome (borderline, the threat criteria not met) owes nothing. Never throws.
+async function recordCheckRemovalDebt(env, postId, { category, detection, threatContent, at, report }) {
+  try {
+    const outcome = (await import('./legal_reports.mjs')).reportDebtOutcome(report);
+    if (outcome !== 'owed' && outcome !== 'stuck') return;
+    await updateForumCase(env, postId, async current => {
+      if (!current || current.report_owed) return null;
+      current.report_owed = { since: at, category, reason: 'check_removal', by: null, detection, threat_content: threatContent || null };
+      forumHistory(current, 'legal_report_owed', { reason: String(report?.reason || 'unknown').slice(0, 60) });
+      return current;
+    });
+    if (!(await indexForumReportOwed(env, postId, at))) return;
+    if (outcome === 'stuck') await closeForumReportDebt(env, postId, report);
+  } catch (e) {
+    console.error('forum removal: the owed report was not recorded:', e?.name || 'Error');
+  }
+}
+
 /// A forum post the forum battery refused after it was posted (checkCommunityText's answer, `check`), which the forum takes
 /// down: the case records the removal (`removed_by: 'check'`), the text is sealed for csam and nonconsensual_sexual, and the
 /// report or the scam batch follows (forumRemovalAfter). `secondCheck` is an independent classifier's answer the forum has
@@ -3800,6 +3996,7 @@ export async function recordForumRemoval({ env, postId, threadId, authorId, text
     await releaseLease(env, lease);
     lease = null;
     const after = await forumRemovalAfter(env, rec, { category, detection, removedAt: rec.removed_at || at, uploadIps: ips, threatContent, deps });
+    if (category === 'csam' || category === 'threat') await recordCheckRemovalDebt(env, postId, { category, detection, threatContent, at, report: after.report });
     return { ok: true, reference: rec.reference || null, removed: true, sealed: rec.evidence_seal ? !!rec.evidence_seal.ok : null, report: after.report ? (after.report.written ? after.report.status : after.report.reason) : null, case_version: forumCaseVersion(rec) };
   } catch (e) {
     if (e instanceof ForumCaseConflict) return forumBusy('This post is being recorded. Try again in a moment.');
@@ -4013,12 +4210,27 @@ async function extendLease(env, lease, t) {
   if (!(await env.SCENES.put(lease.key, JSON.stringify(body), { ...JSON_META, onlyIf: { etagMatches: current.etag } }))) throw new LeaseLost(lease.simId);
 }
 
+/// The key under which a wrapper of `env` that counts or refuses calls (the forum sweep's budget, src/forums.mjs
+/// budgetedEnv) answers the env it wraps, so a lease is released outside the budget: a budget spent while a lease is held
+/// must never leave the lease held for its whole term. A global symbol, so the wrapper needs no import of this module. An
+/// env with no wrapper answers nothing here and is used as it is.
+export const UNBUDGETED_ENV = Symbol.for('eustress.unbudgeted_env');
+// The release is tried this many times on a failure.
+const LEASE_RELEASE_ATTEMPTS = 3;
+
 export async function releaseLease(env, lease) {
   if (!lease) return;
-  try {
-    const current = await readLease(env, lease.key);
-    if (current?.body?.holder === lease.holder) await env.SCENES.delete(lease.key);
-  } catch (e) { console.error('moderation lease release failed', e?.message); }
+  const store = env?.[UNBUDGETED_ENV] || env;
+  for (let attempt = 0; attempt < LEASE_RELEASE_ATTEMPTS; attempt++) {
+    try {
+      const current = await readLease(store, lease.key);
+      if (current?.body?.holder === lease.holder) await store.SCENES.delete(lease.key);
+      return;
+    } catch (e) {
+      console.error('moderation lease release failed', e?.message);
+      if (attempt + 1 < LEASE_RELEASE_ATTEMPTS) await sleep(20 * 2 ** attempt);
+    }
+  }
 }
 
 const adoptLease = (rec, lease) => { if (rec && lease) rec[LEASE] = lease; return rec; };
@@ -5158,8 +5370,9 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
       out.sealed = seal.ok ? 'sealed' : 'pending';
     }
     let report = null;
+    const legal = await import('./legal_reports.mjs');
     if (vaultCategory === 'csam') {
-      const { writeLegalReport } = await import('./legal_reports.mjs');
+      const { writeLegalReport } = legal;
       report = await writeLegalReport(env, {
         kind: 'csam', caseKind: 'moderation', caseId: rec.sim_id, caseRef: rec.reference || seal?.case_ref || null, category: 'csam', article: 'A1', subject, detection,
         uploader: { account_id: rec.author_id, uploaded_at: uploader.uploaded_at, upload_ips: [] },
@@ -5168,20 +5381,235 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
       }, deps);
       out.report = report.written ? report.status : report.reason;
     }
+    // The debt the report leaves (src/legal_reports.mjs reportDebtOutcome): paid or settled owes nothing; owed is kept on the
+    // case (`report_owed`) and indexed (legalowed:moderation:{simId}) for the hourly sweep (writeOwedListingReports); stuck goes
+    // to the stuck index, staff are alerted, and only a person clears it. The index is written before the case.
+    const outcome = report ? legal.reportDebtOutcome(report) : null;
+    out.outcome = outcome;
+    const at = new Date().toISOString();
+    const reason = String(report?.reason || 'unknown').slice(0, 60);
+    const since = rec.report_owed?.since || rec.legal_hold?.at || at;
+    const stuck = outcome === 'stuck' ? (await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: rec.sim_id, reportKind: 'csam', category, reason, reference: rec.reference || seal?.case_ref || null, since })).ok : false;
+    if (outcome === 'owed' || (outcome === 'stuck' && !stuck)) await indexListingReportOwed(env, rec.sim_id, since);
     const fresh = await loadCase(env, rec.sim_id);
     if (fresh) {
       // The report itself is found by its case (src/legal_reports.mjs, `legalcase:`); the case keeps its outcome only.
       if (seal) fresh.evidence_seal = { at: new Date().toISOString(), ok: seal.ok, reference: seal.case_ref, sealed: seal.sealed, already: seal.already, missing: seal.missing, pending: seal.pending };
       if (report) fresh.legal_report = { status: report.status || null, written: !!report.written, reason: report.reason || null, band: detection.band };
-      pushHistory(fresh, 'legal_lane', { sealed: out.sealed, report: out.report, band: detection.band });
+      if (outcome === 'settled') {
+        // A debt is never closed unaudited: the audit of a debt being settled must be written (a throw keeps the debt).
+        const details = { case_kind: 'moderation', case_id: rec.sim_id, category, reason };
+        if (fresh.report_owed) await writeAuditRecord(env, 'LEGAL_REPORT_SETTLED', 'system', fresh.reference || rec.sim_id, details);
+        else { try { await writeAuditRecord(env, 'LEGAL_REPORT_SETTLED', 'system', fresh.reference || rec.sim_id, details); } catch (e) { console.error('moderation: the settled report was not audited:', e?.name || 'Error'); } }
+        fresh.report_settled = { reason, category, at };
+      }
+      if (outcome === 'paid' || outcome === 'settled') fresh.report_owed = null;
+      else if (outcome === 'owed' || outcome === 'stuck') fresh.report_owed = { since, category, actor, reason, ...(stuck ? { stuck: { reason, at } } : {}) };
+      pushHistory(fresh, 'legal_lane', { sealed: out.sealed, report: out.report, band: detection.band, ...(outcome ? { debt: outcome } : {}) });
       if (rec[HUMAN]) fresh[HUMAN] = true;
       await saveCase(env, fresh);
     }
+    if (outcome === 'paid' || outcome === 'settled' || stuck) await env.SOCIAL.delete(listingReportOwedKey(rec.sim_id)).catch(() => {});
   } catch (e) {
     console.error('moderation: sealing or reporting after a quarantine failed:', e?.name || 'Error');
     out.sealed = out.sealed === 'not_needed' ? 'error' : out.sealed;
   }
   return out;
+}
+
+/// The KV index of a listing case that owes a legal report (`rec.report_owed`), for the hourly sweep (writeOwedListingReports).
+export const listingReportOwedKey = simId => `legalowed:moderation:${simId}`;
+export const LISTING_OWED_CURSOR_KEY = 'legalowed-cursor:moderation';
+export const LISTING_OWED_HEAL_CURSOR_KEY = 'legalowed-heal-cursor:moderation';
+const LISTING_OWED_PREFIX = 'legalowed:moderation:';
+
+// Writes a listing's owed index, tried FORUM_OWED_INDEX_ATTEMPTS times. `true` when it was written; a debt whose index was
+// not written is found by the heal (healListingReportDebts).
+async function indexListingReportOwed(env, simId, since) {
+  for (let attempt = 0; attempt < FORUM_OWED_INDEX_ATTEMPTS; attempt++) {
+    try { await env.SOCIAL.put(listingReportOwedKey(simId), since); return true; }
+    catch (e) {
+      console.error('moderation: the owed report was not indexed:', e?.name || 'Error');
+      if (attempt + 1 < FORUM_OWED_INDEX_ATTEMPTS) await sleep(25 * 2 ** attempt);
+    }
+  }
+  return false;
+}
+
+/// The hourly legal sweep's part for listings (src/legal_reports.mjs sweepLegalReports): every quarantined listing whose
+/// report is owed (`report_owed`, indexed at listingReportOwedKey) has it written again through sealAndReportListing, which
+/// closes the debt as the outcome says. First the heal (healListingReportDebts). The index is read with a cursor
+/// (LISTING_OWED_CURSOR_KEY), a page of `limit` at a time, at most `maxPages` pages a run, as writeOwedForumReports reads its
+/// own. Each case is worked under its lease, released in a finally. Never throws. `{ tried, written, settled, stuck,
+/// still_owed, stopped, pages, complete, healed }`.
+export async function writeOwedListingReports(env, deps = {}, { limit = 25, maxPages = 4, budgetMs = 20_000, now = Date.now } = {}) {
+  const out = { tried: 0, written: 0, settled: 0, stuck: 0, still_owed: 0, stopped: false, pages: 0, complete: false, healed: 0 };
+  const deadline = now() + budgetMs;
+  try { out.healed = (await healListingReportDebts(env, { deadline, now })).healed; } catch { /* the next run heals */ }
+  let cursor;
+  try { cursor = (await env.SOCIAL.get(LISTING_OWED_CURSOR_KEY)) || undefined; } catch { cursor = undefined; }
+  while (out.pages < maxPages && !out.stopped) {
+    let listed;
+    try { listed = await env.SOCIAL.list({ prefix: LISTING_OWED_PREFIX, limit, ...(cursor ? { cursor } : {}) }); }
+    catch {
+      if (!cursor) break;
+      cursor = undefined;
+      continue;
+    }
+    out.pages += 1;
+    for (const k of listed?.keys || []) {
+      if (now() > deadline) { out.stopped = true; break; }
+      const simId = k.name.slice(LISTING_OWED_PREFIX.length);
+      let lease = null;
+      try {
+        lease = await acquireLease(env, simId, thresholdsFrom(env), 'owed_report');
+        if (!lease) { out.still_owed += 1; continue; }
+        const rec = await loadCase(env, simId);
+        const owed = rec?.report_owed;
+        if (!owed) { await env.SOCIAL.delete(k.name).catch(() => {}); continue; }
+        if (owed.stuck) {
+          const kept = await (await import('./legal_reports.mjs')).recordStuckReport(env, { caseKind: 'moderation', caseId: simId, reportKind: 'csam', category: owed.category, reason: owed.stuck.reason, reference: rec.reference || null, since: owed.since || null });
+          if (kept.ok) await env.SOCIAL.delete(k.name).catch(() => {});
+          continue;
+        }
+        out.tried += 1;
+        const r = await sealAndReportListing(env, deps, rec, owed.category, owed.actor);
+        const closed = !(await env.SOCIAL.get(k.name));
+        if (closed && r.outcome === 'paid') out.written += 1;
+        else if (closed && r.outcome === 'settled') out.settled += 1;
+        else if (closed && r.outcome === 'stuck') out.stuck += 1;
+        else out.still_owed += 1;
+      } catch (e) {
+        console.error('moderation: an owed report was not written:', e?.name || 'Error');
+        out.still_owed += 1;
+      } finally {
+        if (lease) await releaseLease(env, lease);
+      }
+    }
+    if (out.stopped) break;
+    if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; out.complete = true; break; }
+    cursor = listed.cursor;
+  }
+  try {
+    if (cursor) await env.SOCIAL.put(LISTING_OWED_CURSOR_KEY, cursor);
+    else await env.SOCIAL.delete(LISTING_OWED_CURSOR_KEY);
+  } catch { /* the next run reads from where KV says, or from the start */ }
+  return out;
+}
+
+/// The heal for listings: a bounded pass over the quarantined queue (`modq:quarantined:`, a page of `limit` at a time, at most
+/// `maxPages` a run, from a cursor kept at LISTING_OWED_HEAL_CURSOR_KEY) that finds a csam quarantine whose report is neither
+/// written, settled nor owed on the case (the write after the quarantine failed outright), or owed with no index, and owes it.
+/// The detection is the one the quarantine recorded (its actor, from the case's reasons); a case with none is stuck for a
+/// person. Never throws. `{ healed, pages, complete }`.
+export async function healListingReportDebts(env, { limit = 50, maxPages = 2, deadline = Infinity, now = Date.now } = {}) {
+  const out = { healed: 0, pages: 0, complete: false };
+  const legal = await import('./legal_reports.mjs');
+  let cursor;
+  try { cursor = (await env.SOCIAL.get(LISTING_OWED_HEAL_CURSOR_KEY)) || undefined; } catch { cursor = undefined; }
+  while (out.pages < maxPages && now() <= deadline) {
+    let listed;
+    try { listed = await env.SOCIAL.list({ prefix: 'modq:quarantined:', limit, ...(cursor ? { cursor } : {}) }); }
+    catch {
+      if (!cursor) break;
+      cursor = undefined;
+      continue;
+    }
+    out.pages += 1;
+    for (const k of listed?.keys || []) {
+      const simId = k.name.slice('modq:quarantined:'.length);
+      try {
+        if (await env.SOCIAL.get(listingReportOwedKey(simId))) continue;
+        if (await legal.loadStuckReport(env, 'moderation', simId)) continue;
+        const rec = await loadCase(env, simId);
+        const category = rec?.legal_hold?.category;
+        if (!rec || rec.status !== 'quarantined' || SEALED_LISTING_CATEGORIES[category] !== 'csam') continue;
+        if (rec.report_owed) {
+          if (!rec.report_owed.stuck && (await indexListingReportOwed(env, simId, rec.report_owed.since || rec.legal_hold.at))) out.healed += 1;
+          continue;
+        }
+        if (rec.report_settled || legal.SETTLED_REPORT_REASONS.includes(rec.legal_report?.reason)) continue;
+        if (await legal.caseReportId(env, 'csam', 'moderation', simId)) continue;
+        // Owed and recorded nowhere: owed now, under the case's lease.
+        const lease = await acquireLease(env, simId, thresholdsFrom(env), 'owed_heal');
+        if (!lease) continue;
+        try {
+          const fresh = await loadCase(env, simId);
+          if (!fresh || fresh.report_owed) continue;
+          const actor = [...(fresh.decision?.reasons || [])].reverse().find(r => r?.action === 'quarantine' && r.code === category)?.by || null;
+          const since = fresh.legal_hold?.at || new Date().toISOString();
+          if (!actor) {
+            if (!(await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: simId, reportKind: 'csam', category, reason: 'no_detection_recorded', reference: fresh.reference || null, since })).ok) continue;
+            fresh.report_owed = { since, category, actor: null, reason: 'not_recorded', stuck: { reason: 'no_detection_recorded', at: new Date().toISOString() } };
+          } else {
+            fresh.report_owed = { since, category, actor, reason: 'not_recorded' };
+            await indexListingReportOwed(env, simId, since);
+          }
+          pushHistory(fresh, 'legal_report_owed', { reason: 'not_recorded' });
+          await saveCase(env, fresh);
+          out.healed += 1;
+        } finally {
+          await releaseLease(env, lease);
+        }
+      } catch (e) {
+        console.error('moderation: a report debt was not healed:', e?.name || 'Error');
+      }
+    }
+    if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; out.complete = true; break; }
+    cursor = listed.cursor;
+  }
+  try {
+    if (cursor) await env.SOCIAL.put(LISTING_OWED_HEAL_CURSOR_KEY, cursor);
+    else await env.SOCIAL.delete(LISTING_OWED_HEAL_CURSOR_KEY);
+  } catch { /* the next run starts where KV says, or from the start */ }
+  return out;
+}
+
+/// A person clears a stuck report debt (src/legal_reports.mjs clearStuckReport, after its audit is written): the case's
+/// `report_owed` goes, `report_cleared: { by, at, rationale, reason }` records who and why, and its owed index goes. The
+/// evidence and its legal hold are never touched. Called only from that path. `{ ok }` or `{ ok: false, code }`: bad_case,
+/// person_required, busy, unavailable.
+export async function clearReportDebt(env, { caseKind, caseId, by, rationale } = {}) {
+  if (typeof by !== 'string' || !by || by === 'system' || typeof rationale !== 'string' || !rationale.trim()) return { ok: false, code: 'person_required' };
+  const at = new Date().toISOString();
+  const cleared = owed => ({ by: by.slice(0, 64), at, rationale: clip(rationale.trim(), 2000), reason: owed?.stuck?.reason || owed?.reason || null, category: owed?.category || null });
+  let lease = null;
+  try {
+    if (caseKind === 'forum') {
+      if (!FORUM_POST_ID.test(String(caseId))) return { ok: false, code: 'bad_case' };
+      lease = await forumLease(env, caseId, thresholdsFrom(env), 'debt_clear');
+      if (!lease) return { ok: false, code: 'busy' };
+      await updateForumCase(env, caseId, async current => {
+        if (!current?.report_owed) return null;
+        current.report_cleared = cleared(current.report_owed);
+        current.report_owed = null;
+        forumHistory(current, 'legal_report_debt_cleared', { by: current.report_cleared.by });
+        return current;
+      });
+      await env.SOCIAL.delete(forumReportOwedKey(caseId));
+      return { ok: true };
+    }
+    if (caseKind === 'moderation') {
+      if (typeof caseId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(caseId)) return { ok: false, code: 'bad_case' };
+      lease = await acquireLease(env, caseId, thresholdsFrom(env), 'debt_clear');
+      if (!lease) return { ok: false, code: 'busy' };
+      const rec = await loadCase(env, caseId);
+      if (rec?.report_owed) {
+        rec.report_cleared = cleared(rec.report_owed);
+        rec.report_owed = null;
+        pushHistory(rec, 'legal_report_debt_cleared', { by: rec.report_cleared.by });
+        await saveCase(env, rec);
+      }
+      await env.SOCIAL.delete(listingReportOwedKey(caseId));
+      return { ok: true };
+    }
+    return { ok: false, code: 'bad_case' };
+  } catch (e) {
+    console.error('moderation: a report debt was not cleared:', e?.name || 'Error');
+    return { ok: false, code: 'unavailable' };
+  } finally {
+    if (lease) await releaseLease(env, lease);
+  }
 }
 
 /// Releases a quarantine's withheld removal notice and tells the author (the feed and the email, as every decision is told):

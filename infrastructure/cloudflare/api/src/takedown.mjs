@@ -1242,6 +1242,13 @@ export async function alertStaffLegalReport(env, facts) {
   return alertStaff(env, renderMail('staff_legal_report', facts), { required: false });
 }
 
+/// A legal report debt is stuck (src/legal_reports.mjs recordStuckReport), on this module's staff alert path, at once and then
+/// daily while it stands. `facts`: reference, case_kind, case_id, report_kind, reason, since, stuck_at, alerts, admin_url.
+/// Never the content, the account or an address.
+export async function alertStaffStuckReport(env, facts) {
+  return alertStaff(env, renderMail('staff_legal_stuck', facts), { required: false });
+}
+
 function staffFacts(rec, ctx) {
   return {
     reference: rec.reference, id: rec.id, received_at: rec.received_at, removed_at: rec.removed_at, possible_csam: !!rec.possible_csam,
@@ -1435,6 +1442,16 @@ export function renderMail(kind, d) {
           `The queue, with an administrator session: ${d.admin_url}.`,
         ],
         rows: [['Report', d.id], ['Kind', d.kind], ['Case', d.reference || 'not yet referenced'], ['Destination', d.destination || 'none set'], ['Status', d.status], ['Why it waits', d.reason || 'the sender is off']],
+      });
+    case 'staff_legal_stuck':
+      return mail({
+        subject: `A legal report is stuck and needs a person: ${d.reference || `${d.case_kind} ${d.case_id}`}`, heading: 'A legal report is stuck', label: 'Staff Notice',
+        paragraphs: [
+          'A case owes a legal report that cannot be written as it stands, and trying again will not change that. The debt is kept: nothing about it was cleared or dropped, and the sealed evidence stays.',
+          'A person decides what happens next and clears the debt with a rationale, which is audited. This email names the case only. It is sent again each day while the debt stands.',
+          `The stuck debts, with an administrator session: ${d.admin_url}.`,
+        ],
+        rows: [['Case', d.reference || 'not yet referenced'], ['Case kind', d.case_kind], ['Case id', d.case_id], ['Report kind', d.report_kind || 'unknown'], ['Why it is stuck', d.reason || 'unknown'], ['Owed since', d.since ? when(d.since) : 'unknown'], ['Stuck since', d.stuck_at ? when(d.stuck_at) : 'unknown'], ['Alert', String(d.alerts ?? 1)]],
       });
     default:
       throw new Error(`unknown takedown mail ${kind}`);
