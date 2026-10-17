@@ -551,7 +551,8 @@ test('a registered applier is called once per decision with the decision, and th
     assert.equal(calls.length, 1);
     assert.deepEqual([calls[0].env, calls[0].postId, calls[0].action, calls[0].reference], [env, POST, 'remove', r.reference]);
     assert.ok(Date.parse(calls[0].decidedAt));
-    assert.deepEqual(JSON.parse(env.SOCIAL.m.get(forumDecisionKey(POST))), { action: 'remove', decided_at: calls[0].decidedAt, reference: r.reference });
+    assert.deepEqual(JSON.parse(env.SOCIAL.m.get(forumDecisionKey(POST))), { action: 'remove', decided_at: calls[0].decidedAt, reference: r.reference, case_version: r.case_version, category: 'scam' });
+    assert.deepEqual([calls[0].caseVersion, calls[0].category], [r.case_version, 'scam'], 'the push carries the version and category too');
     assert.equal((await loadForumCase(env, POST)).decision_push.status, 'decision_pushed');
     await makeToolExecutor(env, deps(), { actor: 'admin', actorId: ADMIN })('moderation_forum_resolve', { post_id: POST, decision: 'restore', rationale: 'Reviewed: an honest giveaway by the developer.' });
     assert.deepEqual(calls.map((c) => c.action), ['remove', 'restore'], 'the admin tool goes through it too');

@@ -3318,8 +3318,10 @@ async function afterForumDecision(env, o) {
   // The version the decision was taken at: its own write's, not a later one (the push record, the forum's seal).
   const decisionVersion = forumCaseVersion(rec);
   // The durable records first, still under the lease: the decision (the forum's hourly sweep reconciles from it), and the
-  // report the decision owes (the legal sweep's index).
-  try { await env.SOCIAL.put(forumDecisionKey(postId), JSON.stringify({ action: decision, decided_at: at, reference: rec.reference || null })); }
+  // report the decision owes (the legal sweep's index). The record carries the decision's case version and category, so two
+  // decisions in one instant are told apart and ordered by (decided_at, case_version), and it expires after
+  // FORUM_DECISION_TTL_SECONDS, so the forum's decisions pass does not grow without bound.
+  try { await env.SOCIAL.put(forumDecisionKey(postId), JSON.stringify({ action: decision, decided_at: at, reference: rec.reference || null, case_version: decisionVersion, category: category || null }), { expirationTtl: FORUM_DECISION_TTL_SECONDS }); }
   catch (e) { console.error('forum case: the decision record was not written:', e?.name || 'Error'); owe('push'); }
   // The index is written before the report is tried, and tried again on a failure: one that still fails leaves the report
   // pending in the answer, and the debt on the case, where the sweep's heal finds it.
@@ -3331,7 +3333,7 @@ async function afterForumDecision(env, o) {
   o.released();
   // The decision reaches the forum at once, through the applier the forums module registered. A push that fails is recorded
   // and never undoes the decision. Outside the case's change, so a write conflict never pushes a decision twice.
-  const push = await pushForumDecision(env, { postId, action: decision, reference: rec.reference || null, decidedAt: at });
+  const push = await pushForumDecision(env, { postId, action: decision, reference: rec.reference || null, decidedAt: at, caseVersion: decisionVersion, category: category || null });
   if (push.status === 'push_failed') owe('push');
   // The addresses the report carries: those of the text items the case has sealed, the forum's applier's seal included, and
   // of no other text (uploadIpsForItems).
@@ -3705,24 +3707,30 @@ async function uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds, no
 
 // A person's forum decision is pushed to the forum, not read by it on serve: the forums module registers the function that
 // applies one (registerForumDecisionApplier), and resolveForumCase calls it once per decision. Nothing here imports the forums
-// module. `forum-decision:{postId}` (SOCIAL) is the durable record of the latest decision, `{ action, decided_at, reference }`,
-// which the forum's hourly sweep reconciles from.
+// module. `forum-decision:{postId}` (SOCIAL) is the durable record of the latest decision, `{ action, decided_at, reference,
+// case_version: { round, seq }, category }`, which the forum's hourly sweep reconciles from, ordered by (decided_at,
+// case_version): the case version is the decision's own write's, so two decisions in the same instant still differ and the
+// later one is greater. Every write carries a TTL of FORUM_DECISION_TTL_SECONDS (the forum keeps its own applied mark as long),
+// so the record lives long enough for the reconcile and is never kept for ever.
 export const forumDecisionKey = postId => `forum-decision:${postId}`;
+/// How long the `forum-decision:` record is kept: 90 days, as the forum's own applied mark.
+export const FORUM_DECISION_TTL_SECONDS = 90 * 86400;
 let forumDecisionApplier = null;
 
-/// The forums module's applier, `fn({ env, postId, action, reference, decidedAt })` returning a Promise. Storing it is not I/O,
+/// The forums module's applier, `fn({ env, postId, action, reference, decidedAt, caseVersion, category })` returning a Promise
+/// (`caseVersion`: the decision's `{ round, seq }`; `category`: the category the person found, or null). Storing it is not I/O,
 /// so it may be called at module load. A later call replaces the function; null removes it.
 export function registerForumDecisionApplier(fn) {
   forumDecisionApplier = typeof fn === 'function' ? fn : null;
 }
 
 // `{ status, at, error? }`: decision_pushed, decision_push_skipped (nothing registered) or push_failed. Never throws.
-async function pushForumDecision(env, { postId, action, reference, decidedAt }) {
+async function pushForumDecision(env, { postId, action, reference, decidedAt, caseVersion = null, category = null }) {
   const at = new Date().toISOString();
   const apply = forumDecisionApplier;
   if (!apply) return { status: 'decision_push_skipped', at, reason: 'no forum decision applier is registered' };
   try {
-    await apply({ env, postId, action, reference, decidedAt });
+    await apply({ env, postId, action, reference, decidedAt, caseVersion, category });
     return { status: 'decision_pushed', at };
   } catch (e) {
     console.error('forum case: the decision was not pushed to the forum:', e?.name || 'Error');
