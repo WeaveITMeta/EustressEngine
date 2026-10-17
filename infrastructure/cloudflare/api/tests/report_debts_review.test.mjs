@@ -221,7 +221,12 @@ test('D-3 (zz_debt_5): a failed account read is never reported as a deleted acco
   assert.deepEqual([k.written, k.reason], [false, 'unavailable'], 'an identity record read that fails is owed too');
   const ok = await quiet(() => writeLegalReport(env, finding(`${'b'.repeat(24)}-7`)));
   assert.equal((await loadLegalReport(env, ok.id)).who.account_status, 'known');
-  const gone = await quiet(() => writeLegalReport(env, { ...finding(`${'b'.repeat(24)}-8`), uploader: { account_id: 'user-never-was' } }));
+  const absent = { ...finding(`${'b'.repeat(24)}-8`), uploader: { account_id: 'user-never-was' } };
+  const once = await quiet(() => writeLegalReport(env, absent));
+  assert.deepEqual([once.written, once.reason], [false, 'account_unconfirmed'], 'one read that finds no record is not a fact');
+  const soon = await quiet(() => writeLegalReport(env, absent, { now: () => Date.now() + 30_000 }));
+  assert.equal(soon.reason, 'account_unconfirmed', 'nor are two reads within the minute');
+  const gone = await quiet(() => writeLegalReport(env, absent, { now: () => Date.now() + 61_000 }));
   assert.equal((await loadLegalReport(env, gone.id)).who.account_status, 'deleted', 'deleted only on a confirmed absent record');
   const noStore = { ...env, USERS: undefined };
   const u = await quiet(() => writeLegalReport(noStore, finding(`${'b'.repeat(24)}-9`)));
@@ -248,8 +253,11 @@ test('D-4 (zz_debt_3): clearing a stale stuck alert never clears a newer, payabl
   await quarantineAs(env, 'admin', ADMIN);
   restore();
   assert.equal((await loadCase(env, SIM)).report_owed?.stuck, undefined, 'the new debt is payable');
+  // The stale record was closed when the person's finding replaced its debt (F1): there is nothing stale to clear.
+  assert.equal(await loadStuckReport(env, 'moderation', SIM), null);
+  assert.ok(auditsOf(env, 'LEGAL_REPORT_STUCK_CLOSED').some((a) => a.details.why === 'replaced'));
   const done = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/clear`, { note: 'Old quarantine with no detection on record; reviewed.' });
-  assert.equal(done.status, 200, JSON.stringify(done));
+  assert.equal(done.status, 404, JSON.stringify(done));
   const rec = await loadCase(env, SIM);
   assert.deepEqual([!!rec.report_owed, rec.report_owed?.actor], [true, 'admin'], 'the payable debt is still owed after the clear');
   assert.ok(await env.SOCIAL.get(listingReportOwedKey(SIM)), 'and still indexed');
@@ -303,7 +311,10 @@ test('D-6 (zz_debt_9): a forum debt that fails the same way every hour is stuck 
   const stuck = await loadStuckReport(env, 'forum', POST);
   assert.equal(stuck?.reason, RETRIES_EXHAUSTED);
   assert.ok(subjects(env).some((s) => s.startsWith('A legal report is stuck')), 'staff are told');
-  assert.equal(await env.SOCIAL.get(forumReportOwedKey(POST)), null, 'off the hourly list');
+  const debt = (await loadForumCase(env, POST)).report_owed;
+  assert.equal(debt.stuck.last_reason, 'unavailable', 'with the reason the tries kept failing');
+  assert.ok(Date.parse(debt.stuck.next_try_at) > Date.now(), 'and is still tried, once a day (F4)');
+  assert.ok(await env.SOCIAL.get(forumReportOwedKey(POST)), 'so it keeps its index');
 });
 
 test('D-6: a listing debt whose try throws before it starts (a corrupt listing record) is counted and stuck in the end', async () => {
@@ -316,7 +327,7 @@ test('D-6: a listing debt whose try throws before it starts (a corrupt listing r
   for (let hour = 0; hour < REPORT_DEBT_MAX_TRIES; hour++) await quiet(() => writeOwedListingReports(env));
   assert.equal((await loadStuckReport(env, 'moderation', SIM))?.reason, RETRIES_EXHAUSTED);
   assert.equal((await loadCase(env, SIM)).report_owed.stuck.reason, RETRIES_EXHAUSTED);
-  assert.equal(await env.SOCIAL.get(listingReportOwedKey(SIM)), null);
+  assert.ok(await env.SOCIAL.get(listingReportOwedKey(SIM)), 'still tried once a day, so still indexed');
 });
 
 // -- D-7 -----------------------------------------------------------------------------------------------------------------

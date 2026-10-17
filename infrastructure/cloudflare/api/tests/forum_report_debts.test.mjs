@@ -330,7 +330,7 @@ test('a report try comes to paid, settled, owed or stuck, and a reason named now
   assert.equal(reportDebtOutcome(null), 'owed', 'a try that did not get that far');
   for (const reason of ['no_account', 'something_new', undefined]) assert.equal(reportDebtOutcome({ written: false, reason }), 'stuck', String(reason));
   assert.deepEqual([...SETTLED_REPORT_REASONS], ['not_a_reported_kind', 'borderline_never_reported', 'threat_criteria_not_met']);
-  assert.deepEqual([...OWED_REPORT_REASONS], ['unavailable', 'busy', 'budget']);
+  assert.deepEqual([...OWED_REPORT_REASONS], ['unavailable', 'busy', 'budget', 'account_unconfirmed']);
 });
 
 // A case that owes a threat report on a person's finding: the threat criteria (two independent classifiers) cannot be met.
@@ -435,7 +435,7 @@ test('a stuck debt leaves the owed list for its own index, staff are alerted at 
   assert.equal(JSON.stringify(listed.body).includes(AUTHOR), false);
   assert.equal(auditsOf(env, 'LEGAL_STUCK_LISTED').length, 1);
   // The heal writes a stuck index that is missing, from the case.
-  await env.SOCIAL.delete(legalStuckKey('forum', POST));
+  await env.SOCIAL.delete(legalStuckKey('forum', POST, 'threat'));
   env.FORUM_LEGAL_OWED_SWEEP = 'on';
   const healed = await quiet(() => sweepLegalReports(env));
   assert.equal(healed.owed_reports.healed, 1);
