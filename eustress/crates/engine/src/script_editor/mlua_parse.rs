@@ -51,7 +51,7 @@ pub fn syntax_errors(source: &str) -> Vec<SyntaxError> {
     if nesting_depth(source) > MAX_PARSE_DEPTH {
         return Vec::new();
     }
-    let result = parse_fallible(source, LuaVersion::mlua());
+    let result = parse_fallible(source, LuaVersion::luau());
     let mut out: Vec<SyntaxError> = result
         .errors()
         .iter()
