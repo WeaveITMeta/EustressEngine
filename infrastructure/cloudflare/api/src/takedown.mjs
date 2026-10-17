@@ -1262,13 +1262,13 @@ export async function alertStaffQueueOverdue(env, { now = Date.now(), recipients
 /// A forum post reported as csam (src/moderation.mjs fileForumReport), on this module's staff alert path: the same mailboxes,
 /// the staff-only possible-CSAM notice. `facts`: reference, post_id, thread_id, at, queue_url. Never a reporter or a note.
 export async function alertStaffForumReport(env, facts) {
-  return alertStaff(env, 'staff_forum_csam', facts, { required: false });
+  return alertStaff(env, 'staff_forum_csam', facts, { required: false, alertId: `forum-csam:${facts?.post_id}:${facts?.at || ''}` });
 }
 
 /// A seal into the evidence vault failed (src/evidence_vault.mjs), on this module's staff alert path. `facts`: reference,
 /// case_kind, case_id, item, category, attempts, error, material_kept. Never the content, the uploader or an address.
 export async function alertStaffEvidence(env, facts) {
-  return alertStaff(env, 'staff_evidence_failure', facts, { required: false });
+  return alertStaff(env, 'staff_evidence_failure', facts, { required: false, alertId: `evidence-failure:${facts?.case_kind}:${facts?.case_id}:${facts?.item}:${facts?.attempts ?? 1}` });
 }
 
 /// A legal report is queued or held (src/legal_reports.mjs), on this module's staff alert path. `facts`: id, kind, status,

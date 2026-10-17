@@ -25,9 +25,10 @@
 // caller's retry finds the digest's mark (`digested_at`) on the next try. An alert is identified by `alertId` (stable across
 // retries, so a retry finds its own entry); without one it is listed once.
 //
-// A REQUIRED alert, and every legal-lane alert (a legal report, a report debt owed or stuck), goes on the same list when its
-// send fails for any other reason too (the mail binding failed or threw, or there is none), so the digest or the caller's
-// retry carries it and one mail failure never loses it. Its entry's `reason` says which (daily_cap or the failure).
+// A REQUIRED alert, every priority-lane alert (possible CSAM) and every legal-lane alert (a legal report, a report debt owed
+// or stuck) goes on the same list when its send fails for any other reason too (the mail binding failed or threw, or there
+// is none), so the digest or the caller's retry carries it and one mail failure never loses it. Its entry's `reason` says
+// which (daily_cap or the failure). Only a general-lane alert that is not required is counted failed and dropped.
 //
 // A digest that cannot be sent (a mail outage) leaves its entries on the queue. Once any entry has waited there 24 hours,
 // staff get one failure alert on the legal lane, which no allowance stops (alertOverdueStaffQueue, from the same hourly
@@ -105,12 +106,12 @@ const hasMeta = (k) => typeof k?.metadata?.queued_at === 'string';
 /// allowance the alert goes on that address's over-cap list for the digest. `{ sent, queued, digested, failed, delivered }`:
 /// `digested` counts the addresses a digest already carried this alert to; `delivered` is true when at least one address has
 /// it (sent now, or carried by a digest that sent). An alert already queued for an address and not yet carried is sent
-/// directly when the allowance allows (a new day), and leaves the list. A REQUIRED or legal-lane alert whose send fails for
-/// any other reason goes on the list too (`queueOnFailure`, which the overdue-queue alert sets false: it describes the list).
+/// directly when the allowance allows (a new day), and leaves the list. A REQUIRED, priority-lane or legal-lane alert whose
+/// send fails for any other reason goes on the list too (`queueOnFailure`, which the overdue-queue alert sets false: it describes the list).
 export async function sendStaffAlert(env, recipients, rendered, { lane = 'general', alertId = null, kind = null, reference = null, required = false, fromName, queueOnFailure = null } = {}) {
   const out = { sent: 0, queued: 0, digested: 0, failed: 0, delivered: false };
   const mailKind = STAFF_LANES[lane] || STAFF_LANES.general;
-  const holdOnFailure = typeof queueOnFailure === 'boolean' ? queueOnFailure : (required === true || lane === 'legal');
+  const holdOnFailure = typeof queueOnFailure === 'boolean' ? queueOnFailure : (required === true || lane === 'legal' || lane === 'priority');
   const id = typeof alertId === 'string' && alertId ? alertId : `once:${crypto.randomUUID()}`;
   const alert = await alertTag(id);
   for (const to of recipients) {

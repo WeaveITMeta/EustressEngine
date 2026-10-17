@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import { fakeKv } from './helpers/load_worker.mjs';
 import { makeToolExecutor, loadCase, POLICY_HASH_ANCHORED, listingReportOwedKey } from '../src/moderation.mjs';
 import { sweepLegalReports } from '../src/legal_reports.mjs';
-import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport } from '../src/takedown.mjs';
+import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport, alertStaffForumReport, alertStaffEvidence } from '../src/takedown.mjs';
 import { sendStaffAlert } from '../src/staff_alerts.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 
@@ -134,7 +134,7 @@ test('F5 control: with mail up at the quarantine the owed alert is sent once and
   assert.equal(queueKeys(env).length, 0);
 });
 
-test('a failed send waits on the list only for a required or legal-lane alert; a general one that is not required is counted failed', async () => {
+test('a failed send waits on the list only for a required, priority-lane or legal-lane alert; a general one that is not required is counted failed', async () => {
   const env = await environment();
   env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
   const rendered = { subject: 'A staff alert for the test', text: 'A staff alert for the test.', html: '<p>A staff alert for the test.</p>' };
@@ -144,6 +144,8 @@ test('a failed send waits on the list only for a required or legal-lane alert; a
   assert.deepEqual([required.queued, required.failed, required.delivered], [1, 0, false]);
   const legal = await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'legal', alertId: 'l-1', kind: 'staff_legal_report', required: false }));
   assert.deepEqual([legal.queued, legal.failed], [1, 0]);
+  const priority = await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'priority', alertId: 'p-1', kind: 'staff_failure', required: false }));
+  assert.deepEqual([priority.queued, priority.failed], [1, 0]);
   // No mail binding at all: a required alert still waits on the list.
   const bare = await environment();
   delete bare.EMAIL;
@@ -151,7 +153,7 @@ test('a failed send waits on the list only for a required or legal-lane alert; a
   assert.equal(none.queued, 1);
   const entry = JSON.parse(bare.USERS.store.get(queueKeys(bare)[0]));
   assert.equal(entry.reason, 'no_mail_binding');
-  assert.equal(queueKeys(env).length, 2);
+  assert.equal(queueKeys(env).length, 3);
   for (const k of queueKeys(env)) assert.equal(JSON.parse(env.USERS.store.get(k)).reason, 'send_failed');
 });
 
@@ -175,4 +177,45 @@ test('a legal alert retried while mail is down has one entry on the list: its al
   const again = await quiet(() => alertStaffReportOwed(env, owed));
   assert.equal(again.sent, 0);
   assert.equal(again.digested, 2, 'carried by the digest: not sent twice');
+});
+
+test('possible CSAM is never lost to a mail blip: a failed staff_forum_csam send waits on the list and the next digest carries it', async () => {
+  const env = await environment();
+  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
+  const facts = { reference: 'EC-F5-CSAM-0001', post_id: 'p-f5-csam', thread_id: 't-f5', at: '2026-10-16T02:00:00.000Z', queue_url: 'https://x' };
+  const told = await quiet(() => alertStaffForumReport(env, facts));
+  assert.equal(told.sent, 0);
+  assert.equal(told.queued, 2, 'queued for each staff address (the mailbox and the administrator)');
+  // A retry of the same report is the same entry: its alert id is the post and the report time.
+  await quiet(() => alertStaffForumReport(env, facts));
+  assert.equal(queueKeys(env).length, 2);
+  const seal = { reference: 'EC-F5-CSAM-0001', case_kind: 'forum', case_id: 'p-f5-csam', item: 'body', category: 'csam', attempts: 1, error: 'r2', material_kept: true };
+  const sealTold = await quiet(() => alertStaffEvidence(env, seal));
+  assert.equal(sealTold.queued, 2, 'an evidence seal failure waits on the list too');
+  for (const k of queueKeys(env)) {
+    const e = JSON.parse(env.USERS.store.get(k));
+    assert.equal(e.lane, 'priority');
+    assert.equal(e.reason, 'send_failed');
+  }
+  // Mail is back: the next digest carries both, and they leave the list.
+  env.EMAIL.send = async (m) => { env.mail.push(m); };
+  await quiet(() => sendStaffDigest(env));
+  const carried = digests(env);
+  assert.equal(carried.length, 1);
+  assert.match(carried[0].text, /staff_forum_csam: EC-F5-CSAM-0001, queued .*, after its send failed/);
+  assert.match(carried[0].text, /staff_evidence_failure: EC-F5-CSAM-0001/);
+  assert.equal(queueKeys(env).length, 0);
+  // A retry now finds it carried and does not send it twice.
+  const again = await quiet(() => alertStaffForumReport(env, facts));
+  assert.equal(again.sent, 0);
+  assert.equal(again.digested, 2);
+});
+
+test('a general alert that is not required, failing to send, is counted failed and does not wait on the list', async () => {
+  const env = await environment();
+  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
+  const rendered = { subject: 'A staff alert for the test', text: 'A staff alert for the test.', html: '<p>A staff alert for the test.</p>' };
+  const r = await quiet(() => sendStaffAlert(env, [STAFF], rendered, { lane: 'general', alertId: 'g-2', kind: 'staff_relocked', required: false }));
+  assert.deepEqual([r.sent, r.queued, r.failed, r.delivered], [0, 0, 1, false]);
+  assert.equal(queueKeys(env).length, 0);
 });
