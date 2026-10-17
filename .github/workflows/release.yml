@@ -343,14 +343,20 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
-            imagemagick mold clang xvfb
+            libgtk-3-dev libxkbcommon-x11-0 \
+            imagemagick clang xvfb
 
       - name: Build
         working-directory: eustress
         run: cargo build --release --locked --package eustress-engine
         env:
+          # The system linker, not mold: under mold, Luau's C++ static
+          # initializers were dropped and the Player died of SIGFPE at startup.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Check that Luau's static initializers are linked
+        run: |
+          nm -C eustress/target/release/eustress-engine | grep -E '_GLOBAL__sub_I_.*lmem' || { echo "::error::lmem.cpp's static initializer is missing"; exit 1; }
 
       - name: Smoke test
         run: |
