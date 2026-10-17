@@ -34,6 +34,7 @@
 //! replication tier after avatars.
 
 pub mod join_link;
+pub mod player_replica;
 pub mod repl;
 pub mod session;
 pub mod wire;

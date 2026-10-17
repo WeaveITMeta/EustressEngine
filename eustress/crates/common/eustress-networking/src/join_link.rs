@@ -145,6 +145,19 @@ impl JoinLink {
     }
 }
 
+/// [`JoinLink::parse`] for a link from outside: a launch argument, `--connect`,
+/// or a link a browser page hands its Player. `parse`'s address errors are fixed
+/// text, but one still quotes a bracketed host (`[..]`), and a crafted link can
+/// put query text there (a `ticket=`, `pin=` or `key=`), which
+/// [`split_link_extras`] never sees, since it takes out only what follows a `?`.
+/// So an error that holds `=` or `&` is replaced by one that quotes nothing.
+/// Both Players parse join links through this one function.
+pub fn parse_join_link(text: &str) -> Result<JoinLink, String> {
+    JoinLink::parse(text).map_err(|e| {
+        if e.contains('=') || e.contains('&') { "this link is malformed".to_string() } else { e }
+    })
+}
+
 /// The join key a request path carries, if any.
 pub fn key_from_path(path: &str) -> Option<&str> {
     key_after(JOIN_PATH, path)
@@ -276,6 +289,8 @@ fn check_key(k: &str) -> Result<(), String> {
     }
 }
 
+/// Its errors quote nothing from the link but a bracketed host: a join key can
+/// sit in the address's path (`host:port/join/<key>`) when no `?` comes first.
 fn split_host_port(authority: &str) -> Result<(String, u16), String> {
     let (host, port) = if let Some(end) = authority.find(']') {
         // [v6]:port
@@ -287,12 +302,12 @@ fn split_host_port(authority: &str) -> Result<(String, u16), String> {
     } else {
         authority
             .rsplit_once(':')
-            .ok_or_else(|| format!("missing :port in {authority:?}"))?
+            .ok_or_else(|| "the link names no port".to_string())?
     };
     if host.is_empty() {
         return Err("missing host".into());
     }
-    let port: u16 = port.parse().map_err(|_| format!("bad port {port:?}"))?;
+    let port: u16 = port.parse().map_err(|_| "the link's port is not a number".to_string())?;
     if port == 0 {
         return Err("port 0 is not joinable".into());
     }
@@ -388,6 +403,46 @@ mod tests {
         assert_eq!(probe_key_from_path("/probe/abc123"), Some("abc123"));
         assert_eq!(probe_key_from_path("/join/abc123"), None);
         assert_eq!(key_from_path("/probe/abc123"), None, "a probe is never a join");
+    }
+
+    /// The one address error that quotes the link, a bracketed host's, can carry
+    /// query text a crafted link put there; the scrubbed error quotes nothing.
+    /// An error with nothing to hide passes through.
+    #[test]
+    fn a_malformed_link_never_quotes_its_key_or_pin() {
+        let key = "k3y-Secret_0123456789";
+        let bad = format!("eustress-player://join/[203.0.113.7&key={key}&pin={}]", "ab".repeat(32));
+        let raw = JoinLink::parse(&bad).expect_err("a bracketed host with no port");
+        assert!(raw.contains(key), "the unscrubbed error quotes the key, so the test can fail: {raw}");
+        let e = parse_join_link(&bad).expect_err("a malformed link is refused");
+        assert_eq!(e, "this link is malformed");
+        assert_eq!(parse_join_link("  ").expect_err("empty"), "empty join link");
+        let ok = parse_join_link(&format!("eustress-player://join/203.0.113.7:7777?key={key}")).expect("a good link");
+        assert_eq!((ok.port, ok.key.as_deref()), (7777, Some(key)));
+    }
+
+    /// A join key in a link's path, with no `?` before it, is never quoted: the
+    /// port and no-port errors are fixed text, in every form a link takes
+    /// (Security, 2026-10-15).
+    #[test]
+    fn a_key_in_the_path_is_never_quoted() {
+        let key = "pathK3y-Secret_0123456789";
+        let links = [
+            format!("eustress://203.0.113.7:7777/join/{key}"),
+            format!("eustress-player://203.0.113.7:7777/join/{key}"),
+            format!("eustress-player://join/203.0.113.7:7777/join/{key}"),
+            format!("203.0.113.7:7777/join/{key}"),
+            format!("host.example/join/{key}"),
+            format!("eustress://host.example/join/{key}?pin={}", "ab".repeat(32)),
+        ];
+        for bad in &links {
+            let errors = [JoinLink::parse(bad).expect_err("a path is not a port"), parse_join_link(bad).expect_err("refused")];
+            for e in errors {
+                assert!(!e.contains(key), "{bad:?} gave an error quoting its key: {e}");
+            }
+        }
+        assert_eq!(JoinLink::parse(&links[3]).unwrap_err(), "the link's port is not a number");
+        assert_eq!(JoinLink::parse(&links[4]).unwrap_err(), "the link names no port");
     }
 
     /// A link's Debug shows where it goes and its pin, never its join key.

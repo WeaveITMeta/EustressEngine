@@ -49,6 +49,10 @@ eustress-common = { path = "..", default-features = false, features = ["physics"
 # feature already links it, so this compiles nothing new.
 avian3d = { workspace = true }
 
+# Never compiled for wasm32: `native` code is gated on not(wasm32) as well,
+# so a browser build whose graph turns `native` on (play-runtime does) links
+# neither crate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # ── Native transport ────────────────────────────────────────────────────────
 # Same quinn 0.11 / rustls 0.23 on ring / rcgen 0.13 stack the engine already
 # links, so nothing compiles twice. `dangerous-configuration` exists for one
