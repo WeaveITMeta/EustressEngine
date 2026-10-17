@@ -227,12 +227,21 @@ pub fn service_document_properties(doc: &toml::Value) -> toml::value::Table {
 /// service loader gives `LightingService` on open. `Ok(None)` when the Space
 /// has no Lighting service file.
 pub fn read_space_lighting(space_root: &Path) -> Result<Option<LightingService>, String> {
-    let path = space_root.join("Lighting").join("_service.toml");
-    if !path.is_file() {
+    read_space_lighting_from(&crate::space_source::DiskSource::new(space_root))
+}
+
+/// [`read_space_lighting`] through a [`SpaceSource`](crate::space_source::SpaceSource):
+/// a Space's folder, or the records a browser Player holds. Errors name the
+/// Space-relative path.
+pub fn read_space_lighting_from(
+    source: &dyn crate::space_source::SpaceSource,
+) -> Result<Option<LightingService>, String> {
+    const FILE: &str = "Lighting/_service.toml";
+    if !source.exists(FILE) {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let doc: toml::Value = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = source.read_to_string(FILE).map_err(|e| format!("{FILE}: {e}"))?;
+    let doc: toml::Value = text.parse().map_err(|e| format!("{FILE}: {e}"))?;
     let mut lighting = LightingService::default();
     apply_lighting_properties(&service_document_properties(&doc), &mut lighting);
     Ok(Some(lighting))
@@ -294,5 +303,28 @@ mod tests {
     fn a_space_without_a_lighting_file_reads_none() {
         let root = std::env::temp_dir().join(format!("eustress-no-lighting-{}", std::process::id()));
         assert!(matches!(read_space_lighting(&root), Ok(None)));
+    }
+
+    /// The Lighting service reads alike from a Space's folder (the desktop
+    /// Player) and from its records (the browser Player).
+    #[test]
+    fn the_lighting_service_reads_alike_from_the_folder_and_the_records() {
+        let text = "[service]\nclass_name = \"Lighting\"\n\n[properties]\nclock_time = 14\n";
+        let root = std::env::temp_dir().join(format!("eustress-lighting-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Lighting")).unwrap();
+        std::fs::write(root.join("Lighting").join("_service.toml"), text).unwrap();
+        let from_disk = read_space_lighting(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let records = crate::space_source::RecordsSource::new(vec![(
+            "Lighting/_service.toml".to_string(),
+            text.as_bytes().to_vec(),
+        )]);
+        let from_records = read_space_lighting_from(&records);
+        let clock = |read: Result<Option<LightingService>, String>| read.expect("reads").expect("a Lighting file").clock_time;
+        assert_eq!(clock(from_disk), "14:00:00");
+        assert_eq!(clock(from_records), "14:00:00");
+        let empty = crate::space_source::RecordsSource::new(Vec::new());
+        assert!(matches!(read_space_lighting_from(&empty), Ok(None)), "no file, no Lighting service");
     }
 }

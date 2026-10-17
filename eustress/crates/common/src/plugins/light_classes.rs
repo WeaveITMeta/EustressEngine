@@ -786,88 +786,86 @@ struct NestFrame {
 /// a flat `<Name>.instance.toml`. Files that cannot be read are reported,
 /// never dropped silently.
 pub fn read_space_lights(space_root: &std::path::Path) -> (Vec<SpaceLight>, Vec<String>) {
+    read_space_lights_from(&crate::space_source::DiskSource::new(space_root))
+}
+
+/// [`read_space_lights`] through a [`SpaceSource`](crate::space_source::SpaceSource):
+/// a Space's folder, or the records a browser Player holds. Problems name
+/// Space-relative paths.
+pub fn read_space_lights_from(source: &dyn crate::space_source::SpaceSource) -> (Vec<SpaceLight>, Vec<String>) {
     let mut lights = Vec::new();
     let mut problems = Vec::new();
     for service in ["Workspace", "Lighting"] {
-        let dir = space_root.join(service);
-        if dir.is_dir() {
-            walk_space_lights(&dir, NestFrame { rotation: Quat::IDENTITY, ..Default::default() }, &mut lights, &mut problems);
+        if source.exists(service) {
+            let top = NestFrame { rotation: Quat::IDENTITY, ..Default::default() };
+            walk_space_lights(source, service, top, &mut lights, &mut problems);
         }
     }
     (lights, problems)
 }
 
 fn walk_space_lights(
-    dir: &std::path::Path,
+    source: &dyn crate::space_source::SpaceSource,
+    dir: &str,
     parent: NestFrame,
     lights: &mut Vec<SpaceLight>,
     problems: &mut Vec<String>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        problems.push(format!("unreadable directory: {}", dir.display()));
+    let Ok(entries) = source.list(dir) else {
+        problems.push(format!("unreadable directory: {dir}"));
         return;
     };
     let mut dirs = Vec::new();
     let mut flat = Vec::new();
-    for e in entries.flatten() {
-        let p = e.path();
-        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue };
-        if name.starts_with('.') {
+    for e in entries {
+        if e.name.starts_with('.') {
             continue;
         }
-        if p.is_dir() {
-            dirs.push(p);
-        } else if name.ends_with(".instance.toml") {
-            flat.push(p);
+        if e.is_dir {
+            dirs.push(e);
+        } else if e.name.ends_with(".instance.toml") {
+            flat.push(e);
         }
     }
-    let dir_names: Vec<String> = dirs
-        .iter()
-        .filter_map(|d| d.file_name()?.to_str().map(str::to_owned))
-        .collect();
-    for f in flat {
-        let stem = f
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.trim_end_matches(".instance.toml").to_owned())
-            .unwrap_or_default();
-        if dir_names.contains(&stem) {
+    for f in &flat {
+        let stem = f.name.trim_end_matches(".instance.toml");
+        if dirs.iter().any(|d| d.name == stem) {
             continue;
         }
-        ingest_space_instance(&f, &stem, &parent, lights, problems);
+        ingest_space_instance(source, &f.rel_path, stem, &parent, lights, problems);
     }
-    for d in dirs {
-        let name = d.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_owned();
-        let inst = d.join("_instance.toml");
-        let here = if inst.is_file() {
-            ingest_space_instance(&inst, &name, &parent, lights, problems).unwrap_or(parent)
+    for d in &dirs {
+        let inst = format!("{}/_instance.toml", d.rel_path);
+        let here = if source.exists(&inst) {
+            ingest_space_instance(source, &inst, &d.name, &parent, lights, problems).unwrap_or(parent)
         } else {
             parent
         };
-        walk_space_lights(&d, here, lights, problems);
+        walk_space_lights(source, &d.rel_path, here, lights, problems);
     }
 }
 
 /// Read one instance file: a light is collected; anything else returns the
 /// frame its children nest in.
 fn ingest_space_instance(
-    path: &std::path::Path,
+    source: &dyn crate::space_source::SpaceSource,
+    path: &str,
     fallback_name: &str,
     parent: &NestFrame,
     lights: &mut Vec<SpaceLight>,
     problems: &mut Vec<String>,
 ) -> Option<NestFrame> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match source.read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            problems.push(format!("{}: {e}", path.display()));
+            problems.push(format!("{path}: {e}"));
             return None;
         }
     };
     let doc: toml::Value = match text.parse() {
         Ok(d) => d,
         Err(e) => {
-            problems.push(format!("{}: {e}", path.display()));
+            problems.push(format!("{path}: {e}"));
             return None;
         }
     };
@@ -1494,5 +1492,53 @@ mod tests {
         assert!((t.translation.x - expected_x).abs() < 1e-4);
         assert!((t.rotation * Vec3::NEG_Z - Vec3::NEG_Y).length() < 1e-4);
         assert_eq!(t.scale, Vec3::ONE);
+    }
+
+    /// One Space's lights read alike from its folder (the desktop Player)
+    /// and from its records (the browser Player): a folder wins over a flat
+    /// file of its name, a hidden folder is skipped, and a light in a part
+    /// takes the part's size.
+    #[test]
+    fn a_spaces_lights_read_alike_from_its_folder_and_its_records() {
+        let records: Vec<(String, Vec<u8>)> = [
+            (
+                "Workspace/Lamp/_instance.toml",
+                "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [0.0, 4.0, 0.0]\nscale = [2.0, 1.0, 2.0]\n",
+            ),
+            ("Workspace/Lamp/Glow.instance.toml", "[metadata]\nclass_name = \"PointLight\"\n\n[light]\nbrightness = 2.0\nrange = 12.0\n"),
+            ("Workspace/Lamp/Beam/_instance.toml", "[metadata]\nclass_name = \"SpotLight\"\nname = \"Beam\"\n"),
+            ("Workspace/Lamp/Beam.instance.toml", "[metadata]\nclass_name = \"PointLight\"\nname = \"Ghost\"\n"),
+            ("Workspace/.hidden/Skip.instance.toml", "[metadata]\nclass_name = \"PointLight\"\n"),
+            ("Lighting/Sun.instance.toml", "[metadata]\nclass_name = \"DirectionalLight\"\n"),
+        ]
+        .into_iter()
+        .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec()))
+        .collect();
+        let root = std::env::temp_dir().join(format!("eustress-space-lights-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, bytes) in &records {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+        }
+        let (from_disk, disk_problems) = read_space_lights(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let (from_records, record_problems) =
+            read_space_lights_from(&crate::space_source::RecordsSource::new(records));
+        assert!(disk_problems.is_empty() && record_problems.is_empty(), "{disk_problems:?} {record_problems:?}");
+        let summary = |lights: &[SpaceLight]| {
+            let mut out: Vec<String> = lights
+                .iter()
+                .map(|l| format!("{} {:?} {:?} {:?}", l.name, l.component, l.transform, l.host_size))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(summary(&from_disk), summary(&from_records));
+        let mut names: Vec<&str> = from_records.iter().map(|l| l.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["Beam", "Glow", "Sun"]);
+        let glow = from_records.iter().find(|l| l.name == "Glow").unwrap();
+        assert!(glow.host_size.is_some(), "a light in a part takes the part's size");
     }
 }

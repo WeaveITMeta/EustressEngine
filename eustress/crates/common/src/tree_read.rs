@@ -77,6 +77,15 @@
 //! script's source file, or the folder's own path. Replication's
 //! `Replica::bind_scene` then gives both sides the same ids.
 //!
+//! ## Opening a world for a Player
+//!
+//! [`open_player_world`] is what a Player does with a world before it draws
+//! it: read the tree, make the local `Player`, and begin the session as
+//! Studio's Play begins its own ([`crate::play_session::begin_session`]),
+//! with the Space's own camera, gravity and `Players.CharacterAutoLoads`.
+//! The desktop Player opens a Space's folder ([`open_player_world_dir`]);
+//! the browser Player opens the records it downloaded, with no disk.
+//!
 //! ## Posed records
 //!
 //! [`posed_records`] runs the same walk and returns, for every instance read
@@ -92,7 +101,7 @@ use bevy::prelude::*;
 use crate::classes::ClassName;
 use crate::datamodel::record::{
     attribute_to_dm, camera_props, class_from_toml, component_props, folder_display_name, has_model_pivot, loads_as_part,
-    is_known_class, luau_script_class, model_pivot_prop, raw_class_name, reads_own_properties, record_animation_id,
+    is_known_class, mlua_script_class, model_pivot_prop, raw_class_name, reads_own_properties, record_animation_id,
     warn_unknown_class,
     record_attachment, data_mesh_props, data_mesh_section, starter_player_props,
     record_class_props, record_component_props,
@@ -179,6 +188,61 @@ pub fn space_records(space_root: &Path) -> Result<(Vec<(String, Vec<u8>)>, Vec<S
     let mut problems = Vec::new();
     collect(space_root, space_root, &mut records, &mut problems);
     Ok((records, problems))
+}
+
+/// A world opened for a Player to play: its tree, with the session begun.
+pub struct PlayerWorld {
+    /// The session's tree.
+    pub dm: DataModel,
+    /// The record key of every scene instance, for replication to bind.
+    pub keys: Vec<(String, InstanceId)>,
+    pub report: TreeReadReport,
+    /// The Player this app plays as: the tree's own local player when it has
+    /// one, else a new `Player` under Players, which replication maps the
+    /// host's Player for this peer onto.
+    pub local_player: InstanceId,
+    /// The Space's gravity, by Studio's rule
+    /// ([`crate::play_session::space_gravity`]).
+    pub gravity: Vec3,
+    /// The Space's `Players.CharacterAutoLoads`.
+    pub character_auto_loads: bool,
+    /// Where a character's feet go: on the first SpawnLocation, when there is
+    /// one ([`crate::space_read::tree_spawn_point`]).
+    pub spawn: Option<Vec3>,
+}
+
+/// Open a world's records for the Player named `player_name`: the tree
+/// [`read_space_records`] builds, with the session begun on it. The Space's
+/// gravity and `Players.CharacterAutoLoads` come from its
+/// `Workspace/_service.toml` and `Players/_service.toml` records, read as the
+/// desktop reads those files.
+pub fn open_player_world(records: &[(String, Vec<u8>)], player_name: &str) -> PlayerWorld {
+    use crate::play_session::{begin_session, character_auto_loads_in, gravity_in, SessionCamera, SessionStart};
+    let text = |key: &str| records.iter().find(|(k, _)| k == key).and_then(|(_, bytes)| std::str::from_utf8(bytes).ok());
+    let gravity = gravity_in(text("Workspace/_service.toml"));
+    let character_auto_loads = character_auto_loads_in(text("Players/_service.toml"));
+    let scene = read_space_records(records);
+    let mut dm = scene.dm;
+    let local_player = match dm.local_player.filter(|p| dm.exists(*p)) {
+        Some(me) => me,
+        None => {
+            let players = dm.get_service("Players");
+            dm.create_virtual("Player", player_name, players)
+        }
+    };
+    let start = SessionStart { camera: SessionCamera::SpaceOrFresh, gravity, character_auto_loads };
+    begin_session(&mut dm, local_player, &start);
+    let spawn = crate::space_read::tree_spawn_point(&dm);
+    PlayerWorld { dm, keys: scene.keys, report: scene.report, local_player, gravity, character_auto_loads, spawn }
+}
+
+/// [`open_player_world`] for the Space in `space_root`, read from disk.
+pub fn open_player_world_dir(space_root: &Path, player_name: &str) -> Result<PlayerWorld, String> {
+    let (records, mut problems) = space_records(space_root)?;
+    let mut world = open_player_world(&records, player_name);
+    problems.append(&mut world.report.problems);
+    world.report.problems = problems;
+    Ok(world)
 }
 
 /// One instance read from a file, placed by a [`TransformRule`].
@@ -401,12 +465,12 @@ fn flat_stem(file: &str) -> Option<&str> {
     FLAT_SUFFIXES.iter().find_map(|s| file.strip_suffix(s)?.strip_suffix('.'))
 }
 
-fn is_luau_file(file: &str) -> bool {
+fn is_mlua_file(file: &str) -> bool {
     file.ends_with(".luau") || file.ends_with(".lua")
 }
 
 fn is_script_file(file: &str) -> bool {
-    is_luau_file(file) || file.ends_with(".rune") || file.ends_with(".soul")
+    is_mlua_file(file) || file.ends_with(".rune") || file.ends_with(".soul")
 }
 
 /// Everything before a file name's last dot, as `Path::file_stem` keeps it.
@@ -467,8 +531,8 @@ fn own_branch(class: ClassName) -> bool {
     )
 }
 
-fn is_luau_class(class: ClassName) -> bool {
-    matches!(class, ClassName::LuauScript | ClassName::LuauLocalScript | ClassName::LuauModuleScript)
+fn is_mlua_class(class: ClassName) -> bool {
+    matches!(class, ClassName::MluaScript | ClassName::MluaLocalScript | ClassName::MluaModuleScript)
 }
 
 // ── The walk ───────────────────────────────────────────────────────────────
@@ -635,7 +699,7 @@ impl Reader<'_, '_> {
             }
             props.extend(data_mesh_props(class, data_mesh_section(doc)));
         }
-        let folded = if is_luau_class(class) { self.child_source(path) } else { None };
+        let folded = if is_mlua_class(class) { self.child_source(path) } else { None };
         if let Some((code, _)) = &folded {
             props.push(("Source".to_string(), DmValue::String(code.clone())));
         }
@@ -668,7 +732,7 @@ impl Reader<'_, '_> {
             .as_ref()
             .and_then(|s| s.get("source"))
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && is_luau_class(rec.engine_class))
+            .filter(|s| !s.is_empty() && is_mlua_class(rec.engine_class))
             .map(str::to_owned);
         let id = self.create(&rec, parent, source);
         self.bind(key, id);
@@ -757,8 +821,8 @@ impl Reader<'_, '_> {
         };
         let file = src_key.rsplit('/').next().unwrap_or(&src_key).to_string();
         let own = record_name(doc).unwrap_or(name);
-        let (class, name) = if is_luau_file(&file) {
-            (luau_script_class(&file, service).to_string(), strip_script_suffix(own))
+        let (class, name) = if is_mlua_file(&file) {
+            (mlua_script_class(&file, service).to_string(), strip_script_suffix(own))
         } else {
             ("SoulScript".to_string(), own.to_string())
         };
@@ -774,8 +838,8 @@ impl Reader<'_, '_> {
     /// A bare script file.
     fn bare_script(&mut self, key: &str, file: &str, i: usize, parent: InstanceId, service: &str) {
         let stem = file_stem(file);
-        let (class, name) = if is_luau_file(file) {
-            (luau_script_class(file, service).to_string(), strip_script_suffix(stem))
+        let (class, name) = if is_mlua_file(file) {
+            (mlua_script_class(file, service).to_string(), strip_script_suffix(stem))
         } else {
             ("SoulScript".to_string(), stem.to_string())
         };
@@ -1357,6 +1421,110 @@ mod tests {
             tree.dm.get_prop(wave, "Priority").as_ref().and_then(DmValue::as_enum_name),
             Some("Action2")
         );
+    }
+
+    /// The world of the session tests: [`world`], on the Moon, with
+    /// characters off.
+    fn moon_world() -> Vec<(String, Vec<u8>)> {
+        let mut records: Vec<_> = world().into_iter().filter(|(k, _)| k != "Workspace/_service.toml").collect();
+        records.push(rec(
+            "Workspace/_service.toml",
+            "[service]\nclass_name = \"Workspace\"\n\n[properties]\ngravity = [0.0, -1.62, 0.0]\n",
+        ));
+        records.push(rec(
+            "Players/_service.toml",
+            "[service]\nclass_name = \"Players\"\n\n[properties]\ncharacter_auto_loads = false\n",
+        ));
+        records
+    }
+
+    /// A Player opens a world as Studio's Play begins a session, from the
+    /// records alone: its own Player under Players, the Space's own camera,
+    /// and the Space's gravity and CharacterAutoLoads.
+    #[test]
+    fn a_player_opens_a_world_from_its_records_alone() {
+        let records = moon_world();
+        let opened = open_player_world(&records, "Tester");
+        let dm = &opened.dm;
+        let players = dm.find_service("Players").expect("Players");
+        let ws = dm.find_service("Workspace").expect("Workspace");
+        let me = opened.local_player;
+        assert_eq!(dm.local_player, Some(me));
+        assert_eq!(dm.class_of(me), Some("Player"));
+        assert_eq!(dm.get(me).map(|i| i.name.as_str()), Some("Tester"));
+        assert_eq!(dm.parent(me), Some(players));
+        assert_eq!(dm.get_prop(players, "LocalPlayer").and_then(|v| v.as_instance()), Some(me));
+
+        assert!((opened.gravity - Vec3::new(0.0, -1.62, 0.0)).length() < 1e-5, "got {}", opened.gravity);
+        assert_eq!(dm.get_prop(ws, "Gravity").and_then(|v| v.as_number()), Some(1.62), "the Moon reads 1.62");
+        assert!(!opened.character_auto_loads);
+        assert_eq!(dm.get_prop(players, "CharacterAutoLoads").and_then(|v| v.as_bool()), Some(false));
+
+        // A Camera folder is an entity of the general branch, keyed by its
+        // folder, as `the_hierarchy_and_keys_are_studios` keys a Model.
+        let camera = opened.keys.iter().find(|(k, _)| k == "Workspace/Camera").map(|(_, id)| *id);
+        assert!(camera.is_some(), "the Space's camera is a scene instance");
+        assert_eq!(
+            dm.get_prop(ws, "CurrentCamera").and_then(|v| v.as_instance()),
+            camera,
+            "a Player shows the Space's own camera"
+        );
+        assert_eq!(
+            camera.and_then(|cam| dm.get_prop(cam, "CameraType")).as_ref().and_then(DmValue::as_enum_name),
+            Some("Scriptable"),
+            "the Space's Scriptable camera, not a fresh one"
+        );
+        let mut keys: Vec<&str> = opened.keys.iter().map(|(k, _)| k.as_str()).collect();
+        let read = read_space_records(&records);
+        let mut read_keys: Vec<&str> = read.keys.iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort();
+        read_keys.sort();
+        assert_eq!(keys, read_keys, "the session adds no scene instance");
+        assert_eq!(opened.report.instances, read.report.instances);
+        assert_eq!(opened.spawn, None, "this world has no SpawnLocation");
+    }
+
+    /// A world that sets neither runs at standard gravity and loads
+    /// characters, and a SpawnLocation gives the spawn point.
+    #[test]
+    fn a_world_without_service_settings_opens_with_the_defaults() {
+        let mut records = world();
+        records.push(rec(
+            "Workspace/Pad/_instance.toml",
+            "[metadata]\nclass_name = \"SpawnLocation\"\nname = \"Pad\"\n\n\
+             [transform]\nposition = [0.0, 0.5, 0.0]\nscale = [6.0, 1.0, 6.0]\n\n[properties]\nanchored = true\n",
+        ));
+        let opened = open_player_world(&records, "Tester");
+        assert_eq!(opened.gravity, crate::services::workspace::DEFAULT_GRAVITY);
+        assert!(opened.character_auto_loads);
+        assert_eq!(opened.spawn, crate::space_read::tree_spawn_point(&read_space_records(&records).dm));
+        assert!(opened.spawn.is_some(), "the SpawnLocation is the spawn point");
+    }
+
+    /// The desktop Player opens a Space's folder as the browser opens its
+    /// records: the same tree keys, gravity and CharacterAutoLoads.
+    #[test]
+    fn a_space_on_disk_opens_like_its_records() {
+        let root = std::env::temp_dir().join(format!("eustress_player_world_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, bytes) in moon_world() {
+            let file = root.join(&path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+        }
+        let from_disk = open_player_world_dir(&root, "Tester");
+        let _ = std::fs::remove_dir_all(&root);
+        let from_disk = from_disk.expect("the Space opens");
+        let from_records = open_player_world(&moon_world(), "Tester");
+
+        let mut a: Vec<&str> = from_disk.keys.iter().map(|(k, _)| k.as_str()).collect();
+        let mut b: Vec<&str> = from_records.keys.iter().map(|(k, _)| k.as_str()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(from_disk.gravity, from_records.gravity);
+        assert!(!from_disk.character_auto_loads, "the disk read reaches Players/_service.toml");
+        assert_eq!(from_disk.dm.get(from_disk.local_player).map(|i| i.name.clone()), Some("Tester".to_string()));
     }
 
     #[test]

@@ -617,46 +617,63 @@ pub const CELESTIAL_FOLDERS: [(&str, bool); 2] = [("Lighting", true), ("Workspac
 /// class's own section over the class defaults, which equal its schema.
 /// This is the Player's reader; unreadable files come back as problems.
 pub fn read_space_celestials(space_root: &std::path::Path) -> (Vec<SpaceCelestial>, Vec<String>) {
+    read_space_celestials_from(&crate::space_source::DiskSource::new(space_root))
+}
+
+/// [`read_space_celestials`] through a [`SpaceSource`](crate::space_source::SpaceSource):
+/// a Space's folder, or the records a browser Player holds. Problems name
+/// Space-relative paths.
+pub fn read_space_celestials_from(
+    source: &dyn crate::space_source::SpaceSource,
+) -> (Vec<SpaceCelestial>, Vec<String>) {
     let mut found = Vec::new();
     let mut problems = Vec::new();
     for (folder, every_class) in CELESTIAL_FOLDERS {
-        walk_celestials(&space_root.join(folder), every_class, &mut found, &mut problems);
+        walk_celestials(source, folder, every_class, &mut found, &mut problems);
     }
     (found, problems)
 }
 
 fn walk_celestials(
-    dir: &std::path::Path,
+    source: &dyn crate::space_source::SpaceSource,
+    dir: &str,
     every_class: bool,
     found: &mut Vec<SpaceCelestial>,
     problems: &mut Vec<String>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let entries = match source.list(dir) {
+        Ok(entries) => entries,
+        // Most Spaces have no such folder (no Clouds under Terrain).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            problems.push(format!("{dir}: {e}"));
+            return;
+        }
+    };
     let mut dirs = Vec::new();
     let mut flats = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned) else { continue };
-        if name.starts_with('.') {
+    for entry in entries {
+        if entry.name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
-            dirs.push((name, path));
-        } else if let Some(stem) = name.strip_suffix(".instance.toml") {
-            flats.push((stem.to_owned(), path));
+        if entry.is_dir {
+            dirs.push((entry.name, entry.rel_path));
+        } else if let Some(stem) = entry.name.strip_suffix(".instance.toml") {
+            flats.push((stem.to_owned(), entry.rel_path));
         }
     }
     flats.retain(|(stem, _)| !dirs.iter().any(|(d, _)| d == stem));
-    let files = dirs
+    let files: Vec<(String, String)> = dirs
         .iter()
-        .map(|(name, path)| (name.clone(), path.join("_instance.toml")))
-        .filter(|(_, file)| file.is_file())
-        .chain(flats);
+        .map(|(name, path)| (name.clone(), format!("{path}/_instance.toml")))
+        .filter(|(_, file)| source.exists(file))
+        .chain(flats)
+        .collect();
     for (fallback_name, path) in files {
-        let text = match std::fs::read_to_string(&path) {
+        let text = match source.read_to_string(&path) {
             Ok(text) => text,
             Err(e) => {
-                problems.push(format!("{}: {e}", path.display()));
+                problems.push(format!("{path}: {e}"));
                 continue;
             }
         };
@@ -668,7 +685,7 @@ fn walk_celestials(
         let mut doc = match text.parse::<toml::Value>() {
             Ok(doc) => doc,
             Err(e) => {
-                problems.push(format!("{}: {e}", path.display()));
+                problems.push(format!("{path}: {e}"));
                 continue;
             }
         };
@@ -693,7 +710,7 @@ fn walk_celestials(
         }
     }
     for (_, sub) in dirs {
-        walk_celestials(&sub, every_class, found, problems);
+        walk_celestials(source, &sub, every_class, found, problems);
     }
 }
 
@@ -1234,6 +1251,59 @@ mod tests {
         assert!(clouds.iter().any(|c| !c.enabled && close(c.coverage, 0.8)), "the imported layer");
         assert!(found.iter().any(|c| matches!(&c.body, CelestialBody::Sun(s) if close(s.angular_size, 0.7))));
         assert!(found.iter().any(|c| matches!(&c.body, CelestialBody::Sky(s) if s.star_count == Sky::default().star_count)));
+    }
+
+    /// The sky objects read alike from a Space's folder (the desktop Player)
+    /// and from its records (the browser Player).
+    #[test]
+    fn the_sky_objects_read_alike_from_the_folder_and_the_records() {
+        let records: Vec<(String, Vec<u8>)> = [
+            ("Lighting/Clouds/_instance.toml", CLOUDS_SCHEMA),
+            ("Lighting/Clouds.instance.toml", "[metadata]\nclass_name = \"Clouds\"\n[clouds]\ncover = 0.9\n"),
+            ("Lighting/Sun.instance.toml", "[metadata]\nclass_name = \"Sun\"\n[star]\nangular_size = 0.7\n"),
+            (
+                "Workspace/Terrain/Clouds/_instance.toml",
+                "[metadata]\nclass_name = \"Clouds\"\nunit = \"stud\"\n[clouds]\ncover = 0.8\nenabled = false\n",
+            ),
+            ("Workspace/Terrain/Sky.instance.toml", "[metadata]\nclass_name = \"Sky\"\n"),
+        ]
+        .into_iter()
+        .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec()))
+        .collect();
+        let root = std::env::temp_dir().join(format!("eustress-celestial-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, bytes) in &records {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+        }
+        let (from_disk, disk_problems) = read_space_celestials(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let (from_records, record_problems) =
+            read_space_celestials_from(&crate::space_source::RecordsSource::new(records));
+        assert!(disk_problems.is_empty() && record_problems.is_empty(), "{disk_problems:?} {record_problems:?}");
+        let summary = |found: &[SpaceCelestial]| {
+            let mut out: Vec<String> = found.iter().map(|c| format!("{c:?}")).collect();
+            out.sort();
+            out
+        };
+        // Lighting's Clouds folder (its flat twin loses), the Sun, and
+        // Terrain's Clouds; a Sky under Terrain is not drawn.
+        assert_eq!(from_records.len(), 3, "{from_records:?}");
+        assert_eq!(summary(&from_disk), summary(&from_records));
+    }
+
+    /// A sky folder the Space does not have is no problem; one that cannot
+    /// be listed is reported, never dropped silently.
+    #[test]
+    fn an_unlistable_sky_folder_is_reported_and_a_missing_one_is_not() {
+        // `Lighting` is a file, so it cannot be listed; `Workspace/Terrain`
+        // does not exist.
+        let records = crate::space_source::RecordsSource::new(vec![("Lighting".to_string(), b"not a folder".to_vec())]);
+        let (found, problems) = read_space_celestials_from(&records);
+        assert!(found.is_empty());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("Lighting: "), "{problems:?}");
     }
 
     #[test]

@@ -26,111 +26,18 @@
 //!
 //! The chosen source is stored as the [`ActiveSpaceSource`] resource;
 //! loader systems read through it instead of `std::fs`.
+//!
+//! The trait, [`SourceEntry`] and [`DiskSource`] live in
+//! `eustress_common::space_source`, where the Play runtime and the
+//! browser Player read a Space through them too; this module adds the
+//! world-DB source and the editor's resource.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::prelude::*;
 
-/// One entry in a [`SpaceSource`] directory listing — mirrors the
-/// shape of `std::fs::DirEntry` the loader needs (name + is_dir),
-/// plus the Space-relative path so callers don't re-derive it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceEntry {
-    /// Leaf name (no separators).
-    pub name: String,
-    /// Space-relative forward-slash path.
-    pub rel_path: String,
-    /// Directory vs file.
-    pub is_dir: bool,
-}
-
-/// Read-side content provider for the Space loader. Object-safe so it
-/// can live behind `Arc<dyn SpaceSource>` in a Bevy resource.
-pub trait SpaceSource: Send + Sync + 'static {
-    /// Read a file's bytes by Space-relative path.
-    fn read(&self, rel: &str) -> std::io::Result<Vec<u8>>;
-
-    /// Read a file's bytes as UTF-8 text — convenience for the many
-    /// TOML/script call sites.
-    fn read_to_string(&self, rel: &str) -> std::io::Result<String> {
-        let bytes = self.read(rel)?;
-        String::from_utf8(bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    }
-
-    /// List the immediate children of a Space-relative directory.
-    /// `""` lists the Space root.
-    fn list(&self, rel_dir: &str) -> std::io::Result<Vec<SourceEntry>>;
-
-    /// True when a file or directory exists at the relative path.
-    fn exists(&self, rel: &str) -> bool;
-
-    /// True when this source serves from Fjall (diagnostics + the
-    /// "should I also write back to disk?" decision in the writer).
-    fn is_fjall(&self) -> bool;
-}
-
-/// Legacy filesystem source — joins relative paths onto the Space
-/// root and uses `std::fs`. Behaviour identical to the pre-pivot
-/// loader, so `--features toml` (or a non-migrated world) is a
-/// byte-for-byte no-op change.
-pub struct DiskSource {
-    root: PathBuf,
-}
-
-impl DiskSource {
-    /// `root` is the on-disk Space directory
-    /// (`<universe>/Spaces/<space>/`).
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    fn abs(&self, rel: &str) -> PathBuf {
-        let mut p = self.root.clone();
-        for seg in rel.split(['/', '\\']) {
-            if !seg.is_empty() && seg != "." && seg != ".." {
-                p.push(seg);
-            }
-        }
-        p
-    }
-}
-
-impl SpaceSource for DiskSource {
-    fn read(&self, rel: &str) -> std::io::Result<Vec<u8>> {
-        std::fs::read(self.abs(rel))
-    }
-
-    fn list(&self, rel_dir: &str) -> std::io::Result<Vec<SourceEntry>> {
-        let abs = self.abs(rel_dir);
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(abs)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let rel_path = if rel_dir.is_empty() {
-                name.clone()
-            } else {
-                format!("{rel_dir}/{name}")
-            };
-            out.push(SourceEntry {
-                name,
-                rel_path,
-                is_dir,
-            });
-        }
-        Ok(out)
-    }
-
-    fn exists(&self, rel: &str) -> bool {
-        self.abs(rel).exists()
-    }
-
-    fn is_fjall(&self) -> bool {
-        false
-    }
-}
+pub use eustress_common::space_source::{DiskSource, FileStamp, SourceEntry, SpaceSource};
 
 /// Fjall-backed source — reads through the `tree` partition the
 /// faithful importer populated. Zero disk access; this is what makes
