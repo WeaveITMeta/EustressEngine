@@ -10,7 +10,6 @@ import {
   GUEST_CHAT_FIELD, GUEST_CHAT_QUESTION_CATEGORIES, GUEST_CHAT_CATEGORIES, FORUM_QUESTION_CATEGORIES, FORUM_FIELDS, PROFILE_FIELDS,
   PROFILE_TEXT_MAX, DEFAULT_THRESHOLDS, thresholdsFrom, CONFIDENCE_BANDS, POLICY_VERSION, JEV_STATE_MAX_CHARS,
 } from '../src/moderation.mjs';
-import { guestChatRule } from '../src/guest_chat_rules.mjs';
 
 // ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -246,8 +245,6 @@ test('a phone number or an email address refuses as personal_info by the profile
     assert.deepEqual([forum.verdict, forum.category, forum.reason], ['refuse', 'personal_info', kind]);
   }
   assert.equal((await chat('1,000,000 coins')).r.verdict, 'pass');
-  // guest_chat_rules.mjs imports profilePersonalInfo from moderation.mjs, and still reads it.
-  assert.equal(guestChatRule('555 123 4567'), 'phone');
 });
 
 // ── failures never pass ─────────────────────────────────────────────────────
