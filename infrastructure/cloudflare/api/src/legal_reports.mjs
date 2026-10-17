@@ -38,6 +38,9 @@
 //   LEGAL_REPORT_CSAM_NOTICE_RELEASE   release the author's notice of a CSAM removal without waiting for the report to be sent.
 //   FORUM_LEGAL_OWED_SWEEP             let the hourly sweep write the reports forum cases owe (writeOwedForumReports). Turned on
 //                                      with the forums; off, the sweep makes no call into the forum code.
+//   LISTING_LEGAL_OWED_SWEEP           let the hourly sweep write the reports listing cases owe (writeOwedListingReports, with its
+//                                      heal over the quarantined queue) and send the daily re-alert for stuck debts. Off, the
+//                                      sweep touches no listing case, no owed index and sends no stuck mail.
 //
 // Storage (SOCIAL):
 //   legalreport:{id}                            the report
@@ -108,7 +111,7 @@ export function uploadIpUnknownItems(caseKind, items, ips) {
   return content.filter((i) => !known.has(i)).map((item_id) => ({ item_id, upload_ip: null, reason: 'not_known' }));
 }
 
-export const SETTING_NAMES = Object.freeze(['LEGAL_REPORT_NCMEC', 'LEGAL_REPORT_EU_EMAIL', 'LEGAL_REPORT_THREATS', 'LEGAL_REPORT_SCAMS', 'LEGAL_REPORT_CSAM_NOTICE_RELEASE', 'FORUM_LEGAL_OWED_SWEEP']);
+export const SETTING_NAMES = Object.freeze(['LEGAL_REPORT_NCMEC', 'LEGAL_REPORT_EU_EMAIL', 'LEGAL_REPORT_THREATS', 'LEGAL_REPORT_SCAMS', 'LEGAL_REPORT_CSAM_NOTICE_RELEASE', 'FORUM_LEGAL_OWED_SWEEP', 'LISTING_LEGAL_OWED_SWEEP']);
 
 /// The settings as the code reads them. Only the exact string "on" turns one on.
 export function legalSettingsFrom(env) {
@@ -130,6 +133,7 @@ export function legalSettingsFrom(env) {
     scams: on('LEGAL_REPORT_SCAMS'),
     csam_notice_release: on('LEGAL_REPORT_CSAM_NOTICE_RELEASE'),
     forum_owed_sweep: on('FORUM_LEGAL_OWED_SWEEP'),
+    listing_owed_sweep: on('LISTING_LEGAL_OWED_SWEEP'),
   };
 }
 
@@ -915,11 +919,17 @@ export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date
   } else {
     out.owed_reports = 'off';
   }
-  // Listings whose report is owed, every hour (the listing review is live).
-  try { out.owed_listing_reports = await (await import('./moderation.mjs')).writeOwedListingReports(env, deps); }
-  catch (e) { console.error('legal reports: the owed listing reports were not written:', e?.name || 'Error'); out.owed_listing_reports = null; }
-  // Stuck debts: staff are alerted again once a day while each stands.
-  out.stuck = await alertStuckReports(env, { now });
+  // Listings whose report is owed, and the daily re-alert for stuck debts, once LISTING_LEGAL_OWED_SWEEP is on. Off, nothing below
+  // is reached: no listing case or owed index is read and no stuck mail is sent.
+  if (settings.listing_owed_sweep) {
+    try { out.owed_listing_reports = await (await import('./moderation.mjs')).writeOwedListingReports(env, deps); }
+    catch (e) { console.error('legal reports: the owed listing reports were not written:', e?.name || 'Error'); out.owed_listing_reports = null; }
+    // Stuck debts: staff are alerted again once a day while each stands.
+    out.stuck = await alertStuckReports(env, { now });
+  } else {
+    out.owed_listing_reports = 'off';
+    out.stuck = 'off';
+  }
   out.scam_batch = await weeklyScamBatch(env, now, deps);
   return out;
 }

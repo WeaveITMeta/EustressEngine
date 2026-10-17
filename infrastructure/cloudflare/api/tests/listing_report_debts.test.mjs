@@ -102,6 +102,22 @@ test('a listing csam report that fails is owed on the case and indexed, and the 
   assert.deepEqual([rec.status, rec.report_owed?.category, rec.report_owed?.actor, rec.report_owed?.reason], ['quarantined', 'csam_or_minor_sexualization', 'system', 'unavailable']);
   assert.ok(await env.SOCIAL.get(listingReportOwedKey(SIM)), 'indexed for the sweep');
   assert.equal((await reportsOf(env)).length, 0);
+  // With LISTING_LEGAL_OWED_SWEEP off (the default) the hourly sweep touches no listing case, no listing owed index and sends
+  // no stuck mail: the debt simply waits.
+  const touched = [];
+  const { get, list } = env.SOCIAL;
+  env.SOCIAL.get = (k, ...a) => { touched.push(String(k)); return get.call(env.SOCIAL, k, ...a); };
+  env.SOCIAL.list = (o, ...a) => { touched.push(String(o?.prefix)); return list.call(env.SOCIAL, o, ...a); };
+  const mailBefore = (env.mail || []).length;
+  const off = await quiet(() => sweepLegalReports(env));
+  env.SOCIAL.get = get; env.SOCIAL.list = list;
+  assert.deepEqual([off.owed_listing_reports, off.stuck], ['off', 'off']);
+  assert.ok(touched.length > 0, 'the sweep did run');
+  assert.equal(touched.some((k) => k.startsWith('modcase:') || k.startsWith('legalowed:moderation') || k.startsWith('legalstuck:') || k.startsWith('modq:')), false, 'no listing case, owed index, stuck index or queue read');
+  assert.equal((env.mail || []).length, mailBefore, 'no mail');
+  assert.equal((await reportsOf(env)).length, 0);
+  assert.ok(await env.SOCIAL.get(listingReportOwedKey(SIM)), 'the debt is kept');
+  env.LISTING_LEGAL_OWED_SWEEP = 'on';
   const swept = await quiet(() => sweepLegalReports(env));
   assert.deepEqual([swept.owed_listing_reports.written, swept.owed_listing_reports.still_owed], [1, 0]);
   const [rep] = await reportsOf(env);
@@ -122,6 +138,7 @@ test('a listing csam quarantine whose report was recorded nowhere is found by th
   delete rec.legal_report;
   await env.SOCIAL.put(`modcase:${SIM}`, JSON.stringify(rec));
   await env.SOCIAL.delete(listingReportOwedKey(SIM));
+  env.LISTING_LEGAL_OWED_SWEEP = 'on';
   const swept = await quiet(() => sweepLegalReports(env));
   assert.deepEqual([swept.owed_listing_reports.healed, swept.owed_listing_reports.written], [1, 1]);
   assert.equal((await reportsOf(env)).length, 1);
