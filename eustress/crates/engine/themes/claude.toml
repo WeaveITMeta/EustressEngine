@@ -1,0 +1,117 @@
+# Eustress Studio: the "Claude" theme.
+#
+# Claude's dark look: warm greys from #141413 under the viewport up to
+# #30302e, ivory text, and the clay orange #d97757 for whatever is focused,
+# selected or hovered.
+#
+# Primary-button fills use a deeper clay (#a9502c, #b85a35) because their
+# label is white, and white on #d97757 is 3.1:1.
+#
+# To author your own: copy this (or classic.toml) to
+#   %LOCALAPPDATA%/Eustress/Themes/<yourtheme>.toml
+# change [meta].id, tweak tokens, Rescan in File > Settings > Theme.
+
+[meta]
+id = "claude"
+name = "Claude"
+description = "Warm dark grey with clay orange for what is focused, selected or hovered."
+
+[tokens]
+# Surfaces: warm dark grey, darkest under the viewport
+background-primary = "#1f1e1d"
+background-secondary = "#262624"
+background-tertiary = "#30302e"
+panel-background = "#262624"
+header-background = "#30302e"
+viewport-background = "#141413"
+# Tabs
+tab-active = "#30302e"
+tab-inactive = "#1f1e1d"
+tab-hover = "#383835"
+# Text: ivory, warm grey for the quiet
+text-primary = "#faf9f5"
+text-secondary = "#b1ada1"
+text-disabled = "#75736c"
+text-accent = "#e8936f"
+text-error = "#ff7a6e"
+text-warning = "#e8c468"
+text-success = "#8cc97a"
+# Borders: warm lines; orange where something is focused
+border-color = "#3e3d39"
+border-focus = "#d97757"
+border-error = "#e5534b"
+# Status surfaces: dark tints behind success and danger controls
+success-surface = "#18261a"
+success-surface-hover = "#1f3322"
+success-surface-border = "#3a6640"
+success-surface-text-hover = "#a8dca0"
+error-surface = "#2c1814"
+error-surface-hover = "#3b1d18"
+error-surface-border = "#7a3326"
+# Buttons: the primary fill is a deep clay so its white label reads
+button-background = "#30302e"
+button-hover = "#3a3a37"
+button-pressed = "#1f1e1d"
+button-primary = "#a9502c"
+button-primary-hover = "#b85a35"
+# Inputs
+input-background = "#1f1e1d"
+input-border = "#45443f"
+input-focus = "#d97757"
+# Selection: the clay orange
+selection-background = "#d9775726"
+selection-border = "#d97757"
+# Overlays and dialogs
+overlay-background = "#141413e8"
+dialog-background = "#30302e"
+modal-backdrop = "#000000b3"
+dialog-titlebar-background = "#262624"
+# Accents: accent-cyan is the interactive accent, so it is the clay here
+accent-blue = "#6a9bcc"
+accent-cyan = "#d97757"
+accent-eustress = "#b85a35"
+accent-green = "#7fbf6a"
+accent-green-bright = "#a3d98f"
+accent-orange = "#f2a65a"
+accent-purple = "#b08cdc"
+accent-red = "#e5534b"
+accent-yellow = "#e8c468"
+# Ribbon tint categories
+cat-parts = "#d97757"
+cat-structure = "#8cc97a"
+cat-constraint = "#e8c468"
+cat-modify = "#b08cdc"
+cat-data = "#6a9bcc"
+# Floating surfaces: a faint orange edge on the viewport
+panel-glass = "#262624cc"
+border-highlight = "#ffffff0f"
+shadow-float = "#000000a6"
+border-glow-color = "#d9775740"
+# Ribbon
+ribbon-background = "#1f1e1d"
+ribbon-tab-active = "#30302e"
+ribbon-tab-inactive = "#1f1e1d"
+ribbon-separator = "#3e3d39"
+# Explorer
+explorer-item-hover = "#2e2d2b"
+explorer-item-selected = "#4a2a1f"
+explorer-folder = "#e3a35a"
+explorer-file = "#c9c6bc"
+# Output console
+output-info = "#8fb8e0"
+output-warning = "#e8c468"
+output-error = "#ff7a6e"
+output-debug = "#b1ada1"
+# Gizmo: the standard axis hues, for muscle memory
+gizmo-x = "#f14c4c"
+gizmo-y = "#4ec9b0"
+gizmo-z = "#569cd6"
+# Shadow
+shadow-color = "#000000a0"
+# Lengths: soft rounded corners, a quiet edge glow
+accent-glow-blur = "8px"
+backdrop-blur-lg = "14px"
+radius-sm = "4px"
+radius-md = "8px"
+radius-lg = "12px"
+radius-xl = "16px"

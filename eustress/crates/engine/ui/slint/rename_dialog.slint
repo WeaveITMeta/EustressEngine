@@ -1,0 +1,142 @@
+// ============================================================================
+// Rename Dialog: File > Rename. Renames the open Space's folder, or the
+// Universe folder that holds it, while Studio has the Space open.
+// Law 1 chrome: DialogScrim > DialogCard > DialogFooter (dialog_kit.slint).
+// Enter renames, Escape cancels. While the rename runs, the dialog stays up
+// and only says it is working; Studio closes it when the Space reopens.
+// ============================================================================
+
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, DialogFooter, KitButton, KitSegmented, KitNotice } from "dialog_kit.slint";
+
+export component RenameDialog inherits Rectangle {
+    // "space" or "universe": which folder is renamed.
+    in-out property <string> target: "space";
+    // The folders' current names; an empty Universe name means the Space is
+    // not inside a Universe folder, and only the Space can be renamed.
+    in property <string> space-name: "";
+    in property <string> universe-name: "";
+    in-out property <string> new-name: "";
+    // Why the last rename could not run, or did not finish.
+    in property <string> error: "";
+    // True while a rename runs.
+    in property <bool> busy: false;
+
+    callback on-rename(/* target */ string, /* new name */ string);
+    callback on-cancel();
+
+    property <string> current-name: root.target == "universe" ? root.universe-name : root.space-name;
+    property <bool> can-rename: !root.busy && root.new-name != "" && root.new-name != root.current-name;
+
+    width: 100%;
+    height: 100%;
+
+    DialogScrim {
+        dismiss => {
+            if !root.busy {
+                root.on-cancel();
+            }
+        }
+
+        card := DialogCard {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(420px, parent.width - 32px);
+            height: min(card.preferred-height, parent.height - 32px);
+            icon: @image-url("../../assets/icons/ui/rename.svg");
+            title: "Rename";
+            subtitle: root.target == "universe" ? "The Universe folder that holds this Space" : "The open Space's folder";
+            close => {
+                if !root.busy {
+                    root.on-cancel();
+                }
+            }
+
+            keys := FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Escape && !root.busy {
+                        root.on-cancel();
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                VerticalLayout {
+                    padding: 0;
+                    spacing: 0;
+
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 14px;
+                        padding-bottom: 16px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        if root.universe-name != "": KitSegmented {
+                            managed: true;
+                            options: ["Space", "Universe"];
+                            current-index: root.target == "universe" ? 1 : 0;
+                            selected(i) => {
+                                if !root.busy {
+                                    root.target = i == 1 ? "universe" : "space";
+                                    root.new-name = root.current-name;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.target == "universe" ? "Universe name" : "Space name";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                        }
+
+                        LineEdit {
+                            text <=> root.new-name;
+                            enabled: !root.busy;
+                            placeholder-text: root.current-name;
+                            init => { self.focus(); }
+                            accepted(t) => {
+                                if root.can-rename {
+                                    root.on-rename(root.target, t);
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Renames the folder on disk. Studio saves the Space, closes it for a moment, renames the folder and opens it again under the new name.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                        }
+
+                        if root.busy: KitNotice {
+                            kind: "info";
+                            text: "Renaming. Studio reopens the Space when the folder has its new name.";
+                        }
+                        if !root.busy && root.error != "": KitNotice {
+                            kind: "error";
+                            text: root.error;
+                        }
+                    }
+
+                    DialogFooter {
+                        KitButton {
+                            text: "Cancel";
+                            enabled: !root.busy;
+                            clicked => { root.on-cancel(); }
+                        }
+                        KitButton {
+                            text: root.busy ? "Renaming..." : "Rename";
+                            kind: "primary";
+                            enabled: root.can-rename;
+                            clicked => { root.on-rename(root.target, root.new-name); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
