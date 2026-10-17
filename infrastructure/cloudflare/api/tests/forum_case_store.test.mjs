@@ -14,11 +14,11 @@ import {
   listOpenForumCases, forumCaseKey, forumCaseR2Key, forumReportCapKey, forumPostLockKey, forumTextItemId, forumUploadIpOf,
   FORUM_CASE_PREFIX, FORUM_CASE_WRITE_ATTEMPTS, FORUM_OPEN_LIST_MAX, FORUM_TEXT_ITEM_PREFIX,
   registerForumDecisionApplier, makeToolExecutor, forumPostIpKey, forumPostIpPrefix, forumUploadIpsOf, FORUM_UPLOAD_IPS_MAX,
-  FORUM_UPLOAD_IP_MAX_AGE_DAYS, releaseForumNotice,
+  FORUM_UPLOAD_IP_MAX_AGE_DAYS, releaseForumNotice, writeOwedForumReports, handleModerationRoute,
 } from '../src/moderation.mjs';
-import { handleCaseRoute, forumCsamSilenced, forumNoticeEntry } from '../src/case_history.mjs';
+import { handleCaseRoute, forumNoticeEntry } from '../src/case_history.mjs';
 import { readEvidence, sealEvidence, handleEvidenceRoute, retryPendingEvidence, VAULT_PREFIX, PENDING_PREFIX, PENDING_CURSOR_KEY } from '../src/evidence_vault.mjs';
-import { loadLegalReport, writeLegalReport, recordScamRemoval, weeklyScamBatch, amendLegalReportUploadIps, amendLegalReport, NOT_VIEWED_PERSON_DECIDED, VIEWED_BY_STAFF } from '../src/legal_reports.mjs';
+import { loadLegalReport, writeLegalReport, recordScamRemoval, weeklyScamBatch, amendLegalReportUploadIps, amendLegalReport, sweepLegalReports, NOT_VIEWED_PERSON_DECIDED, VIEWED_BY_STAFF } from '../src/legal_reports.mjs';
 
 const THREAD = 'c'.repeat(24);
 const POST = `${THREAD}-1`;
@@ -679,75 +679,78 @@ test('R5-2: resolveForumCase answers the case_version its own write made, not a 
   assert.ok((await loadForumCase(env, POST)).seq > r.case_version.seq, 'later writes (the seal, the push record) came after');
 });
 
-// The author is told nothing: no case history entry, no feed item, no email.
-async function authorToldNothing(env, label) {
+// The author's own case history entries, as the route answers them.
+async function authorEntries(env) {
   const deps = { verifyAuth: async () => AUTHOR, json: (body, status = 200) => new Response(JSON.stringify(body), { status }) };
   const url = new URL('https://api.eustress.dev/api/account/cases');
-  const res = await handleCaseRoute(new Request(url, { method: 'GET' }), url, env, {}, deps);
-  assert.deepEqual((await res.json()).cases, [], `${label}: no forum_notice`);
-  assert.deepEqual((await env.SOCIAL.list({ prefix: `notif:${AUTHOR}:` })).keys, [], `${label}: no feed item`);
-  assert.equal(env.mail.filter((m) => m.to === `${AUTHOR}@example.com`).length, 0, `${label}: no email`);
+  return (await (await handleCaseRoute(new Request(url, { method: 'GET' }), url, env, {}, deps)).json()).cases;
 }
+// An entry with what may differ (ids and times) taken out.
+const bareEntry = (e) => JSON.stringify({ ...e, reference: null, post: null, opened_at: null, decided_at: null, updated_at: null });
 
-test('R5-5: a staff csam removal of a post no one reported as csam tells the author nothing until the report or a release', async () => {
-  // The case exists only because the post was sealed under another category; nothing cites csam until the person removes it.
-  const env = await environment();
-  assert.equal((await seal(env, { category: 'personal_info' })).ok, true);
-  assert.equal((await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN }))).ok, true);
-  const rec = await loadForumCase(env, POST);
-  assert.deepEqual([rec.removed, rec.hide_reason], [true, 'removed']);
-  assert.equal(forumCsamSilenced(rec), true);
-  await authorToldNothing(env, 'a staff csam removal');
-  // The silence lifts as before: a person restores the post.
-  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'restore', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), false);
-  // Or the report's release.
-  const env2 = await environment();
-  await seal(env2, { category: 'personal_info' });
-  await quiet(() => resolveForumCase({ env: env2, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN }));
-  await authorToldNothing(env2, 'before the release');
-  const { releaseForumNotice } = await import('../src/moderation.mjs');
-  assert.equal((await quiet(() => releaseForumNotice(env2, POST, { by: 'system', reason: 'the report was sent' }))).ok, true);
-  assert.equal(forumCsamSilenced(await loadForumCase(env2, POST)), false);
+test('R8-3 (removals): a person\'s removal in csam or nonconsensual_sexual shows one byte-identical generic entry at once; other categories stay named', async () => {
+  const viewOf = async (category, seed) => {
+    const env = await environment();
+    await seed(env);
+    assert.equal((await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category, reviewerId: ADMIN }))).ok, true, category);
+    const cases = await authorEntries(env);
+    assert.equal(cases.length, 1, `${category}: told at once`);
+    return cases[0];
+  };
+  // An unreported post (a staff seal under another category makes its case), and a reported one.
+  for (const seed of [(env) => seal(env, { category: 'personal_info' }), (env) => report(env, REPORTERS[0], 'spam')]) {
+    const csam = await viewOf('csam', seed);
+    const ncii = await viewOf('nonconsensual_sexual', seed);
+    assert.equal(bareEntry(csam), bareEntry(ncii), 'byte-identical but for ids and times');
+    assert.deepEqual([csam.status, csam.outcome, csam.headline], ['under_review', 'removed', 'Your forum post was removed while a person reviews it.']);
+    assert.doesNotMatch(bareEntry(csam), /A1|A5|minor|sexual|consent|csam/i);
+    for (const named of ['threat', 'scam', 'personal_info', 'spam']) {
+      const e = await viewOf(named, seed);
+      assert.match(e.feedback.reasons[0].why, /Code (A2|A6|A7|B4)/, `${named} stays named`);
+      assert.equal(e.headline, 'A moderator removed your forum post.');
+    }
+  }
 });
 
-test('R5-5: a csam seal alone silences the author, even through a later gate, until a person lifts it', async () => {
-  const env = await environment();
-  assert.equal((await seal(env, { category: 'csam' })).ok, true);
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), true);
-  // A gate would be told to the author; under the silence it is not.
-  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'gate', category: 'adult_sexual', reviewerId: ADMIN }));
-  await authorToldNothing(env, 'sealed as csam, then gated');
-  // A removal under another category does not lift it (R6-1); a restore does.
-  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'threat', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), true);
-  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'restore', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), false);
+test('R8-3 (seals): a seal in csam or nonconsensual_sexual of a post that is down shows the same generic entry; a seal never changes one shown', async () => {
+  // A post already down with nothing shown to its author (its case written down by another path): the seal shows the generic
+  // entry.
+  const down = async (category) => {
+    const env = await environment();
+    await seal(env, { category: 'personal_info' });
+    await env.SCENES.rewriteCase(POST, (r) => { r.removed = true; r.hidden = true; r.removed_by = 'person'; r.shown_entries = []; });
+    await seal(env, { category, postBody: `${TEXT} ${category}` });
+    return (await authorEntries(env))[0];
+  };
+  const csam = await down('csam');
+  const ncii = await down('nonconsensual_sexual');
+  assert.ok(csam && ncii, 'both are told');
+  assert.equal(bareEntry(csam), bareEntry(ncii));
+  assert.equal(csam.headline, 'Your forum post was removed while a person reviews it.');
+  // A seal of a post that is up shows nothing; a seal never changes an entry already shown.
+  const up = await environment();
+  await seal(up, { category: 'csam' });
+  assert.deepEqual(await authorEntries(up), [], 'nothing happened to the post');
+  const shown = await environment();
+  await report(shown, REPORTERS[0], 'nonconsensual_sexual');
+  const before = await authorEntries(shown);
+  await seal(shown, { category: 'csam' });
+  assert.deepEqual(await authorEntries(shown), before, 'the seal changed nothing shown');
 });
 
 // -- round 6 -------------------------------------------------------------------------------------------------------------------
 
-test('R6-1: once silenced as csam, a later removal under another category never lifts the silence; a restore or the release does', async () => {
-  // Security's reproduction: a csam removal, then a spam removal (the thread's, applied to this post).
+test('R6-1 (now): a later removal under another category is a person\'s decision and shows its own entry; nothing is ever silenced', async () => {
   const env = await environment();
   await seal(env, { category: 'personal_info' });
   await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), true);
-  for (const category of ['spam', 'threat', 'scam', 'personal_info', 'nonconsensual_sexual']) {
-    await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category, reviewerId: ADMIN }));
-    assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), true, `a later ${category} removal`);
-  }
-  await authorToldNothing(env, 'csam, then other removals');
+  assert.equal((await authorEntries(env))[0].headline, 'Your forum post was removed while a person reviews it.');
+  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'spam', reviewerId: ADMIN }));
+  assert.match((await authorEntries(env))[0].feedback.reasons[0].why, /spam \(Code B4\)/);
   await quiet(() => resolveForumCase({ env, postId: POST, decision: 'restore', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env, POST)), false, 'a restore lifts it');
-  // The same after a csam report, and the release lifts it.
-  const env2 = await environment();
-  await report(env2, REPORTERS[0], 'csam');
-  await quiet(() => resolveForumCase({ env: env2, postId: POST, decision: 'remove', category: 'spam', reviewerId: ADMIN }));
-  assert.equal(forumCsamSilenced(await loadForumCase(env2, POST)), true);
-  await authorToldNothing(env2, 'a csam report, then a spam removal');
-  assert.equal((await quiet(() => releaseForumNotice(env2, POST, { by: 'system', reason: 'the report was sent' }))).ok, true);
-  assert.equal(forumCsamSilenced(await loadForumCase(env2, POST)), false, 'the release lifts it');
+  assert.equal((await authorEntries(env))[0].outcome, 'restored');
+  // Every entry it showed is on the case, in order.
+  assert.deepEqual((await loadForumCase(env, POST)).shown_entries.map((e) => [e.kind, e.category || e.decision]), [['person_removed', 'csam'], ['person_removed', 'spam'], ['person_decided', 'restore']]);
 });
 
 const DAY_MS = 86400 * 1000;
@@ -865,20 +868,20 @@ test('item 6: after a failed push, the seal that comes later amends the report\'
   let [rep] = await reportsOf(env);
   assert.deepEqual([rep.status, rep.evidence.items, rep.evidence.sealed], ['ready_to_send', [], false]);
   // The forum retries: the seal amends the report still waiting.
-  assert.equal((await seal(env, { uploadIps: [A] })).ok, true);
+  assert.equal((await seal(env, { now: Date.now(), uploadIps: [A] })).ok, true);
   [rep] = await reportsOf(env);
   assert.deepEqual([rep.status, rep.evidence.items, rep.evidence.sealed, rep.who.upload_ips], ['ready_to_send', [keyedItem(TEXT)], true, [A]]);
   assert.ok(rep.history.some((h) => h.event === 'amended' && h.detail.items === 1));
   // Sent: a later text is an addendum, the report is not edited, and staff are told.
   await env.SOCIAL.put(`legalreport:${rep.id}`, JSON.stringify({ ...rep, status: 'sent' }));
   const before = await loadLegalReport(env, rep.id);
-  assert.equal((await seal(env, { postBody: `${TEXT} v2`, uploadIps: [] })).ok, true);
+  assert.equal((await seal(env, { now: Date.now(), postBody: `${TEXT} v2`, uploadIps: [] })).ok, true);
   const after = await loadLegalReport(env, rep.id);
   assert.deepEqual([after.evidence, after.who], [before.evidence, before.who]);
   assert.deepEqual(after.addenda.map((a) => [a.kind, a.items, a.sealed, a.sent]), [['evidence_items', [keyedItem(`${TEXT} v2`)], true, false]]);
   assert.ok(await env.SOCIAL.get(`legalalert:${rep.id}:addendum:1`), 'staff were told');
   // Sealing the same text again adds nothing.
-  await seal(env, { postBody: `${TEXT} v2`, uploadIps: [] });
+  await seal(env, { now: Date.now(), postBody: `${TEXT} v2`, uploadIps: [] });
   assert.equal((await loadLegalReport(env, rep.id)).addenda.length, 1);
 });
 
@@ -904,7 +907,7 @@ test('R7-3: the forum\'s pairs are read only for the text sealed in that call, n
   // The body's own pair has expired (gone from KV); a held edit's pair is still there. Neither seal path takes it.
   const env = await environment();
   await putPair(env, pairFor(HELD, '192.0.2.70', DAY_MS));
-  const sealed = await seal(env);
+  const sealed = await seal(env, { now: Date.now() });
   assert.equal(sealed.upload_ip_sealed, false);
   assert.deepEqual(await sealedIpsOf(env, sealed.reference, keyedItem(TEXT)), [], 'the body is not sealed with the held edit\'s address');
   assert.ok(!plainStorage(env).split('\n').filter((l) => !l.startsWith(forumPostIpPrefix(POST))).join('\n').includes('192.0.2.70'));
@@ -923,7 +926,7 @@ test('R7-3: the forum\'s pairs are read only for the text sealed in that call, n
   const [rep] = await reportsOf(env2);
   assert.deepEqual(rep.who.upload_ips, [own], 'the sealed text\'s own pair, and not the held edit\'s');
   // The held edit sealed later is a new item: its pair is added to the report with it.
-  await seal(env2, { postBody: HELD });
+  await seal(env2, { now: Date.now(), postBody: HELD });
   const [after] = await reportsOf(env2);
   assert.deepEqual(after.who.upload_ips.map((x) => x.ip).sort(), ['192.0.2.71', '192.0.2.72']);
   assert.ok(after.who.upload_ips.every((x) => [keyedItem(TEXT), keyedItem(HELD)].includes(x.item_id)));
@@ -939,9 +942,9 @@ test('R7-3: a pair more than 30 days old is dropped, read from the forum or pass
   assert.deepEqual(forumUploadIpsOf([at(31), at(400)], now), []);
   const env = await environment();
   await putPair(env, { ...at(31), ip: '192.0.2.81' });
-  assert.equal((await seal(env)).upload_ip_sealed, false, 'the forum\'s old pair');
+  assert.equal((await seal(env, { now: Date.now() })).upload_ip_sealed, false, 'the forum\'s old pair');
   const env2 = await environment();
-  assert.equal((await seal(env2, { uploadIps: [{ ...at(31), ip: '192.0.2.82' }] })).upload_ip_sealed, false, 'a passed old pair');
+  assert.equal((await seal(env2, { now: Date.now(), uploadIps: [{ ...at(31), ip: '192.0.2.82' }] })).upload_ip_sealed, false, 'a passed old pair');
   for (const e of [env, env2]) assert.ok(!/192\.0\.2\.8[12]/.test(plainStorage(e).split('\n').filter((l) => !l.startsWith(forumPostIpPrefix(POST))).join('\n')));
 });
 
@@ -954,7 +957,7 @@ test('Required 1: one key per version, read by prefix and paged; the old single 
     const r = await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT }));
     assert.equal(r.ok, true);
     assert.deepEqual((await reportsOf(env))[0].who.upload_ips, [], old);
-    assert.equal((await seal(env)).upload_ip_sealed, false, old);
+    assert.equal((await seal(env, { now: Date.now() })).upload_ip_sealed, false, old);
   }
   // Many versions, listed two keys a page: the sealed text's key, at the end, is reached.
   const env = await environment();
@@ -964,13 +967,13 @@ test('Required 1: one key per version, read by prefix and paged; the old single 
   await putPair(env, own);
   const listedBefore = (await env.SOCIAL.list({ prefix: forumPostIpPrefix(POST) })).list_complete;
   assert.equal(listedBefore, false, 'the versions take more than one page');
-  const r = await seal(env);
+  const r = await seal(env, { now: Date.now() });
   assert.equal(r.upload_ip_sealed, true);
   assert.deepEqual(await sealedIpsOf(env, r.reference, keyedItem(TEXT)), [own]);
   // A key whose value names another item is not this item's pair.
   const env2 = await environment();
   await env2.SOCIAL.put(forumPostIpKey(POST, keyedItem(TEXT)), JSON.stringify(pairFor(HELD, '192.0.2.121', DAY_MS)));
-  assert.equal((await seal(env2)).upload_ip_sealed, false);
+  assert.equal((await seal(env2, { now: Date.now() })).upload_ip_sealed, false);
 });
 
 test('Required 2: the report says per sealed text item whether its address is known, and never that the Worker records none', async () => {
@@ -1003,10 +1006,10 @@ test('Required 4: a check removal as csam or as nonconsensual_sexual gives its a
   const cases = (await (await handleCaseRoute(new Request(url, { method: 'GET' }), url, env, {}, deps)).json()).cases;
   assert.equal(cases.length, 2);
   assert.equal(bare(cases[0]), bare(cases[1]));
-  // A reported post's csam silence is unchanged.
+  // A reported csam post is no longer silent either (R8-3): it shows the one generic hide entry.
   const env2 = await environment();
   await report(env2, REPORTERS[0], 'csam');
-  assert.equal(forumCsamSilenced(await loadForumCase(env2, POST)), true);
+  assert.equal(forumNoticeEntry(await loadForumCase(env2, POST)).headline, 'Your forum post was hidden after a report while a person reviews it.');
 });
 
 test('Required 10: the pending seals are paged with a cursor, and every one is reached across runs', async () => {
@@ -1029,4 +1032,231 @@ test('Required 10: the pending seals are paged with a cursor, and every one is r
   const swept = await quiet(() => retryPendingEvidence(env, { limit: 25 }));
   assert.deepEqual([swept.sealed, swept.still_pending, swept.pages, swept.complete], [60, 0, 3, true]);
   assert.equal(pendingKeys().length, 0);
+});
+
+// -- round 8: Required 11, a first post's title is sealed beside its body ----------------------------------------------------------
+
+const TITLE = 'WOMBAT-CANARY offending thread title';
+const titleItemOf = (title) => `post-title-${keyedHex(title).slice(0, 32)}`;
+
+test('Required 11: a report of post 1 seals its title beside the body, as its own item, under the reports\' detection', async () => {
+  const env = await environment();
+  const r = await report(env, REPORTERS[0], 'csam', { postTitle: TITLE });
+  assert.equal(r.hide, true);
+  const rec = await loadForumCase(env, POST);
+  assert.equal(rec.evidence_seal.ok, true);
+  assert.deepEqual([...rec.evidence_seal.sealed].sort(), [keyedItem(TEXT), titleItemOf(TITLE)].sort());
+  assert.equal(rec.evidence_seal.title_item_id, titleItemOf(TITLE));
+  assert.ok(rec.sealed_items.includes(titleItemOf(TITLE)));
+  assert.ok(!titleItemOf(TITLE).includes(crypto.createHash('sha256').update(TITLE, 'utf8').digest('hex').slice(0, 32)), 'a keyed hash, not a plain one');
+  const read = await readEvidence(env, { caseRef: rec.reference, adminId: ADMIN, legalProcess: LEGAL });
+  const title = read.items.find((i) => i.index.item === titleItemOf(TITLE));
+  assert.equal(dec.decode(title.content), TITLE);
+  assert.equal(title.facts.detection.source, 'member_reports');
+  assert.deepEqual(title.facts.uploader.upload_ips, [], 'no address is paired with a title');
+  assert.ok(!plainStorage(env).includes('offending thread title'), 'the title is stored nowhere in the clear');
+  // A title the forum_title rules do not allow is dropped, and the report is still filed and sealed.
+  for (const bad of ['x'.repeat(121), 42, '   ']) {
+    const e = await environment();
+    const filed = await report(e, REPORTERS[0], 'csam', { postTitle: bad });
+    assert.equal(filed.ok, true);
+    const c = await loadForumCase(e, POST);
+    assert.deepEqual(c.evidence_seal.sealed, [keyedItem(TEXT)], JSON.stringify(bad));
+  }
+});
+
+test('Required 11: resolveForumCase and sealForumEvidence take postTitle too; the report lists it with no address', async () => {
+  const env = await environment();
+  await report(env, REPORTERS[0], 'spam');
+  const own = pairFor(TEXT, '192.0.2.140', DAY_MS);
+  await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT, postTitle: TITLE, uploadIps: [own] }));
+  const [rep] = await reportsOf(env);
+  assert.ok(rep.evidence.items.includes(titleItemOf(TITLE)), 'a sealed item of the report');
+  assert.deepEqual(rep.who.upload_ips, [own], 'the body\'s pair only');
+  assert.deepEqual(rep.who.upload_ip_unknown_items, [{ item_id: titleItemOf(TITLE), upload_ip: null, reason: 'not_known' }], 'the title, which has no pair');
+  // The same title sealed again is already sealed; another title is a new item.
+  const again = await seal(env, { postTitle: TITLE });
+  assert.ok((await loadForumCase(env, POST)).evidence_seal.already.includes(titleItemOf(TITLE)));
+  assert.equal(again.ok, true);
+  await seal(env, { postTitle: `${TITLE} edited` });
+  assert.ok((await loadForumCase(env, POST)).evidence_seal.sealed.includes(titleItemOf(`${TITLE} edited`)));
+});
+
+// -- forums round 8 (Security): one generic entry, frozen; report_owed; the owed sweep; the forum case read audited -----------
+
+test('R8-3: every report hide or removal shows one byte-identical entry, whatever the category', async () => {
+  const views = {};
+  for (const [category, reporters] of [['csam', 1], ['nonconsensual_sexual', 1], ['personal_info', 3], ['threat', 3], ['scam', 3]]) {
+    const env = await environment();
+    for (const id of REPORTERS.slice(0, reporters)) await report(env, id, category);
+    const cases = await authorEntries(env);
+    assert.equal(cases.length, 1, `${category}: told at once`);
+    views[category] = cases[0];
+  }
+  const want = bareEntry(views.csam);
+  for (const [category, e] of Object.entries(views)) assert.equal(bareEntry(e), want, category);
+  assert.deepEqual([views.csam.status, views.csam.outcome, views.csam.headline], ['under_review', 'hidden', 'Your forum post was hidden after a report while a person reviews it.']);
+  assert.doesNotMatch(want, /A1|A5|A6|A2|A7|minor|sexual|consent|threat|scam|private/i);
+});
+
+test('R8-3: an entry once shown is frozen: a later report never withdraws or changes it (variant A), and the case records what was shown', async () => {
+  const env = await environment();
+  await report(env, REPORTERS[0], 'nonconsensual_sexual');
+  const shown = JSON.stringify(await authorEntries(env));
+  // A later csam report, a report that removes, a csam seal: nothing the author sees changes.
+  await report(env, REPORTERS[1], 'csam');
+  assert.equal(JSON.stringify(await authorEntries(env)), shown, 'the ncii entry did not vanish at a csam report');
+  await report(env, REPORTERS[2], 'threat');
+  await seal(env, { category: 'csam' });
+  assert.equal(JSON.stringify(await authorEntries(env)), shown);
+  const rec = await loadForumCase(env, POST);
+  assert.deepEqual(rec.shown_entries.map((e) => e.kind), ['report_hidden'], 'one entry shown, and kept');
+  // A case written before shown_entries existed keeps the entry its state showed.
+  const legacy = await environment();
+  await report(legacy, REPORTERS[0], 'nonconsensual_sexual');
+  await legacy.SCENES.rewriteCase(POST, (r) => { delete r.shown_entries; });
+  const legacyShown = JSON.stringify(await authorEntries(legacy));
+  await report(legacy, REPORTERS[1], 'csam');
+  assert.equal(JSON.stringify(await authorEntries(legacy)), legacyShown);
+  assert.deepEqual((await loadForumCase(legacy, POST)).shown_entries.map((e) => e.kind), ['report_hidden']);
+});
+
+test('R8-3: a case the check refused at posting is not decided by a person: 409 check_removed (variant B), and its entry stands', async () => {
+  const env = await environment();
+  await quiet(() => recordForumRemoval({ env, postId: POST, threadId: THREAD, authorId: AUTHOR, text: TEXT, check: { verdict: 'refuse', category: 'nonconsensual_sexual', confidence: 0.97, confidence_band: 'high' } }));
+  const shown = JSON.stringify(await authorEntries(env));
+  const r = await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN }));
+  assert.deepEqual([r.ok, r.code, r.status], [false, 'check_removed', 409]);
+  // Through the admin tool route too, answered 409.
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+  const url = new URL('https://api.eustress.dev/api/admin/moderation/tool');
+  const res = await quiet(() => handleModerationRoute(new Request(url, { method: 'POST', body: JSON.stringify({ name: 'moderation_forum_resolve', args: { post_id: POST, decision: 'remove', category: 'csam', rationale: 'Acting on the placeholder as csam.' } }) }), url, env, {}, { json, cors: {}, requireAdmin: async () => ADMIN, auditLog: async () => {} }));
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, 'check_removed');
+  assert.equal(JSON.stringify(await authorEntries(env)), shown, 'the generic entry already shown stands');
+  assert.deepEqual((await loadForumCase(env, POST)).decisions, []);
+});
+
+// Every case write after the first conflict from here on (another writer, again and again), and legal report writes failing.
+function breakAfterDecision(env) {
+  env.SCENES.hooks.beforePut = async (key, opts) => {
+    if (key === forumCaseR2Key(POST) && opts.onlyIf?.etagMatches) await env.SCENES.rewriteCase(POST, (r) => { r.churn = (r.churn || 0) + 1; });
+  };
+  const realPut = env.SOCIAL.put.bind(env.SOCIAL);
+  env.SOCIAL.put = async (key, value, opts) => { if (key.startsWith('legalreport:')) throw new Error('KV is unavailable'); return realPut(key, value, opts); };
+  return () => { env.SCENES.hooks.beforePut = null; env.SOCIAL.put = realPut; };
+}
+
+test('R8-2: a failure after the decision answers ok with pending; report_owed is written before the push, and the sweep writes the report', async () => {
+  const env = await environment();
+  await report(env, REPORTERS[0], 'spam');
+  let restore = null;
+  const pushed = [];
+  registerForumDecisionApplier(async (a) => { pushed.push(a); restore = breakAfterDecision(env); });
+  let r;
+  try {
+    r = await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT }));
+  } finally {
+    registerForumDecisionApplier(null);
+  }
+  assert.ok(Date.parse(pushed[0].decidedAt), 'the applier still receives decidedAt');
+  assert.deepEqual([r.ok, r.action, r.follow_up], [true, 'remove', 'pending']);
+  assert.deepEqual([...r.pending].sort(), ['case_write', 'legal_report']);
+  assert.equal(r.case_version.round, 1, 'the decision\'s own version');
+  restore();
+  let rec = await loadForumCase(env, POST);
+  assert.equal(rec.removed, true, 'the decision stands');
+  assert.deepEqual([rec.report_owed?.category, rec.report_owed?.reason, rec.report_owed?.by], ['csam', 'person_removal', ADMIN], 'the debt was written with the decision');
+  assert.ok(await env.SOCIAL.get(`legalowed:forum:${POST}`), 'and indexed for the sweep');
+  assert.equal((await reportsOf(env)).length, 0, 'no report yet');
+  // With FORUM_LEGAL_OWED_SWEEP off (the default) the hourly sweep never reaches the forum code: its index is not even listed,
+  // and the debt stays for the day the forums are turned on.
+  const listed = [];
+  const list = env.SOCIAL.list.bind(env.SOCIAL);
+  env.SOCIAL.list = (opts) => { listed.push(opts?.prefix); return list(opts); };
+  const off = await quiet(() => sweepLegalReports(env));
+  env.SOCIAL.list = list;
+  assert.equal(off.owed_reports, 'off');
+  assert.ok(listed.length > 0 && !listed.some((p) => String(p).startsWith('legalowed:')), 'the forum index is never listed while the setting is off');
+  assert.equal((await reportsOf(env)).length, 0, 'and no report is written');
+  assert.ok(await env.SOCIAL.get(`legalowed:forum:${POST}`), 'the debt is kept');
+  // On, the hourly legal sweep writes it, and the debt goes.
+  env.FORUM_LEGAL_OWED_SWEEP = 'on';
+  const swept = await quiet(() => sweepLegalReports(env));
+  assert.deepEqual([swept.owed_reports.written, swept.owed_reports.still_owed], [1, 0]);
+  const [rep] = await reportsOf(env);
+  assert.deepEqual([rep.kind, rep.when_where.case_id], ['csam', POST]);
+  rec = await loadForumCase(env, POST);
+  assert.equal(rec.report_owed, null);
+  assert.equal(await env.SOCIAL.get(`legalowed:forum:${POST}`), null);
+  // A plain success has pending: [] and no follow_up; the admin tool route answers 202 only when something is pending.
+  const ok = await environment();
+  await report(ok, REPORTERS[0], 'spam');
+  const plain = await quiet(() => resolveForumCase({ env: ok, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT }));
+  assert.deepEqual([plain.ok, plain.pending, 'follow_up' in plain], [true, [], false]);
+  assert.equal((await loadForumCase(ok, POST)).report_owed, null, 'written at once, so nothing is owed');
+  const viaRoute = await environment();
+  await report(viaRoute, REPORTERS[0], 'spam');
+  registerForumDecisionApplier(async () => { breakAfterDecision(viaRoute); });
+  try {
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+    const url = new URL('https://api.eustress.dev/api/admin/moderation/tool');
+    const res = await quiet(() => handleModerationRoute(new Request(url, { method: 'POST', body: JSON.stringify({ name: 'moderation_forum_resolve', args: { post_id: POST, decision: 'remove', category: 'csam', rationale: 'Sexual content involving a minor, confirmed.' } }) }), url, viaRoute, {}, { json, cors: {}, requireAdmin: async () => ADMIN, auditLog: async () => {} }));
+    assert.equal(res.status, 202);
+    const body = await res.json();
+    assert.deepEqual([body.ok, body.follow_up, body.pending.includes('legal_report')], [true, 'pending', true]);
+  } finally {
+    registerForumDecisionApplier(null);
+  }
+});
+
+test('Required 2: the owed-report sweep lets go of the case lease when its budget runs out mid-case', async () => {
+  const env = await environment();
+  await report(env, REPORTERS[0], 'spam');
+  let restore = null;
+  registerForumDecisionApplier(async () => { restore = breakAfterDecision(env); });
+  try { await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT })); }
+  finally { registerForumDecisionApplier(null); }
+  restore();
+  assert.ok((await loadForumCase(env, POST)).report_owed);
+  // The clock passes the budget after the lease is taken.
+  let t = 0;
+  const clock = () => (t++ < 2 ? 0 : 10_000);
+  const out = await quiet(() => writeOwedForumReports(env, {}, { budgetMs: 1, now: clock }));
+  assert.equal(out.stopped, true, 'stopped on the budget');
+  assert.equal(env.SCENES.objects.has(`locks/forum/${POST}.json`), false, 'the lease was released');
+  assert.ok((await loadForumCase(env, POST)).report_owed, 'still owed, for the next run');
+  // The next run, with time, writes it.
+  assert.equal((await quiet(() => writeOwedForumReports(env, {}))).written, 1);
+});
+
+test('moderation_forum_case is audited before it answers, and a read whose audit cannot be written does not happen', async () => {
+  const env = await environment();
+  await report(env, REPORTERS[0], 'threat', { note: 'NOTE-CANARY-AUDIT' });
+  const exec = (e) => makeToolExecutor(e, { auditLog: async () => {} }, { actor: 'admin', actorId: ADMIN });
+  const read = await exec(env)('moderation_forum_case', { post_id: POST });
+  assert.equal(read.ok, true);
+  const audited = [...env.AUDIT_LOG.store.values()].map((v) => JSON.parse(v)).filter((a) => a.action === 'FORUM_CASE_READ');
+  assert.deepEqual(audited.map((a) => [a.admin_id, a.details.post_id]), [[ADMIN, POST]]);
+  // The audit log throws: refused, and nothing of the case is answered.
+  const broken = { ...env, AUDIT_LOG: { put: async () => { throw new Error('down'); } } };
+  const refused = await quiet(() => exec(broken)('moderation_forum_case', { post_id: POST }));
+  assert.deepEqual([refused.ok, refused.code, refused.status], [false, 'audit_unavailable', 503]);
+  assert.equal(refused.case, undefined);
+  assert.ok(!JSON.stringify(refused).includes('NOTE-CANARY-AUDIT'));
+  assert.ok(!JSON.stringify(refused).includes(REPORTERS[0]));
+});
+
+test("resolveForumCase reads the forum's pairs against the clock it is given, not the machine's", async () => {
+  // A fixed moment long past: a pair 29.5 days before it is inside the 30-day window at that moment, and far outside it by the
+  // real clock. Passing `now` must keep the pair; reading the real clock would drop it.
+  const PAST = Date.parse('2026-01-01T12:00:00.000Z');
+  const pair = { ip: '192.0.2.91', at: new Date(PAST - 29.5 * 86400 * 1000).toISOString(), item_id: keyedItem(TEXT) };
+  const env = await environment();
+  await report(env, REPORTERS[0], 'spam', { now: PAST });
+  await env.SOCIAL.put(forumPostIpKey(POST, keyedItem(TEXT)), JSON.stringify(pair));
+  assert.equal((await quiet(() => resolveForumCase({ env, postId: POST, decision: 'remove', category: 'csam', reviewerId: ADMIN, postBody: TEXT, now: PAST }))).ok, true);
+  assert.deepEqual((await reportsOf(env))[0].who.upload_ips, [pair], 'kept: 29.5 days old at the given clock');
+  const rec = await loadForumCase(env, POST);
+  assert.deepEqual((await readEvidence(env, { caseRef: rec.reference, adminId: ADMIN, legalProcess: LEGAL })).items[0].facts.uploader.upload_ips, [pair], 'and sealed');
 });

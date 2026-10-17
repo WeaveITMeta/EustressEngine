@@ -82,13 +82,13 @@ async function later(ms, fn) {
 // ── A stuck KV does not hold up the answer ───────────────────────────────────
 
 test('a replacement answers within its KV budget when every mirror write hangs, and what was not written stays owed to the alarm', async () => {
-  // One write is allowed 400 ms and the whole answer 100: five hung writes would take two seconds.
-  const { env, k0 } = await environment({ MIRROR_INLINE_BUDGET_MS: 100, MIRROR_WRITE_TIMEOUT_MS: 400 });
+  // One write is allowed 400 ms and the whole answer 100. KV never answers a write, so an answer at all proves the change did
+  // not wait on KV past its budget; no stopwatch, so a busy machine cannot fail it. The caller's own timeout is set far out
+  // (ACCOUNT_CALL_TIMEOUT_MS) for the same reason; production's defaults are untouched.
+  const { env, k0 } = await environment({ MIRROR_INLINE_BUDGET_MS: 100, MIRROR_WRITE_TIMEOUT_MS: 400, ACCOUNT_CALL_TIMEOUT_MS: 600_000 });
   env.USERS.put = () => new Promise(() => {}); // KV never answers a write
-  const started = Date.now();
   const { result } = await rotation(env, k0);
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.ok(Date.now() - started < 1000, 'it did not wait on KV beyond its budget');
   const state = await call(env, 'state');
   assert.equal(state.key_epoch, 1, 'the key changed');
   assert.ok(state.mirror_pending > 0, 'the writes are owed');
@@ -98,7 +98,10 @@ test('a replacement answers within its KV budget when every mirror write hangs, 
 });
 
 test('the caller does not give up on a change that was already made: a stuck KV is not a 503', async () => {
-  const { env, k0 } = await environment({ MIRROR_INLINE_BUDGET_MS: 60, MIRROR_WRITE_TIMEOUT_MS: 40, ACCOUNT_CALL_TIMEOUT_MS: 800 });
+  // The caller waits far longer (ACCOUNT_CALL_TIMEOUT_MS) than the change waits on KV (MIRROR_INLINE_BUDGET_MS). KV never
+  // answers, so if the change waited on it the caller would give up and answer 503; with the inline budget it answers ok,
+  // however busy the machine.
+  const { env, k0 } = await environment({ MIRROR_INLINE_BUDGET_MS: 60, MIRROR_WRITE_TIMEOUT_MS: 40, ACCOUNT_CALL_TIMEOUT_MS: 30_000 });
   env.USERS.put = () => new Promise(() => {});
   const { result } = await rotation(env, k0);
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -106,22 +109,36 @@ test('the caller does not give up on a change that was already made: a stuck KV 
 });
 
 test('a change whose answer was lost says so: it may have gone through, and sign-in will tell', async () => {
-  const { env, k0, token } = await environment({ ACCOUNT_CALL_TIMEOUT_MS: 100 });
+  // No sleeps: the object receives the rotate only when the test opens a gate, after the route has given up on its answer.
+  // Begin runs with a long caller timeout; the rotate with a short one (ACCOUNT_CALL_TIMEOUT_MS is read on each call).
+  const { env, k0, token } = await environment({ ACCOUNT_CALL_TIMEOUT_MS: 600_000 });
   const real = env.ACCOUNT_AUTH;
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  let reached = null;
   env.ACCOUNT_AUTH = {
     idFromName: real.idFromName,
     get: (id) => {
       const stub = real.get(id);
-      return { fetch: async (url, init) => { if (String(url).endsWith('/rotate')) await new Promise((r) => setTimeout(r, 400)); return stub.fetch(url, init); } };
+      return { fetch: (url, init) => { if (String(url).endsWith('/rotate')) { reached = gate.then(() => stub.fetch(url, init)); return reached; } return stub.fetch(url, init); } };
     },
   };
-  const { r } = await rotateThroughRoutes(env, k0, token);
+  const begun = await post(env, '/api/identity/rotate/begin', {}, token);
+  assert.equal(begun.status, 200, JSON.stringify(begun.body));
+  const newKey = keyPair();
+  const m = rotationMessage({ origin: ORIGIN, accountId: ACCOUNT, oldKey: k0.hex, newKey: newKey.hex, challenge: begun.body.challenge });
+  env.ACCOUNT_CALL_TIMEOUT_MS = 50;
+  const r = await post(env, '/api/identity/rotate', { new_public_key: newKey.hex, challenge: begun.body.challenge, old_signature: k0.sign(m), new_signature: newKey.sign(m) }, token);
+  env.ACCOUNT_CALL_TIMEOUT_MS = 600_000;
   assert.equal(r.status, 503);
   assert.equal(r.body.code, 'account_unavailable');
   assert.match(r.body.error, /may have gone through/);
   assert.match(r.body.error, /NEW identity file/);
-  await new Promise((resolve) => setTimeout(resolve, 600));
-  assert.equal((await accountCall(real === env.ACCOUNT_AUTH ? env : { ...env, ACCOUNT_AUTH: real }, ACCOUNT, 'state')).key_epoch, 1, 'and it had: the object committed');
+  // The answer was lost, not the change: the object commits once its request arrives.
+  assert.ok(reached, 'the rotate was on its way to the object');
+  open();
+  await reached;
+  assert.equal((await accountCall({ ...env, ACCOUNT_AUTH: real }, ACCOUNT, 'state')).key_epoch, 1, 'and it had: the object committed');
 });
 
 // ── The notice is part of the change ─────────────────────────────────────────

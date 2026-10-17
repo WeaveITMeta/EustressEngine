@@ -31,7 +31,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { renderModerationEmail, buildModerationMime } from './moderation_email.mjs';
 import { textPart, userMessage } from './xai.mjs';
 import { readAccountEmail } from './email_ops.mjs';
-import { prepareUserImage } from './user_images.mjs';
+import { prepareUserImage, storedImageVerdict, pngColourType, measurePngAlpha, sha256Hex as sha256OfImage, identOfObject, imageVerdictKey } from './user_images.mjs';
+export { identOfObject, imageVerdictKey } from './user_images.mjs';
 import { tagsForReview, listingTags, reviewChoosesTags, judgeTags, withTagsWrittenBack, sameTagSet, JUDGE_TAGS_MAX, personalInfoIn } from './tags.mjs';
 import { createReviewMeter, meterKind, meterBytes, meterCall, persistReviewMeter, rollupRecentReviewCosts, reviewCostReport, handleReviewQuote } from './review_costs.mjs';
 import { BANDS, DESCRIPTORS, PSYCHEDELIC_USE_RATING, questionnaireOf, questionnaireRecord, questionnaireForm, checkAnswers } from './rating_questionnaire.mjs';
@@ -71,7 +72,17 @@ const judgeModelFrom = env => (typeof env?.JUDGE_MODEL === 'string' && /^claude-
 
 export const DOSSIER_VERSION = 1;
 export const DOSSIER_MAX_BYTES = 512 * 1024;
-export const CAPTURE_MAX_BYTES = 4 * 1024 * 1024;
+// The Messages API refuses an image whose base64 is over 5 MB, so the judge sends no image whose base64 is over
+// JUDGE_IMAGE_MAX_B64. Every image the judge reads (a capture, the thumbnail, the cover) is capped at upload to the raw bytes
+// that fit under it after base64 (three bytes become four characters), less a margin, and no serving path gives the public an
+// image over that size: an image the judge could not be sent is never one the public sees.
+export const JUDGE_IMAGE_MAX_B64 = 5_000_000;
+export const JUDGE_IMAGE_MARGIN_BYTES = 64 * 1024;
+export const JUDGE_IMAGE_MAX_BYTES = Math.floor(JUDGE_IMAGE_MAX_B64 * 3 / 4) - JUDGE_IMAGE_MARGIN_BYTES;
+export const CAPTURE_MAX_BYTES = JUDGE_IMAGE_MAX_BYTES;
+/// Whether a stored image (an R2 object, its head, or a list entry) is too large to have been judged. Decided from the stored
+/// size alone, never the body; an object whose size is not a number is treated as too large.
+export const overJudgeImageLimit = object => !(Number.isFinite(object?.size) && object.size <= JUDGE_IMAGE_MAX_BYTES);
 export const CAPTURE_MAX_COUNT = 8;
 // Jev's window is 32K tokens, shared by the state and the questions. The state
 // is budgeted in characters: script source tokenizes at roughly three
@@ -1629,6 +1640,15 @@ export function decideTriage({ signals, jev, thresholds }) {
 // on a quarantine, a harm (Group A) rejection or any other legal-lane outcome, where the listing is not dressed for the Gallery.
 export function decideFinal(args) {
   const out = decideOutcome(args);
+  // A verdict is only about what the judge was shown. When the run left an image out (too large to send, past the request's
+  // image budget, a type the API does not take, or unreadable), nothing the rules drew from the verdict lists the Space or
+  // tells the author a change that would: a person decides (rule 6). A rejection or a quarantine drawn from what it did see
+  // stands. The labels are the staff's: the author's view of a held case gives no reason.
+  const notJudged = imagesNotJudged(args.judge);
+  if (notJudged.length && (out.outcome === 'approve' || out.outcome === 'changes_requested')) {
+    out.outcome = 'hold'; out.lane = 'judge'; out.changes = null; out.suggested_edit = null; out.featured_candidate = false;
+    out.reasons.push({ code: 'images_not_judged', images: notJudged, rule: 6, lane: 'judge', action: 'hold' });
+  }
   if (out.lane === 'legal' || out.outcome === 'quarantine' || (out.outcome === 'reject' && out.lane === 'harm')) out.assigned_tags = [];
   return out;
 }
@@ -2163,29 +2183,66 @@ export function judgeSystemPrompt(policyText, policyHash) {
 }
 
 const JUDGE_MEDIA = { 'image/png': 'image/png', 'image/jpeg': 'image/jpeg', 'image/jpg': 'image/jpeg', 'image/webp': 'image/webp', 'image/gif': 'image/gif' };
-// The Messages API refuses an image whose base64 is over 5 MB and a request over 32 MB. A capture may be 4 MB (5.3 MB of
-// base64), so an image past the first limit, or one that would take the request past a 24 MB budget for images, is left out
-// and named to the judge as left out; a Space whose captures cannot all be read is judged on the ones that can.
-export const JUDGE_IMAGE_MAX_B64 = 5_000_000;
+// The Messages API refuses an image whose base64 is over 5 MB (JUDGE_IMAGE_MAX_B64, at the top of this file) and a request
+// over 32 MB. An image past the first limit (one stored before uploads were capped to it), one that would take the request
+// past a 24 MB budget for images, one of a type the API does not take, or one that could not be read is left out and named to
+// the judge as left out. A run that left any image out never lists the Space: decideFinal holds it for a person
+// (images_not_judged), so nothing the judge did not see is published by its verdict.
 export const JUDGE_IMAGES_MAX_B64 = 24_000_000;
+
+/// The base64 length of `bytes` raw bytes: what an image weighs in the judge's request.
+export const base64Length = bytes => 4 * Math.ceil(bytes / 3);
+
+/// Which images the judge is sent, from what is known of each without its bytes: `{ label, contentType, b64Length }`, with
+/// b64Length null when there are no bytes to send. Returns the indexes sent, in order, and each one left out with why:
+/// 'count' (past the most images a request carries, counted over the images sent: an entry left out for any other reason
+/// takes no place, so a capture left out never pushes the thumbnail or the cover out), 'unreadable' (no bytes: gone, or not
+/// the object the review recorded),
+/// 'type' (a type the API does not take), 'size' (over JUDGE_IMAGE_MAX_B64) or 'budget' (past JUDGE_IMAGES_MAX_B64). Pure;
+/// judgeImages and the staff report (scripts/oversize_images.mjs) both decide through it.
+export function judgeImagePlan(images) {
+  const sent = [], left = [];
+  let total = 0;
+  for (const [i, c] of (Array.isArray(images) ? images : []).entries()) {
+    const size = Number.isFinite(c?.b64Length) ? c.b64Length : Infinity;
+    const why = size === Infinity ? 'unreadable' : !JUDGE_MEDIA[c?.contentType] ? 'type' : size > JUDGE_IMAGE_MAX_B64 ? 'size'
+      : sent.length >= CAPTURE_MAX_COUNT + 2 ? 'count' : total + size > JUDGE_IMAGES_MAX_B64 ? 'budget' : null;
+    if (why) { left.push({ index: i, label: String(c?.label ?? `image ${i}`), why }); continue; }
+    sent.push(i);
+    total += size;
+  }
+  return { sent, left };
+}
+
+/// Which images the judge is sent, in order, and the labels of the ones it is not (judgeImagePlan over their base64).
+export function judgeImages(captures) {
+  const list = Array.isArray(captures) ? captures : [];
+  const plan = judgeImagePlan(list.map(c => ({ label: c?.label, contentType: c?.contentType, b64Length: typeof c?.base64 === 'string' ? c.base64.length : null })));
+  return { sent: plan.sent.map(i => list[i]), left: plan.left.map(l => l.label), reasons: plan.left };
+}
+
+/// Why an image was left out, in the words the judge is told (judgeImagePlan's reasons).
+const LEFT_OUT_WORDS = {
+  count: 'past the most images one request carries',
+  unreadable: 'not readable, or not the image the review recorded',
+  type: 'a file type the judge cannot read',
+  size: 'too large to send',
+  budget: 'past the request\'s budget for images',
+};
+
+/// The labels of the images a judge's run left out (judgeImages), or [] when it was sent every image it was given.
+export const imagesNotJudged = judge => (Array.isArray(judge?.captures_left_out) ? judge.captures_left_out : []);
 
 /// The judge's request, as sent to `messages.stream`. Exported so a test can pin its shape.
 export function judgeRequest({ summary, captures, policyText, policyHash, model = JUDGE_MODEL, effort = DEFAULT_JUDGE_EFFORT, maxTokens = DEFAULT_THRESHOLDS.judge_max_tokens }) {
-  const sent = [], left = [];
-  let total = 0;
-  for (const c of captures.slice(0, CAPTURE_MAX_COUNT + 2)) {
-    const size = typeof c.base64 === 'string' ? c.base64.length : Infinity;
-    if (!JUDGE_MEDIA[c.contentType] || size > JUDGE_IMAGE_MAX_B64 || total + size > JUDGE_IMAGES_MAX_B64) { left.push(c.label); continue; }
-    sent.push(c);
-    total += size;
-  }
+  const { sent, reasons } = judgeImages(captures);
   const content = [
     ...sent.map(c => ({ type: 'image', source: { type: 'base64', media_type: JUDGE_MEDIA[c.contentType], data: c.base64 } })),
     {
       type: 'text',
       text: [
         `The ${sent.length} image(s) above are: ${sent.length ? sent.map(c => c.label).join(', ') : 'NONE: no verdict may be issued from text or metadata alone, so set flagged_for_review unless the digest alone proves Code B8(a)'}.`,
-        ...(left.length ? [`Left out because they are too large to send: ${left.join(', ')}. Do not score anything only they would show.`] : []),
+        ...(reasons.length ? [`Left out, not sent: ${reasons.map(r => `${r.label} (${LEFT_OUT_WORDS[r.why] || r.why})`).join('; ')}. Do not score anything only they would show.`] : []),
         'Case summary (JSON):', JSON.stringify(summary),
       ].join('\n'),
     },
@@ -2212,7 +2269,10 @@ function judgeClient(env, deps) {
 /// `research` is the researcher's result, given to the judge as untrusted data. `stage` names the call in the meter.
 export async function claudeJudge({ sim, dossier, jev, triage, captures, policyText, policyHash, research = null, env, deps, timeoutMs = DEFAULT_THRESHOLDS.judge_timeout_ms, maxTokens = DEFAULT_THRESHOLDS.judge_max_tokens, meter = null, model = null, stage = 'judge' }) {
   const useModel = model || judgeModelFrom(env);
-  if (!env?.ANTHROPIC_API_KEY && !deps?.claude) return { malformed: true, error: 'judge_unavailable_no_key', model: useModel };
+  // The images this run sends and the ones it leaves out, on every answer, so the case records exactly what the judge saw.
+  const shown = judgeImages(captures);
+  const imageMeta = { captures_used: shown.sent.map(c => c.label), captures_left_out: shown.left };
+  if (!env?.ANTHROPIC_API_KEY && !deps?.claude) return { malformed: true, error: 'judge_unavailable_no_key', model: useModel, ...imageMeta };
   const summary = caseSummaryForModel(sim, dossier, jev, triage, { research: researchForJudge(research) });
   const effort = judgeEffortFrom(env);
   const body = judgeRequest({ summary, captures, policyText, policyHash, model: useModel, effort, maxTokens });
@@ -2227,13 +2287,13 @@ export async function claudeJudge({ sim, dossier, jev, triage, captures, policyT
     const status = Number.isInteger(e?.status) ? e.status : null;
     const timedOut = isTimeout(e) || e instanceof Anthropic.APIConnectionTimeoutError || e instanceof Anthropic.APIUserAbortError;
     metered({ ok: false, status, error: timedOut ? 'timeout' : status ? `http_${status}` : 'exception', usage: null });
-    if (timedOut) { console.error(`moderation ${stage}: no answer within ${Math.round(timeoutMs / 1000)}s`); return { malformed: true, error: 'judge_timeout', model: useModel }; }
-    if (status) { console.error(`moderation ${stage}: Anthropic`, status, String(e?.message || '').slice(0, 300)); return { malformed: true, error: `judge_unavailable_${status}`, model: useModel }; }
+    if (timedOut) { console.error(`moderation ${stage}: no answer within ${Math.round(timeoutMs / 1000)}s`); return { malformed: true, error: 'judge_timeout', model: useModel, ...imageMeta }; }
+    if (status) { console.error(`moderation ${stage}: Anthropic`, status, String(e?.message || '').slice(0, 300)); return { malformed: true, error: `judge_unavailable_${status}`, model: useModel, ...imageMeta }; }
     console.error(`moderation ${stage}: failed`, e?.name, String(e?.message || '').slice(0, 300));
-    return { malformed: true, error: 'judge_exception', model: useModel };
+    return { malformed: true, error: 'judge_exception', model: useModel, ...imageMeta };
   }
   metered({ ok: true, status: 200, usage: message?.usage ?? null, model_reported: message?.model, stop_reason: message?.stop_reason });
-  const meta = { model: message?.model || useModel, effort, stop_reason: message?.stop_reason ?? null, captures_used: captures.map(c => c.label) };
+  const meta = { model: message?.model || useModel, effort, stop_reason: message?.stop_reason ?? null, ...imageMeta };
   // Branch on the stop reason before reading the content: a refusal or a cut-off answer is not an answer.
   if (message?.stop_reason === 'refusal') return { malformed: true, error: 'judge_refusal', refusal_category: message?.stop_details?.category ?? null, ...meta };
   if (message?.stop_reason === 'max_tokens') return { malformed: true, error: 'judge_max_tokens', ...meta };
@@ -2601,6 +2661,24 @@ export async function forumBodyHash(env, body) {
 // FORUM_TEXT_ITEM_UNKEYED.
 export const FORUM_TEXT_ITEM_PREFIX = 'post-text-';
 export const FORUM_TEXT_ITEM_UNKEYED = 'post-text';
+// A thread's first post has a title, which can be the offending text itself. It is sealed beside the body, as its own item:
+// `post-title-` and the first 32 hex digits of the title's keyed hash. It is not a text version: no address is paired with it.
+export const FORUM_TITLE_ITEM_PREFIX = 'post-title-';
+
+/// The title as a seal takes it: a string of 1 to PROFILE_TEXT_MAX.forum_title (120) characters once cleaned (the forum_title
+/// rules), or null. A title that is not one is dropped, never a reason to refuse a report or a seal.
+export function forumTitleOf(title) {
+  if (typeof title !== 'string') return null;
+  const cleaned = profileTextCleaned(title);
+  return cleaned && [...cleaned].length <= PROFILE_TEXT_MAX.forum_title ? cleaned : null;
+}
+
+/// The vault item id of a post's title (`post-title-{hmac}`), or null without JWT_SECRET or without a title.
+export async function forumTitleItemId(env, title) {
+  const t = forumTitleOf(title);
+  const hash = t ? await forumBodyHash(env, t) : null;
+  return hash ? `${FORUM_TITLE_ITEM_PREFIX}${hash.slice(0, 32)}` : null;
+}
 const forumTextItemOfHash = hash => (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash) ? `${FORUM_TEXT_ITEM_PREFIX}${hash.slice(0, 32)}` : null);
 
 /// The vault item id of a forum post's text (`post-text-{hmac}`), or null without JWT_SECRET.
@@ -2693,6 +2771,66 @@ export async function loadForumCase(env, postId) {
   try { return (await readForumCase(env, postId))?.rec || null; } catch { return null; }
 }
 
+// ---------------------------------------------------------------------------
+// What the author has been shown: append-only, so an entry once shown is provably never withdrawn
+// ---------------------------------------------------------------------------
+// `shown_entries: [{ kind, at, round, category?, decision? }]` on the case, appended as each entry is shown, and never edited or
+// removed. src/case_history.mjs forumNoticeEntry renders the latest. Kinds:
+//   report_hidden    the post was hidden or removed by reports, whatever the category: one generic entry
+//   report_gated     behind the Adult content gate after reports
+//   check_removed    refused by the forum check at posting (generic for csam and nonconsensual_sexual)
+//   person_removed   a person removed it, or it was sealed as csam or nonconsensual_sexual while down (generic for those two)
+//   person_decided   a person restored, gated or ungated it
+// A later report or seal never replaces an entry: only a person's decision (or a new removal at posting) shows a new one.
+
+/// The categories whose entries are generic (src/case_history.mjs FORUM_GENERIC_CATEGORIES).
+export const FORUM_GENERIC_ENTRY_CATEGORIES = Object.freeze(['csam', 'nonconsensual_sexual']);
+
+// The entry a case written before shown_entries existed shows, derived once from its state (as the author saw it then).
+function forumLegacyShownEntry(rec) {
+  if (!rec) return null;
+  const last = (rec.decisions || []).at(-1) || null;
+  const round = Number.isInteger(rec.round) ? rec.round : 0;
+  if (rec.removed && rec.removed_by === 'check') return { kind: 'check_removed', at: rec.removed_at || null, round, category: rec.check_removal?.category || null };
+  if ((rec.removed && rec.removed_by === 'reports') || (rec.hidden && !rec.removed)) return { kind: 'report_hidden', at: rec.hidden_at || rec.removed_at || null, round };
+  if (rec.removed) return { kind: 'person_removed', at: last?.at || rec.removed_at || null, round, category: [...(rec.decisions || [])].reverse().find(d => d.decision === 'remove')?.category || null };
+  if (rec.gated && rec.waiting && !last?.decision?.startsWith('gate')) return { kind: 'report_gated', at: rec.gated_at || null, round };
+  if (last) return { kind: 'person_decided', at: last.at || null, round, decision: last.decision };
+  return null;
+}
+
+/// The entries the case has shown its author, oldest first: its `shown_entries`, or for a case from before them (no such
+/// field), the one entry its state showed.
+export function forumShownEntriesOf(rec) {
+  if (Array.isArray(rec?.shown_entries)) return rec.shown_entries;
+  const legacy = forumLegacyShownEntry(rec);
+  return legacy ? [legacy] : [];
+}
+
+// A case from before shown_entries gets them from what its state showed, before anything changes it: called first in every
+// change to a case, so the entry its author already saw is the first one kept.
+function seedShownEntries(rec) {
+  if (rec && !Array.isArray(rec.shown_entries)) rec.shown_entries = forumShownEntriesOf(rec).map(e => ({ ...e }));
+  return rec;
+}
+
+// Appends an entry as it is shown. `rule`: 'person' always shows it (a person's decision, a new refusal at posting); 'report'
+// shows it unless what the author sees is already a report hide of this round, or a removal the reports cannot change (a later
+// report never changes an entry); 'down' (a seal while the post is down) shows it only when nothing was shown. Returns whether
+// it was appended.
+function showForumEntry(rec, entry, rule) {
+  seedShownEntries(rec);
+  const list = rec.shown_entries;
+  const lastShown = list.at(-1);
+  if (rule === 'report') {
+    if (lastShown && lastShown.round === rec.round && (lastShown.kind === 'report_hidden' || (entry.kind === 'report_gated' && lastShown.kind === 'report_gated'))) return false;
+    if (lastShown && ['person_removed', 'check_removed'].includes(lastShown.kind) && rec.removed) return false;
+  }
+  if (rule === 'down' && list.length) return false;
+  list.push({ ...entry, round: Number.isInteger(rec.round) ? rec.round : 0 });
+  return true;
+}
+
 /// `{ round, seq }` of a case: `seq` rises on every write, so of two snapshots of one post the one with the higher seq is the
 /// newer. A post with no case is `{ round: 0, seq: 0 }`.
 export const forumCaseVersion = rec => ({ round: Number.isInteger(rec?.round) ? rec.round : 0, seq: Number.isInteger(rec?.seq) ? rec.seq : 0 });
@@ -2760,7 +2898,7 @@ function newForumCase({ postId, threadId, authorId, reference, at, bodyHash, pos
     created_at: at, updated_at: at, round: 0, seq: 0, waiting: false, waiting_since: null, tally: { remove: 0, gate: 0 },
     hidden: false, hidden_at: null, hide_reason: null, gated: false, gated_at: null, removed: false, removed_at: null, removed_by: null,
     evidence: { post_id: postId, thread_id: threadId, body_hash: bodyHash, body_hash_alg: FORUM_EVIDENCE_HASH, body_hash_unavailable: bodyHash === null, post_created_at: postCreatedAt, first_reported_at: firstReportedAt, sealed_at: at, later: [] },
-    reporters: [], reports: [], reports_not_kept: 0, decisions: [], views: [], history: [{ at, event: 'created', ...(by ? { detail: { by } } : {}) }],
+    reporters: [], reports: [], reports_not_kept: 0, decisions: [], views: [], shown_entries: [], history: [{ at, event: 'created', ...(by ? { detail: { by } } : {}) }],
   };
 }
 
@@ -2902,10 +3040,13 @@ function forumNoteOf(note) {
 /// `postBody` is the post's body as the forum stores it: it is hashed into the case's sealed evidence pointer (HMAC-SHA256
 /// under a key derived from JWT_SECRET, label FORUM_EVIDENCE_KEY_LABEL) and never kept, logged or sent anywhere. Without
 /// JWT_SECRET the report is still filed, with `body_hash: null` and `body_hash_unavailable: true`; there is no unkeyed hash. `postCreatedAt` is optional, the post's creation time (ISO), kept on the pointer.
+/// `postTitle` is optional, a thread's first post's title (forum_title rules, up to 120 characters; anything else is dropped):
+/// when the body is sealed it is sealed beside it, as its own item (forumTitleItemId), under the same detection. The same
+/// `postTitle` is taken by sealForumEvidence and resolveForumCase.
 /// A repeat report from the same account is a no-op answered the same way. A refusal is `{ ok: false, code, message, status }`:
 /// bad_post, bad_thread, bad_reporter, bad_author, bad_body, self_report, bad_category, bad_note, note_too_long (400),
 /// no_account (403), rate_limited (429), busy, unavailable (503). `message` is a sentence the route may show.
-export async function fileForumReport({ env, postId, threadId, postAuthorId, reporterId, category, note, postBody, postCreatedAt = null, now = Date.now() } = {}) {
+export async function fileForumReport({ env, postId, threadId, postAuthorId, reporterId, category, note, postBody, postTitle = null, postCreatedAt = null, now = Date.now() } = {}) {
   let lease = null;
   try {
     const t = thresholdsFrom(env);
@@ -2939,7 +3080,7 @@ export async function fileForumReport({ env, postId, threadId, postAuthorId, rep
     let events = [];
     const { rec, written } = await updateForumCase(env, postId, async current => {
       events = [];
-      const rec = current || newForumCase({ postId, threadId, authorId: postAuthorId, reference: null, at, bodyHash, postCreatedAt: created, firstReportedAt: at });
+      const rec = seedShownEntries(current || newForumCase({ postId, threadId, authorId: postAuthorId, reference: null, at, bodyHash, postCreatedAt: created, firstReportedAt: at }));
       await forumReferenceOf(env, rec, 'forum report');
       if (rec.reporters.includes(reporterId)) return null;
       // Sealed: the first hash stays; a body edited since is recorded beside it, hash and time only. A first report filed
@@ -2954,8 +3095,6 @@ export async function fileForumReport({ env, postId, threadId, postAuthorId, rep
       if (rec.reports.length < FORUM_REPORTS_KEPT) rec.reports.push({ reporter_id: reporterId, category, note: kept.note, at, counted: reporter.counted, round: rec.round, body_hash: bodyHash, body_hash_unavailable: bodyHash === null });
       else rec.reports_not_kept += 1;
       forumHistory(rec, 'reported', { category, counted: reporter.counted, round: rec.round });
-      // A possible-CSAM report silences the author's notice until a person decides (src/case_history.mjs forumNoticeEntry).
-      if (category === 'csam') rec.csam_reported_round = rec.round;
 
       if (!rec.removed) {
         if (reporter.counted && FORUM_REMOVE_COUNTED.includes(category)) rec.tally.remove += 1;
@@ -2975,11 +3114,14 @@ export async function fileForumReport({ env, postId, threadId, postAuthorId, rep
         }
         if (!rec.gated && rec.tally.gate >= t.forum_hide_reporters) { rec.gated = true; rec.gated_at = at; events.push('gated'); forumHistory(rec, 'gated', { reason: 'reports' }); }
       }
+      // What the author is shown: one generic entry for a report hide or removal, whatever the category, frozen once shown.
+      if (events.includes('hidden') || events.includes('removed')) showForumEntry(rec, { kind: 'report_hidden', at }, 'report');
+      else if (events.includes('gated')) showForumEntry(rec, { kind: 'report_gated', at }, 'report');
       // A post hidden or removed as csam or nonconsensual_sexual is sealed into the evidence vault (src/evidence_vault.mjs) with
       // the body as reported (a repeat after a conflict is answered as already sealed). Reports are not a confident finding, so
       // nothing is reported to an authority from here.
       if ((events.includes('hidden') || events.includes('removed')) && FORUM_SEALED_CATEGORIES.includes(category)) {
-        await sealForumBody(env, rec, { category, body: postBody, detection: { source: 'member_reports', checks: [{ kind: 'reports', source: 'member_reports', category, confidence: null, band: null }], band: null, viewed_by_staff: false }, postedAt: created, now });
+        await sealForumBody(env, rec, { category, body: postBody, title: postTitle, detection: { source: 'member_reports', checks: [{ kind: 'reports', source: 'member_reports', category, confidence: null, band: null }], band: null, viewed_by_staff: false }, postedAt: created, now });
       }
       return rec;
     });
@@ -3037,7 +3179,7 @@ async function alertStaffOfForumCsam(env, rec, at) {
 /// not kept. A refusal is `{ ok: false, code, message }`:
 /// bad_post, bad_decision, bad_reviewer, bad_category, no_case, category_required, not_removable, takedown_lock, busy,
 /// unavailable.
-export async function resolveForumCase({ env, postId, decision, category = null, reviewerId, note = null, postBody = null, uploadIps = null, uploadIp = null, deps = {} } = {}) {
+export async function resolveForumCase({ env, postId, decision, category = null, reviewerId, note = null, postBody = null, postTitle = null, uploadIps = null, uploadIp = null, deps = {}, now = null } = {}) {
   let lease = null;
   try {
     const t = thresholdsFrom(env);
@@ -3059,10 +3201,20 @@ export async function resolveForumCase({ env, postId, decision, category = null,
     // facts, and carried by the csam report), each with its own time, and an invalid one dropped, never refused. With none
     // passed (the admin tool path), the forum's own record is read (forumPostIpKey), for the text this call seals only.
     const keepsIp = decision === 'remove' && FORUM_SEALED_CATEGORIES.includes(category);
-    const sealedIps = keepsIp ? await uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds: textItem ? [textItem] : [] }) : [];
+    const sealedIps = keepsIp ? await uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds: textItem ? [textItem] : [], now: now ?? Date.now() }) : [];
     let personFinding = null;
+    let refusedCheck = false;
+    // A person's csam removal owes a legal report (forumRemovalAfter). The debt is written with the decision, before the push, so
+    // a failure after it (a conflict, the push, the report itself) never loses it: the hourly sweep writes it
+    // (writeOwedForumReports).
+    const needsReport = decision === 'remove' && category === 'csam';
     const decided = await updateForumCase(env, postId, async rec => {
+      refusedCheck = false;
       if (!rec) return null;
+      // A post the forum check refused at posting is a placeholder whose author was shown the generic entry: a person's
+      // decision on it would change what was shown (as csam, it would once have silenced it). It is not decided here.
+      if (rec.removed_by === 'check') { refusedCheck = true; return null; }
+      seedShownEntries(rec);
       await forumReferenceOf(env, rec, 'forum case');
       // Restore is the appeal path: a post hidden or removed by reports, or removed by a person, is shown again.
       if (decision === 'restore') { rec.hidden = false; rec.hide_reason = null; rec.removed = false; rec.removed_by = null; }
@@ -3074,9 +3226,12 @@ export async function resolveForumCase({ env, postId, decision, category = null,
       personFinding = forumPersonFinding(rec, { by: reviewerId, category, source: 'moderation_forum_resolve', itemId: textItem });
       rec.decisions.push({ decision, category: category || null, by: reviewerId, at, round: rec.round, under_takedown: locked, viewed_by_staff: personFinding.viewed_by_staff, upload_ip_kept: sealedIps.length > 0, note: typeof note === 'string' ? clip(note.trim(), 2000) : null });
       forumHistory(rec, `decided_${decision}`, { by: reviewerId, category: category || null, round: rec.round });
+      // What the author is shown: a person's decision always shows a new entry (generic for a csam or nonconsensual_sexual removal).
+      showForumEntry(rec, decision === 'remove' ? { kind: 'person_removed', at, category: category || null } : { kind: 'person_decided', at, decision }, 'person');
+      if (needsReport) rec.report_owed = { since: at, category, reason: 'person_removal', by: reviewerId };
       // csam and nonconsensual_sexual are sealed when the forum sends the body.
       if (decision === 'remove' && FORUM_SEALED_CATEGORIES.includes(category) && typeof postBody === 'string' && postBody) {
-        await sealForumBody(env, rec, { category, body: postBody, detection: personFinding, uploadIps: sealedIps, now: Date.now() });
+        await sealForumBody(env, rec, { category, body: postBody, title: postTitle, detection: personFinding, uploadIps: sealedIps, now: Date.now() });
       }
       rec.round += 1;
       rec.waiting = false;
@@ -3084,39 +3239,15 @@ export async function resolveForumCase({ env, postId, decision, category = null,
       rec.tally = { remove: 0, gate: 0 };
       return rec;
     });
+    if (refusedCheck) return forumRefusal('check_removed', 'The forum check refused this post when it was written, and its author was told so. It is not decided again here.', 409);
     if (!decided.written) return forumRefusal('no_case', 'No forum case exists for this post.', 404);
-    let rec = decided.rec;
-    // The version the decision was taken at: its own write's, not a later one (the push record, the forum's seal).
-    const decisionVersion = forumCaseVersion(rec);
-    // The durable record first (the forum's hourly sweep reconciles from it), still under the lease.
-    await env.SOCIAL.put(forumDecisionKey(postId), JSON.stringify({ action: decision, decided_at: at, reference: rec.reference || null }));
-    // The lease is released before the push: the forum's applier seals the post (sealForumEvidence), which takes this same
-    // lease, and a lease held through the push would answer it busy and fail every removal's push. Nothing below needs the
-    // lease: each write to the case is a compare-and-swap (updateForumCase).
-    await releaseLease(env, lease);
-    lease = null;
-    // The decision reaches the forum at once, through the applier the forums module registered. A push that fails is recorded
-    // and never undoes the decision. Outside the case's change, so a write conflict never pushes a decision twice.
-    const push = await pushForumDecision(env, { postId, action: decision, reference: rec.reference || null, decidedAt: at });
-    // The addresses the report carries: those of the text items the case has sealed, the forum's applier's seal included, and
-    // of no other text (uploadIpsForItems).
-    let reportIps = sealedIps;
-    rec = (await updateForumCase(env, postId, async current => {
-      if (!current) return null;
-      current.decision_push = push;
-      forumHistory(current, push.status, push.status === 'push_failed' ? { error: push.error } : null);
-      if (keepsIp) {
-        const items = [...new Set([...(current.sealed_items || []), ...(textItem ? [textItem] : [])])].filter(i => TEXT_ITEM_ID.test(i));
-        reportIps = await uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds: items });
-        const mine = [...current.decisions].reverse().find(d => d.at === at && d.by === reviewerId && d.decision === decision);
-        if (mine && reportIps.length) mine.upload_ip_kept = true;
-      }
-      return current;
-    })).rec || rec;
-    await clearWorkspace(env, 'forum', postId);
-    // The report is written after the push, so the seal the forum's applier made (with the address) is on the case it reads.
-    if (decision === 'remove') await forumRemovalAfter(env, rec, { category, detection: personFinding, removedAt: rec.removed_at || at, uploadIps: reportIps, deps });
-    return { ok: true, action: decision, reference: rec.reference || null, case_version: decisionVersion };
+    // Recorded. From here on nothing undoes the decision: a step that fails is named in `pending`, and the answer is ok.
+    try {
+      return await afterForumDecision(env, { postId, decision, category, reviewerId, at, rec: decided.rec, lease, personFinding, keepsIp, textItem, sealedIps, uploadIps, uploadIp, needsReport, deps, now, released: () => { lease = null; } });
+    } catch (e) {
+      console.error('forum case: a step after the decision failed:', e?.name || 'Error');
+      return { ok: true, action: decision, reference: decided.rec.reference || null, case_version: forumCaseVersion(decided.rec), pending: ['case_write', ...(needsReport ? ['legal_report'] : [])], follow_up: 'pending' };
+    }
   } catch (e) {
     if (e instanceof ForumCaseConflict) return forumBusy('This case is being written. Try again in a moment.');
     console.error('forum case: not decided:', e?.name || 'Error');
@@ -3124,6 +3255,134 @@ export async function resolveForumCase({ env, postId, decision, category = null,
   } finally {
     if (lease) await releaseLease(env, lease);
   }
+}
+
+/// The KV index of a forum case that owes a legal report (`rec.report_owed`), for the hourly sweep (writeOwedForumReports).
+export const forumReportOwedKey = postId => `legalowed:forum:${postId}`;
+
+// Everything after a person's decision is recorded. Never throws: each step that fails is named in `pending` ('case_write',
+// 'legal_report', 'push'), and the answer is `{ ok: true, action, reference, case_version, pending, follow_up? }`.
+async function afterForumDecision(env, o) {
+  const { postId, decision, category, reviewerId, at, personFinding, keepsIp, textItem, sealedIps, uploadIps, uploadIp, needsReport, deps, now = null } = o;
+  let rec = o.rec;
+  const pending = [];
+  const owe = (what) => { if (!pending.includes(what)) pending.push(what); };
+  // The version the decision was taken at: its own write's, not a later one (the push record, the forum's seal).
+  const decisionVersion = forumCaseVersion(rec);
+  // The durable records first, still under the lease: the decision (the forum's hourly sweep reconciles from it), and the
+  // report the decision owes (the legal sweep's index).
+  try { await env.SOCIAL.put(forumDecisionKey(postId), JSON.stringify({ action: decision, decided_at: at, reference: rec.reference || null })); }
+  catch (e) { console.error('forum case: the decision record was not written:', e?.name || 'Error'); owe('push'); }
+  if (needsReport) {
+    try { await env.SOCIAL.put(forumReportOwedKey(postId), at); }
+    catch (e) { console.error('forum case: the owed report was not indexed:', e?.name || 'Error'); owe('legal_report'); }
+  }
+  // The lease is released before the push: the forum's applier seals the post (sealForumEvidence), which takes this same
+  // lease, and a lease held through the push would answer it busy and fail every removal's push. Nothing below needs the
+  // lease: each write to the case is a compare-and-swap (updateForumCase).
+  await releaseLease(env, o.lease);
+  o.released();
+  // The decision reaches the forum at once, through the applier the forums module registered. A push that fails is recorded
+  // and never undoes the decision. Outside the case's change, so a write conflict never pushes a decision twice.
+  const push = await pushForumDecision(env, { postId, action: decision, reference: rec.reference || null, decidedAt: at });
+  if (push.status === 'push_failed') owe('push');
+  // The addresses the report carries: those of the text items the case has sealed, the forum's applier's seal included, and
+  // of no other text (uploadIpsForItems).
+  let reportIps = sealedIps;
+  try {
+    rec = (await updateForumCase(env, postId, async current => {
+      if (!current) return null;
+      current.decision_push = push;
+      forumHistory(current, push.status, push.status === 'push_failed' ? { error: push.error } : null);
+      if (keepsIp) {
+        const items = [...new Set([...(current.sealed_items || []), ...(textItem ? [textItem] : [])])].filter(i => TEXT_ITEM_ID.test(i));
+        reportIps = await uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds: items, now: now ?? Date.now() });
+        const mine = [...current.decisions].reverse().find(d => d.at === at && d.by === reviewerId && d.decision === decision);
+        if (mine && reportIps.length) mine.upload_ip_kept = true;
+      }
+      return current;
+    })).rec || rec;
+  } catch (e) {
+    console.error('forum case: the push outcome was not recorded:', e?.name || 'Error');
+    owe('case_write');
+    // The report still reads the latest case.
+    try { rec = (await loadForumCase(env, postId)) || rec; } catch { /* the decision's own record stands */ }
+    if (keepsIp) {
+      try { reportIps = await uploadIpsForItems(env, postId, { uploadIps, uploadIp, itemIds: [...new Set([...(rec.sealed_items || []), ...(textItem ? [textItem] : [])])].filter(i => TEXT_ITEM_ID.test(i)), now: now ?? Date.now() }); } catch { /* the call's own stand */ }
+    }
+  }
+  await clearWorkspace(env, 'forum', postId);
+  // The report is written after the push, so the seal the forum's applier made (with the address) is on the case it reads.
+  if (decision === 'remove') {
+    const after = await forumRemovalAfter(env, rec, { category, detection: personFinding, removedAt: rec.removed_at || at, uploadIps: reportIps, deps });
+    if (needsReport) {
+      if (after.report_written) {
+        if (!(await clearForumReportOwed(env, postId))) owe('case_write');
+      } else owe('legal_report');
+    }
+  }
+  return { ok: true, action: decision, reference: rec.reference || null, case_version: decisionVersion, pending, ...(pending.length ? { follow_up: 'pending' } : {}) };
+}
+
+// The report a case owed is written: the debt and its index go. `true` when both did.
+async function clearForumReportOwed(env, postId) {
+  try {
+    await updateForumCase(env, postId, async current => {
+      if (!current?.report_owed) return null;
+      current.report_owed = null;
+      forumHistory(current, 'legal_report_written', null);
+      return current;
+    });
+    await env.SOCIAL.delete(forumReportOwedKey(postId));
+    return true;
+  } catch (e) {
+    console.error('forum case: the owed report was not cleared:', e?.name || 'Error');
+    return false;
+  }
+}
+
+/// Thrown inside the owed-report sweep when its time budget is spent, so the case it holds is let go (its lease in a finally).
+export class OwedReportBudgetSpent extends Error {
+  constructor() { super('the owed-report sweep spent its time budget'); this.name = 'OwedReportBudgetSpent'; }
+}
+
+/// The hourly legal sweep's part for forum cases (src/legal_reports.mjs sweepLegalReports): every case that owes a legal report
+/// (`report_owed`, indexed at forumReportOwedKey) has it written, and the debt is cleared once it is. Each case is worked under
+/// its lease, released in a finally whatever happens, a spent budget included. Stops when `budgetMs` is spent (the remaining
+/// cases wait for the next run). Never throws. `{ tried, written, still_owed, stopped }`.
+export async function writeOwedForumReports(env, deps = {}, { limit = 25, budgetMs = 20_000, now = Date.now } = {}) {
+  const out = { tried: 0, written: 0, still_owed: 0, stopped: false };
+  const deadline = now() + budgetMs;
+  let listed;
+  try { listed = await env.SOCIAL.list({ prefix: 'legalowed:forum:', limit }); } catch { return out; }
+  for (const k of listed?.keys || []) {
+    const postId = k.name.slice('legalowed:forum:'.length);
+    if (!FORUM_POST_ID.test(postId)) continue;
+    let lease = null;
+    try {
+      if (now() > deadline) throw new OwedReportBudgetSpent();
+      lease = await forumLease(env, postId, thresholdsFrom(env), 'owed_report');
+      if (!lease) { out.still_owed += 1; continue; }
+      const rec = await loadForumCase(env, postId);
+      if (!rec?.report_owed) { await env.SOCIAL.delete(k.name).catch(() => {}); continue; }
+      out.tried += 1;
+      if (now() > deadline) throw new OwedReportBudgetSpent();
+      const owed = rec.report_owed;
+      const detection = forumPersonFinding(rec, { by: owed.by, category: owed.category, source: 'moderation_forum_resolve' });
+      const items = (rec.sealed_items || []).filter(i => TEXT_ITEM_ID.test(i));
+      const reportIps = FORUM_SEALED_CATEGORIES.includes(owed.category) ? await forumPostIpEntriesOf(env, postId, items) : [];
+      const after = await forumRemovalAfter(env, rec, { category: owed.category, detection, removedAt: rec.removed_at || owed.since, uploadIps: reportIps, deps });
+      if (after.report_written && (await clearForumReportOwed(env, postId))) out.written += 1;
+      else out.still_owed += 1;
+    } catch (e) {
+      if (e instanceof OwedReportBudgetSpent) { out.stopped = true; break; }
+      console.error('forum case: an owed report was not written:', e?.name || 'Error');
+      out.still_owed += 1;
+    } finally {
+      if (lease) await releaseLease(env, lease);
+    }
+  }
+  return out;
 }
 
 /// The forum's record of the address one version of a post was written from (SOCIAL, written by the forum with its own 30-day
@@ -3297,7 +3556,7 @@ export async function recordForumView({ env, postId, reviewerId, how = 'evidence
 /// or, once sent, given an addendum (src/legal_reports.mjs amendLegalReport).
 /// `{ ok, reference, sealed, item_id, upload_ip_sealed, case_version }`, or a refusal `{ ok: false, code, message, status }`:
 /// bad_post, bad_thread, bad_author, bad_body, bad_category, bad_item, bad_reviewer (403), busy, unavailable.
-export async function sealForumEvidence({ env, postId, threadId, postAuthorId, postBody, category, reviewerId, itemId = null, uploadIps = null, uploadIp = null, now = Date.now() } = {}) {
+export async function sealForumEvidence({ env, postId, threadId, postAuthorId, postBody, category, reviewerId, itemId = null, postTitle = null, uploadIps = null, uploadIp = null, now = Date.now() } = {}) {
   let lease = null;
   try {
     const t = thresholdsFrom(env);
@@ -3317,16 +3576,16 @@ export async function sealForumEvidence({ env, postId, threadId, postAuthorId, p
     lease = await forumLease(env, postId, t, 'forum_seal');
     if (!lease) return forumBusy('This case is being written. Try again in a moment.');
     const { rec } = await updateForumCase(env, postId, async current => {
-      const rec = current || newForumCase({ postId, threadId, authorId: postAuthorId, reference: null, at, bodyHash, by: 'staff_seal' });
+      const rec = seedShownEntries(current || newForumCase({ postId, threadId, authorId: postAuthorId, reference: null, at, bodyHash, by: 'staff_seal' }));
       await forumReferenceOf(env, rec, 'forum seal');
       const evidence = rec.evidence;
       if (current && bodyHash !== null && evidence && evidence.body_hash !== bodyHash && evidence.later?.at(-1)?.body_hash !== bodyHash && (evidence.later?.length || 0) < FORUM_EVIDENCE_LATER_KEPT) (evidence.later ||= []).push({ body_hash: bodyHash, at });
       // Whether the person sealing it viewed the text is what the case records (recordForumView), never assumed.
       const detection = forumPersonFinding(rec, { by: reviewerId, category, source: 'sealForumEvidence', itemId: item });
-      await sealForumBody(env, rec, { category, body: postBody, detection, itemId: item, uploadIps: sealedIps, now });
-      // A csam seal silences the author's notice the way a csam report does (src/case_history.mjs forumCsamSilenced): a seal
-      // before a removal must not be followed by a warning to the author ahead of the report.
-      if (category === 'csam') rec.csam_sealed_round = rec.round;
+      await sealForumBody(env, rec, { category, body: postBody, title: postTitle, detection, itemId: item, uploadIps: sealedIps, now });
+      // A seal in csam or nonconsensual_sexual of a post that is down, with nothing shown yet, shows the generic removal entry:
+      // the same for both, frozen once shown. A seal never changes an entry already shown.
+      if (FORUM_GENERIC_ENTRY_CATEGORIES.includes(category) && (rec.removed || rec.hidden)) showForumEntry(rec, { kind: 'person_removed', at, category }, 'down');
       forumHistory(rec, 'evidence_sealed', { by: reviewerId, category, item, ok: rec.evidence_seal.ok });
       return rec;
     });
@@ -3404,7 +3663,8 @@ export async function listOpenForumCases({ env, cursor = null, limit = 50 } = {}
 // band `high`) is written up for NCMEC, a threat is weighed against the threat criteria (src/legal_reports.mjs assessThreat,
 // switched off by default), and a confirmed scam joins the week's scam batch. A borderline removal is removed and sealed and
 // never reported. The author's account is never frozen or banned: the author is told through the case history
-// (src/case_history.mjs forumNoticeEntry), and a csam removal's notice waits for its report.
+// (src/case_history.mjs forumNoticeEntry) at once, a csam or nonconsensual_sexual removal in one generic entry the same for
+// both, so no notice waits for a report and no missing one tells them apart.
 
 /// The forum categories whose removal seals the post's text.
 export const FORUM_SEALED_CATEGORIES = Object.freeze(['csam', 'nonconsensual_sexual']);
@@ -3415,8 +3675,10 @@ const FORUM_SEALED_ITEMS_KEPT = 20;
 // Seals the text under its item id (one that follows the text, forumTextItemId, unless the caller names one) and records the
 // outcome on the case: `evidence_seal` (the latest) and `sealed_items`. The addresses the post was made from
 // (`uploadIps`, forumUploadIpsOf entries, each with its own time) go into the item's encrypted facts as `upload_ips` and
-// nowhere else. Safe to repeat: the vault answers an item already sealed as `already`.
-async function sealForumBody(env, rec, { category, body, detection, postedAt = null, uploadIps = [], itemId = null, now = Date.now() }) {
+// nowhere else. A first post's `title` (forumTitleOf) is sealed beside the body under its own item (forumTitleItemId), with
+// the same detection and no address: it is not a text version, so nothing is paired with it. Safe to repeat: the vault
+// answers an item already sealed as `already`.
+async function sealForumBody(env, rec, { category, body, title = null, detection, postedAt = null, uploadIps = [], itemId = null, now = Date.now() }) {
   if (typeof body !== 'string' || !body) { rec.evidence_seal = { at: new Date(now).toISOString(), ok: false, error: 'no_body' }; return rec.evidence_seal; }
   const item = itemId || (await forumTextItemId(env, body)) || FORUM_TEXT_ITEM_UNKEYED;
   const ips = Array.isArray(uploadIps) ? uploadIps : [];
@@ -3438,8 +3700,19 @@ async function sealForumBody(env, rec, { category, body, detection, postedAt = n
     for (const k of ['sealed', 'already', 'pending']) seal[k] = [...seal[k], ...ipSeal[k]];
     seal.ok = seal.ok && ipSeal.ok;
   }
-  rec.evidence_seal = { at: new Date(now).toISOString(), ok: seal.ok, reference: seal.case_ref, item_id: item, sealed: seal.sealed, already: seal.already, pending: seal.pending, error: seal.error };
-  if (seal.ok) rec.sealed_items = [...new Set([...(Array.isArray(rec.sealed_items) ? rec.sealed_items : []), item])].slice(-FORUM_SEALED_ITEMS_KEPT);
+  const titleText = forumTitleOf(title);
+  const titleItem = titleText ? await forumTitleItemId(env, titleText) : null;
+  if (titleItem) {
+    const titleSeal = await sealEvidence(env, {
+      caseKind: 'forum', caseId: rec.post_id, category, subject: { ...subject, field: 'title' },
+      uploader: { ...uploader, upload_ips: [], upload_ip_note: 'A title is not a text version: no address is paired with it.' },
+      detection, items: [{ id: titleItem, text: titleText }], now,
+    });
+    for (const k of ['sealed', 'already', 'pending']) seal[k] = [...seal[k], ...titleSeal[k]];
+    seal.ok = seal.ok && titleSeal.ok;
+  }
+  rec.evidence_seal = { at: new Date(now).toISOString(), ok: seal.ok, reference: seal.case_ref, item_id: item, ...(titleItem ? { title_item_id: titleItem } : {}), sealed: seal.sealed, already: seal.already, pending: seal.pending, error: seal.error };
+  if (seal.ok) rec.sealed_items = [...new Set([...(Array.isArray(rec.sealed_items) ? rec.sealed_items : []), item, ...(titleItem ? [titleItem] : [])])].slice(-FORUM_SEALED_ITEMS_KEPT);
   return rec.evidence_seal;
 }
 
@@ -3469,6 +3742,8 @@ async function forumRemovalAfter(env, rec, { category, detection, removedAt, upl
   } catch (e) {
     console.error('forum removal: the report step failed:', e?.name || 'Error');
   }
+  // Whether the case now has its legal report (written now, or before).
+  out.report_written = !!(out.report?.written || out.report?.reason === 'already_reported');
   return out;
 }
 
@@ -3505,12 +3780,14 @@ export async function recordForumRemoval({ env, postId, threadId, authorId, text
     lease = await forumLease(env, postId, t, 'forum_check_removal');
     if (!lease) return forumBusy('This post is being recorded. Try again in a moment.');
     const { rec } = await updateForumCase(env, postId, async current => {
-      const rec = current || newForumCase({ postId, threadId, authorId, reference: null, at, bodyHash, postCreatedAt: created });
+      const rec = seedShownEntries(current || newForumCase({ postId, threadId, authorId, reference: null, at, bodyHash, postCreatedAt: created }));
       await forumReferenceOf(env, rec, 'forum removal');
       if (!rec.removed) {
         rec.removed = true; rec.removed_at = at; rec.removed_by = 'check';
         rec.hidden = true; rec.hidden_at = rec.hidden_at || at; rec.hide_reason = category;
         rec.evidence.removed_at = at;
+        // The refusal at posting is shown at once: generic for csam and nonconsensual_sexual, frozen once shown.
+        showForumEntry(rec, { kind: 'check_removed', at, category }, 'person');
       }
       rec.check_removal = { category, band: check.confidence_band, confidence: checkConfidence, policy_version: check.policy_version || POLICY_VERSION, round: rec.round, at };
       forumHistory(rec, 'removed', { reason: 'check', category, band: check.confidence_band });
@@ -3533,8 +3810,9 @@ export async function recordForumRemoval({ env, postId, threadId, authorId, text
   }
 }
 
-/// Releases the withheld notice of a forum post removed as csam (src/case_history.mjs forumCsamSilenced): when its report was
-/// sent, or a person or LEGAL_REPORT_CSAM_NOTICE_RELEASE released it. Never throws. `{ ok }` or `{ ok: false, code }`.
+/// Records that a forum csam report's notice was released (a report written before the forum's csam silence was retired still
+/// carries a withheld notice, src/legal_reports.mjs). It changes nothing the author sees: a forum post's author is told at
+/// once (src/case_history.mjs forumNoticeEntry). Never throws. `{ ok }` or `{ ok: false, code }`.
 export async function releaseForumNotice(env, postId, { by, reason } = {}) {
   let lease = null;
   try {
@@ -3837,13 +4115,73 @@ const COVER_EXTS = ['webp', 'png', 'jpg'];
 // assembled from parts carries no whole-object SHA-256 and is identified by its etag
 // and R2's version, which is unique to each upload of the key.
 const hexOf = buf => [...new Uint8Array(buf)].map(x => x.toString(16).padStart(2, '0')).join('');
-// The identity of an R2 object as head() or get() returned it.
-export function identOfObject(object) {
-  if (!object) return null;
-  const sha = object.checksums?.sha256;
-  // `version` is unique to each upload of a key (strongly consistent), so a swap that keeps the etag still moves.
-  return sha ? `sha256:${typeof sha === 'string' ? sha : hexOf(sha)}` : `etag:${object.etag}${object.version ? `:v${object.version}` : ''}`;
+// ---------------------------------------------------------------------------
+// What the public is served for a stored listing image
+// ---------------------------------------------------------------------------
+// Each stored listing image (a capture, the thumbnail, the cover) has a verdict, decided once from its bytes
+// (src/user_images.mjs storedImageVerdict) and kept in its OWN record, keyed by the object's identity (identOfObject: its
+// SHA-256, else its key, etag and version). An upload writes it for what it stored; an object stored before verdicts gets
+// its record on its first public read, the one time its bytes are read for it. A verdict of "stripped" (colour transforms,
+// EXIF and the like) is served as the rebuilt copy, written once under a derived key named by its own SHA-256. The image
+// object itself, bound, reviewed or sealed, is never written: a new put would change its version, which can break the
+// binding, and its bytes are evidence. Every later public read streams, reading only the record.
+const strippedImageKey = sha => `derived/stripped/${sha}`;
+
+/// Decide the verdict for `bytes` stored under identity `ident`, write its record (and the stripped copy, when there is
+/// one), and return them. `createOnly` keeps a record that is already there (a first public read never replaces one).
+async function persistImageVerdict(env, ident, bytes, extra = {}, { createOnly = false } = {}) {
+  const v = storedImageVerdict(bytes);
+  const record = { verdict: v.verdict, problem: v.problem, ...extra, at: new Date().toISOString() };
+  if (v.verdict === 'stripped') {
+    const sha = await sha256OfImage(v.bytes);
+    record.stripped_key = strippedImageKey(sha);
+    // Typed as the image it is (served by the listing's own routes only, after their checks, with their own headers).
+    await env.SCENES.put(record.stripped_key, v.bytes, { httpMetadata: { contentType: v.mime }, sha256: sha, onlyIf: { etagDoesNotMatch: '*' } });
+  }
+  await env.SCENES.put(imageVerdictKey(ident), JSON.stringify(record), { ...JSON_META, ...(createOnly ? { onlyIf: { etagDoesNotMatch: '*' } } : {}) });
+  return { record, bytes: v.verdict === 'stripped' ? v.bytes : bytes };
 }
+
+/// The verdict an upload records for the bytes it just stored (identity `sha256:{hex}`), with the alpha measure of an RGBA
+/// PNG capture or thumbnail (`measureAlpha`): recorded for staff, deciding nothing.
+export async function recordUploadedImage(env, sha256, bytes, { measureAlpha = false } = {}) {
+  const extra = { by: 'upload' };
+  if (measureAlpha && pngColourType(bytes) === 6) {
+    const m = await measurePngAlpha(bytes);
+    extra.alpha_used = m.alpha_used;
+    extra.alpha_reason = m.reason;
+  }
+  return (await persistImageVerdict(env, `sha256:${sha256}`, bytes, extra)).record;
+}
+
+/// The verdict record of a stored object, or null when it has none (or it cannot be read).
+export async function imageVerdictOf(env, object) {
+  const stored = object ? await env.SCENES.get(imageVerdictKey(identOfObject(object))) : null;
+  if (!stored) return null;
+  try { return JSON.parse(await stored.text()); } catch { return { verdict: 'refused', problem: 'unreadable_verdict' }; }
+}
+
+/// What the public is served for a stored listing image `object` (just fetched): `{ body, verdict }` to stream, or null when
+/// the public is answered as if it were absent (an animation, transparency, a second picture, not an accepted image,
+/// dimensions over the bounds). Reads only the verdict record, except on the first public read of an object stored before
+/// verdicts, which decides and keeps it. The object is never written.
+export async function publicImageBody(env, object) {
+  const record = await imageVerdictOf(env, object);
+  if (!record) {
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    const done = await persistImageVerdict(env, identOfObject(object), bytes, { by: 'first_public_read' }, { createOnly: true });
+    return done.record.verdict === 'refused' ? null : { body: done.bytes, verdict: done.record.verdict };
+  }
+  if (record.verdict === 'ok') return { body: object.body, verdict: 'ok' };
+  await object.body?.cancel?.();
+  if (record.verdict === 'stripped' && typeof record.stripped_key === 'string') {
+    const copy = await env.SCENES.get(record.stripped_key);
+    return copy ? { body: copy.body, verdict: 'stripped' } : null;
+  }
+  return null;
+}
+
+// The identity of an R2 object (identOfObject) is src/user_images.mjs's, re-exported above.
 const identOf = async (env, key) => (key ? identOfObject(await env.SCENES.head(key)) : null);
 // Production sets REQUIRE_APPROVAL_BINDING from day one: an approved marker with no
 // binding then reads as pending, so no listing serves bytes nobody reviewed.
@@ -3889,6 +4227,22 @@ async function captureIdents(env, simId, epoch) {
 const capturesKey = c => JSON.stringify(Object.entries(c).sort());
 const sameObjects = (a, b) => (a?.content ?? null) === (b?.content ?? null) && (a?.thumb ?? null) === (b?.thumb ?? null) && (a?.cover ?? null) === (b?.cover ?? null) && (a?.source ?? null) === (b?.source ?? null)
   && (a?.captures == null || b?.captures == null || capturesKey(a.captures) === capturesKey(b.captures));
+/// Whether a case's approval still stands, for a dedup to copy. A person's rejection, hold, change request or quarantine
+/// moves the status off approved; a takedown or a removal leaves the status and puts a legal hold on the case. The case is
+/// read from KV, which can be about a minute stale, so the approval in R2 must be there and not revoked, and no legal lock
+/// may be in R2 either: both are written before the case that changes them.
+async function approvalStands(env, rec) {
+  if (rec?.status !== 'approved' || rec.legal_hold) return false;
+  const binding = await readApproval(env, rec.sim_id);
+  if (!binding || binding.revoked) return false;
+  return !(await legalLockOf(env, rec.sim_id));
+}
+/// What a run records on its case once every image the judge read was checked against the review's record of it
+/// (fetchCaptures). A dedup copies an approval only from a case that carries it.
+export const IMAGES_CHECKED = 'identity_v1';
+// Whether two reviews read the same images (thumbnail, cover and captures), both sides naming their captures.
+const sameReviewedImages = (a, b) => !!a && !!b && (a.thumb ?? null) === (b.thumb ?? null) && (a.cover ?? null) === (b.cover ?? null)
+  && a.captures != null && b.captures != null && capturesKey(a.captures) === capturesKey(b.captures);
 
 export async function readApproval(env, simId) {
   if (!env?.SCENES?.get) return null;
@@ -4005,7 +4359,10 @@ export async function approvedCaptureKeys(env, sim) {
   for (const o of listed?.objects || []) {
     const hit = /capture-([0-7])\.(png|jpg|webp)$/.exec(o.key);
     if (!hit || byNumber.has(Number(hit[1]))) continue;
-    if (binding.captures[hit[1]] !== (await identOf(env, o.key))) continue;
+    const head = await env.SCENES.head(o.key);
+    if (binding.captures[hit[1]] !== identOfObject(head)) continue;
+    // Too large to have been judged: never a public preview, whatever the approval (see JUDGE_IMAGE_MAX_BYTES).
+    if (overJudgeImageLimit(head)) continue;
     byNumber.set(Number(hit[1]), { n: Number(hit[1]), ext: hit[2], key: o.key });
   }
   return [...byNumber.values()].sort((a, b) => a.n - b.n);
@@ -4117,8 +4474,10 @@ export async function sweepLocks(env, now = Date.now()) {
     if (!legalLockKind(await loadCase(env, simId))) strays.push(simId);
   }
   if (strays.length) console.error(`moderation: ${strays.length} legal lock(s) whose case reads as not locked (a person decides): ${strays.slice(0, 10).join(', ')}`);
-  // A listing approved before bindings existed has none: bind it to what is
-  // stored now, a page of the approved index per run.
+  // A listing approved before bindings existed has none. Its case's record of what the review read (rec.reviewed) is
+  // bound when there is one and the stored objects are still those; when they differ, the listing is held for a person
+  // instead, since what is stored now was never judged. Only a listing with no recorded review binds what is stored now.
+  // A page of the approved index per run.
   // Where binding is required (production), nothing is bound by the sweep: a
   // person binds a listing after looking at it (moderation_bind).
   const cursor = bindingRequired(env) ? undefined : (await env.SOCIAL.get('modsweep:approved_cursor')) || undefined;
@@ -4132,7 +4491,21 @@ export async function sweepLocks(env, now = Date.now()) {
     if (sim.moderation?.status === 'approved') {
       const bound = await loadCase(env, simId);
       const epoch = Number.isInteger(bound?.evidence_epoch) ? bound.evidence_epoch : 0;
-      await writeApproval(env, simId, await snapshotReviewed(env, sim, epoch), 'backfill', epoch);
+      const stored = await snapshotReviewed(env, sim, epoch);
+      if (!bound) { await writeApproval(env, simId, stored, 'backfill', epoch); continue; }
+      if (bound.status === 'approved' && (!bound.reviewed || sameObjects(bound.reviewed, stored))) { await writeApproval(env, simId, bound.reviewed || stored, 'backfill', epoch); continue; }
+      const lease = await acquireLease(env, simId, thresholdsFrom(env), 'binding_sweep');
+      if (!lease) continue;
+      try {
+        const rec = await loadCase(env, simId);
+        if (rec?.status === 'approved') {
+          adoptLease(rec, lease);
+          await setStatus(env, rec, 'held', { outcome: 'hold', lane: rec.decision?.lane || 'judge', reasons: [...(rec.decision?.reasons || []), { code: 'stored_objects_not_reviewed', lane: 'judge', action: 'hold' }], decided_by: 'sweep' }, 'held', { by: 'binding_sweep' });
+        } else {
+          // The listing reads approved and the case does not: no approval stands behind what is stored, so none is served.
+          await revokeApproval(env, simId);
+        }
+      } finally { await releaseLease(env, lease); }
     }
   }
   if (approvedPage?.list_complete === false && approvedPage.cursor) await env.SOCIAL.put('modsweep:approved_cursor', approvedPage.cursor);
@@ -4525,6 +4898,15 @@ export const tagsChosenLine = tags => `Tags chosen for your Space: ${tags.join('
 
 // Kept for the existing call sites; the author view IS the public view.
 export const publicModeration = authorView;
+
+// A listing whose content or art changed is not the one that was judged. Until a new run passes it (POST .../submit) it
+// is pending, so an approved world, thumbnail or cover cannot be swapped for another one that is served under the old
+// approval, whether or not the approval carries a binding. A quarantine is a hold, not a verdict on content; only a
+// person lifts it, so a change must not clear it. Changes `sim` in place; the caller writes it.
+export function sendBackToReview(sim) {
+  if (sim.moderation?.status === 'quarantined') return;
+  sim.moderation = { ...(sim.moderation || {}), status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION, review_schema: REVIEW_SCHEMA };
+}
 
 export function isListable(sim) {
   return !!sim && sim.is_public !== false && sim.moderation?.status === 'approved';
@@ -4924,6 +5306,21 @@ const requireText = (v, min, what) => { if (typeof v !== 'string' || v.trim().le
 // The TAKE IT DOWN requests whose hold is part of the case's legal hold (src/takedown.mjs holdModerationCase).
 const takedownHolds = rec => (Array.isArray(rec?.legal_hold?.takedowns) ? rec.legal_hold.takedowns.filter(Boolean) : []);
 
+// An administrator's read is audited before it is answered (src/evidence_vault.mjs readEvidence is the model). The record names
+// who (the administrator), what (the route and the id read) and when (auditLog's timestamp), never what was read. True when it
+// was written; false when it was not, and the read is then refused (`audit_unavailable`).
+async function auditAdminRead(env, deps, adminId, action, target, details) {
+  try {
+    if (typeof deps?.auditLog !== 'function') throw new Error('the audit log is not configured');
+    await deps.auditLog(env, action, adminId, target, details);
+    return true;
+  } catch (e) {
+    console.error('moderation: a read was refused, its audit was not written:', e?.name || 'Error');
+    return false;
+  }
+}
+const AUDIT_UNAVAILABLE = Object.freeze({ ok: false, code: 'audit_unavailable', error: 'audit_unavailable' });
+
 export function makeToolExecutor(env, deps, ctx = {}) {
   const tools = new Map(MODERATION_TOOLS.map(t => [t.name, t]));
   const audit = async (action, target, details) => { try { await deps.auditLog(env, action, ctx.actorId || ctx.actor || 'system', target, details); } catch (e) { console.error('audit failed', e?.message); } };
@@ -4933,6 +5330,11 @@ export function makeToolExecutor(env, deps, ctx = {}) {
     const actorId = callCtx.actorId || ctx.actorId || actor;
     // A case an admin loads here is a person's: its writes may lift a legal lock.
     const load = async id => { const r = await loadCase(env, id); if (r && actor === 'admin') r[HUMAN] = true; return r; };
+    // A person's read of a case or a queue, audited first. Each of these answers carries an account id (a case's or a queue
+    // item's author_id, the Review Workspace's members) or a listing's evidence, so a read that cannot be audited is refused.
+    // The pipeline's and the agent's own reads are not a person's view and are not recorded here.
+    const via = typeof callCtx.via === 'string' ? callCtx.via : 'POST /api/admin/moderation/tool';
+    const readAudited = (target, details) => actor !== 'admin' ? true : auditAdminRead(env, deps, actorId, name, target, { route: via, ...details });
     const tool = tools.get(name);
     if (!tool) return { ok: false, error: `unknown tool ${name}` };
     if (actor === 'agent' && !tool.agent) return { ok: false, error: `${name} is not available to the agent` };
@@ -4947,6 +5349,7 @@ export function makeToolExecutor(env, deps, ctx = {}) {
         case 'moderation_list_queue': {
           const status = args.status || 'held';
           const limit = Math.min(200, Math.max(1, parseInt(args.limit || '50')));
+          if (!(await readAudited(`modq:${String(status).slice(0, 40)}`, { status: String(status).slice(0, 40), limit }))) return AUDIT_UNAVAILABLE;
           const list = await env.SOCIAL.list({ prefix: `modq:${status}:`, limit });
           const items = [];
           for (const k of list.keys) {
@@ -4957,6 +5360,7 @@ export function makeToolExecutor(env, deps, ctx = {}) {
           return { ok: true, status, items, summary: `${items.length} case(s) with status ${status}` };
         }
         case 'moderation_get_case': {
+          if (!(await readAudited(typeof args.sim_id === 'string' ? args.sim_id.slice(0, 64) : null, {}))) return AUDIT_UNAVAILABLE;
           const rec = await load(args.sim_id);
           if (!rec) return { ok: false, error: 'no case' };
           const view = { ...rec };
@@ -5175,13 +5579,20 @@ export function makeToolExecutor(env, deps, ctx = {}) {
         }
         case 'moderation_workspace_queue': {
           if (actor !== 'admin') return { ok: false, error: 'human only' };
-          const q = await listWorkspaceQueue(env, { kind: args.kind || null, limit: parseInt(args.limit || '50') || 50 });
+          const kind = WORKSPACE_KINDS.includes(args.kind) ? args.kind : null;
+          const limit = parseInt(args.limit || '50') || 50;
+          if (!(await readAudited('wsq', { kind, limit }))) return AUDIT_UNAVAILABLE;
+          const q = await listWorkspaceQueue(env, { kind, limit });
           return { ok: true, ...q, summary: `${q.items.length} case(s) waiting in the Review Workspace` };
         }
         case 'moderation_forum_case': {
           if (actor !== 'admin') return { ok: false, error: 'human only' };
           const rec = await loadForumCase(env, args.post_id);
           if (!rec) return { ok: false, error: 'no forum case' };
+          // The record names its reporters, their notes and the post's author: the read is audited before it is answered, and a
+          // read whose audit cannot be written does not happen (as the evidence vault's, src/evidence_vault.mjs readEvidence).
+          try { await writeAuditRecord(env, 'FORUM_CASE_READ', actorId, rec.reference || rec.post_id, { post_id: rec.post_id }); }
+          catch { return { ok: false, code: 'audit_unavailable', error: 'The audit log could not be written, so the case was not read.', status: 503 }; }
           const locked = !!(await env.SOCIAL.get(forumPostLockKey(rec.post_id)));
           return { ok: true, case: rec, takedown_lock: locked, summary: `forum case ${rec.reference || rec.post_id}: ${rec.status}, ${rec.reporters.length} reporter(s)${rec.hidden ? ', hidden' : ''}${rec.gated ? ', gated' : ''}` };
         }
@@ -5189,9 +5600,10 @@ export function makeToolExecutor(env, deps, ctx = {}) {
           if (actor !== 'admin') return { ok: false, error: 'human only' };
           const rationale = requireText(args.rationale, 10, 'rationale');
           const r = await resolveForumCase({ env, postId: args.post_id, decision: args.decision, category: args.category ?? null, reviewerId: actorId, note: rationale });
-          if (!r.ok) return { ok: false, code: r.code, error: r.message };
-          await audit('moderation_forum_resolve', args.post_id, { decision: args.decision, category: args.category ?? null, rationale });
-          return { ok: true, action: r.action, reference: r.reference, summary: `forum post ${args.post_id}: ${r.action}` };
+          if (!r.ok) return { ok: false, code: r.code, error: r.message, status: r.status };
+          await audit('moderation_forum_resolve', args.post_id, { decision: args.decision, category: args.category ?? null, rationale, pending: r.pending });
+          // Recorded; what is still owed (pending) is retried by the sweeps, and the route answers 202 for it.
+          return { ok: true, action: r.action, reference: r.reference, case_version: r.case_version, pending: r.pending, ...(r.follow_up ? { follow_up: r.follow_up } : {}), summary: `forum post ${args.post_id}: ${r.action}${r.pending.length ? ` (still owed: ${r.pending.join(', ')})` : ''}` };
         }
         case 'moderation_backfill': {
           if (actor !== 'admin' && actor !== 'system') return { ok: false, error: 'admin only' };
@@ -5221,11 +5633,12 @@ async function loadDossier(env, simId, epoch = 0, meter = null) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+// Every capture stored in the epoch, sorted. None is cut here: one the review did not record, or past the most images a
+// request carries, is named to the judge as left out (fetchCaptures, judgeImages), which holds the case.
 async function listCaptures(env, simId, epoch = 0) {
   const prefix = `${evidencePrefix(simId, epoch)}capture-`;
-  const listed = await env.SCENES.list({ prefix, limit: CAPTURE_MAX_COUNT * 2 });
-  const keys = (listed?.objects || []).map(o => o.key).sort();
-  return keys.slice(0, CAPTURE_MAX_COUNT);
+  const listed = await env.SCENES.list({ prefix, limit: 1000 });
+  return (listed?.objects || []).map(o => o.key).sort();
 }
 
 function bytesToBase64(buf) {
@@ -5236,32 +5649,45 @@ function bytesToBase64(buf) {
   return btoa(binary);
 }
 
-// Each capture carries its byte count, for the meter; the judge reads only the label, type and base64.
-async function fetchCaptures(env, simId, keys) {
+// Each capture carries its byte count, for the meter; the judge reads only the label, type and base64. `reviewed` is what the
+// review recorded at its start (snapshotReviewed): what an approval binds. An image read now that is not that object (it was
+// replaced since, even if put back before the decision), one the review recorded that is gone, and a capture the review
+// did not record (a second format of one number, a name the upload route never writes) are each named to the judge as left
+// out (no type, no bytes), which holds the case. Only recorded objects are read, so at most one per capture number.
+async function fetchCaptures(env, simId, keys, reviewed) {
   const out = [];
+  const leftOut = label => ({ label, contentType: null, base64: null, bytes: 0 });
+  // The public art comes first: the thumbnail, the image the Gallery shows everyone and what an approval binds (see
+  // simForServing), then a creator's own cover art, when there is one. Each is the first format found, as the review recorded.
+  // Sent ahead of the captures, so the request's image budget (JUDGE_IMAGES_MAX_B64) and its count can only ever cut a
+  // capture, never the art the public sees: a harmful cover is always judged, and can be quarantined.
+  for (const [label, keyOf, exts, recorded] of [
+    ['listing thumbnail (the image the Gallery shows)', ext => `thumbnails/${simId}/thumb.${ext}`, THUMB_EXTS, reviewed?.thumb ?? null],
+    ['listing cover (the box art the Gallery shows)', ext => `covers/${simId}/cover.${ext}`, COVER_EXTS, reviewed?.cover ?? null],
+  ]) {
+    let found = false;
+    for (const ext of exts) {
+      const obj = await env.SCENES.get(keyOf(ext));
+      if (!obj) continue;
+      found = true;
+      if (identOfObject(obj) !== recorded) { await obj.body?.cancel?.(); out.push(leftOut(label)); break; }
+      const verdict = await imageVerdictOf(env, obj);
+      const buf = await obj.arrayBuffer();
+      out.push({ label, contentType: obj.httpMetadata?.contentType || `image/${ext === 'jpg' ? 'jpeg' : ext}`, base64: bytesToBase64(buf), bytes: buf.byteLength, alpha_used: verdict?.alpha_used });
+      break;
+    }
+    if (!found && recorded !== null) out.push(leftOut(label));
+  }
+  // Then the captures, in slot order (listCaptures sorts their keys).
   for (const key of keys) {
+    const label = key.split('/').pop();
     const obj = await env.SCENES.get(key);
-    if (!obj) continue;
+    const n = /capture-([0-7])\.(png|jpg|webp)$/.exec(key)?.[1];
+    if (!obj || n === undefined || (reviewed?.captures?.[n] ?? null) !== identOfObject(obj)) { await obj?.body?.cancel?.(); out.push(leftOut(label)); continue; }
     const contentType = obj.httpMetadata?.contentType || 'image/png';
+    const verdict = await imageVerdictOf(env, obj);
     const buf = await obj.arrayBuffer();
-    out.push({ label: key.split('/').pop(), contentType, base64: bytesToBase64(buf), bytes: buf.byteLength });
-  }
-  // The listing's thumbnail is judged too, because it is what the Gallery
-  // shows and what an approval binds (see simForServing).
-  for (const ext of THUMB_EXTS) {
-    const obj = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
-    if (!obj) continue;
-    const buf = await obj.arrayBuffer();
-    out.push({ label: 'listing thumbnail (the image the Gallery shows)', contentType: obj.httpMetadata?.contentType || `image/${ext === 'jpg' ? 'jpeg' : ext}`, base64: bytesToBase64(buf), bytes: buf.byteLength });
-    break;
-  }
-  // A creator's own cover art, when there is one.
-  for (const ext of COVER_EXTS) {
-    const obj = await env.SCENES.get(`covers/${simId}/cover.${ext}`);
-    if (!obj) continue;
-    const buf = await obj.arrayBuffer();
-    out.push({ label: 'listing cover (the box art the Gallery shows)', contentType: obj.httpMetadata?.contentType || `image/${ext === 'jpg' ? 'jpeg' : ext}`, base64: bytesToBase64(buf), bytes: buf.byteLength });
-    break;
+    out.push({ label, contentType, base64: bytesToBase64(buf), bytes: buf.byteLength, alpha_used: verdict?.alpha_used });
   }
   return out;
 }
@@ -5366,6 +5792,8 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   // The objects this review is about, from R2 (see simForServing): what an
   // approval will bind, and what is compared again at decision time.
   rec.reviewed = await snapshotReviewed(env, sim, epoch);
+  // Set again below once this run's judge input is checked against it (IMAGES_CHECKED).
+  delete rec.images_checked;
   // A review of a changed thumbnail alone runs with the listing still listed.
   rec.keep_listed = !!opts.keepListed;
   if (rec.status === 'quarantined' && trigger !== 'appeal') { rec.status = 'quarantined'; await saveCase(env, rec, prevStatus); return rec; }
@@ -5408,8 +5836,17 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
         const prev = JSON.parse(prior);
         if (prev.sim_id !== simId && ['approved', 'rejected'].includes(prev.status)) {
           const prevRec = await loadCase(env, prev.sim_id);
-          if (prevRec?.decision) {
+          // An approval is copied only onto the images it was drawn from: the same thumbnail, cover and captures, every one
+          // of them sent to that judge. A listing with other images is reviewed in full.
+          const sameImages = prev.status !== 'approved' || (sameReviewedImages(prevRec?.reviewed, rec.reviewed) && !imagesNotJudged(prevRec?.judge).length);
+          // The dedup record is only a pointer, kept for months: the case itself must still stand where the record says. An
+          // approval is copied only while the case is approved now and nothing a person did since says otherwise.
+          // And only from a run whose judge read images checked against what its review recorded (IMAGES_CHECKED): a run
+          // from before that check may have recorded one image and judged another.
+          const stands = prev.status !== 'approved' || (prevRec?.images_checked === IMAGES_CHECKED && await approvalStands(env, prevRec));
+          if (prevRec?.decision && sameImages && stands) {
             rec.jev = prevRec.jev; rec.judge = prevRec.judge; rec.triage = prevRec.triage;
+            if (prevRec.images_checked) rec.images_checked = prevRec.images_checked;
             // Another listing's chosen tags are not this one's.
             rec.decision = { ...prevRec.decision, dedup_of: prev.sim_id, assigned_tags: [] };
             await setStatus(env, rec, prev.status, rec.decision, 'dedup', { of: prev.sim_id });
@@ -5502,7 +5939,11 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   const shadowModel = shadowModelFrom(env);
   const judgeStart = Date.now();
   try {
-    const captures = await fetchCaptures(env, simId, captureKeys);
+    const captures = await fetchCaptures(env, simId, captureKeys, rec.reviewed);
+    rec.images_checked = IMAGES_CHECKED;
+    // Staff only: whether each RGBA PNG the judge read uses its alpha (true, false or unknown), as its upload measured it.
+    // It decides nothing.
+    rec.alpha_used = Object.fromEntries(captures.filter(c => c.alpha_used !== undefined).map(c => [c.label, c.alpha_used]));
     const sent = captures.slice(0, CAPTURE_MAX_COUNT + 2);
     meterBytes(meter, { captures_count: sent.length, captures: sent.reduce((s, c) => s + (c.bytes || 0), 0) });
     const input = { sim, dossier, jev, triage, captures, policyText: deps.policyText || '', policyHash: deps.policyHash || POLICY_HASH_ANCHORED, research: rec.research, env, deps, timeoutMs: t.judge_timeout_ms, maxTokens: t.judge_max_tokens, meter };
@@ -5790,7 +6231,19 @@ async function routeModeration(request, url, env, ctx, deps) {
     // Dimensions bounded, metadata dropped, SHA-256 taken (src/user_images.mjs): the
     // captures can be shown to the public as previews once approved.
     const prepared = await prepareUserImage(body);
-    if (!prepared.ok) return json({ error: prepared.error }, 413, cors);
+    if (!prepared.ok) return json({ error: prepared.error }, prepared.status || 413, cors);
+    if (prepared.bytes.byteLength > CAPTURE_MAX_BYTES) return json({ error: `Capture too large (max ${CAPTURE_MAX_BYTES} bytes)` }, 413, cors);
+    // Studio sends a republish's captures before anything else that would send the listing back to review (a world commit
+    // that changed nothing does not), so a capture to an approved listing that is not locked does it here, the way any other
+    // change does (sendBackToReview), and the evidence slot opens the next epoch. A locked or quarantined listing still refuses.
+    if (sim.moderation?.status === 'approved' && !(await contentLockedFor(env, sim, sim.author_id))) {
+      const fresh = JSON.parse((await env.SOCIAL.get(`sim:${sim.id}`)) || 'null');
+      if (fresh?.moderation?.status === 'approved') {
+        sendBackToReview(fresh);
+        fresh.updated_at = new Date().toISOString();
+        await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(withTagsWrittenBack(fresh)));
+      }
+    }
     const slot = await openEvidenceSlot(env, sim.id);
     if (slot.refused) return inReview(json, cors);
     let key;
@@ -5799,6 +6252,8 @@ async function routeModeration(request, url, env, ctx, deps) {
       // One file per capture number in an epoch: a PNG replaced by a JPEG must not leave both.
       for (const ext of ['png', 'jpg', 'webp']) if (ext !== kind.ext) await env.SCENES.delete(captureR2Key(sim.id, match[2], ext, slot.epoch)).catch(() => {});
       await env.SCENES.put(key, prepared.bytes, { httpMetadata: { contentType: kind.ct }, customMetadata: { simId: sim.id, authorId: sim.author_id }, sha256: prepared.sha256 });
+      // Its public verdict, decided once now, and for an RGBA PNG whether its alpha is used (measured, deciding nothing).
+      await recordUploadedImage(env, prepared.sha256, prepared.bytes, { measureAlpha: true });
       if (slot.sim.moderation?.evidence_epoch !== slot.epoch) {
         slot.sim.moderation = { ...(slot.sim.moderation || {}), evidence_epoch: slot.epoch };
         await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(withTagsWrittenBack(slot.sim)));
@@ -6004,17 +6459,24 @@ async function routeModeration(request, url, env, ctx, deps) {
     const adminId = await deps.requireAdmin(request, env);
     if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
     const exec = makeToolExecutor(env, deps, { actor: 'admin', actorId: adminId });
-    if (path === '/api/admin/moderation/queue' && m === 'GET')
-      return json(await exec('moderation_list_queue', { status: url.searchParams.get('status') || 'held', limit: url.searchParams.get('limit') || '50' }), 200, cors);
+    // A read refused because its audit could not be written: the evidence vault's answer (src/evidence_vault.mjs).
+    const auditRefused = () => json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, { ...cors, 'Cache-Control': 'private, no-store' });
+    if (path === '/api/admin/moderation/queue' && m === 'GET') {
+      const r = await exec('moderation_list_queue', { status: url.searchParams.get('status') || 'held', limit: url.searchParams.get('limit') || '50' }, { via: 'GET /api/admin/moderation/queue' });
+      return r.code === 'audit_unavailable' ? auditRefused() : json(r, 200, cors);
+    }
     if ((match = path.match(/^\/api\/admin\/moderation\/case\/([a-f0-9-]+)$/)) && m === 'GET') {
-      const r = await exec('moderation_get_case', { sim_id: match[1] });
-      return json(r, r.ok ? 200 : 404, cors);
+      const r = await exec('moderation_get_case', { sim_id: match[1] }, { via: 'GET /api/admin/moderation/case/{id}' });
+      return r.code === 'audit_unavailable' ? auditRefused() : json(r, r.ok ? 200 : 404, cors);
     }
     if ((match = path.match(/^\/api\/admin\/moderation\/captures\/([a-f0-9-]+)\/([0-7])$/)) && m === 'GET') {
       // The epoch the verdict was drawn from, unless one is asked for.
       const asked = parseInt(url.searchParams.get('epoch') ?? '', 10);
       const rec = await loadCase(env, match[1]);
       const epoch = Number.isInteger(asked) && asked >= 0 ? asked : (Number.isInteger(rec?.evidence_epoch) ? rec.evidence_epoch : 0);
+      // A capture is a listing's evidence (a quarantined listing's may be possible CSAM): it is not read unless the read is on
+      // the audit log first.
+      if (!(await auditAdminRead(env, deps, adminId, 'moderation_capture_read', match[1], { route: 'GET /api/admin/moderation/captures/{id}/{n}', capture: Number(match[2]), epoch }))) return auditRefused();
       for (const ext of ['png', 'jpg', 'webp']) {
         const obj = await env.SCENES.get(captureR2Key(match[1], match[2], ext, epoch));
         if (!obj) continue;
@@ -6026,8 +6488,12 @@ async function routeModeration(request, url, env, ctx, deps) {
       let body = {};
       try { body = await request.json(); } catch { return json({ error: 'JSON body required' }, 400, cors); }
       if (typeof body.name !== 'string') return json({ error: 'name required' }, 400, cors);
-      const r = await exec(body.name, body.args || {});
-      return json(r, r.ok ? 200 : 400, cors);
+      const r = await exec(body.name, body.args || {}, { via: 'POST /api/admin/moderation/tool' });
+      if (r.code === 'audit_unavailable') return auditRefused();
+      // 202: the decision is recorded and a step it owes is still pending (moderation_forum_resolve). A refusal may carry
+      // its own status (409 check_removed); anything else refused is 400.
+      const status = r.ok ? (Array.isArray(r.pending) && r.pending.length ? 202 : 200) : (Number.isInteger(r.status) && r.status >= 400 && r.status < 600 ? r.status : 400);
+      return json(r, status, cors);
     }
     // The review's model costs: tokens and dollars per MB, per model and overall, the average and spread of a first review
     // and of an update, by day (?from=YYYY-MM-DD&to=YYYY-MM-DD, the last 30 days by default).
@@ -6049,8 +6515,10 @@ async function routeModeration(request, url, env, ctx, deps) {
       try { await deps.auditLog(env, 'review_workspace_set', adminId, workspace.space_id, { members: workspace.members.length }); } catch (e) { console.error('audit failed', e?.message); }
       return json({ ok: true, workspace }, 200, cors);
     }
-    if (path === '/api/admin/moderation/workspace/queue' && m === 'GET')
-      return json(await exec('moderation_workspace_queue', { kind: url.searchParams.get('kind') || null, limit: url.searchParams.get('limit') || '50' }), 200, cors);
+    if (path === '/api/admin/moderation/workspace/queue' && m === 'GET') {
+      const r = await exec('moderation_workspace_queue', { kind: url.searchParams.get('kind') || null, limit: url.searchParams.get('limit') || '50' }, { via: 'GET /api/admin/moderation/workspace/queue' });
+      return r.code === 'audit_unavailable' ? auditRefused() : json(r, 200, cors);
+    }
     // How often the shadow judge agrees with the judge, by the judge's outcome (?from=YYYY-MM-DD&to=YYYY-MM-DD).
     if (path === '/api/admin/moderation/shadow' && m === 'GET') {
       const r = await shadowAgreementReport(env, url.searchParams);

@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadWorker, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
+import { loadWorker, mintToken, fakeEnv, ctx, testWebp } from './helpers/load_worker.mjs';
 import { loadSimulation } from '../src/commerce.mjs';
 
 const worker = await loadWorker();
@@ -27,7 +27,7 @@ async function seed(lock) {
   }));
   await env.SOCIAL.put(`sim-author:${AUTHOR}:${SIM}`, SIM);
   await env.SCENES.put(`universes/${SIM}/universe.pak`, 'the world');
-  await env.SCENES.put(`thumbnails/${SIM}/thumb.webp`, 'RIFFxxxxWEBPthumb');
+  await env.SCENES.put(`thumbnails/${SIM}/thumb.webp`, testWebp());
   if (lock) await env.SCENES.put(`locks/legal/${SIM}`, JSON.stringify({ kind: lock }), { customMetadata: { kind: lock } });
   return env;
 }

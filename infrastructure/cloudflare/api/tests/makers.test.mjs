@@ -66,14 +66,14 @@ const listed = (count, extra = {}) => Array.from({ length: count }, () => ({ ...
 
 test('makers are the people with a listed listing: a name, an avatar, how many listed Spaces, how many visits, and nothing else', async () => {
   const env = await world([
-    { name: 'ada', avatar: 'https://cdn.example.com/ada.png', listings: [{ plays: 4, visits: 3 }] },
+    { name: 'ada', avatar: '/assets/avatars/ada.png', listings: [{ plays: 4, visits: 3 }] },
     { name: 'bob', listings: [{}] },
   ]);
   const r = await read(env);
   assert.equal(r.status, 200, r.text);
   assert.deepEqual(Object.keys(r.body), ['makers']);
   assert.deepEqual(r.body.makers, [
-    { username: 'ada', avatar_url: 'https://cdn.example.com/ada.png', space_count: 1, visits: 7 },
+    { username: 'ada', avatar_url: '/assets/avatars/ada.png', space_count: 1, visits: 7 },
     { username: 'bob', avatar_url: null, space_count: 1, visits: 0 },
   ]);
   for (const maker of r.body.makers) assert.deepEqual(Object.keys(maker), ['username', 'avatar_url', 'space_count', 'visits']);
@@ -265,9 +265,12 @@ test('the search does not narrow the order, only the set', async () => {
 
 // -- the avatar ---------------------------------------------------------------------------------------------------------------------
 
-test('the avatar is the account\'s avatar_url, as the profile reads show it, and null when there is none or it is not a web address', async () => {
+test('the avatar is the account\'s avatar_url by the website\'s own rule: a path under /assets, and null for any address on any host', async () => {
   const env = await world([
+    { name: 'a-assets', avatar: '/assets/avatars/a.png', listings: [{ visits: 10 }] },
     { name: 'a-https', avatar: 'https://cdn.example.com/a.png', listings: [{ visits: 9 }] },
+    { name: 'a-ours', avatar: 'https://api.eustress.dev/api/simulations/x/thumbnail', listings: [{ visits: 9 }] },
+    { name: 'a-dots', avatar: '/assets/../secret.png', listings: [{ visits: 9 }] },
     { name: 'b-none', listings: [{ visits: 8 }] },
     { name: 'c-http', avatar: 'http://cdn.example.com/c.png', listings: [{ visits: 7 }] },
     { name: 'd-script', avatar: 'javascript:alert(1)', listings: [{ visits: 6 }] },
@@ -277,10 +280,10 @@ test('the avatar is the account\'s avatar_url, as the profile reads show it, and
     { name: 'h-long', avatar: `https://cdn.example.com/${'a'.repeat(600)}`, listings: [{ visits: 2 }] },
   ]);
   const byName = Object.fromEntries((await read(env, '?limit=24')).body.makers.map((m) => [m.username, m.avatar_url]));
-  assert.equal(byName['a-https'], 'https://cdn.example.com/a.png');
-  for (const name of ['b-none', 'c-http', 'd-script', 'e-data', 'f-number', 'g-space', 'h-long']) assert.equal(byName[name], null, name);
+  assert.equal(byName['a-assets'], '/assets/avatars/a.png');
+  for (const name of ['a-https', 'a-ours', 'a-dots', 'b-none', 'c-http', 'd-script', 'e-data', 'f-number', 'g-space', 'h-long']) assert.equal(byName[name], null, name);
 
-  const gone = await world([{ name: 'ada', avatar: 'https://cdn.example.com/a.png', listings: [{}] }]);
+  const gone = await world([{ name: 'ada', avatar: '/assets/avatars/a.png', listings: [{}] }]);
   await gone.USERS.delete(`user:${accountId(1)}`);
   assert.deepEqual((await read(gone)).body.makers, [{ username: 'ada', avatar_url: null, space_count: 1, visits: 0 }], 'an account record that cannot be read costs the avatar and nothing else');
   const broken = await world([{ name: 'ada', listings: [{}] }]);

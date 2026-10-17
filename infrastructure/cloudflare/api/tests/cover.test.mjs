@@ -128,7 +128,20 @@ async function call(env, method, path, { who, body, headers, origin = 'https://a
 }
 
 const cover = `/api/simulations/${SIM}/cover`;
-const put = (env, bytes, who = 'author', headers = { 'Content-Type': 'image/png' }) => call(env, 'PUT', cover, { who, body: bytes, headers });
+/// PUT the cover. A cover set on an approved listing sends it back to review (sendBackToReview); `env.reviewOwed` says so,
+/// and bind() (what a review leaves behind) passes it again.
+const put = async (env, bytes, who = 'author', headers = { 'Content-Type': 'image/png' }) => {
+  const before = (await env.SOCIAL.get(`sim:${SIM}`)) ? (await record(env)).moderation?.status : null;
+  const r = await call(env, 'PUT', cover, { who, body: bytes, headers });
+  if (r.status === 200 && before === 'approved' && (await record(env)).moderation?.status === 'pending') env.reviewOwed = true;
+  return r;
+};
+/// The listing approved again, as a passing review leaves it.
+async function reapprove(env) {
+  const sim = await record(env);
+  sim.moderation = { ...sim.moderation, status: 'approved' };
+  await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify(sim));
+}
 const del = (env, who = 'author') => call(env, 'DELETE', cover, { who });
 const record = async (env) => JSON.parse(await env.SOCIAL.get(`sim:${SIM}`));
 const coverKeys = (env) => [...env.SCENES.objects.keys()].filter((k) => k.startsWith(`covers/${SIM}/`)).sort();
@@ -141,6 +154,8 @@ async function bind(env, { evidence_epoch = 0, revoked = false } = {}) {
     await env.SCENES.put(`locks/approved/${SIM}.json`, JSON.stringify({ v: 1, revoked: true, at: '2026-01-02T00:00:00.000Z' }));
     return;
   }
+  // The review a cover change sent the listing to (sendBackToReview) passes it again.
+  if (env.reviewOwed) { env.reviewOwed = false; await reapprove(env); }
   const now = await snapshotReviewed(env, await record(env), evidence_epoch);
   await env.SCENES.put(`locks/approved/${SIM}.json`, JSON.stringify({ v: 1, ...now, evidence_epoch, by: 'test', at: '2026-01-02T00:00:00.000Z' }));
 }
@@ -203,15 +218,20 @@ for (const [name, make, ext, mime, width, height] of KINDS) {
   });
 }
 
-test('setting a cover leaves the review as it was: the listing stays listed, and the marker is not touched', async () => {
-  const env = await environment();
-  const before = await record(env);
-  assert.equal((await put(env, png(600, 800))).status, 200);
-  const after = await record(env);
-  assert.deepEqual(after.moderation, before.moderation);
-  assert.equal(after.is_public, true);
-  const listed = (await call(env, 'GET', '/api/simulations')).body.simulations.map((s) => s.id);
-  assert.deepEqual(listed, [SIM]);
+test('setting a cover on an approved listing sends it back to review, binding or not: pending and out of the Gallery until a review passes it', async () => {
+  for (const bound of [false, true]) {
+    const env = await environment();
+    if (bound) await bind(env);
+    const before = await record(env);
+    assert.equal((await put(env, png(600, 800))).status, 200);
+    const after = await record(env);
+    assert.equal(after.moderation.status, 'pending', `bound: ${bound}`);
+    assert.equal(after.moderation.rating, before.moderation.rating, 'the rest of the marker stays');
+    assert.equal(after.is_public, true);
+    assert.deepEqual((await call(env, 'GET', '/api/simulations')).body.simulations, [], 'not in the Gallery meanwhile');
+    assert.equal((await call(env, 'GET', cover)).status, 404, 'and the new cover is not served to the public');
+    assert.equal((await call(env, 'GET', cover, { who: 'author' })).status, 200, 'its author still sees it');
+  }
 });
 
 test('the type is what the bytes are: the label is never read', async () => {
@@ -584,6 +604,8 @@ test('the list, the single read and the author\'s projects carry cover_url and t
   for (const field of OLD_CARD_FIELDS) assert.ok(field in none, `${field} is still there`);
 
   assert.equal((await put(env, png(600, 800))).status, 200);
+  // The review the cover change sent the listing to passes it again.
+  if (env.reviewOwed) { env.reviewOwed = false; await reapprove(env); }
   const v = Date.parse((await record(env)).cover.updated_at);
   const url = `https://api.eustress.dev/api/simulations/${SIM}/cover?v=${v}`;
 
@@ -642,6 +664,8 @@ test('a listing record that names no usable cover has none: a made-up extension 
 const readyWith = async (options) => {
   const env = await environment(options);
   assert.equal((await put(env, png(600, 800))).status, 200);
+  // The review the cover change sent an approved listing to passes it again, with no binding (bind() writes one).
+  if (env.reviewOwed) { env.reviewOwed = false; await reapprove(env); }
   return env;
 };
 
@@ -792,7 +816,7 @@ test('a cover set after the approval is not served to the public until a review 
   const sim = await record(env);
   assert.equal(await coverApproved(env, sim), false, 'a changed cover is not the reviewed one');
   assert.equal(await thumbnailApproved(env, sim), true, 'and the thumbnail binding is not affected by it');
-  assert.equal(isListable(sim), true, 'the listing stays listed meanwhile');
+  assert.equal(isListable(sim), false, 'the listing is back in review meanwhile');
 
   const strangerView = await call(env, 'GET', cover, { who: 'stranger' });
   assert.equal(strangerView.status, 404);
@@ -800,13 +824,13 @@ test('a cover set after the approval is not served to the public until a review 
   assert.notEqual(strangerView.headers.get('Content-Type'), 'image/svg+xml', 'no placeholder panel for a cover');
   const anon = await call(env, 'GET', cover);
   assert.equal(anon.status, 404);
-  assert.equal((await call(env, 'GET', '/api/simulations')).body.simulations.length, 1, 'the listing is still in the Gallery');
+  assert.equal((await call(env, 'GET', '/api/simulations')).body.simulations.length, 0, 'the listing is out of the Gallery until the review');
   assert.equal((await call(env, 'GET', cover, { who: 'author' })).status, 200, 'the author sees what is waiting for review');
   assert.equal((await call(env, 'GET', cover, { who: 'admin' })).status, 200);
 
   // A review runs and binds the cover that is stored now.
   await bind(env);
-  assert.equal(await coverApproved(env, sim), true);
+  assert.equal(await coverApproved(env, await record(env)), true);
   const served = await call(env, 'GET', cover);
   assert.equal(served.status, 200);
   assert.equal(served.headers.get('Cache-Control'), 'public, max-age=300');

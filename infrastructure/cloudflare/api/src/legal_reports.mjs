@@ -36,6 +36,8 @@
 //   LEGAL_REPORT_THREATS               write threat reports as sendable. Off: they are held (`held_setting_off`) and go to no one.
 //   LEGAL_REPORT_SCAMS                 send the weekly scam batch.
 //   LEGAL_REPORT_CSAM_NOTICE_RELEASE   release the author's notice of a CSAM removal without waiting for the report to be sent.
+//   FORUM_LEGAL_OWED_SWEEP             let the hourly sweep write the reports forum cases owe (writeOwedForumReports). Turned on
+//                                      with the forums; off, the sweep makes no call into the forum code.
 //
 // Storage (SOCIAL):
 //   legalreport:{id}                            the report
@@ -79,16 +81,17 @@ export function recordedViewOf(detection) {
 const ID_DOCUMENTS_LINE = 'The identity document images and the selfie are held sealed in Eustress identity storage and are disclosed only under legal process.';
 // Whether an address is known is stated per sealed item, never for the report as a whole: `who.upload_ip_unknown_items` lists
 // `{ item_id, upload_ip: null, reason: 'not_known' }` for each sealed content item no address is known for (for a forum post,
-// each sealed text item, `post-text-...`; the items that carry addresses are not content). An address known for an item is
-// in `who.upload_ips` with that `item_id`.
-const FORUM_TEXT_ITEM = /^post-text(?:-[0-9a-f]{32})?$/;
+// each sealed text item, `post-text-...`, and a first post's sealed title, `post-title-...`, which no address is ever paired
+// with; the items that carry addresses are not content). An address known for an item is in `who.upload_ips` with that
+// `item_id`.
+const FORUM_TEXT_ITEM = /^(?:post-text(?:-[0-9a-f]{32})?|post-title-[0-9a-f]{32})$/;
 export function uploadIpUnknownItems(caseKind, items, ips) {
   const known = new Set((ips || []).map((x) => x?.item_id).filter(Boolean));
   const content = [...new Set((items || []).filter((i) => typeof i === 'string' && (caseKind !== 'forum' || FORUM_TEXT_ITEM.test(i))))];
   return content.filter((i) => !known.has(i)).map((item_id) => ({ item_id, upload_ip: null, reason: 'not_known' }));
 }
 
-export const SETTING_NAMES = Object.freeze(['LEGAL_REPORT_NCMEC', 'LEGAL_REPORT_EU_EMAIL', 'LEGAL_REPORT_THREATS', 'LEGAL_REPORT_SCAMS', 'LEGAL_REPORT_CSAM_NOTICE_RELEASE']);
+export const SETTING_NAMES = Object.freeze(['LEGAL_REPORT_NCMEC', 'LEGAL_REPORT_EU_EMAIL', 'LEGAL_REPORT_THREATS', 'LEGAL_REPORT_SCAMS', 'LEGAL_REPORT_CSAM_NOTICE_RELEASE', 'FORUM_LEGAL_OWED_SWEEP']);
 
 /// The settings as the code reads them. Only the exact string "on" turns one on.
 export function legalSettingsFrom(env) {
@@ -109,6 +112,7 @@ export function legalSettingsFrom(env) {
     threats: on('LEGAL_REPORT_THREATS'),
     scams: on('LEGAL_REPORT_SCAMS'),
     csam_notice_release: on('LEGAL_REPORT_CSAM_NOTICE_RELEASE'),
+    forum_owed_sweep: on('FORUM_LEGAL_OWED_SWEEP'),
   };
 }
 
@@ -378,7 +382,8 @@ export async function writeLegalReport(env, finding, deps = {}) {
       takeover: await takeoverCheck(env, accountId, finding.uploader?.uploaded_at, deps),
       evidence: { case_ref: finding.evidence?.case_ref || reference, items: (finding.evidence?.items || []).slice(0, 64), sealed: finding.evidence?.sealed === true },
       // CSAM only: the author's notice waits for this report to be sent (or for a person, or the setting, to release it).
-      notice: finding.kind === 'csam' ? { withheld: true, released_at: null, released_by: null } : null,
+      // A forum post's author is told at once with one generic entry (src/case_history.mjs), so nothing is withheld for it.
+      notice: finding.kind === 'csam' && finding.subject?.kind !== 'forum_post' ? { withheld: true, released_at: null, released_by: null } : null,
       attempts: 0, last_error: null, sent_at: null, history: [{ at: now, event: 'written' }],
     };
     await saveLegalReport(env, rep);
@@ -697,9 +702,11 @@ export async function weeklyScamBatch(env, nowMs = Date.now(), deps = {}) {
 
 /// Hourly, from scheduled() in index.js: every report waiting to be sent is tried again (it stays queued while its sender is
 /// off); with LEGAL_REPORT_CSAM_NOTICE_RELEASE on, every withheld CSAM notice is released; the weekly scam batch is built when
-/// a week has ended. Never throws. `{ tried, sent, waiting, notices_released, scam_batch }`.
+/// a week has ended; with FORUM_LEGAL_OWED_SWEEP on, every forum case that owes a report (src/moderation.mjs
+/// writeOwedForumReports) has it written. Never throws. `{ tried, sent, waiting, notices_released, owed_reports, scam_batch }`;
+/// `owed_reports` is 'off' while that setting is off.
 export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date.now() } = {}) {
-  const out = { tried: 0, sent: 0, waiting: 0, notices_released: 0, scam_batch: null };
+  const out = { tried: 0, sent: 0, waiting: 0, notices_released: 0, owed_reports: null, scam_batch: null };
   const settings = legalSettingsFrom(env);
   try {
     // A threat report held while LEGAL_REPORT_THREATS was off becomes sendable once it is on, and is tried below.
@@ -741,6 +748,14 @@ export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date
   } catch (e) {
     console.error('legal reports: the sweep failed:', e?.name || 'Error');
   }
+  // Forum cases a person's decision left owing a report (a step after the decision failed): written now, once the forums are
+  // on. Off, nothing below is reached: no import of the forum code and no read of its index.
+  if (settings.forum_owed_sweep) {
+    try { out.owed_reports = await (await import('./moderation.mjs')).writeOwedForumReports(env, deps); }
+    catch (e) { console.error('legal reports: the owed forum reports were not written:', e?.name || 'Error'); out.owed_reports = null; }
+  } else {
+    out.owed_reports = 'off';
+  }
   out.scam_batch = await weeklyScamBatch(env, now, deps);
   return out;
 }
@@ -759,7 +774,13 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
   const headers = { ...cors, 'Cache-Control': 'private, no-store' };
   const adminId = await deps.requireAdmin(request, env);
   if (!adminId || !(await isAdmin(env, adminId))) return deps.json({ error: 'Admin access required' }, 403, cors);
-  const audit = async (action, target, details) => { try { await deps.auditLog?.(env, action, adminId, target, details); } catch (e) { console.error('legal reports: the audit log write failed:', e?.name || 'Error'); } };
+  // An audit record that must be written: throws when it cannot be (src/evidence_vault.mjs readEvidence is the model).
+  const auditOrThrow = async (action, target, details) => {
+    if (typeof deps.auditLog !== 'function') throw new Error('the audit log is not configured');
+    await deps.auditLog(env, action, adminId, target, details);
+  };
+  // An audit record whose loss does not stop the act: the list's counts, a release already done.
+  const audit = async (action, target, details) => { try { await auditOrThrow(action, target, details); } catch (e) { console.error('legal reports: the audit log write failed:', e?.name || 'Error'); } };
   const noteOf = async () => {
     let body = {};
     try { body = await request.json(); } catch { body = {}; }
@@ -779,7 +800,8 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
         if (rep && rep.status === status) items.push({ id: rep.id, kind: rep.kind, status: rep.status, created_at: rep.created_at, reference: rep.when_where?.case_reference || null, destination: rep.route?.authority || null, waiting_reason: rep.waiting_reason || null, notice_withheld: !!rep.notice?.withheld });
       }
     }
-    await audit('LEGAL_REPORTS_LISTED', asked, { count: items.length });
+    // The list is counts, statuses and dates (no address, no account id): its audit is written, and its loss is logged.
+    await audit('LEGAL_REPORTS_LISTED', asked, { route: 'GET /api/admin/legal/reports', count: items.length });
     return deps.json({ items }, 200, headers);
   }
   let m = /^\/api\/admin\/legal\/reports\/([0-9a-f-]{36})(\/release-notice)?$/.exec(url.pathname);
@@ -788,7 +810,9 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
     if (!rep) return deps.json({ error: 'No such report' }, 404, cors);
     if (!m[2]) {
       if (request.method !== 'GET') return deps.json({ error: 'Method not allowed' }, 405, cors);
-      await audit('LEGAL_REPORT_READ', rep.id, { kind: rep.kind });
+      // A report carries addresses and account ids: it is not served unless its read is on the audit log first.
+      try { await auditOrThrow('LEGAL_REPORT_READ', rep.id, { route: 'GET /api/admin/legal/reports/{id}', kind: rep.kind }); }
+      catch { return deps.json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
       return deps.json({ report: rep, ...(rep.kind === 'csam' ? { cybertipline_draft: cyberTiplineDraft(rep) } : {}) }, 200, headers);
     }
     if (request.method !== 'POST') return deps.json({ error: 'Method not allowed' }, 405, cors);

@@ -22,6 +22,7 @@
 import { playCountOf } from './visits.mjs';
 import { cachedValue, defaultCache } from './body_cache.mjs';
 import { ratingCap, viewerHeaders } from './adult_content.mjs';
+import { cleanAvatarUrl } from './account_profile.mjs';
 
 export const MAKERS_DEFAULT_LIMIT = 8;
 export const MAKERS_MAX_LIMIT = 24;
@@ -43,7 +44,8 @@ export function makersQuery(params) {
 }
 
 /// An avatar the Gallery may put in an image tag: an https address, or nothing.
-const avatarOf = (user) => (typeof user?.avatar_url === 'string' && /^https:\/\/\S{1,500}$/.test(user.avatar_url) ? user.avatar_url : null);
+// The website's own rule (account_profile.mjs cleanAvatarUrl): a path under /assets, never an address on any host.
+const avatarOf = (user) => cleanAvatarUrl(user?.avatar_url ?? '');
 
 function compareNames(a, b) {
   const x = normalized(a);

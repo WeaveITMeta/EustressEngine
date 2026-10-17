@@ -50,7 +50,7 @@
 // spent again score nothing, so trading them in a circle earns nothing.
 // =============================================================================
 
-import { cleanText, cleanIcon, isAccountId, recordPurchase } from './purchases.mjs';
+import { cleanText, isAccountId, recordPurchase } from './purchases.mjs';
 import { creditValueScore } from './bliss.mjs';
 import { simWithLegalLock } from './moderation.mjs';
 import { isAdultListing, mayView, refusalOf, viewerFor } from './adult_content.mjs';
@@ -983,18 +983,36 @@ const WALLET_OPS = {
 const pad12 = (n) => String(n).padStart(12, '0');
 const pad13 = (n) => String(Math.trunc(n)).padStart(13, '0');
 
+/// This environment's own API origin: env PUBLIC_API_ORIGIN (staging sets https://api-staging.eustress.dev), else production's.
+export const apiOriginOf = env => String(env?.PUBLIC_API_ORIGIN || 'https://api.eustress.dev').replace(/\/$/, '');
+
+/// A product's icon: one of its own listing's image routes on this environment's own API (`origin`, apiOriginOf: production
+/// api, staging api-staging, never the other), the listing's thumbnail, cover or preview 0 to 7, https, no query, which serve
+/// the public only an image a review bound; or null. The catalog is read signed out, so an address on any other route or
+/// host, ours included, is never kept or served: it could name an image no review in this environment passed.
+export function listingIcon(value, simId, origin = 'https://api.eustress.dev') {
+  if (typeof value !== 'string' || !value || typeof simId !== 'string' || !simId) return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password || url.search || url.hash) return null;
+  const [empty, api, sims, id, kind, n, ...rest] = url.pathname.split('/');
+  if (empty !== '' || api !== 'api' || sims !== 'simulations' || id !== simId || rest.length) return null;
+  const own = n === undefined ? kind === 'thumbnail' || kind === 'cover' : kind === 'preview' && /^[0-7]$/.test(n);
+  return own ? `${url.origin}${url.pathname}` : null;
+}
+
 /// A product as the API returns it.
-export function productView(p) {
+export function productView(p, origin) {
   return {
     object: 'product', id: p.id, number: p.number, sim_id: p.sim_id, space: p.space,
     name: p.name, description: p.description, type: p.type, price: p.price, currency: 'TKT',
-    icon: p.icon || null, active: p.active, metadata: p.metadata || {}, created: p.created, updated: p.updated,
+    icon: listingIcon(p.icon, p.sim_id, origin), active: p.active, metadata: p.metadata || {}, created: p.created, updated: p.updated,
   };
 }
 
 /// The compact product a purchase carries, frozen at the time of purchase.
-export function productSummary(p) {
-  return { id: p.id, number: p.number, name: p.name, type: p.type, price: p.price, icon: p.icon || null };
+export function productSummary(p, origin) {
+  return { id: p.id, number: p.number, name: p.name, type: p.type, price: p.price, icon: listingIcon(p.icon, p.sim_id, origin) };
 }
 
 /// A purchase as the API returns it. The idempotency key stays private.
@@ -1283,8 +1301,8 @@ const HUB_OPS = {
         [`pseq:${sim_id}`]: number,
         [`pcount:${sim_id}`]: count + 1,
       });
-      await this.publish('product.created', null, productView(product), sim_id);
-      return { ok: true, product: productView(product) };
+      await this.publish('product.created', null, productView(product, apiOriginOf(this.env)), sim_id);
+      return { ok: true, product: productView(product, apiOriginOf(this.env)) };
     });
   },
 
@@ -1299,12 +1317,12 @@ const HUB_OPS = {
           product[k] = v;
         }
       }
-      if (Object.keys(previous).length === 0) return { ok: true, product: productView(product), unchanged: true };
+      if (Object.keys(previous).length === 0) return { ok: true, product: productView(product, apiOriginOf(this.env)), unchanged: true };
       product.updated = nowS();
       await this.storage.put(`prod:${id}`, product);
       const type = patch.active === false && previous.active === true ? 'product.archived' : 'product.updated';
-      await this.publish(type, null, productView(product), product.sim_id, { previous_attributes: previous });
-      return { ok: true, product: productView(product) };
+      await this.publish(type, null, productView(product, apiOriginOf(this.env)), product.sim_id, { previous_attributes: previous });
+      return { ok: true, product: productView(product, apiOriginOf(this.env)) };
     });
   },
 
@@ -1313,14 +1331,14 @@ const HUB_OPS = {
     if (!productId && sim_id && isWhole(number)) productId = await this.storage.get(`pnum:${sim_id}:${number}`);
     const product = productId ? await this.storage.get(`prod:${productId}`) : null;
     if (!product || (sim_id && product.sim_id !== sim_id)) return fail(404, 'No such product', 'resource_missing');
-    return { ok: true, product: productView(product) };
+    return { ok: true, product: productView(product, apiOriginOf(this.env)) };
   },
 
   async list_products({ sim_id, active, limit, starting_after, all }) {
     const products = [...(await this.storage.list({ prefix: 'prod:' })).values()]
       .filter((p) => (!sim_id || p.sim_id === sim_id) && (active === undefined || active === null || p.active === active))
       .sort((a, b) => b.created - a.created || b.number - a.number)
-      .map(productView);
+      .map((p) => productView(p, apiOriginOf(this.env)));
     if (all) return { ok: true, object: 'list', data: products, has_more: false };
     return { ok: true, ...paginate(products, { limit, starting_after }) };
   },
@@ -1422,7 +1440,7 @@ const HUB_OPS = {
       object: 'purchase', id: newId('pur'), livemode: false, synthetic: true,
       sim_id, sim_name: sim_name || '', space: product.space || null,
       buyer_id: `test_buyer_${randomToken(8)}`, seller_id: this.accountId,
-      product: productSummary(product), amount: product.price,
+      product: productSummary(product, apiOriginOf(this.env)), amount: product.price,
       creator_amount: creatorAmount, platform_amount: product.price - creatorAmount,
       created: nowS(), status: 'succeeded', fulfilled: false, fulfilled_at: null,
     };
@@ -1683,7 +1701,7 @@ export async function authenticate(request, env, ctx, deps) {
 
 /// The product fields a create or update sets, cleaned. With `partial`, only
 /// the fields present are returned; otherwise name and price are required.
-export function productFields(body, { partial = false, previousMetadata = {} } = {}) {
+export function productFields(body, { partial = false, previousMetadata = {}, simId = null, origin } = {}) {
   const out = {};
   if (!partial || body.name !== undefined) {
     const name = cleanText(body.name, LIMITS.product_name);
@@ -1706,8 +1724,8 @@ export function productFields(body, { partial = false, previousMetadata = {} } =
     out.price = price;
   }
   if (!partial || body.icon !== undefined) {
-    const icon = body.icon ? cleanIcon(body.icon) : '';
-    if (body.icon && !icon) return { error: 'icon must be served by Eustress (https://*.eustress.dev or /assets/...)', param: 'icon' };
+    const icon = body.icon ? listingIcon(body.icon, simId, origin) : null;
+    if (body.icon && !icon) return { error: 'icon must be one of this listing\'s own images on this API: its thumbnail, its cover or one of its previews 0 to 7', param: 'icon' };
     out.icon = icon || null;
   }
   if (!partial || body.active !== undefined) {
@@ -1871,7 +1889,7 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
     if (!space) return error(400, 'space is required: the published Space the product is sold in', 'invalid_request', { param: 'space' });
     const spaceError = checkSpacePublished(sim, space);
     if (spaceError) return error(409, spaceError, 'space_not_published', { param: 'space', published_spaces: [...publishedSpaces(sim)].sort() });
-    const cleaned = productFields(body);
+    const cleaned = productFields(body, { simId: sim.id, origin: apiOriginOf(env) });
     if (cleaned.error) return error(400, cleaned.error, 'invalid_request', { param: cleaned.param });
     if (cleaned.fields.active && !livemode) return liveChangeRequired();
     const r = await call(hub, 'create_product', { sim_id: sim.id, fields: { space, ...cleaned.fields } });
@@ -1903,7 +1921,7 @@ export async function handleCommerceRoute(request, url, env, ctx, cors, deps) {
       if (!body) return error(400, 'Body must be JSON', 'invalid_json');
       const current = await call(hub, 'get_product', { id });
       if (!current.ok) return fromObject(current);
-      const cleaned = productFields(body, { partial: true, previousMetadata: current.product.metadata });
+      const cleaned = productFields(body, { partial: true, previousMetadata: current.product.metadata, simId: current.product.sim_id, origin: apiOriginOf(env) });
       if (cleaned.error) return error(400, cleaned.error, 'invalid_request', { param: cleaned.param });
       if ((current.product.active || cleaned.fields.active) && !livemode) return liveChangeRequired();
       const patch = cleaned.fields;
@@ -2195,7 +2213,7 @@ async function createPurchase(request, env, ctx, caller, deps, { reply, error, f
     buyer_id: caller.account_id,
     seller_id: seller,
     seller_name: attribution.creator_name || '',
-    product: productSummary(product),
+    product: productSummary(product, apiOriginOf(env)),
     amount: product.price,
     currency: 'TKT',
     creator_amount: creatorAmount,
@@ -2206,7 +2224,7 @@ async function createPurchase(request, env, ctx, caller, deps, { reply, error, f
   if (!result.ok) {
     if (result.code === 'insufficient_tickets' || result.code === 'already_owned') {
       const note = callObject(hubStub(env, seller), 'purchase_failed', {
-        account_id: seller, livemode, sim_id: sim.id, product: productSummary(product),
+        account_id: seller, livemode, sim_id: sim.id, product: productSummary(product, apiOriginOf(env)),
         buyer_id: caller.account_id, code: result.code, message: result.error,
       }).catch(() => {});
       if (ctx?.waitUntil) ctx.waitUntil(note);

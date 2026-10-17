@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
     "sync-policy": "node scripts/sync-policy.mjs",
-    "check": "node scripts/sync-policy.mjs --check && node --test \"tests/**/*.test.mjs\""
+    "check": "node scripts/sync-policy.mjs --check && node --test \"tests/**/*.test.mjs\"",
+    "test:clock-shift": "node --import ./tests/helpers/clock_shift.mjs --test \"tests/**/*.test.mjs\""
   },
   "keywords": [],
   "author": "",

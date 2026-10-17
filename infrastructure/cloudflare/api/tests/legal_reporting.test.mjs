@@ -483,7 +483,9 @@ test('a forum CSAM removal by the check is reported, and its author is told only
   // nonconsensual_sexual refusal does (tests/forum_case_store.test.mjs compares the two).
   const before = forumNoticeEntry(await loadForumCase(env, POST));
   assert.equal(before.outcome, 'removed');
-  assert.doesNotMatch(JSON.stringify(before), /A1|A5|minor|sexual|csam/i);
+  // The random case reference, the post id and the times are left out of the check: a reference is random base32 and can spell
+  // a forbidden word by chance (as tests/forum_case_store.test.mjs does).
+  assert.doesNotMatch(JSON.stringify({ ...before, reference: null, post: null, opened_at: null, decided_at: null, updated_at: null }), /A1|A5|minor|sexual|csam/i);
   assert.match(before.feedback.reasons[0].why, /^Your account is not affected/);
   assert.doesNotMatch([...env.SOCIAL.m.values()].join('\n'), /QUOKKA-CANARY/, 'the body is in no case record');
   await releaseReportNotice(env, rep, { by: 'system', reason: 'the report was sent' });

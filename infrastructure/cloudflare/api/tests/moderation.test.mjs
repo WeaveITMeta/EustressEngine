@@ -158,7 +158,7 @@ async function publishedSim(env, { id = 'a1b2c3d4-0000-4000-8000-000000000001', 
   await env.SOCIAL.put(`sim:${id}`, JSON.stringify(sim));
   if (withDossier) await env.SCENES.put(`universes/${id}/moderation/dossier.json`, JSON.stringify(withDossier), { httpMetadata: { contentType: 'application/json' } });
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]).buffer;
-  for (let n = 0; n < withCaptures; n++) await env.SCENES.put(`universes/${id}/moderation/capture-${n}.png`, png, { httpMetadata: { contentType: 'image/png' } });
+  for (let n = 0; n < withCaptures; n++) await env.SCENES.put(`universes/${id}/moderation/capture-${n}.png`, png, { httpMetadata: { contentType: 'image/png' }, sha256: createHash('sha256').update(Buffer.from(png)).digest('hex') });
   return sim;
 }
 

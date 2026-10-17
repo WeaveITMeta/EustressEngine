@@ -80,7 +80,7 @@ test('metadata is dropped from every format and the pixels are left alone', () =
     assert.deepEqual([inspectImage(bytes).width, inspectImage(bytes).height], [100, 50], `${kind}: still the same picture`);
   }
   const latin = bytes => new TextDecoder('latin1').decode(bytes);
-  assert.ok(latin(stripped.png).includes('gAMA') && latin(stripped.png).includes('IDAT'), 'colour and image data stay');
+  assert.ok(!latin(stripped.png).includes('gAMA') && latin(stripped.png).includes('IDAT'), 'a colour transform goes, the image data stays');
   assert.ok(latin(stripped.jpeg).includes('JFIF'), 'the JFIF header stays');
   assert.ok(stripped.jpeg.length < jpeg(100, 50).length);
   // WebP: the container size is right and the extended header no longer promises metadata.

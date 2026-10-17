@@ -29,15 +29,21 @@
 //   - forum_notice: a case about the account's own post, once the post is hidden,
 //     removed, gated or decided, and not before. It says what happened to the post
 //     and how to ask for it back, and never who reported it, how many did or what
-//     they wrote. While the case was reported, removed, sealed or decided as csam there
-//     is no forum_notice at all (forumCsamSilenced), until a person restores the post or
-//     the report is sent or the notice released; a removal under another category does
-//     not lift it. No forum case sends the author any other notice.
+//     they wrote. It is the latest of the entries the case has shown its author
+//     (`shown_entries`, written by src/moderation.mjs as each one is shown): an entry
+//     once shown is never withdrawn and never changed by a later report or seal; only
+//     a person's later decision shows a new one. The author always sees what happened
+//     to the post (the thread page shows it), so no outcome is ever left without an
+//     entry, and no entry tells csam from nonconsensual_sexual: every report hide, of any
+//     category, is one generic entry, and a person's removal, a seal or a refusal at
+//     posting in csam or nonconsensual_sexual is one generic entry, with no category and
+//     no article. Other categories keep their named entries. No forum case sends the
+//     author any other notice.
 //
 // Every answer is private and never stored by a cache.
 // =============================================================================
 
-import { loadCase, authorView, authorStatusOf, loadForumCase } from './moderation.mjs';
+import { loadCase, authorView, authorStatusOf, loadForumCase, forumShownEntriesOf } from './moderation.mjs';
 import { assignCaseReference, resolveCaseReference, normalizeCaseReference } from './case_reference.mjs';
 import { loadTakedown, takedownStatusView, takedownEntriesFor, takedownPartyOf, requestTakedownReview, STATEMENT_MIN, STATEMENT_MAX } from './takedown.mjs';
 
@@ -97,9 +103,16 @@ const FORUM_CATEGORY_WORDS = {
   spam: 'it was spam (Code B4)',
 };
 
-/// The categories a removal by the forum check (refused at posting) tells its author only generically (McKale): the same
-/// entry for each, with no category and no article.
-export const FORUM_CHECK_GENERIC_CATEGORIES = Object.freeze(['csam', 'nonconsensual_sexual']);
+/// The categories whose removal, seal or refusal at posting is told to the author only generically (McKale): the same entry
+/// for each, word for word, with no category and no article. The author sees the outcome either way (the thread page shows
+/// "Removed by a moderator"), so a named entry for one and none for the other would tell them apart.
+export const FORUM_GENERIC_CATEGORIES = Object.freeze(['csam', 'nonconsensual_sexual']);
+/// The same list, by its earlier name (a refusal at posting).
+export const FORUM_CHECK_GENERIC_CATEGORIES = FORUM_GENERIC_CATEGORIES;
+/// The one entry for a post hidden or removed by reports, whatever the category.
+export const FORUM_REPORT_HIDDEN_HEADLINE = 'Your forum post was hidden after a report while a person reviews it.';
+/// The one entry for a person's removal or a seal in csam or nonconsensual_sexual.
+export const FORUM_GENERIC_REMOVED_HEADLINE = 'Your forum post was removed while a person reviews it.';
 
 /// A report the account filed, as its reporter sees it: where it is, never what was decided about the post or its author.
 export function forumReportEntry(rec, reporterId) {
@@ -124,77 +137,54 @@ export function forumReportEntry(rec, reporterId) {
   };
 }
 
-/// Whether the post's author must be told nothing: the case was reported, removed, sealed or decided as csam, and since then
-/// no person has restored the post, and the report was not sent or the notice released. A report to NCMEC must not be
-/// preceded by a warning to the suspect, so, as the listing takedown path does for possible CSAM (src/takedown.mjs
-/// authorVisible), there is no entry and no notice until then. A later removal under another category (a spam or threat
-/// removal, of the post or of its thread) never lifts it: the post was still found as csam. A restore counts when it was made
-/// in the round of the latest csam signal or later.
-export function forumCsamSilenced(rec) {
-  const csamRounds = (rec.reports || []).filter((r) => r.category === 'csam').map((r) => r.round);
-  if (Number.isInteger(rec.csam_reported_round)) csamRounds.push(rec.csam_reported_round);
-  // A removal by the forum check (src/moderation.mjs recordForumRemoval) as csam is not a silence: the text was refused at
-  // posting with the generic message, and its author is told the same generic entry as for nonconsensual_sexual
-  // (FORUM_CHECK_GENERIC_CATEGORIES), so neither the words nor an absent entry tells the two apart. What follows silences it:
-  // a csam report, a person's csam removal, and a seal as csam.
-  // So does a person's removal decided as csam (hide_reason 'removed'), and a seal of the post as csam (sealForumEvidence),
-  // whether or not anyone reported it: a staff csam removal of an unreported post is not told before its report.
-  for (const d of rec.decisions || []) if (d?.decision === 'remove' && d.category === 'csam') csamRounds.push(Number.isInteger(d.round) ? d.round : 0);
-  if (Number.isInteger(rec.csam_sealed_round)) csamRounds.push(rec.csam_sealed_round);
-  if (rec.hide_reason === 'csam' && rec.removed_by !== 'check' && !csamRounds.length) csamRounds.push(0);
-  if (!csamRounds.length) return false;
-  const round = Math.max(...csamRounds);
-  // Released: the report was sent, or a person or LEGAL_REPORT_CSAM_NOTICE_RELEASE released it (src/legal_reports.mjs).
-  if (Number.isInteger(rec.csam_notice_released_round) && rec.csam_notice_released_round >= round) return false;
-  // Only a restore lifts it; a removal under any category does not.
-  return !(rec.decisions || []).some((d) => d.round >= round && d.decision === 'restore');
+// The forum's csam silence (no entry at all while a post was reported, removed or sealed as csam) is retired (McKale,
+// 2026-10-15): the author sees the outcome on the thread page either way, so "something happened and no entry" was itself the
+// tell. Every outcome now has an entry, and the generic ones say the same for csam as for nonconsensual_sexual.
+
+/// What a shown entry says, by its kind (src/moderation.mjs showForumEntry): `{ status, outcome, headline, why }`. The
+/// generic kinds depend on nothing but their kind, so they are byte-identical whatever the category behind them.
+export function forumEntryText(entry) {
+  const words = (category) => (FORUM_GENERIC_CATEGORIES.includes(category) ? null : FORUM_CATEGORY_WORDS[category] || null);
+  switch (entry?.kind) {
+    case 'report_hidden':
+      return { status: 'under_review', outcome: 'hidden', headline: FORUM_REPORT_HIDDEN_HEADLINE, why: `It was reported as content the forums do not allow, and a person reviews it. ${FORUM_SUPPORT_LINE}` };
+    case 'report_gated':
+      return { status: 'under_review', outcome: null, headline: 'Your forum post is shown only behind the Adult content gate while a person reviews it.', why: 'Members reported it as explicit adult content. It stays up for accounts that have turned Adult content on; a person decides.' };
+    case 'check_removed': {
+      const w = words(entry.category);
+      return { status: 'decided', outcome: 'removed', headline: 'Your forum post was removed: it carried content the forums do not allow.', why: `${w ? `It was removed because ${w}. ` : ''}Your account is not affected. ${FORUM_SUPPORT_LINE}` };
+    }
+    case 'person_removed': {
+      if (FORUM_GENERIC_CATEGORIES.includes(entry.category)) return { status: 'under_review', outcome: 'removed', headline: FORUM_GENERIC_REMOVED_HEADLINE, why: `Your account is not affected. ${FORUM_SUPPORT_LINE}` };
+      const w = words(entry.category);
+      return { status: 'decided', outcome: 'removed', headline: 'A moderator removed your forum post.', why: `${w ? `It was removed because ${w}. ` : ''}${FORUM_SUPPORT_LINE}` };
+    }
+    case 'person_decided': {
+      const outcome = { restore: 'restored', gate: 'gated', ungate: 'ungated' }[entry.decision] || 'decided';
+      const headline = { restored: 'A person reviewed your forum post and it is shown again.', gated: 'A person placed your forum post behind the Adult content gate.', ungated: 'A person took your forum post out from behind the Adult content gate.' }[outcome] || 'A person reviewed your forum post.';
+      return { status: 'decided', outcome, headline, why: '' };
+    }
+    default:
+      return null;
+  }
 }
 
-/// A case about the account's own post, as its author sees it, or null while nothing has happened to the post (no hide, no
-/// gate, no decision), and null while possible CSAM silences it (forumCsamSilenced). Never a reporter, their number or a note.
+/// A case about the account's own post, as its author sees it: the latest entry the case has shown (forumShownEntriesOf), or
+/// null while nothing has happened to the post. Never a reporter, their number or a note.
 export function forumNoticeEntry(rec) {
-  if (forumCsamSilenced(rec)) return null;
-  const last = (rec.decisions || []).at(-1) || null;
-  let status;
-  let outcome = null;
-  let headline;
-  let why = '';
-  // Illegal content is removed or hidden without a person reading it, so these are told as done, with the way to appeal.
-  if (rec.removed && rec.removed_by === 'check') {
-    status = 'decided'; outcome = 'removed';
-    headline = 'Your forum post was removed: it carried content the forums do not allow.';
-    // csam and nonconsensual_sexual are told in one generic entry, word for word the same, naming no category and no article.
-    const generic = FORUM_CHECK_GENERIC_CATEGORIES.includes(rec.check_removal?.category);
-    const words = generic ? null : FORUM_CATEGORY_WORDS[rec.check_removal?.category];
-    why = `${words ? `It was removed because ${words}. ` : ''}Your account is not affected. ${FORUM_SUPPORT_LINE}`;
-  } else if (rec.removed && rec.removed_by === 'reports') {
-    status = 'decided'; outcome = 'removed';
-    headline = 'Your forum post was removed after reports that it carried illegal content.';
-    why = `Several members reported it as content the forums do not allow. ${FORUM_SUPPORT_LINE}`;
-  } else if (rec.removed) {
-    status = 'decided'; outcome = 'removed'; headline = 'A moderator removed your forum post.';
-    const removal = [...(rec.decisions || [])].reverse().find((d) => d.decision === 'remove');
-    why = `${removal && FORUM_CATEGORY_WORDS[removal.category] ? `It was removed because ${FORUM_CATEGORY_WORDS[removal.category]}. ` : ''}${FORUM_SUPPORT_LINE}`;
-  } else if (rec.hidden) {
-    status = 'decided'; outcome = 'hidden'; headline = 'Your forum post was hidden after a report.';
-    why = `It was reported as content the forums do not allow. ${FORUM_SUPPORT_LINE}`;
-  } else if (rec.gated && rec.waiting && !last?.decision?.startsWith('gate')) {
-    status = 'under_review'; headline = 'Your forum post is shown only behind the Adult content gate while a person reviews it.';
-    why = 'Members reported it as explicit adult content. It stays up for accounts that have turned Adult content on; a person decides.';
-  } else if (last) {
-    status = 'decided';
-    outcome = { restore: 'restored', gate: 'gated', ungate: 'ungated' }[last.decision] || 'decided';
-    headline = { restored: 'A person reviewed your forum post and it is shown again.', gated: 'A person placed your forum post behind the Adult content gate.', ungated: 'A person took your forum post out from behind the Adult content gate.' }[outcome] || 'A person reviewed your forum post.';
-  } else return null;
+  const entries = forumShownEntriesOf(rec);
+  const last = entries.at(-1);
+  const text = last ? forumEntryText(last) : null;
+  if (!text) return null;
   return {
     reference: rec.reference || null,
     kind: 'forum_notice',
     post: { id: rec.post_id, thread_id: rec.thread_id },
-    status, outcome, headline,
-    opened_at: rec.hidden_at || rec.removed_at || rec.gated_at || (rec.decisions || [])[0]?.at || null,
-    decided_at: status === 'decided' ? (rec.removed_by === 'reports' ? rec.removed_at : rec.hidden && !rec.removed ? rec.hidden_at : last?.at || null) : null,
-    updated_at: [last?.at, rec.hidden_at, rec.removed_at, rec.gated_at].filter(Boolean).sort().pop() || null,
-    feedback: { reasons: why ? [{ title: 'Eustress Forums', why, what_to_change: '' }] : [], articles: [], tests: [], suggested_edit: null, note: null },
+    status: text.status, outcome: text.outcome, headline: text.headline,
+    opened_at: entries[0].at || null,
+    decided_at: text.status === 'decided' ? last.at || null : null,
+    updated_at: last.at || null,
+    feedback: { reasons: text.why ? [{ title: 'Eustress Forums', why: text.why, what_to_change: '' }] : [], articles: [], tests: [], suggested_edit: null, note: null },
   };
 }
 

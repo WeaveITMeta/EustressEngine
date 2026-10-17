@@ -181,7 +181,7 @@ async function publishedSim(env, { id = SIM, author = 'user-1', withDossier = do
   sim.pak_etag = stored.etag; sim.scene_size_bytes = stored.size;
   await env.SOCIAL.put(`sim:${id}`, JSON.stringify(sim));
   if (withDossier) await env.SCENES.put(`universes/${id}/moderation/dossier.json`, JSON.stringify(withDossier), { httpMetadata: { contentType: 'application/json' } });
-  for (let n = 0; n < withCaptures; n++) await env.SCENES.put(`universes/${id}/moderation/capture-${n}.png`, PNG.buffer, { httpMetadata: { contentType: 'image/png' } });
+  for (let n = 0; n < withCaptures; n++) await env.SCENES.put(`universes/${id}/moderation/capture-${n}.png`, PNG.buffer, { httpMetadata: { contentType: 'image/png' }, sha256: createHash('sha256').update(PNG).digest('hex') });
   return sim;
 }
 

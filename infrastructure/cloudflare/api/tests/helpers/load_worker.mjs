@@ -26,7 +26,16 @@ export async function loadWorker() {
   const entry = path.join(tmp, 'index.js');
   fs.writeFileSync(entry, fs.readFileSync(entry, 'utf8').replaceAll("'cloudflare:email'", "'./cloudflare_email_stub.mjs'"));
   const mod = await import(pathToFileURL(path.join(tmp, 'index.js')).href);
+  workerDir = tmp;
   return mod.default;
+}
+
+let workerDir = null;
+/// A module of the Worker loadWorker loaded last, as that Worker sees it (the same instance its index.js imported), so a test
+/// can call what Website's own modules call at load, such as a registration function.
+export async function workerModule(name) {
+  if (!workerDir) throw new Error('loadWorker() first');
+  return import(pathToFileURL(path.join(workerDir, name)).href);
 }
 
 export const JWT_SECRET = 'test-secret-not-real';

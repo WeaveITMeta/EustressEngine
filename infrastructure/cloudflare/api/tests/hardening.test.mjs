@@ -517,7 +517,10 @@ test('a thumbnail is served as an image that cannot run as a page', async () => 
   await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify({ ...sim, moderation: { ...sim.moderation, rating: 'all_ages' } }));
   // Written by the old upload route: its author chose the type.
   await env.SCENES.put(`thumbnails/${SIM}/thumb.png`, HTML, { httpMetadata: { contentType: 'text/html' } });
-  const r = await call(env, 'GET', `/api/simulations/${SIM}/thumbnail`);
+  // Not an image an upload would store: absent to the public (src/user_images.mjs storedImageProblem).
+  assert.equal((await call(env, 'GET', `/api/simulations/${SIM}/thumbnail`)).status, 404);
+  // Its author is still served the stored bytes, and they still cannot run as a page.
+  const r = await call(env, 'GET', `/api/simulations/${SIM}/thumbnail`, { token: mintToken(sim.author_id) });
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('content-type'), 'image/png');
   assert.equal(r.headers.get('x-content-type-options'), 'nosniff');

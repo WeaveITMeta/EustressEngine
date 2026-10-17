@@ -44,6 +44,7 @@
 
 import { assignCaseReference, resolveCaseReference, REFERENCE_PATTERN, CASE_KINDS } from './case_reference.mjs';
 import { isAdmin } from './admin_check.mjs';
+import { derivedCopyOf } from './user_images.mjs';
 
 export const VAULT_PREFIX = 'evidence/';
 export const VAULT_KEY_LABEL = 'evidence-vault-v1';
@@ -481,12 +482,21 @@ export async function listingEvidenceItems(env, sim) {
   if (own(sim.r2_key)) add('package', sim.r2_key);
   let n = 0;
   for (const space of Object.values(sim.spaces || {}).slice(0, 20)) if (own(space?.r2_key)) add(`space-${n++}`, space.r2_key);
-  for (const ext of ['webp', 'png', 'jpg']) if (await env.SCENES.head(`thumbnails/${sim.id}/thumb.${ext}`)) add(`thumbnail-${ext}`, `thumbnails/${sim.id}/thumb.${ext}`);
-  for (const ext of ['webp', 'png', 'jpg']) if (await env.SCENES.head(`covers/${sim.id}/cover.${ext}`)) add(`cover-${ext}`, `covers/${sim.id}/cover.${ext}`);
+  // A listing image the public is served as a rebuilt copy (src/moderation.mjs publicImageBody) is sealed with that copy too,
+  // as its own item named for the original with "-stripped".
+  const addImage = async (id, r2Key) => {
+    add(id, r2Key);
+    const copy = await derivedCopyOf(env, r2Key);
+    if (copy) add(`${id}-stripped`, copy.key);
+  };
+  for (const ext of ['webp', 'png', 'jpg']) if (await env.SCENES.head(`thumbnails/${sim.id}/thumb.${ext}`)) await addImage(`thumbnail-${ext}`, `thumbnails/${sim.id}/thumb.${ext}`);
+  for (const ext of ['webp', 'png', 'jpg']) if (await env.SCENES.head(`covers/${sim.id}/cover.${ext}`)) await addImage(`cover-${ext}`, `covers/${sim.id}/cover.${ext}`);
   const listed = await env.SCENES.list({ prefix: `universes/${sim.id}/moderation/`, limit: 500 });
   for (const o of listed?.objects || []) {
     const m = /\/moderation\/(?:e(\d+)\/)?(dossier\.json|capture-[0-7]\.(?:png|jpg|webp))$/.exec(o.key);
-    if (m) add(`${m[1] ? `e${m[1]}-` : ''}${m[2].replace(/\.json$/, '')}`.replace(/[^a-z0-9_.-]/g, '-'), o.key);
+    if (!m) continue;
+    const id = `${m[1] ? `e${m[1]}-` : ''}${m[2].replace(/\.json$/, '')}`.replace(/[^a-z0-9_.-]/g, '-');
+    if (m[2].startsWith('capture-')) await addImage(id, o.key); else add(id, o.key);
   }
   return items;
 }

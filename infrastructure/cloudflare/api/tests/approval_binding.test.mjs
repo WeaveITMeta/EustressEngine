@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { loadWorker, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
+import { loadWorker, mintToken, fakeEnv, ctx, testWebp } from './helpers/load_worker.mjs';
 
 const worker = await loadWorker();
 
@@ -23,7 +23,8 @@ const MANIFEST = `universes/${SIM}/world/manifest.json`;
 const SOURCE = `universes/${SIM}/world/source-manifest.json`;
 const sha = text => createHash('sha256').update(text).digest('hex');
 // What each stored object holds. Objects are stored with their SHA-256, so an identity is known from the content.
-const BODY = { [PAK]: 'the world', [THUMB]: 'RIFFxxxxWEBPthumb', [MANIFEST]: '{"chunks":[]}', [SOURCE]: '{"chunks":[]}' };
+// The thumbnail is a real WebP: the public is served only an image an upload would store (src/user_images.mjs storedImageProblem).
+const BODY = { [PAK]: 'the world', [THUMB]: testWebp(), [MANIFEST]: '{"chunks":[]}', [SOURCE]: '{"chunks":[]}' };
 const etag = key => `sha256:${sha(BODY[key])}`;
 const putWithHash = (env, key, body) => env.SCENES.put(key, body, { sha256: sha(body) });
 

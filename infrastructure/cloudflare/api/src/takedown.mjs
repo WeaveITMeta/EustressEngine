@@ -75,12 +75,19 @@
 // thread path, or a bare post id; a thread alone names its first post). It is removed
 // like a listing, through a lock the forum routes treat as removed: SOCIAL
 // `forum-post-lock:{postId}`, `{ reason: 'takedown', reference, locked_at }`. This
-// module writes and deletes only that key and never touches forum storage, so it
-// cannot see whether the post exists or who wrote it: the post's author is told by
-// the forum ("Removed under a legal request"), not here. The hash blocklist does not
-// apply to a text post (there is no file to hash). A person's `invalid` decision
-// deletes the lock, and the hourly sweep writes it again if it disappears while the
-// takedown is in force.
+// module writes and deletes only that key and never touches forum storage: the post's
+// author is told by the forum ("Removed under a legal request"), not here. Whether the
+// post exists is the forum's answer, through the function it registers
+// (registerForumPostExists): a lock is written only for a post the forum says exists;
+// one it says does not is recorded `not_found` and nothing is written, so a request
+// cannot plant locks on posts that are not there; an answer the forum cannot give
+// leaves the lock owed (`pending`) for the sweep. The hash blocklist does not apply to
+// a text post (there is no file to hash), and this module never blocks forum text
+// from being posted again: McKale's rule for forum text is "lock now, block later",
+// and the forum blocks a re-post once a person confirms the takedown
+// (forumTakedownStatus, and the decision pushed through registerForumTakedownDecision).
+// A person's `invalid` decision deletes the lock, and the hourly sweep writes it again
+// if it disappears while the takedown is in force.
 //
 // Storage (SOCIAL unless said):
 //   tdcase:{id}                the case, with the request (the requester's name, signature, email: administrators only)
@@ -111,7 +118,7 @@ import { sendNotice, scrubAddresses } from './account_notices.mjs';
 import { renderEmail, html, paragraph, note as noteLine, facts, formatWhen } from './email_shell.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { accountTimeZone } from './account_time_zone.mjs';
-import { sha256Hex, prepareUserImage } from './user_images.mjs';
+import { sha256Hex, prepareUserImage, derivedCopyOf, storedImageVerdict } from './user_images.mjs';
 import { defaultCache } from './body_cache.mjs';
 import { siteOrigin } from './cors.mjs';
 import { sealEvidence, listingEvidenceItems } from './evidence_vault.mjs';
@@ -402,6 +409,28 @@ const STEPS = {
   forum_lock: async (env, rec, postId) => {
     const target = forumTargetOf(rec, postId);
     if (!target || target.restored_at) return;
+    // A post not yet locked is locked only when the forum says it exists. A lock written before (the sweep putting back one
+    // that disappeared) is not asked again.
+    if (!target.locked_at) {
+      // Asked as of the filing: a post created under this id after the request was filed is not the post it named, so the
+      // check is given the request's received_at, the same on every retry of the step.
+      const exists = await forumPostExistence(env, postId, rec.received_at);
+      if (exists === false) {
+        // Not there: recorded, a person looks at it, and nothing is written.
+        rec.forum_targets = rec.forum_targets.filter((t) => t.post_id !== postId);
+        for (const l of rec.locations || []) {
+          if (l.forum_post_id !== postId) continue;
+          l.result = 'not_found';
+          rec.unresolved.push({ location: l.location, reason: 'the forum has no post with this id' });
+        }
+        record(rec, 'forum_post_not_found', { post_id: postId });
+        if (rec.status === 'received' && !rec.targets.some((t) => t.via === 'request') && !rec.forum_targets.length) rec.status = 'under_review';
+        settleRemoval(rec);
+        return;
+      }
+      // Unknown (the forum could not say, or no check is registered): the step stays owed and the sweep asks again.
+      if (exists !== true) throw new Error('the forum could not say whether the post exists; the lock waits for the sweep');
+    }
     // The post is marked locked only once the key is written, so a write that fails leaves the step owed and the removal unsettled.
     const at = target.locked_at || nowIso();
     if (!(await env.SOCIAL.get(forumPostLockKey(postId)))) {
@@ -411,6 +440,17 @@ const STEPS = {
     for (const l of rec.locations || []) if (l.forum_post_id === postId) l.result = 'removed';
     settleRemoval(rec);
     await env.SOCIAL.put(onForumPostKey(postId, rec.id), rec.id);
+  },
+  // A person's decision, for the forum's re-post block (forumTakedownConfirmed): true on a confirm, false on an invalid unless
+  // another confirmed request still holds the post.
+  forum_confirmed: async (env, rec, postId) => {
+    let value;
+    if (rec.status === 'confirmed') value = { confirmed: true, reference: rec.reference, at: rec.decided_at || nowIso() };
+    else {
+      const other = await otherConfirmedTakedown(env, postId, rec.id);
+      value = other ? { confirmed: true, reference: other.reference, at: other.decided_at || nowIso() } : { confirmed: false, reference: rec.reference, at: rec.decided_at || nowIso() };
+    }
+    await env.SOCIAL.put(forumConfirmedKey(postId), JSON.stringify(value));
   },
   // A person found the request invalid: the lock goes, unless another takedown in force names the post, which keeps it.
   forum_restore: async (env, rec, postId) => {
@@ -548,6 +588,120 @@ function settleRemoval(rec) {
 }
 
 const forumTargetOf = (rec, postId) => (rec.forum_targets || []).find((t) => t.post_id === postId);
+
+// The forum's answer to whether a post exists, `fn(env, postId, filedBefore)` -> true | false | null, registered by the forums
+// module at load (registerForumPostExists). Nothing here imports the forums module. Storing it is not I/O.
+let forumPostExistsFn = null;
+
+/// The forums module's check, `fn(env, postId, filedBefore)` returning (a Promise of) true, false or null (unknown):
+/// whether a post with this id existed when the request was filed (`filedBefore`, the takedown's received_at, ISO), so a post
+/// created under the id later is never locked by it. A later call replaces it; null removes it.
+export function registerForumPostExists(fn) {
+  forumPostExistsFn = typeof fn === 'function' ? fn : null;
+}
+
+// true, false, or null when the answer is unknown: nothing registered, an answer that is not a boolean, or a throw.
+async function forumPostExistence(env, postId, filedBefore) {
+  const fn = forumPostExistsFn;
+  if (!fn) return null;
+  try {
+    const answer = await fn(env, postId, filedBefore);
+    return answer === true ? true : answer === false ? false : null;
+  } catch (e) {
+    console.error('takedown: the forum post check failed:', e?.name || 'Error');
+    return null;
+  }
+}
+
+// A person's decision on a takedown that locked forum posts is pushed to the forum (registerForumTakedownDecision), which
+// blocks the post's text from being posted again once it is confirmed. Nothing here imports the forums module.
+let forumTakedownDecisionFn = null;
+
+/// The forums module's applier, `fn({ env, postId, reference, decision: 'confirmed' | 'invalid' })` returning a Promise,
+/// called once per forum post right after a person's confirm or invalid decision is recorded. A throw never undoes the
+/// decision: it is recorded on the post's target as `push_failed`. A later call replaces it; null removes it.
+export function registerForumTakedownDecision(fn) {
+  forumTakedownDecisionFn = typeof fn === 'function' ? fn : null;
+}
+
+// Pushes the decision for each forum post the takedown names. `{ status, at, error? }` per post: decision_pushed,
+// decision_push_skipped (nothing registered) or push_failed. Never throws.
+async function pushForumTakedownDecision(env, rec, decision) {
+  const fn = forumTakedownDecisionFn;
+  let pushed = false;
+  for (const target of rec.forum_targets || []) {
+    const at = nowIso();
+    if (!fn) { target.decision_push = { status: 'decision_push_skipped', at, decision }; pushed = true; continue; }
+    try {
+      await fn({ env, postId: target.post_id, reference: rec.reference, decision });
+      target.decision_push = { status: 'decision_pushed', at, decision };
+    } catch (e) {
+      console.error('takedown: the decision was not pushed to the forum:', e?.name || 'Error');
+      target.decision_push = { status: 'push_failed', at, decision, error: String(e?.name || 'Error').slice(0, 60) };
+      record(rec, 'push_failed', { post_id: target.post_id, decision });
+    }
+    pushed = true;
+  }
+  return pushed;
+}
+
+/// Whether a person has confirmed a TAKE IT DOWN request that holds a forum post, for the forum's re-post block: SOCIAL
+/// `tdforum-confirmed:{postId}` = `{ confirmed, reference, at }`, written on every person's confirm (true) and invalid (false,
+/// unless another confirmed request still holds the post) for every forum post the takedown names (the forum_confirmed step,
+/// retried by the sweep until it holds).
+export const forumConfirmedKey = (postId) => `tdforum-confirmed:${postId}`;
+
+/// true or false from the key (false when there is none), or null when it cannot be read. One KV read.
+export async function forumTakedownConfirmed(env, postId) {
+  if (typeof postId !== 'string' || !FORUM_POST_ID.test(postId)) return false;
+  try {
+    const raw = await env.SOCIAL.get(forumConfirmedKey(postId));
+    if (!raw) return false;
+    const v = JSON.parse(raw);
+    return v?.confirmed === true;
+  } catch (e) {
+    console.error('takedown: the forum confirmation could not be read:', e?.name || 'Error');
+    return null;
+  }
+}
+
+// Another takedown a person confirmed that still holds the post, or null.
+async function otherConfirmedTakedown(env, postId, exceptId) {
+  const listed = await env.SOCIAL.list({ prefix: `tdforum:${postId}:`, limit: 100 });
+  for (const k of listed?.keys || []) {
+    const id = k.name.slice(`tdforum:${postId}:`.length);
+    if (id === exceptId) continue;
+    const other = await loadTakedown(env, id);
+    const target = other ? forumTargetOf(other, postId) : null;
+    if (other?.status === 'confirmed' && target && !target.restored_at) return other;
+  }
+  return null;
+}
+
+/// Where a TAKE IT DOWN request stands for a forum post, for the forum: `{ status, reference, confirmed_at }` of the takedown
+/// that holds the post (a confirmed one first, then one still open, then the latest decided), or null when no takedown names
+/// it. `confirmed_at` is the time a person confirmed it, or null. The forum blocks the post's text from being posted again
+/// only while `status` is 'confirmed'. Never throws (null on a failure to read).
+export async function forumTakedownStatus(env, postId) {
+  if (typeof postId !== 'string' || !FORUM_POST_ID.test(postId)) return null;
+  try {
+    const listed = await env.SOCIAL.list({ prefix: `tdforum:${postId}:`, limit: 100 });
+    const found = [];
+    for (const k of listed?.keys || []) {
+      const rec = await loadTakedown(env, k.name.slice(`tdforum:${postId}:`.length));
+      const target = rec ? forumTargetOf(rec, postId) : null;
+      if (rec && target) found.push({ rec, target });
+    }
+    if (!found.length) return null;
+    const rank = ({ rec, target }) => (rec.status === 'confirmed' && !target.restored_at ? 0 : DECIDED.includes(rec.status) ? 2 : 1);
+    found.sort((a, b) => rank(a) - rank(b) || ((b.rec.decided_at || b.rec.received_at) < (a.rec.decided_at || a.rec.received_at) ? -1 : 1));
+    const { rec } = found[0];
+    return { status: rec.status, reference: rec.reference || null, confirmed_at: rec.status === 'confirmed' ? rec.decided_at || null : null };
+  } catch (e) {
+    console.error('takedown: the forum takedown status could not be read:', e?.name || 'Error');
+    return null;
+  }
+}
 
 /// Another takedown in force that keeps the forum post locked, or null.
 async function otherTakedownHoldingPost(env, postId, exceptId) {
@@ -697,6 +851,19 @@ export async function hashStoredObject(env, key) {
   return { sha256: await sha256Hex(new Uint8Array(await object.arrayBuffer())), size: object.size };
 }
 
+/// The SHA-256 of the copy of the listing image at `key` that the public is served instead of it (colour transforms and the
+/// like dropped: src/moderation.mjs publicImageBody): the derived copy its verdict record names, or, when none is written
+/// yet, the copy that would be. Null when the image has no such copy. The original's own hash is listingHashes'.
+async function strippedSha256Of(env, key) {
+  const copy = await derivedCopyOf(env, key);
+  if (copy) return copy.sha256;
+  const object = await env.SCENES.get(key);
+  if (!object) return null;
+  if (object.size > HASH_IN_MEMORY_MAX) { await object.body?.cancel?.(); return null; }
+  const v = storedImageVerdict(new Uint8Array(await object.arrayBuffer()));
+  return v.verdict === 'stripped' ? sha256Hex(v.bytes) : null;
+}
+
 /// The SHA-256 of every file stored for a listing that can be shown or played: the package (or the world and source manifests),
 /// each Space package, the thumbnail, the cover, and every review capture. World chunks are named by their BLAKE3 in the
 /// manifest, which is on the list; the chunks themselves are not hashed here.
@@ -715,15 +882,22 @@ export async function listingHashes(env, sim) {
     if (isSha(space?.sha256)) add(space.sha256, 'space_package', space.size_bytes);
     else if (own(space?.r2_key)) { const h = await hashStoredObject(env, space.r2_key); if (h) add(h.sha256, 'space_package', h.size); }
   }
-  for (const ext of ['webp', 'png', 'jpg']) { const h = await hashStoredObject(env, `thumbnails/${sim.id}/thumb.${ext}`); if (h) add(h.sha256, 'thumbnail', h.size); }
-  for (const ext of ['webp', 'png', 'jpg']) { const h = await hashStoredObject(env, `covers/${sim.id}/cover.${ext}`); if (h) add(h.sha256, 'cover', h.size); }
+  // Each image with the copy the public is served instead (strippedSha256Of), so an upload of either is refused.
+  const image = async (key, kind) => {
+    const h = await hashStoredObject(env, key);
+    if (!h) return;
+    add(h.sha256, kind, h.size);
+    const stripped = await strippedSha256Of(env, key);
+    if (stripped) add(stripped, `${kind}_stripped`, null);
+  };
+  for (const ext of ['webp', 'png', 'jpg']) await image(`thumbnails/${sim.id}/thumb.${ext}`, 'thumbnail');
+  for (const ext of ['webp', 'png', 'jpg']) await image(`covers/${sim.id}/cover.${ext}`, 'cover');
   const evidence = await env.SCENES.list({ prefix: evidencePrefix(sim.id, 0), limit: 500 });
   let captures = 0;
   for (const o of evidence?.objects || []) {
     if (!/\/capture-[0-7]\.(png|jpg|webp)$/.test(o.key) || captures >= 40) continue;
     captures += 1;
-    const h = await hashStoredObject(env, o.key);
-    if (h) add(h.sha256, 'capture', h.size);
+    await image(o.key, 'capture');
   }
   return out;
 }
@@ -1364,7 +1538,8 @@ async function openCase(env, value, { accountId, ip, receivedAt }) {
   // Each location to a listing or a forum post. A namespace is a website manifest's handle; it names the listing that publishes it.
   for (const l of value.locations) {
     if (l.object === 'forum_post') {
-      // Forum storage is not read here, so a post id is locked as named; one the link could not name is not found.
+      // Forum storage is not read here: the forum_lock step asks the forum whether the post exists (forumPostExistence) before
+      // it writes a lock. A location the link could not name a post from is not found at once.
       if (!l.forum_post_id) {
         rec.locations.push({ location: l.location, forum_post_id: null, thread_id: l.thread_id || null, object: l.object, result: 'not_found' });
         rec.unresolved.push({ location: l.location, reason: l.not_found || 'no forum post at this location' });
@@ -1428,7 +1603,7 @@ async function decide(env, rec, action, adminId, noteText, deps, url) {
   if (action === 'confirm') {
     if (!['received', 'removed', 'under_review'].includes(rec.status)) return { status: 409, body: { error: `This case is ${rec.status} and cannot be confirmed.`, code: 'not_open' } };
     rec.status = 'confirmed';
-    rec.pending.push('decision_notice');
+    rec.pending.push(...(rec.forum_targets || []).filter((t) => !t.restored_at).map((t) => `forum_confirmed:${t.post_id}`), 'decision_notice');
   } else if (action === 'invalid') {
     if (!['received', 'removed', 'under_review', 'confirmed'].includes(rec.status)) return { status: 409, body: { error: `This case is ${rec.status}.`, code: 'not_open' } };
     rec.status = 'invalid';
@@ -1436,7 +1611,7 @@ async function decide(env, rec, action, adminId, noteText, deps, url) {
     rec.pending = rec.pending.filter((s) => !REMOVAL_STEP(s));
     const live = rec.targets.filter((t) => !t.restored_at).map((t) => t.sim_id);
     const posts = (rec.forum_targets || []).filter((t) => !t.restored_at).map((t) => t.post_id);
-    rec.pending.push(...live.map((s) => `restore:${s}`), ...posts.map((p) => `forum_restore:${p}`), 'unblock', ...live.map((s) => `restored_notice:${s}`), 'decision_notice');
+    rec.pending.push(...live.map((s) => `restore:${s}`), ...posts.map((p) => `forum_restore:${p}`), ...(rec.forum_targets || []).map((t) => `forum_confirmed:${t.post_id}`), 'unblock', ...live.map((s) => `restored_notice:${s}`), 'decision_notice');
   } else {
     if (DECIDED.includes(rec.status)) return { status: 409, body: { error: `This case is ${rec.status}.`, code: 'not_open' } };
     if (rec.targets.some((t) => !t.restored_at) || (rec.forum_targets || []).some((t) => !t.restored_at)) return { status: 409, body: { error: 'This case removed listings: confirm it, or mark it invalid to restore them.', code: 'has_listings' } };
@@ -1449,6 +1624,11 @@ async function decide(env, rec, action, adminId, noteText, deps, url) {
   record(rec, `decided_${rec.status}`, { by: adminId });
   await runSteps(env, rec, ctx);
   await saveTakedown(env, rec, prev);
+  // Recorded: now the forum hears it, post by post (registerForumTakedownDecision). A push that fails is recorded on the case
+  // and never undoes the decision.
+  if ((rec.status === 'confirmed' || rec.status === 'invalid') && (rec.forum_targets || []).length) {
+    if (await pushForumTakedownDecision(env, rec, rec.status)) await saveTakedown(env, rec, rec.status).catch((e) => console.error('takedown: the push outcome was not saved:', e?.name || 'Error'));
+  }
   if (ctx.locksWritten) await refreshServingCaches(env, ctx);
   try { await deps.auditLog?.(env, `TAKEDOWN_${rec.status.toUpperCase()}`, adminId, rec.reference, { case_id: rec.id, note: noteText }); }
   catch (e) { console.error('takedown: the audit log write failed:', e?.message || e); }
@@ -1464,12 +1644,22 @@ async function adminRoute(request, url, env, cors, deps) {
   const adminId = await deps.requireAdmin(request, env);
   if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
   const headers = { ...cors, 'Cache-Control': 'private, no-store' };
+  // An administrator's read is audited before it is answered (src/evidence_vault.mjs readEvidence is the model): who, the route
+  // and the id read; never what was read. Throws when the record cannot be written.
+  const auditRead = async (action, target, details) => {
+    if (typeof deps.auditLog !== 'function') throw new Error('the audit log is not configured');
+    await deps.auditLog(env, action, adminId, target, details);
+  };
   if (url.pathname === '/api/admin/takedowns') {
     if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, cors);
     const asked = url.searchParams.get('status') || 'open';
     const statuses = asked === 'open' ? ['received', 'removed', 'under_review'] : asked === 'all' ? TAKEDOWN_STATUSES : TAKEDOWN_STATUSES.includes(asked) ? [asked] : null;
     if (!statuses) return json({ error: `status must be open, all, or one of ${TAKEDOWN_STATUSES.join(', ')}` }, 400, cors);
     const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+    // The queue is counts, statuses, dates and listing ids, with no requester's details and no account id: its audit is
+    // written first, and its loss is logged rather than refusing the queue.
+    try { await auditRead('TAKEDOWNS_LISTED', asked, { route: 'GET /api/admin/takedowns', limit }); }
+    catch (e) { console.error('takedown: the queue read was not audited:', e?.name || 'Error'); }
     const items = [];
     for (const status of statuses) {
       const listed = await env.SOCIAL.list({ prefix: `tdq:${status}:`, limit });
@@ -1492,6 +1682,9 @@ async function adminRoute(request, url, env, cors, deps) {
   if (!rec) return json({ error: 'No such takedown' }, 404, cors);
   if (!m[3]) {
     if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, cors);
+    // The case carries the requester's name, contact and statement: it is not served unless its read is on the audit log first.
+    try { await auditRead('TAKEDOWN_READ', rec.reference, { route: 'GET /api/admin/takedowns/{id}', case_id: rec.id }); }
+    catch { return json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
     return json({ case: adminView(rec) }, 200, headers);
   }
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, cors);

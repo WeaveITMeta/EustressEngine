@@ -41,7 +41,7 @@ const served = async (env, postId = POST) => { const { case_version: _v, ...rest
 class StubMessage { constructor(from, to, raw) { this.from = from; this.to = to; this.raw = raw; } }
 
 async function envWith() {
-  const env = { JWT_SECRET: JWT, USERS: fakeKv(), SOCIAL: fakeKv(), SCENES: fakeBucket(), __EmailMessage: StubMessage, SECURITY_MAILBOX: 'security@example.com', mail: [] };
+  const env = { JWT_SECRET: JWT, USERS: fakeKv(), SOCIAL: fakeKv(), SCENES: fakeBucket(), AUDIT_LOG: fakeKv(), __EmailMessage: StubMessage, SECURITY_MAILBOX: 'security@example.com', mail: [] };
   env.EMAIL = { send: async (m) => { env.mail.push(m); } };
   const user = (id, created) => env.USERS.put(`user:${id}`, JSON.stringify({ id, username: id, email: `${id}@example.com`, created_at: new Date(created).toISOString(), kyc_verified: true }));
   for (const id of [AUTHOR, MEMBER, ...OLD]) await user(id, NOW - 30 * 86400 * 1000);
@@ -456,8 +456,9 @@ test('the reporter sees forum_report with its status only; the author sees forum
   await report(env, OLD[2], 'threat');
   let theirs = (await history(env, AUTHOR)).json.cases;
   assert.equal(theirs.length, 1);
-  assert.deepEqual([theirs[0].kind, theirs[0].status, theirs[0].outcome], ['forum_notice', 'decided', 'removed']);
-  assert.match(theirs[0].headline, /removed after reports/);
+  // Hidden or removed by reports: the one generic entry, whatever the category.
+  assert.deepEqual([theirs[0].kind, theirs[0].status, theirs[0].outcome], ['forum_notice', 'under_review', 'hidden']);
+  assert.equal(theirs[0].headline, 'Your forum post was hidden after a report while a person reviews it.');
   assert.match(theirs[0].feedback.reasons[0].why, /support@eustress\.dev/, 'the author is told how to ask for it back');
   // Removed by reports, not by a person: the reporter learns nothing of it.
   e = (await history(env, OLD[0])).json.cases[0];
@@ -492,47 +493,34 @@ async function authorToldNothing(env, label) {
   assert.equal(env.mail.filter((m) => m.to === `${AUTHOR}@example.com`).length, 0, `${label}: no email`);
 }
 
-test('while a report cites csam the author is told nothing, until a person restores the post; a removal under another category does not lift it', async () => {
+test('a csam report hides the post and its author sees the one generic entry at once, as for any category; a person\'s decision shows the next', async () => {
   const env = await envWith();
   await report(env, OLD[0], 'csam', { note: NOTE });
   assert.equal((await caseOf(env)).hide_reason, 'csam');
-  await authorToldNothing(env, 'hidden as possible CSAM');
-  // Removed by reports with a csam report among them: still nothing.
+  let cases = (await history(env, AUTHOR)).json.cases;
+  assert.deepEqual([cases.length, cases[0].status, cases[0].outcome, cases[0].headline], [1, 'under_review', 'hidden', 'Your forum post was hidden after a report while a person reviews it.']);
+  // Removed by reports after it: the entry already shown stands.
+  const shown = JSON.stringify(cases);
   await report(env, OLD[1], 'threat');
   await report(env, OLD[2], 'threat');
   assert.equal((await caseOf(env)).removed_by, 'reports');
-  await authorToldNothing(env, 'removed by reports after a csam report');
-  // A person removing it as csam, or gating it, keeps the silence.
+  assert.equal(JSON.stringify((await history(env, AUTHOR)).json.cases), shown, 'a later report changes nothing shown');
+  // A person removing it as csam: the generic removal entry, naming nothing.
   await resolve(env, { decision: 'remove', category: 'csam' });
-  await authorToldNothing(env, 'removed as csam');
-  await resolve(env, { decision: 'gate', category: 'adult_sexual' });
-  await authorToldNothing(env, 'gated');
-  // A person restores it: the normal notice rules apply.
+  cases = (await history(env, AUTHOR)).json.cases;
+  assert.deepEqual([cases[0].status, cases[0].outcome, cases[0].headline], ['under_review', 'removed', 'Your forum post was removed while a person reviews it.']);
+  // A person restores it: the restored entry.
   assert.equal((await resolve(env, { decision: 'restore' })).action, 'restore');
-  let cases = (await history(env, AUTHOR)).json.cases;
+  cases = (await history(env, AUTHOR)).json.cases;
   assert.deepEqual([cases.length, cases[0].kind, cases[0].outcome], [1, 'forum_notice', 'restored']);
-  // A new csam report after that decision silences the author again.
+  // A new csam report after that: the generic hide entry again.
   await report(env, OLD[3], 'csam');
-  await authorToldNothing(env, 'a csam report in a new round');
-
-  // Removed by a person under another category: still nothing, since the post was reported as csam. A restore lifts it, and
-  // what the author is told then names nothing about csam.
-  const env2 = await envWith();
-  await report(env2, OLD[0], 'csam');
-  await authorToldNothing(env2, 'before the decision');
-  await resolve(env2, { decision: 'remove', category: 'threat' });
-  await authorToldNothing(env2, 'removed under another category after a csam report');
-  await resolve(env2, { decision: 'restore' });
-  cases = (await history(env2, AUTHOR)).json.cases;
-  assert.deepEqual([cases.length, cases[0].outcome], [1, 'restored']);
-  const text = JSON.stringify(cases.map(({ reference, ...rest }) => rest));
-  assert.ok(!/csam|minor|A1|sexual/i.test(text), text);
-
-  // A post hidden for nonconsensual_sexual is told to its author as hidden, with the way to ask for it back.
-  const env3 = await envWith();
-  await report(env3, OLD[0], 'nonconsensual_sexual');
-  cases = (await history(env3, AUTHOR)).json.cases;
-  assert.deepEqual([cases.length, cases[0].status, cases[0].outcome], [1, 'decided', 'hidden']);
+  assert.equal((await history(env, AUTHOR)).json.cases[0].headline, 'Your forum post was hidden after a report while a person reviews it.');
+  const text = JSON.stringify((await history(env, AUTHOR)).json.cases.map(({ reference, ...rest }) => rest));
+  assert.ok(!/csam|minor|A1|A5|sexual/i.test(text), text);
+  // The author is never emailed or put in a feed for a forum case.
+  assert.deepEqual((await env.SOCIAL.list({ prefix: `notif:${AUTHOR}:` })).keys, []);
+  assert.equal(env.mail.filter((m) => m.to === `${AUTHOR}@example.com`).length, 0);
 });
 
 test('the gate is told to the author as the gate', async () => {

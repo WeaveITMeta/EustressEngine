@@ -18,15 +18,16 @@
 // A change here never starts a review by itself; the client posts /submit.
 
 import {
-  isListable, canServe, contentLockedFor, inReview, simWithLegalLock, coverApproved, approvedCaptureKeys, readApproval, identOfObject,
+  isListable, canServe, contentLockedFor, inReview, simWithLegalLock, coverApproved, approvedCaptureKeys, readApproval, identOfObject, sendBackToReview,
+  JUDGE_IMAGE_MAX_BYTES, overJudgeImageLimit, publicImageBody, recordUploadedImage,
 } from './moderation.mjs';
-import { inspectImage, stripMetadata, sha256Hex, USER_IMAGE_HEADERS } from './user_images.mjs';
+import { inspectImage, stripMetadata, sha256Hex, USER_IMAGE_HEADERS, pngColourType } from './user_images.mjs';
 import { isAdultListing, refuseAdult, refuseUnsignedImage, imageCacheControl, signedImageUrl } from './adult_content.mjs';
 import { refuseBlockedUpload } from './takedown.mjs';
 import { withTagsWrittenBack } from './tags.mjs';
 
-/// The most a cover may weigh.
-export const COVER_MAX_BYTES = 2 * 1024 * 1024;
+/// The most a cover may weigh: 2 MB, and never more than the judge can be sent (JUDGE_IMAGE_MAX_BYTES), since the judge reads it.
+export const COVER_MAX_BYTES = Math.min(2 * 1024 * 1024, JUDGE_IMAGE_MAX_BYTES);
 /// The shortest side a cover may have, in pixels.
 export const COVER_MIN_SHORT_SIDE = 320;
 /// The longest side may be at most this many times the shortest: ratios from 1:2 to 2:1.
@@ -162,6 +163,9 @@ async function putCover(request, simId, env, cors, deps) {
   if (!seen) return refuse(415, 'cover_bad_type', `The file is not a PNG, JPEG or WebP image whose size can be read, or it is larger than the platform accepts for an image. ${COVER_RULES}`);
   const ext = seen.ext;
   if (!EXTS.includes(ext)) return refuse(415, 'cover_bad_type', `The file is not a PNG, JPEG or WebP image. ${COVER_RULES}`);
+  // A cover is the author's own file (Studio never makes one), and an alpha channel can hide a picture from one viewer and
+  // not another, so a PNG with an alpha channel (RGBA, colour type 6) is refused. Save it as an RGB PNG, a JPEG or a WebP.
+  if (pngColourType(body) === 6) return refuse(415, 'cover_bad_type', `The cover is a PNG with an alpha channel (RGBA); save it without transparency as an RGB PNG, a JPEG or a WebP. ${COVER_RULES}`);
   const problem = coverSizeProblem(seen.width, seen.height);
   if (problem) return refuse(422, Math.min(seen.width, seen.height) < COVER_MIN_SHORT_SIDE ? 'cover_too_small' : 'cover_bad_ratio', problem);
 
@@ -177,11 +181,14 @@ async function putCover(request, simId, env, cors, deps) {
   const blocked = await refuseBlockedUpload(env, [await sha256Hex(body), await sha256Hex(stored)], { json: deps.json, cors, accountId: userId, simId, route: 'cover' });
   if (blocked) return blocked;
   const key = coverKey(simId, ext);
+  const storedSha = await images.sha256Hex(stored);
   await env.SCENES.put(key, stored, {
     httpMetadata: { contentType: contentTypeOf(ext) },
     customMetadata: { simId, authorId: userId },
-    sha256: await images.sha256Hex(stored),
+    sha256: storedSha,
   });
+  // Its public verdict, decided once now (src/moderation.mjs publicImageBody reads it).
+  await recordUploadedImage(env, storedSha, stored);
   // One file per listing: a PNG replaced by a JPEG must not leave both, since the approval binds the first it finds.
   for (const other of EXTS) if (other !== ext) await env.SCENES.delete(coverKey(simId, other));
 
@@ -191,6 +198,8 @@ async function putCover(request, simId, env, cors, deps) {
   const fresh = (await readSim(env, simId)) || sim;
   fresh.cover = cover;
   fresh.updated_at = cover.updated_at;
+  // A new cover is not the one that was judged, binding or not: the listing goes back to review like any other change.
+  sendBackToReview(fresh);
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(fresh)));
 
   return deps.json({ ok: true, review: 'submit', ...coverFields(fresh, new URL(request.url).origin) }, 200, cors);
@@ -243,12 +252,23 @@ async function getCover(request, simId, env, cors, deps) {
 
   const object = await env.SCENES.get(coverKey(simId, cover.ext));
   if (!object) return none();
+  // Too large to have been sent to the judge (stored before uploads were capped): absent to all but its author and an admin,
+  // whatever the approval says. Decided from the stored size, never the body.
+  if (!ownerView && overJudgeImageLimit(object)) { await object.body?.cancel?.(); return none(); }
   if (!ownerView) {
     // The object that is sent is the object that was judged: a file put between the check above and this read is not served.
     const binding = await readApproval(env, sim.id);
     if (binding && (binding.revoked || identOfObject(object) !== (binding.cover ?? null))) return none();
   }
-  return new Response(object.body, {
+  // The public is served the cover's stored verdict (src/moderation.mjs publicImageBody), streamed: the object, its rebuilt
+  // copy, or nothing for one an upload would refuse today. Its author and an admin see the object itself.
+  let body = object.body;
+  if (!ownerView) {
+    const shown = await publicImageBody(env, object);
+    if (!shown) return none();
+    body = shown.body;
+  }
+  return new Response(body, {
     headers: {
       ...cors,
       ...USER_IMAGE_HEADERS,
@@ -317,8 +337,12 @@ async function getPreview(request, simId, n, env, cors, deps) {
   // The object that is sent is the capture the approval bound for this number, not whatever is stored under the key by now.
   const binding = await readApproval(env, simId);
   if (!binding || binding.revoked || identOfObject(object) !== (binding.captures?.[String(n)] ?? null)) return none();
+  // The capture's stored verdict (src/moderation.mjs publicImageBody), streamed: the object, its rebuilt copy, or no preview
+  // for one an upload would refuse today. Staff read it through the moderation capture route.
+  const shown = await publicImageBody(env, object);
+  if (!shown) return none();
   // As the author's tools uploaded it: served by the extension the moderation module names, never by a stored header.
-  return new Response(object.body, {
+  return new Response(shown.body, {
     headers: {
       ...cors,
       ...USER_IMAGE_HEADERS,

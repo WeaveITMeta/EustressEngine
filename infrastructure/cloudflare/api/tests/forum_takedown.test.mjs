@@ -6,12 +6,20 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadWorker, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
-import { parseLocation, sweepTakedowns, renderMail, FORUM_SITE_HOSTS } from '../src/takedown.mjs';
+import { loadWorker, workerModule, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
+import * as takedown from '../src/takedown.mjs';
 import { forumPostLockKey, resolveForumCase, fileForumReport } from '../src/moderation.mjs';
 import { REFERENCE_PATTERN } from '../src/case_reference.mjs';
 
+const { parseLocation, sweepTakedowns, renderMail, FORUM_SITE_HOSTS } = takedown;
 const worker = await loadWorker();
+// The forums module registers its post check and its decision applier at load; here, in both the Worker's own module instance
+// and the one this file imports (the sweep is called from it).
+const workerTakedown = await workerModule('takedown.mjs');
+const instances = [workerTakedown, takedown];
+const postExists = (fn) => { for (const m of instances) m.registerForumPostExists(fn); };
+const onDecision = (fn) => { for (const m of instances) m.registerForumTakedownDecision(fn); };
+postExists(async () => true);
 
 const ADMIN = '33333333-3333-4333-8333-333333333333';
 const THREAD = '0123456789abcdef01234567';
@@ -245,4 +253,159 @@ test('the forum staff mails render without an em dash', () => {
   const n = renderMail('staff_new', { reference: 'EC-0', id: 'x', received_at: d.at, removed_at: d.at, named: 0, copies: 0, forum_posts: 2, not_found: 0, pending: [], admin_url: 'https://api.eustress.dev/x' });
   assert.match(n.text, /Forum posts named: 2/);
   assert.equal(n.text.includes(EM_DASH), false);
+});
+
+// -- R7-5: a lock only for a post the forum says exists ---------------------------------------------------------------------------
+
+const lockKeys = (env) => [...env.SOCIAL.store.keys()].filter((k) => k.startsWith('forum-post-lock:'));
+const withCheck = async (fn, body) => { postExists(fn); try { return await body(); } finally { postExists(async () => true); } };
+
+test('R7-5: the forum says the post does not exist: not_found, no lock key, and a person looks at it', async () => {
+  const env = await envWith();
+  const asked = [];
+  const filed = await withCheck(async (e, id) => { asked.push([e === env, id]); return false; }, () => file(env, [`https://eustress.dev/community/t/${THREAD}#post-${POST}`]));
+  assert.equal(filed.status, 201, filed.text);
+  assert.deepEqual(asked, [[true, POST]], 'the check is asked with the env and the post id');
+  assert.deepEqual(filed.json.locations.map((l) => l.result), ['not_found']);
+  assert.equal(filed.json.status, 'under_review');
+  assert.deepEqual(lockKeys(env), [], 'no lock key');
+  const rec = await caseOf(env, filed.json.reference);
+  assert.deepEqual([rec.forum_targets, rec.pending.filter((s) => s.startsWith('forum_lock:')), rec.removed_at], [[], [], null]);
+  assert.ok(rec.unresolved.some((u) => /no post/.test(u.reason)));
+  assert.deepEqual([...env.SOCIAL.store.keys()].filter((k) => k.startsWith('tdforum:')), [], 'and no index of the post');
+  assert.equal(await takedown.forumTakedownStatus(env, POST), null);
+});
+
+test('R7-5: the forum cannot say (null, a throw, or no check registered): the lock is owed, nothing is written, and the sweep retries', async () => {
+  for (const unknown of [async () => null, async () => { throw new Error('forum down'); }, null, async () => 'yes']) {
+    const env = await envWith();
+    const filed = await withCheck(unknown, () => quiet(() => file(env, [POST])));
+    assert.equal(filed.status, 201, filed.text);
+    assert.deepEqual(filed.json.locations.map((l) => l.result), ['pending'], String(unknown));
+    assert.deepEqual(lockKeys(env), []);
+    const rec = await caseOf(env, filed.json.reference);
+    assert.deepEqual(rec.pending.filter((s) => s.startsWith('forum_lock:')), [`forum_lock:${POST}`], 'kept owed');
+    assert.equal(rec.removed_at, null);
+    // Still unknown at the sweep: still owed.
+    await withCheck(unknown, () => quiet(() => sweepTakedowns(env, {})));
+    assert.deepEqual(lockKeys(env), []);
+    // The forum answers at the next sweep: the post is locked.
+    await quiet(() => sweepTakedowns(env, {}));
+    assert.equal((await lockOf(env, POST)).reference, filed.json.reference);
+    assert.ok((await caseOf(env, filed.json.reference)).removed_at);
+  }
+});
+
+test('R7-5: 5,000 planted ids write no key when the forum says they do not exist', async () => {
+  const env = await envWith();
+  let asked = 0;
+  await withCheck(async () => { asked += 1; return false; }, async () => {
+    for (let r = 0; r < 250; r++) {
+      const locations = Array.from({ length: 20 }, (_, i) => `${(r * 20 + i).toString(16).padStart(24, '0')}-1`);
+      const filed = await call(env, 'POST', '/api/takedown/requests', {
+        body: { requester_name: REQUESTER.name, signature: REQUESTER.name, relationship: 'self', contact_email: `planter${r}@example.org`, locations, description: 'A private photo of me posted in a forum thread without consent.', good_faith: true },
+        headers: { 'CF-Connecting-IP': `198.51.${Math.floor(r / 200)}.${r % 200}` },
+      });
+      assert.equal(filed.status, 201, filed.text);
+    }
+  });
+  assert.equal(asked, 5000, 'every planted id was asked about');
+  assert.equal(lockKeys(env).length, 0, 'zero lock keys');
+  assert.equal([...env.SOCIAL.store.keys()].filter((k) => k.startsWith('tdforum:')).length, 0);
+});
+
+// -- "lock now, block later": the takedown's status, and the decision pushed to the forum -----------------------------------------
+
+test('a confirmed or invalid decision is pushed to the forum per post, and forumTakedownStatus says where the request stands', async () => {
+  const env = await envWith();
+  const filed = await file(env, [POST]);
+  const rec = await caseOf(env, filed.json.reference);
+  assert.deepEqual(await takedown.forumTakedownStatus(env, POST), { status: 'removed', reference: filed.json.reference, confirmed_at: null }, 'locked at once, not yet confirmed');
+  const calls = [];
+  onDecision(async (a) => { calls.push(a); });
+  try {
+    assert.equal((await call(env, 'POST', `/api/admin/takedowns/${rec.id}/confirm`, { who: ADMIN, body: { note: 'The requester is the person shown.' } })).status, 200);
+    assert.equal(calls.length, 1);
+    assert.deepEqual([calls[0].postId, calls[0].reference, calls[0].decision, typeof calls[0].env], [POST, filed.json.reference, 'confirmed', 'object']);
+    const status = await takedown.forumTakedownStatus(env, POST);
+    assert.deepEqual([status.status, status.reference], ['confirmed', filed.json.reference]);
+    assert.ok(Date.parse(status.confirmed_at));
+    assert.equal((await caseOf(env, filed.json.reference)).forum_targets[0].decision_push.status, 'decision_pushed');
+    assert.equal(await env.SOCIAL.get(`ncii-hash:${'0'.repeat(64)}`), null);
+    // Invalid after confirm: pushed as invalid; the request no longer blocks anything.
+    assert.equal((await call(env, 'POST', `/api/admin/takedowns/${rec.id}/invalid`, { who: ADMIN, body: { note: 'New information shows the requester is not the person shown.' } })).status, 200);
+    assert.deepEqual(calls.map((c) => c.decision), ['confirmed', 'invalid']);
+    assert.deepEqual(await takedown.forumTakedownStatus(env, POST), { status: 'invalid', reference: filed.json.reference, confirmed_at: null });
+  } finally {
+    onDecision(null);
+  }
+  // No text hash is blocked for forum text on this side.
+  assert.deepEqual([...env.SOCIAL.store.keys()].filter((k) => k.startsWith('ncii-hash:')), []);
+});
+
+test('Required 1: forumTakedownConfirmed reads one key, written on every confirm (true) and invalid (false)', async () => {
+  const env = await envWith();
+  assert.equal(await takedown.forumTakedownConfirmed(env, POST), false, 'no key: false');
+  const filed = await file(env, [POST]);
+  const rec = await caseOf(env, filed.json.reference);
+  assert.equal(await takedown.forumTakedownConfirmed(env, POST), false, 'locked, not confirmed');
+  await call(env, 'POST', `/api/admin/takedowns/${rec.id}/confirm`, { who: ADMIN, body: { note: 'The requester is the person shown.' } });
+  assert.equal(await takedown.forumTakedownConfirmed(env, POST), true);
+  const stored = JSON.parse(await env.SOCIAL.get(takedown.forumConfirmedKey(POST)));
+  assert.deepEqual([stored.confirmed, stored.reference, !!Date.parse(stored.at)], [true, filed.json.reference, true]);
+  assert.equal(takedown.forumConfirmedKey(POST), `tdforum-confirmed:${POST}`);
+  // A second request on the same post, marked invalid, does not undo the first's confirmation.
+  const second = await file(env, [POST], '203.0.113.44');
+  const rec2 = await caseOf(env, second.json.reference);
+  await call(env, 'POST', `/api/admin/takedowns/${rec2.id}/invalid`, { who: ADMIN, body: { note: 'A second request with nothing new in it at all.' } });
+  assert.equal(await takedown.forumTakedownConfirmed(env, POST), true, 'the other confirmed request still holds it');
+  // The confirmed one marked invalid: false.
+  await call(env, 'POST', `/api/admin/takedowns/${rec.id}/invalid`, { who: ADMIN, body: { note: 'New information shows the requester is not the person shown.' } });
+  assert.equal(await takedown.forumTakedownConfirmed(env, POST), false);
+  // A KV that cannot be read: null.
+  const broken = { ...env, SOCIAL: { ...env.SOCIAL, get: async () => { throw new Error('KV down'); } } };
+  assert.equal(await quiet(() => takedown.forumTakedownConfirmed(broken, POST)), null);
+});
+
+test('Required 8: the forum check is asked as of the filing, the same received_at on every retry', async () => {
+  const env = await envWith();
+  const asked = [];
+  let answer = null;
+  postExists(async (e, id, filedBefore) => { asked.push([id, filedBefore]); return answer; });
+  try {
+    const filed = await quiet(() => file(env, [POST]));
+    const rec = await caseOf(env, filed.json.reference);
+    await quiet(() => sweepTakedowns(env, {}));
+    answer = true;
+    await quiet(() => sweepTakedowns(env, {}));
+    assert.equal(asked.length, 3, 'at the filing and at each sweep until it locked');
+    assert.ok(asked.every(([id, at]) => id === POST && at === rec.received_at), JSON.stringify(asked));
+    assert.equal((await lockOf(env, POST)).reference, filed.json.reference);
+  } finally {
+    postExists(async () => true);
+  }
+});
+
+test('an applier that throws never undoes the decision: push_failed is recorded', async () => {
+  const env = await envWith();
+  const filed = await file(env, [POST]);
+  const rec = await caseOf(env, filed.json.reference);
+  onDecision(async () => { throw new Error('forum down'); });
+  try {
+    const r = await quiet(() => call(env, 'POST', `/api/admin/takedowns/${rec.id}/confirm`, { who: ADMIN, body: { note: 'The requester is the person shown.' } }));
+    assert.equal(r.status, 200);
+  } finally {
+    onDecision(null);
+  }
+  const after = await caseOf(env, filed.json.reference);
+  assert.equal(after.status, 'confirmed', 'the decision stands');
+  assert.equal(after.forum_targets[0].decision_push.status, 'push_failed');
+  assert.ok(after.history.some((h) => h.event === 'push_failed'));
+  assert.equal((await lockOf(env, POST)).reason, 'takedown', 'the lock stays');
+  // Nothing registered: skipped, recorded.
+  const env2 = await envWith();
+  const filed2 = await file(env2, [POST]);
+  const rec2 = await caseOf(env2, filed2.json.reference);
+  await call(env2, 'POST', `/api/admin/takedowns/${rec2.id}/confirm`, { who: ADMIN, body: { note: 'The requester is the person shown.' } });
+  assert.equal((await caseOf(env2, filed2.json.reference)).forum_targets[0].decision_push.status, 'decision_push_skipped');
 });

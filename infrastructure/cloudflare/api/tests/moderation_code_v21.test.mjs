@@ -493,7 +493,7 @@ test('a capture too large for the Messages API is left out and named to the judg
   const big = { contentType: 'image/png', base64: 'A'.repeat(JUDGE_IMAGE_MAX_B64 + 4), label: 'capture-7.png' };
   const body = judgeRequest({ summary: {}, captures: [{ contentType: 'image/png', base64: 'AAAA', label: 'capture-0.png' }, big], policyText: 'P', policyHash: 'h' });
   assert.equal(body.messages[0].content.filter(c => c.type === 'image').length, 1);
-  assert.match(body.messages[0].content.at(-1).text, /Left out because they are too large to send: capture-7\.png/);
+  assert.match(body.messages[0].content.at(-1).text, /Left out, not sent: capture-7\.png \(too large to send\)\. Do not score anything only they would show\./);
 });
 
 // ── the pipeline ────────────────────────────────────────────────────────────

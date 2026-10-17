@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectImage, imageProblem, stripMetadata, prepareUserImage, MAX_ICC_BYTES } from '../src/user_images.mjs';
+import { inspectImage, imageProblem, stripMetadata, prepareUserImage, ANIMATED_IMAGE_PROBLEM, MULTIPLE_IMAGE_PROBLEM } from '../src/user_images.mjs';
 
 const GPS = 'gps-52.5200N-13.4050E';
 const text = s => new TextEncoder().encode(s);
@@ -53,21 +53,20 @@ test('JPEG: reserved markers, JFXX, MPF and FlashPix segments, comments and ever
   }
 });
 
-test('JPEG: JFIF, a small ICC profile and the Adobe flag stay; a large profile goes', () => {
+test('JPEG: JFIF and the Adobe flag stay; an ICC colour profile of any size goes', () => {
   const jfif = seg(0xe0, text('JFIF\0\u0001\u0001\0\0\u0001\0\u0001\0\0'));
   const icc = size => seg(0xe2, cat(text('ICC_PROFILE\0'), new Uint8Array([1, 1]), new Uint8Array(size)));
   const adobe = seg(0xee, text('Adobe\0d\0\0\0\0\u0001'));
-  const small = stripMetadata(jpeg(jfif, icc(2000), adobe, frame()));
-  const latin = new TextDecoder('latin1').decode(small);
-  assert.ok(latin.includes('JFIF') && latin.includes('ICC_PROFILE') && latin.includes('Adobe'));
-  const big = new TextDecoder('latin1').decode(stripMetadata(jpeg(jfif, icc(MAX_ICC_BYTES + 100), frame())));
-  assert.ok(big.includes('JFIF') && !big.includes('ICC_PROFILE'), 'the profile is over the cap');
+  const latin = new TextDecoder('latin1').decode(stripMetadata(jpeg(jfif, icc(2000), adobe, frame())));
+  assert.ok(latin.includes('JFIF') && latin.includes('Adobe'));
+  assert.ok(!latin.includes('ICC_PROFILE'), 'a profile one decoder honours and another does not');
 });
 
-test('JPEG: a file with two frame headers counts the larger, a second picture inside the file is refused, and a file with no end is refused', () => {
-  const twoFrames = jpeg(frame(100, 50), sof(0xc2, 20000, 20000));
-  assert.match(imageProblem(twoFrames), /most accepted/);
-  assert.equal(inspectImage(twoFrames), null);
+test('JPEG: a file with two frame headers is two pictures and is refused, as is a second picture inside the file and a file with no end', () => {
+  for (const twoFrames of [jpeg(frame(100, 50), sof(0xc2, 20000, 20000)), jpeg(frame(100, 50), sof(0xc2, 100, 50))]) {
+    assert.equal(imageProblem(twoFrames), MULTIPLE_IMAGE_PROBLEM);
+    assert.equal(inspectImage(twoFrames), null);
+  }
   assert.equal(imageProblem(cat(SOI, frame(), sos(), SCAN, SOI, frame(), sos(), SCAN, EOI)), 'The image must be a PNG, JPEG or WebP file', 'a start-of-image where a segment should be');
   assert.throws(() => stripMetadata(cat(SOI, frame(), sos(), SCAN)), /could not be read/, 'no end-of-image');
 });
@@ -94,22 +93,31 @@ test('WebP: only the chunks that draw the picture stay; EXIF, XMP and every unkn
   assert.equal(out[4] | (out[5] << 8) | (out[6] << 16) | (out[7] << 24), out.length - 8, 'and the container size is right');
 });
 
-test('WebP: bytes after the RIFF length are dropped, an animation keeps its frames and loses what is inside them', () => {
+test('WebP: bytes after the RIFF length are dropped, an animation is refused, and the ICC profile goes', async () => {
   const still = riff(vp8x(100, 50), vp8l(100, 50));
   assert.equal(holds(stripMetadata(cat(still, text(GPS)))), false, 'trailing bytes');
   const frameHeader = cat(le24(0), le24(0), le24(99), le24(49), le24(40), new Uint8Array([0]));
-  const anmf = chunk('ANMF', cat(frameHeader, vp8l(100, 50), chunk('GPSX', text(GPS))));
-  const animated = riff(vp8x(100, 50, 0x02), chunk('ANIM', new Uint8Array(6)), anmf);
-  const out = stripMetadata(animated);
-  assert.equal(holds(out), false, 'an unknown chunk inside a frame');
-  assert.ok(new TextDecoder('latin1').decode(out).includes('ANMF'));
+  const anmf = chunk('ANMF', cat(frameHeader, vp8l(100, 50)));
+  for (const [what, animated] of [
+    ['ANIM and ANMF', riff(vp8x(100, 50, 0x02), chunk('ANIM', new Uint8Array(6)), anmf)],
+    ['an ANMF frame alone', riff(vp8x(100, 50), anmf)],
+    ['the animation flag alone', riff(vp8x(100, 50, 0x02), vp8l(100, 50))],
+  ]) {
+    assert.equal(imageProblem(animated), ANIMATED_IMAGE_PROBLEM, what);
+    assert.equal(inspectImage(animated), null, what);
+    assert.throws(() => stripMetadata(animated), /animated/, what);
+    assert.deepEqual([(await prepareUserImage(animated)).ok, (await prepareUserImage(animated)).status], [false, 415], what);
+  }
+  const profiled = stripMetadata(riff(vp8x(100, 50, 0x20), chunk('ICCP', new Uint8Array(100)), vp8l(100, 50)));
+  assert.ok(!new TextDecoder('latin1').decode(profiled).includes('ICCP'), 'the profile chunk goes');
+  assert.equal(profiled[20] & 0x20, 0, 'and the extended header no longer promises it');
 });
 
 test('WebP: the canvas and every frame state a size, and the largest counts', () => {
   assert.match(imageProblem(riff(vp8x(100, 100), vp8l(16384, 16384))), /most accepted/, 'a small canvas over a huge frame');
   assert.match(imageProblem(riff(vp8x(20000, 20000), vp8l(100, 100))), /most accepted/, 'a huge canvas over a small frame');
   const huge = cat(le24(0), le24(0), le24(19999), le24(19999), le24(40), new Uint8Array([0]));
-  assert.match(imageProblem(riff(vp8x(100, 100, 0x02), chunk('ANMF', cat(huge, vp8l(100, 100))))), /most accepted/, 'an animation frame header');
+  assert.equal(imageProblem(riff(vp8x(100, 100, 0x02), chunk('ANMF', cat(huge, vp8l(100, 100))))), ANIMATED_IMAGE_PROBLEM, 'an animation is refused whatever its frames say');
   assert.equal(imageProblem(riff(vp8x(100, 100), vp8l(100, 100))), null);
 });
 
@@ -119,13 +127,18 @@ const ihdr = (w, h) => pngChunk('IHDR', cat(be32(w), be32(h), new Uint8Array([8,
 const PNG_SIG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const png = (...chunks) => cat(PNG_SIG, ihdr(100, 50), ...chunks, pngChunk('IDAT', new Uint8Array([1, 2, 3])), pngChunk('IEND', new Uint8Array(0)));
 
-test('PNG: text, time, EXIF and unknown ancillary chunks go, a small colour profile stays, a large one goes, bytes after IEND go', () => {
+test('PNG: text, time, EXIF, unknown ancillary chunks and every colour transform go, bytes after IEND go; an APNG is refused', async () => {
   const dirty = png(pngChunk('tEXt', text(`Comment\0${GPS}`)), pngChunk('zTXt', text(GPS)), pngChunk('iTXt', text(GPS)), pngChunk('eXIf', text(GPS)), pngChunk('tIME', new Uint8Array(7)), pngChunk('prVt', text(GPS)));
   assert.equal(holds(stripMetadata(cat(dirty, text(GPS)))), false);
-  const withSmall = new TextDecoder('latin1').decode(stripMetadata(png(pngChunk('iCCP', cat(text('p\0\0'), new Uint8Array(1000))))));
-  assert.ok(withSmall.includes('iCCP'));
-  const withBig = new TextDecoder('latin1').decode(stripMetadata(png(pngChunk('iCCP', cat(text(`p\0\0${GPS}`), new Uint8Array(MAX_ICC_BYTES))))));
-  assert.ok(!withBig.includes('iCCP') && !withBig.includes(GPS));
+  const colour = new TextDecoder('latin1').decode(stripMetadata(png(pngChunk('gAMA', new Uint8Array(4)), pngChunk('cHRM', new Uint8Array(32)), pngChunk('sRGB', new Uint8Array(1)), pngChunk('iCCP', cat(text('p\0\0'), new Uint8Array(100))))));
+  for (const name of ['gAMA', 'cHRM', 'sRGB', 'iCCP']) assert.ok(!colour.includes(name), `${name} goes`);
+  assert.ok(colour.includes('IDAT'), 'the picture stays');
+  const apng = png(pngChunk('acTL', new Uint8Array(8)), pngChunk('fcTL', new Uint8Array(26)));
+  assert.equal(imageProblem(apng), ANIMATED_IMAGE_PROBLEM);
+  assert.equal(inspectImage(apng), null);
+  assert.deepEqual([(await prepareUserImage(apng)).ok, (await prepareUserImage(apng)).status], [false, 415]);
+  // Frame chunks with no animation control are not an animation to any decoder; they are dropped like any unknown chunk.
+  assert.ok(!new TextDecoder('latin1').decode(stripMetadata(png(pngChunk('fcTL', new Uint8Array(26))))).includes('fcTL'));
 });
 
 test('PNG: an unknown critical chunk, a second header and a missing end are refused', () => {

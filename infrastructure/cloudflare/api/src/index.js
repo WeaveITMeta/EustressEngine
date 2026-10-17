@@ -65,7 +65,7 @@ import { handleCoverRoute, coverFields } from './cover.mjs';
 import { handleChangelogRoute } from './changelogs.mjs';
 import { handleMakers } from './makers.mjs';
 import { handleTimeZoneRoute, accountTimeZone, timeZoneKey } from './account_time_zone.mjs';
-import { handleProfileRoute, publicProfileOf, ownerPendingOf } from './account_profile.mjs';
+import { handleProfileRoute, publicProfileOf, ownerPendingOf, cleanAvatarUrl } from './account_profile.mjs';
 import {
   handleAdultContentRoute, viewerOf, ratingCap, ratingOf, isAdultListing, refuseAdult, viewerHeaders,
   refuseUnsignedImage, imageCacheControl, withSignedImages, resolveDob, ageAt,
@@ -78,7 +78,7 @@ import { prepareUserImage, sha256Hex as sha256OfBytes } from './user_images.mjs'
 import {
   handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
   handleNotificationRoute, authorStatusOf, contentLockedFor, inReview,
-  simWithLegalLock, legalLockedIds, withLegalLockFrom, simForServing, thumbnailApproved, objectMatchesBinding,
+  simWithLegalLock, legalLockedIds, withLegalLockFrom, simForServing, thumbnailApproved, objectMatchesBinding, JUDGE_IMAGE_MAX_BYTES, overJudgeImageLimit, sendBackToReview, publicImageBody, recordUploadedImage,
   POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION, RATINGS, REVIEW_SCHEMA,
 } from './moderation.mjs';
 import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkMaxPlayers } from './world.mjs';
@@ -2986,7 +2986,8 @@ async function handleCommunitySearch(request, env, cors) {
           results.push({
             username: user.username,
             display_name: user.username,
-            avatar_url: user.avatar_url || null,
+            // The website's own rule (account_profile.mjs cleanAvatarUrl): a path under /assets, never an address on any host.
+            avatar_url: cleanAvatarUrl(user.avatar_url ?? ''),
             is_verified: user.kyc_verified === true,
             follower_count: Array.isArray(followers) ? followers.length : 0,
             created_at: user.created_at,
@@ -3048,7 +3049,8 @@ async function handleCommunityLeaderboard(env, cors) {
 
     entries.push({
       username: user.username,
-      avatar_url: user.avatar_url || null,
+      // The website's own rule (account_profile.mjs cleanAvatarUrl): a path under /assets, never an address on any host.
+      avatar_url: cleanAvatarUrl(user.avatar_url ?? ''),
       hours: Math.round(hours * 10) / 10,
       spaces_created: spacesCreated,
       total_visits: user.total_visits || 0,
@@ -5220,7 +5222,7 @@ async function handlePublishSimulation(request, env, cors) {
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json();
-  const { name, description, genre, max_players, tags: sentTags, thumbnail_url, is_public, content_root, spaces } = body;
+  const { name, description, genre, max_players, tags: sentTags, is_public, content_root, spaces } = body;
 
   if (!name) return json({ error: 'name required' }, 400, cors);
 
@@ -5274,8 +5276,9 @@ async function handlePublishSimulation(request, env, cors) {
     // The Spaces the Universe package holds, as the engine listed them.
     space_names: readSpaceNames(spaces) || [],
     moderation: { status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION, review_schema: REVIEW_SCHEMA },
-    // Only an https address is kept: the gallery puts this in an <img>.
-    thumbnail_url: typeof thumbnail_url === 'string' && /^https:\/\/\S{1,500}$/.test(thumbnail_url) ? thumbnail_url : null,
+    // Never taken from the request: an address the author named is never judged and can change after an approval. The
+    // thumbnail upload route sets it to this Worker's own route for the listing, which serves the reviewed image.
+    thumbnail_url: null,
     // Never taken from the request. The download route streams whatever object
     // this names from the one bucket every listing shares, so a key the author
     // chose would let a listing serve another author's private world. The
@@ -5365,16 +5368,8 @@ async function refuseWhileHeld(env, sim, userId, cors) {
 }
 
 // Upload .pak scene file to R2
-// A package that lands in a listing is not the one that was judged. Until a new
-// run passes it (POST .../submit) the listing is pending, so an approved world
-// cannot be swapped for another one that is served under the old approval. A
-// quarantine is a hold, not a verdict on content; only a person lifts it, so an
-// upload must not clear it.
-function sendBackToReview(sim) {
-  if (sim.moderation?.status === 'quarantined') return;
-  sim.moderation = { ...(sim.moderation || {}), status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION, review_schema: REVIEW_SCHEMA };
-}
-
+// A package that lands in a listing is not the one that was judged: it goes back to pending (sendBackToReview in
+// src/moderation.mjs) until a new run passes it.
 async function handleUploadScene(request, simId, env, cors) {
   const auth = await verifyAuth(request, env);
   if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
@@ -5582,9 +5577,9 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   const body = await request.arrayBuffer();
   if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
 
-  // Max 5MB for thumbnail
-  if (body.byteLength > 5 * 1024 * 1024)
-    return json({ error: 'Thumbnail too large (max 5MB)' }, 413, cors);
+  // A thumbnail is one of the images the judge reads, so it is capped to what the judge can be sent (JUDGE_IMAGE_MAX_BYTES).
+  if (body.byteLength > JUDGE_IMAGE_MAX_BYTES)
+    return json({ error: `Thumbnail too large (max ${JUDGE_IMAGE_MAX_BYTES} bytes)` }, 413, cors);
 
   // The type comes from the file's own bytes, never from the request header. A
   // thumbnail is served from this origin, so a body the author labelled
@@ -5595,7 +5590,9 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   // Dimensions bounded, metadata (EXIF and GPS, XMP, text chunks) dropped, and a
   // SHA-256 taken before it is stored (src/user_images.mjs): an approval binds it.
   const prepared = await prepareUserImage(body);
-  if (!prepared.ok) return json({ error: prepared.error }, 413, cors);
+  if (!prepared.ok) return json({ error: prepared.error }, prepared.status || 413, cors);
+  if (prepared.bytes.byteLength > JUDGE_IMAGE_MAX_BYTES)
+    return json({ error: `Thumbnail too large (max ${JUDGE_IMAGE_MAX_BYTES} bytes)` }, 413, cors);
   const ext = prepared.info.ext;
   const r2Key = `thumbnails/${simId}/thumb.${ext}`;
   // An image on the takedown blocklist, as sent or as it would be stored, is refused (src/takedown.mjs).
@@ -5607,6 +5604,8 @@ async function handleUploadThumbnail(request, simId, env, cors) {
     customMetadata: { simId, authorId: auth },
     sha256: prepared.sha256,
   });
+  // Its public verdict, decided once now, and for an RGBA PNG whether its alpha is used (measured, deciding nothing).
+  await recordUploadedImage(env, prepared.sha256, prepared.bytes, { measureAlpha: true });
   // One thumbnail per listing: an older one in another format must not outlive
   // this one, because the route serves the first it finds.
   for (const other of ['webp', 'png', 'jpg']) if (other !== ext) await env.SCENES.delete(`thumbnails/${simId}/thumb.${other}`).catch(() => {});
@@ -5617,6 +5616,8 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   const thumbnailUrl = `${new URL(request.url).origin}/api/simulations/${simId}/thumbnail`;
   sim.thumbnail_url = thumbnailUrl;
   sim.updated_at = new Date().toISOString();
+  // A new image is not the one that was judged, binding or not: the listing goes back to review like any other change.
+  sendBackToReview(sim);
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
 
   return json({ thumbnail_url: thumbnailUrl }, 200, cors);
@@ -5652,7 +5653,7 @@ async function handleUserProjects(request, url, env, cors) {
           id: sim.id || simId,
           name: sim.name || 'Untitled',
           description: sim.description || null,
-          thumbnail_url: liveThumbnailUrl(sim),
+          thumbnail_url: liveThumbnailUrl(sim, url.origin),
           ...coverFields(sim, url.origin),
           // 'published' means listed in the gallery. Anything else is the
           // author-facing review status (in_review, not_listed,
@@ -5698,7 +5699,7 @@ function galleryView(sim, origin) {
     // `tags` is the only category, `tags_source` says who chose them, and `genre` is the deprecated mirror for one release.
     ...listingTagFields(sim), max_players: sim.max_players || 10,
     author_id: sim.author_id, author_name: sim.author_name,
-    thumbnail_url: liveThumbnailUrl(sim),
+    thumbnail_url: liveThumbnailUrl(sim, origin),
     // The creator's own cover art when there is one (src/cover.mjs); the Gallery shows the thumbnail otherwise.
     ...coverFields(sim, origin),
     play_count: sim.play_count || 0, favorite_count: sim.favorite_count || 0,
@@ -6565,58 +6566,102 @@ async function handleGetThumbnail(request, simId, env, cors) {
   const unsigned = await refuseUnsignedImage(request, env, sim, json, cors);
   if (unsigned) return unsigned;
   const placeholder = () => thumbnailPlaceholder(cors, imageCacheControl(request, sim, 'public, max-age=60'));
+  // Whether the viewer is the listing's author or an admin, asked once and only when it matters.
+  let privileged;
+  const isPrivileged = async () => {
+    if (privileged === undefined) {
+      const auth = await verifyAuth(request, env);
+      const admin = auth ? await requireAdmin(request, env) : null;
+      privileged = auth === sim.author_id || !!admin;
+    }
+    return privileged;
+  };
+  // Served only because the viewer is its author or an admin: an image no review passed for the public, so it is never
+  // cached for anyone else.
+  let ownerOnly = false;
   if (!isListable(sim)) {
     const auth = await verifyAuth(request, env);
     const admin = auth ? await requireAdmin(request, env) : null;
     if (!canServe(sim, auth, !!admin)) return json({ error: 'Thumbnail not found' }, 404, cors);
+    ownerOnly = true;
   } else if (!(await thumbnailApproved(env, sim))) {
     // The image on file is not the one that was reviewed (it changed after the
-    // approval). The listing stays available; the public sees a plain panel
-    // until the next review binds the new image. Its author and an admin see it.
-    const auth = await verifyAuth(request, env);
-    const admin = auth ? await requireAdmin(request, env) : null;
-    if (auth !== sim.author_id && !admin) return placeholder();
+    // approval). The public sees a plain panel until the next review binds the
+    // new image. Its author and an admin see it.
+    if (!(await isPrivileged())) return placeholder();
+    ownerOnly = true;
   }
   for (const ext of ['webp', 'png', 'jpg']) {
     const object = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
     if (!object) continue;
+    // An image too large to have been sent to the judge (stored before uploads were capped) is, to anyone but its author and
+    // an admin, not there at all, whatever the approval says. Decided from the stored size; the body is never read for it.
+    // The first format found is the listing's thumbnail. One the public may not see is answered as no thumbnail at all, never
+    // by falling through to a stale file in another format.
+    const absent = async () => { await object.body?.cancel?.(); return json({ error: 'Thumbnail not found' }, 404, cors); };
+    if (overJudgeImageLimit(object)) {
+      if (!(await isPrivileged())) return absent();
+      ownerOnly = true;
+    }
     // Judged from a head, so the object fetched now is compared too (see handleDownloadPak).
     if (isListable(sim) && !(await objectMatchesBinding(env, sim, 'thumb', object))) {
-      const auth = await verifyAuth(request, env);
-      const admin = auth ? await requireAdmin(request, env) : null;
-      if (auth !== sim.author_id && !admin) {
+      if (!(await isPrivileged())) {
         await object.body?.cancel?.();
         return placeholder();
+      }
+      ownerOnly = true;
+    }
+    // The public is served the image's stored verdict (src/moderation.mjs publicImageBody): the object as it is, its rebuilt
+    // copy with colour transforms and the like dropped, or nothing at all for one an upload would refuse today (an animation,
+    // transparency, a second picture), whatever the approval says. Read from the verdict record, streamed; the bytes are
+    // walked once in the object's life, never per request. Its author and an admin still see the object itself.
+    let body = object.body;
+    if (!ownerOnly) {
+      const shown = await publicImageBody(env, object);
+      if (shown) body = shown.body;
+      else {
+        if (!(await isPrivileged())) return json({ error: 'Thumbnail not found' }, 404, cors);
+        ownerOnly = true;
+        const again = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
+        if (!again) return json({ error: 'Thumbnail not found' }, 404, cors);
+        body = again.body;
       }
     }
     // The type follows the object's extension, which only an image sniffed at
     // upload can have. Never the stored header: an object written before that
     // check may carry any type its author chose. nosniff and a sandbox policy
     // keep even a mislabelled body from running as a page on this origin.
-    return new Response(object.body, {
+    return new Response(body, {
       headers: {
         ...cors,
         'Content-Type': `image/${ext === 'jpg' ? 'jpeg' : ext}`,
         'X-Content-Type-Options': 'nosniff',
         'Content-Security-Policy': "default-src 'none'; sandbox",
-        // An adult listing's: private, and no longer than its signed URL has left.
-        'Cache-Control': imageCacheControl(request, sim, 'public, max-age=3600'),
+        // An adult listing's: private, and no longer than its signed URL has left. One only its author or an admin may see:
+        // private, and never stored.
+        'Cache-Control': ownerOnly ? 'private, no-store' : imageCacheControl(request, sim, 'public, max-age=3600'),
       },
     });
   }
   return json({ error: 'Thumbnail not found' }, 404, cors);
 }
 
-// Thumbnails published before the eustress-simulations retirement carry
-// `https://simulations.eustress.dev/thumbnails/{id}/thumb.ext`, a host whose
-// DNS never resolved. Rewriting on read repairs every historical gallery card
-// without a KV migration pass. The production host is hardcoded because the
-// callers are list handlers that do not carry the request.
-function liveThumbnailUrl(sim) {
+// The thumbnail address a response carries: this Worker's own thumbnail route for the listing (which serves the reviewed
+// image; see thumbnailApproved in src/moderation.mjs), or null. Never an external address: one the author named was never
+// judged and can change after an approval, so a record that still carries one (from before publish stopped taking it) is
+// served with no thumbnail. Thumbnails published before the eustress-simulations retirement carry
+// `https://simulations.eustress.dev/thumbnails/{id}/thumb.ext`, a host whose DNS never resolved; those are rewritten to
+// the route on read, with no KV migration pass. The production host is used for them because some callers carry no request.
+const OWN_API_HOSTS = ['api.eustress.dev', 'api-staging.eustress.dev'];
+function liveThumbnailUrl(sim, origin = null) {
   const u = sim?.thumbnail_url;
-  if (!u) return null;
-  if (!u.startsWith('https://simulations.eustress.dev/')) return u;
-  return sim.id ? `https://api.eustress.dev/api/simulations/${sim.id}/thumbnail` : null;
+  if (!u || typeof u !== 'string' || !sim.id) return null;
+  if (u.startsWith('https://simulations.eustress.dev/')) return `https://api.eustress.dev/api/simulations/${sim.id}/thumbnail`;
+  let parsed;
+  try { parsed = new URL(u); } catch { return null; }
+  const ownHost = (parsed.protocol === 'https:' && OWN_API_HOSTS.includes(parsed.host)) || (typeof origin === 'string' && parsed.origin === origin);
+  const ownRoute = parsed.pathname === `/api/simulations/${sim.id}/thumbnail` && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
+  return ownHost && ownRoute ? `${parsed.origin}${parsed.pathname}` : null;
 }
 
 

@@ -654,10 +654,13 @@ test('no join link, key or pin is anywhere in the answer, or in what the index h
   await beat(env, 2, { pin: PIN2 });
   const r = await liveNow(env);
   assert.equal(r.body.sessions.length, 2);
-  for (const secret of [KEY, PIN, PIN2, LAN, 'eustress-player', '7777', 'key=', 'pin=', 'link', '203.0.113.7']) {
+  // The port is looked for as a port, after a colon or in a field of its own, never as a bare substring: a random key or pin
+  // can contain 7777 by chance.
+  for (const secret of [KEY, PIN, PIN2, LAN, 'eustress-player', ':7777', 'key=', 'pin=', 'link', '203.0.113.7']) {
     assert.ok(!r.text.includes(secret), `the answer holds ${secret}`);
     assert.ok(!JSON.stringify(indexRows(env)).includes(secret), `the index holds ${secret}`);
   }
+  for (const text of [r.text, JSON.stringify(indexRows(env))]) assert.doesNotMatch(text, /"port"\s*:\s*"?7777\b/, 'no port field');
   // The single-listing read keeps its own rule: the link goes to a signed-in account only.
   const anonymous = await single(env, 1);
   assert.equal(anonymous.body.link, undefined);
