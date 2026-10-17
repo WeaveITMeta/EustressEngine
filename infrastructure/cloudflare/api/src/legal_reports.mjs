@@ -447,23 +447,33 @@ async function refreshClaim(env, claimed) {
 const unconfirmedKey = (id) => `legalunconfirmed:${id}`;
 
 // A try that finds the case's report already written (its claim or its case index names it) makes sure it is recorded as a
-// report is (B-1, R-1): the case index names it, its queue key is there (by its status, unless sent), and a report that was
-// never queued is dispatched (sent, or its staff alert) now. Only then is it answered already_reported (paid); a repair that
-// fails is answered unavailable, so the debt stays owed.
+// report is (B-1, R-1): the report is this case's (its kind, case kind and case id: a claim or an index that names another
+// case's report pays nothing, and the debt is stuck for a person, N-4), the case index names it, and its queue key is there
+// for its CURRENT status (read again right before, unless sent), so the hourly sweep dispatches it. The repair never
+// dispatches or saves the report itself: a send between its reads cannot be repeated from a stale copy (D4-2). Only then is
+// it answered already_reported (paid); a repair that fails is answered unavailable, so the debt stays owed.
 async function repairClaimedReport(env, claim, finding, deps) {
+  void deps;
   try {
     const rep = await loadLegalReport(env, claim.id);
     if (!rep) return { written: false, reason: 'busy' };
+    if (rep.kind !== finding.kind || rep.when_where?.case_kind !== finding.caseKind || rep.when_where?.case_id !== finding.caseId) {
+      console.error('legal reports: a claim or a case index names another case\'s report');
+      return { written: false, reason: 'claim_mismatch' };
+    }
     const idx = caseIndexKey(finding.kind, finding.caseKind, finding.caseId);
     if ((await env.SOCIAL.get(idx)) !== rep.id) await env.SOCIAL.put(idx, rep.id);
+    // The queue key first, then the report as it is now: a send between the two reads is seen, and nothing is put back for it.
+    let now = rep;
     let requeued = false;
     if (rep.status !== 'sent' && !(await env.SOCIAL.get(legalQueueKey(rep.status, rep.id)))) {
-      await env.SOCIAL.put(legalQueueKey(rep.status, rep.id), rep.updated_at || new Date().toISOString());
-      rep.history = [...(rep.history || []), { at: new Date().toISOString(), event: 'requeued' }];
-      requeued = true;
+      now = (await loadLegalReport(env, rep.id)) || rep;
+      if (now.status !== 'sent' && !(await env.SOCIAL.get(legalQueueKey(now.status, now.id)))) {
+        await env.SOCIAL.put(legalQueueKey(now.status, now.id), now.updated_at || new Date().toISOString());
+        requeued = true;
+      }
     }
-    if (requeued) await dispatch(env, rep, deps);
-    return { written: false, reason: 'already_reported', id: rep.id, status: rep.status, ...(requeued ? { repaired: true } : {}) };
+    return { written: false, reason: 'already_reported', id: rep.id, status: now.status, ...(requeued ? { repaired: true } : {}) };
   } catch (e) {
     console.error('legal reports: the written report was not repaired:', e?.name || 'Error');
     return { written: false, reason: 'unavailable' };
@@ -563,16 +573,18 @@ export async function writeLegalReport(env, finding, deps = {}) {
     // Fenced: saved only while the claim is still this writer's (a writer that stalled past REPORT_CLAIM_MS and was taken over
     // saves nothing, and the one that took over writes the report).
     if (claimed.etag && !(await refreshClaim(env, claimed))) { claimed = null; return { written: false, reason: 'busy' }; }
+    // The confirmation's key before the report (D4-3): one that cannot be written leaves the report unwritten and the debt owed.
+    if (accountStatus === 'unconfirmed') await env.SOCIAL.put(unconfirmedKey(rep.id), new Date(nowMs).toISOString());
     await saveLegalReport(env, rep);
     await env.SOCIAL.put(idx, rep.id);
     claimed = null;
-    if (accountStatus === 'unconfirmed') await env.SOCIAL.put(unconfirmedKey(rep.id), new Date(nowMs).toISOString()).catch(() => {});
     await dispatch(env, rep, deps, settings);
     return { written: true, id: rep.id, status: rep.status };
   } catch (e) {
     console.error('legal reports: the report was not written:', e?.name || 'Error');
-    // A claim whose report was not saved is let go, so the next try is not answered busy.
+    // A claim whose report was not saved is let go, so the next try is not answered busy (its confirmation key with it).
     if (claimed) {
+      try { if (!(await loadLegalReport(env, claimed.id))) await env.SOCIAL.delete(unconfirmedKey(claimed.id)); } catch { /* read again by the confirmation, which drops a key with no report */ }
       try { const held = await env.SCENES.get(claimed.key); if (held && parse(await held.text())?.id === claimed.id && !(await loadLegalReport(env, claimed.id))) await env.SCENES.delete(claimed.key); }
       catch { /* taken over after REPORT_CLAIM_MS */ }
     }
@@ -599,7 +611,8 @@ export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps 
       const at = new Date().toISOString();
       const prev = rep.status;
       if (rep.status === 'sent') {
-        rep.addenda = [...(rep.addenda || []), { at, kind: 'account_status', account: { ...account }, sent: false }];
+        const takeover = account.account_status === 'known' && rep.who?.account_id ? await takeoverCheck(env, rep.who.account_id, rep.when_where?.uploaded_at, {}) : null;
+        rep.addenda = [...(rep.addenda || []), { at, kind: 'account_status', account: { ...account }, ...(takeover ? { takeover } : {}), sent: false }];
         rep.history.push({ at, event: 'addendum', detail: { account_status: account.account_status } });
         await saveLegalReport(env, rep, prev);
         await alertAddendum(env, rep);
@@ -607,6 +620,12 @@ export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps 
       }
       const fields = account.account_status === 'known' ? { ...account } : { account_status: 'deleted' };
       rep.who = { ...rep.who, ...fields, upload_ips: rep.who?.upload_ips || [], upload_ip_unknown_items: rep.who?.upload_ip_unknown_items || [] };
+      // Found: the takeover check (the account's age, its credential changes) and the route (its country) are made again from
+      // the account as it is, never left as they were made with no user record (D4-4).
+      if (account.account_status === 'known' && rep.who.account_id) {
+        rep.takeover = await takeoverCheck(env, rep.who.account_id, rep.when_where?.uploaded_at, {});
+        if (rep.kind === 'csam' || rep.kind === 'threat') rep.route = routeFor(rep.kind, rep.who.country);
+      }
       rep.history.push({ at, event: 'amended', detail: { account_status: account.account_status } });
       await saveLegalReport(env, rep, prev);
       return { amended: true, id: rep.id, status: rep.status, how: 'amended', account_status: account.account_status };
@@ -644,13 +663,27 @@ export async function amendLegalReport(env, { kind, caseKind, caseId, uploadIps 
   }
 }
 
+export const UNCONFIRMED_CURSOR_KEY = 'legalunconfirmed-cursor';
+/// The reports one run of the confirmation reads (each is a handful of reads and an amendment).
+export const UNCONFIRMED_PER_RUN = 25;
+
 /// From the hourly sweep: every CSAM report written with account_status 'unconfirmed' has its account read again: found, it is
-/// amended to 'known' with the account's fields; still absent ACCOUNT_ABSENCE_CONFIRM_MS after the first read, 'deleted'.
-/// A read that fails waits for the next run. At most `limit` a run. Never throws. `{ confirmed }`.
-export async function confirmUnconfirmedAccounts(env, { now = Date.now(), limit = 50 } = {}) {
+/// amended to 'known' with the account's fields (and its takeover check and route made again, D4-4); still absent
+/// ACCOUNT_ABSENCE_CONFIRM_MS after the first read, 'deleted'. Its key goes only on a later run that reads the report back
+/// confirmed (an amendment whose save was lost is made again). A read that fails waits for the next run. At most
+/// UNCONFIRMED_PER_RUN a run, from a cursor (UNCONFIRMED_CURSOR_KEY). Never throws. `{ confirmed }`.
+export async function confirmUnconfirmedAccounts(env, { now = Date.now(), limit = UNCONFIRMED_PER_RUN } = {}) {
   const out = { confirmed: 0 };
   try {
-    const listed = await env.SOCIAL.list({ prefix: 'legalunconfirmed:', limit });
+    let cursor;
+    try { cursor = (await env.SOCIAL.get(UNCONFIRMED_CURSOR_KEY)) || undefined; } catch { cursor = undefined; }
+    let listed;
+    try { listed = await env.SOCIAL.list({ prefix: 'legalunconfirmed:', limit, ...(cursor ? { cursor } : {}) }); }
+    catch { listed = await env.SOCIAL.list({ prefix: 'legalunconfirmed:', limit }); }
+    try {
+      if (listed?.list_complete === false && listed.cursor) await env.SOCIAL.put(UNCONFIRMED_CURSOR_KEY, listed.cursor);
+      else await env.SOCIAL.delete(UNCONFIRMED_CURSOR_KEY);
+    } catch { /* from the start next run */ }
     for (const k of listed?.keys || []) {
       try {
         const id = k.name.slice('legalunconfirmed:'.length);
@@ -664,7 +697,8 @@ export async function confirmUnconfirmedAccounts(env, { now = Date.now(), limit 
         else if (Number.isFinite(first) && now - first >= ACCOUNT_ABSENCE_CONFIRM_MS) account = { account_status: 'deleted' };
         if (!account) continue;
         const r = await amendLegalReport(env, { reportId: id, account });
-        if (r.amended) { await env.SOCIAL.delete(k.name); out.confirmed += 1; if (present) await env.SOCIAL.delete(absentKey(accountId)).catch(() => {}); }
+        // The key stays until a later run reads the report back confirmed (the check above), so a lost save is made again.
+        if (r.amended) { out.confirmed += 1; if (present) await env.SOCIAL.delete(absentKey(accountId)).catch(() => {}); }
       } catch (e) {
         console.error('legal reports: an account was not confirmed:', e?.name || 'Error');
       }
@@ -695,8 +729,10 @@ export const REPORT_DEBT_MAX_TRIES = 24;
 export const RETRIES_EXHAUSTED = 'retries_exhausted';
 /// A debt stuck as RETRIES_EXHAUSTED is still tried this often (a long outage ends, and the report is then written).
 export const STUCK_RETRY_EVERY_MS = 86400000;
-/// The most stuck alerts one run of the re-alert sends, so it leaves room for the cron's later steps.
+/// The most stuck alerts one run of the re-alert sends, so it leaves room for the cron's later steps: split between the case
+/// kinds (STUCK_ALERTS_PER_KIND_PER_RUN each), so one kind's backlog never starves the other's.
 export const STUCK_ALERTS_PER_RUN = 50;
+export const STUCK_ALERTS_PER_KIND_PER_RUN = 25;
 /// The stuck debts GET /api/admin/legal/stuck answers per request.
 export const STUCK_LIST_PAGE = 200;
 
@@ -825,10 +861,11 @@ export const stuckCursorKey = (caseKind) => `legalstuck-cursor:${caseKind}`;
 /// again. A page of `limit` at a time, one page a run per kind by default (`maxPages`), carrying on from where the last run stopped
 /// (legalstuck-cursor:{caseKind}), so every stuck debt is reached however many there are; the run that reaches the end starts
 /// the next from the beginning. Never throws. `{ stuck, alerted }` (the debts read this run).
-export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 1, caseKinds = DEBT_CASE_KINDS, maxAlerts = STUCK_ALERTS_PER_RUN } = {}) {
+export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 1, caseKinds = DEBT_CASE_KINDS, maxAlerts = STUCK_ALERTS_PER_KIND_PER_RUN } = {}) {
   const out = { stuck: 0, alerted: 0, capped: false };
   for (const caseKind of caseKinds.filter((k) => DEBT_CASE_KINDS.includes(k))) {
-    if (out.capped) break;
+    let alertedHere = 0;
+    let cappedHere = false;
     try {
       let cursor;
       try { cursor = (await env.SOCIAL.get(stuckCursorKey(caseKind))) || undefined; } catch { cursor = undefined; }
@@ -839,16 +876,16 @@ export async function alertStuckReports(env, { now = Date.now(), limit = 200, ma
         catch { if (!cursor) break; cursor = undefined; continue; }
         pages += 1;
         for (const k of listed?.keys || []) {
-          // Capped: the page is read again next run (the ones alerted now are not due for a day).
-          if (out.alerted >= maxAlerts) { out.capped = true; break; }
+          // Capped for this kind: the page is read again next run (the ones alerted now are not due for a day).
+          if (alertedHere >= maxAlerts) { cappedHere = true; out.capped = true; break; }
           const rec = parse(await env.SOCIAL.get(k.name));
           if (!rec) continue;
           out.stuck += 1;
           const last = Date.parse(rec.alerted_at || '');
           if (Number.isFinite(last) && now - last < STUCK_ALERT_EVERY_MS) continue;
-          if (await alertStuck(env, rec, now, k.name)) out.alerted += 1;
+          if (await alertStuck(env, rec, now, k.name)) { out.alerted += 1; alertedHere += 1; }
         }
-        if (out.capped) break;
+        if (cappedHere) break;
         if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; break; }
         cursor = listed.cursor;
       }

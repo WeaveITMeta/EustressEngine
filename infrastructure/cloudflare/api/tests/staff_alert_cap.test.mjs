@@ -79,8 +79,10 @@ test('zz_debt_4: 31 stuck re-alerts are all sent and recorded, and a possible-CS
     const id = `${String(i).padStart(2, '0')}${'a'.repeat(22)}-1`;
     await env.SOCIAL.put(legalStuckKey('forum', id), JSON.stringify({ case_kind: 'forum', case_id: id, report_kind: 'threat', reason: 'no_account', stuck_at: old, alerted_at: old, alerts: 1 }));
   }
-  const out = await quiet(() => alertStuckReports(env));
-  assert.equal(out.alerted, 31);
+  // The stuck re-alert sends at most STUCK_ALERTS_PER_KIND_PER_RUN a run (src/legal_reports.mjs): two runs send all 31.
+  const first = await quiet(() => alertStuckReports(env));
+  const second = await quiet(() => alertStuckReports(env));
+  assert.equal(first.alerted + second.alerted, 31);
   assert.equal(env.mail.length, 31, 'every stuck re-alert was sent');
   const last = await loadStuckReport(env, 'forum', `30${'a'.repeat(22)}-1`);
   assert.equal(last.alerts, 2);

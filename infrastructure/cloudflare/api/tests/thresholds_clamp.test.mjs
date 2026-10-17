@@ -56,10 +56,10 @@ test('every probability field of every battery is clamped, and a count or a time
   assert.deepEqual(await quiet(() => thresholdsFrom(envWith('not json'))), { ...DEFAULT_THRESHOLDS });
 });
 
-test('R-6: lease_seconds is at least 30, and each high threshold stays at or above its lower one (else both defaults)', async () => {
+test('R-6: lease_seconds is at least 30 (and outlasts the judge, N-1), and each high threshold stays at or above its lower one (else both defaults)', async () => {
   const t = (x) => quiet(() => thresholdsFrom(envWith(x)));
-  assert.equal((await t({ lease_seconds: 29 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds);
-  assert.equal((await t({ lease_seconds: 30 })).lease_seconds, 30);
+  assert.equal((await t({ lease_seconds: 29, judge_timeout_ms: 1 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'below the floor');
+  assert.equal((await t({ lease_seconds: 70, judge_timeout_ms: 1000 })).lease_seconds, 70, 'above the floor and the judge plus its margin');
   const crossed = await t({ guest_chat_refuse: 0.9, guest_chat_high: 0.6 });
   assert.deepEqual([crossed.guest_chat_refuse, crossed.guest_chat_high], [DEFAULT_THRESHOLDS.guest_chat_refuse, DEFAULT_THRESHOLDS.guest_chat_high], 'the guest chat pair');
   const forum = await t({ forum_borderline: 0.9, forum_refuse: 0.6 });

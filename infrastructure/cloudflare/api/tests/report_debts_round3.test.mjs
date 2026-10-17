@@ -21,7 +21,7 @@ import {
 } from '../src/legal_reports.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 import { healListingReportDebts, handleModerationRoute } from '../src/moderation.mjs';
-import { REPORT_CLAIM_MS, STUCK_ALERTS_PER_RUN } from '../src/legal_reports.mjs';
+import { REPORT_CLAIM_MS, STUCK_ALERTS_PER_KIND_PER_RUN } from '../src/legal_reports.mjs';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -165,8 +165,9 @@ test('B-1 (zz_d3_4a): a saved report whose queue key failed to write is queued, 
   await quarantineAs(env, 'admin', ADMIN);
   restore();
   assert.ok((await loadCase(env, SIM)).report_owed, 'the try that lost the queue key left the debt owed');
-  // One hourly sweep: the listing debt's try finds the report, queues it and dispatches it (its staff alert) at once.
-  await quiet(() => sweepLegalReports(env));
+  // The listing debt's try finds the report and queues it (it never dispatches it itself, D4-2); the next sweep's queue
+  // dispatches it, with its staff alert.
+  for (let h = 0; h < 2; h++) await quiet(() => sweepLegalReports(env));
   const csam = (await reportsOf(env)).filter((r) => r.kind === 'csam');
   assert.equal(csam.length, 1, 'one report');
   assert.ok(env.SOCIAL.store.has(`legalq:${csam[0].status}:${csam[0].id}`), 'in the send queue');
@@ -234,6 +235,9 @@ test('R-3 (zz_d3_3): a person\'s csam quarantine of a deleted account is reporte
   assert.equal((await loadCase(env, SIM)).report_owed, null, 'nothing is owed');
   await quiet(() => sweepLegalReports(env, {}, { now: Date.now() + 61_000 }));
   assert.equal((await loadLegalReport(env, rep.id)).who.account_status, 'deleted', 'confirmed on the second read');
+  // Nothing is owed, so a person's retry naming the debt's since finds nothing to try.
+  const retry = await route(env, 'POST', `/api/admin/legal/stuck/moderation/${SIM}/retry`, { note: 'The account is gone; write the report now.', report_kind: 'csam', since: rep.when_where.removed_at });
+  assert.deepEqual([retry.status, retry.body.code], [404, 'not_owed']);
 });
 
 test('R-3: a person can retry an owed debt (not stuck) at once, audited first, naming its since', async () => {
@@ -339,12 +343,12 @@ for (const indexed of [false, true]) {
   });
 }
 
-test('notes: the stuck re-alert sends at most STUCK_ALERTS_PER_RUN alerts a run, and the rest the next run', async () => {
+test('notes: the stuck re-alert sends at most STUCK_ALERTS_PER_KIND_PER_RUN alerts a run per kind, and the rest the next run', async () => {
   const env = await environment();
   const old = new Date(Date.now() - 2 * DAY).toISOString();
-  for (let n = 1; n <= STUCK_ALERTS_PER_RUN + 10; n++) await env.SOCIAL.put(legalStuckKey('forum', `${THREAD}-${n}`, 'csam'), JSON.stringify({ case_kind: 'forum', case_id: `${THREAD}-${n}`, report_kind: 'csam', reason: 'no_account', stuck_at: old, alerted_at: old, alerts: 1 }));
+  for (let n = 1; n <= STUCK_ALERTS_PER_KIND_PER_RUN + 10; n++) await env.SOCIAL.put(legalStuckKey('forum', `${THREAD}-${n}`, 'csam'), JSON.stringify({ case_kind: 'forum', case_id: `${THREAD}-${n}`, report_kind: 'csam', reason: 'no_account', stuck_at: old, alerted_at: old, alerts: 1 }));
   const first = await quiet(() => alertStuckReports(env));
-  assert.deepEqual([first.alerted, first.capped], [STUCK_ALERTS_PER_RUN, true]);
+  assert.deepEqual([first.alerted, first.capped], [STUCK_ALERTS_PER_KIND_PER_RUN, true]);
   const second = await quiet(() => alertStuckReports(env));
   assert.equal(second.alerted, 10);
 });

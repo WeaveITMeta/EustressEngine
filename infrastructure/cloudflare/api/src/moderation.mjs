@@ -338,8 +338,9 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
 // Rates may be 0 (none) or 1 (all); every other probability is a threshold that decides, and is strictly inside (0, 1): at 1
 // nothing reaches it (a battery that refuses nothing), at 0 everything does.
 const THRESHOLD_RATES = new Set(['audit_rate']);
-// The lease must outlast a slow step.
+// The lease must outlast a slow step (and, with LEASE_MARGIN_MS, the judge's bound: thresholdsFrom).
 const THRESHOLD_MINIMUMS = Object.freeze({ lease_seconds: 30 });
+export const LEASE_MARGIN_MS = 60_000;
 // Each pair is (lower, higher): the higher threshold at or above the lower, or both fall back to their defaults.
 export const THRESHOLD_PAIRS = Object.freeze([['guest_chat_refuse', 'guest_chat_high'], ['forum_borderline', 'forum_refuse'], ['profile_review', 'profile_refuse']]);
 
@@ -361,6 +362,13 @@ export function thresholdsFrom(env) {
         if (!Object.hasOwn(out, k)) continue;
         if (thresholdValueOk(k, v)) out[k] = v;
         else console.error(`MODERATION_THRESHOLDS.${k} is not a valid value; its default is kept`);
+      }
+      // The lease must outlast the slowest step it covers, the judge's call, with a margin (N-1): a lease that does not falls
+      // back to its default, and a judge bound the default lease cannot cover falls back too.
+      if (out.lease_seconds * 1000 < out.judge_timeout_ms + LEASE_MARGIN_MS) {
+        console.error('MODERATION_THRESHOLDS.lease_seconds does not outlast judge_timeout_ms; the default is kept');
+        out.lease_seconds = DEFAULT_THRESHOLDS.lease_seconds;
+        if (out.lease_seconds * 1000 < out.judge_timeout_ms + LEASE_MARGIN_MS) out.judge_timeout_ms = DEFAULT_THRESHOLDS.judge_timeout_ms;
       }
       for (const [lo, hi] of THRESHOLD_PAIRS) {
         if (out[hi] < out[lo]) {
@@ -5691,6 +5699,7 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
     // A daily try of a debt stuck on its tries that fails again: its record says the reason it failed for now.
     if (carryStuck && !overtaken) await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: rec.sim_id, reportKind: 'csam', category, reason: legal.RETRIES_EXHAUSTED, lastReason: reason, reference: rec.reference || seal?.case_ref || null, since });
     const stuck = !overtaken && outcome === 'stuck' ? (await legal.recordStuckReport(env, { caseKind: 'moderation', caseId: rec.sim_id, reportKind: 'csam', category, reason, reference: rec.reference || seal?.case_ref || null, since })).ok : false;
+    let writeFailed = false;
     if (!overtaken && (outcome === 'owed' || (outcome === 'stuck' && !stuck))) await indexListingReportOwed(env, rec.sim_id, since);
     if (fresh) {
       // The report itself is found by its case (src/legal_reports.mjs, `legalcase:`); the case keeps its outcome only.
@@ -5720,12 +5729,20 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
       const lastLane = [...(fresh.history || [])].reverse().find(h => h?.event === 'legal_lane');
       if (!lastLane || JSON.stringify(lastLane.detail || null) !== JSON.stringify(lane)) pushHistory(fresh, 'legal_lane', lane);
       if (rec[HUMAN]) fresh[HUMAN] = true;
-      // Under the caller's lease: a lease that lapsed and was taken refuses the write (LeaseLost), and nothing is written.
+      // Under the caller's lease: a lease that lapsed and was taken refuses the write (LeaseLost). A refused write (that, or any
+      // other failure) never skips the debt (D4-5): it is recorded under a fresh lease, merged into the case as it is then and
+      // never weakening a debt on it, and staff are told below either way.
       if (rec[LEASE]) fresh[LEASE] = rec[LEASE];
-      await saveCase(env, fresh);
+      try { await saveCase(env, fresh); }
+      catch (e) {
+        writeFailed = true;
+        console.error('moderation: the case write after the report try was refused:', e?.name || 'Error');
+        if (!overtaken && (outcome === 'owed' || outcome === 'stuck') && fresh.report_owed) await mergeListingDebt(env, rec.sim_id, fresh.report_owed);
+      }
     }
     if (!overtaken) {
-      if (outcome === 'paid' || outcome === 'settled' || stuck) await env.SOCIAL.delete(listingReportOwedKey(rec.sim_id)).catch(() => {});
+      // A settlement the case could not record leaves the debt as it was, indexed (only a paid or stuck one leaves the list then).
+      if (outcome === 'paid' || stuck || (outcome === 'settled' && !writeFailed)) await env.SOCIAL.delete(listingReportOwedKey(rec.sim_id)).catch(() => {});
       // The stuck record of the debt on record goes when that debt is paid, settled, replaced by a new one, or owed again.
       const wasStuck = latestDebt?.stuck ? latestDebt : priorDebt?.stuck ? priorDebt : null;
       const stillStuckSame = (stuck || carryStuck) && wasStuck && (wasStuck.since ?? null) === (since ?? null);
@@ -5739,6 +5756,29 @@ async function sealAndReportListing(env, deps, rec, category, actor) {
     out.sealed = out.sealed === 'not_needed' ? 'error' : out.sealed;
   }
   return out;
+}
+
+// The debt a seal-and-report's refused case write left out (D4-5), recorded on the case as it is now: under a fresh lease when
+// one can be had, else on the case read again just before the write. It never weakens what the case holds: a debt of the same
+// finding (its since) or a stronger one stands. `true` when the case holds the debt, or a stronger one. Never throws.
+async function mergeListingDebt(env, simId, debt) {
+  let lease = null;
+  try {
+    lease = await acquireLease(env, simId, thresholdsFrom(env), 'debt_merge');
+    const cur = adoptLease(await loadCase(env, simId), lease);
+    if (!cur) return false;
+    const have = cur.report_owed && (cur.report_owed.category ?? debt.category) === debt.category ? cur.report_owed : null;
+    if (have && ((have.since ?? null) === (debt.since ?? null) || unrecordedDebt(have) || detectionRank(have.detection) >= detectionRank(debt.detection))) return true;
+    cur.report_owed = debt;
+    pushHistory(cur, 'legal_report_owed', { reason: 'recorded_after_a_refused_write' });
+    await saveCase(env, cur);
+    return true;
+  } catch (e) {
+    console.error('moderation: the owed report was not merged into the case:', e?.name || 'Error');
+    return false;
+  } finally {
+    if (lease) await releaseLease(env, lease);
+  }
 }
 
 /// The KV index of a listing case that owes a legal report (`rec.report_owed`), for the hourly sweep (writeOwedListingReports).
