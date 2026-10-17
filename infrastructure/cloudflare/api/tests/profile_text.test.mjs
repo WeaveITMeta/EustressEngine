@@ -136,7 +136,7 @@ test('length is counted after NFKC and with format characters removed, as Websit
 });
 
 test('the length limits are Website\'s (1 to 32 and 0 to 280 characters), and over them refuses under `other`', async () => {
-  assert.deepEqual({ ...PROFILE_TEXT_MAX }, { display_name: 32, bio: 280, forum_title: 120, forum_post: 10_000 });
+  assert.deepEqual({ ...PROFILE_TEXT_MAX }, { display_name: 32, bio: 280, forum_title: 120, forum_post: 10_000, guest_chat: 500 });
   const cases = [
     ['display_name', 'a'.repeat(32), 'pass'],
     ['display_name', 'a'.repeat(33), 'refuse'],
@@ -497,7 +497,7 @@ const forumCheck = (args) => silence(() => checkCommunityText(args));
 
 test('checkCommunityText is the same check, and the forum fields are forum_title and forum_post', () => {
   assert.equal(checkCommunityText, checkProfileText);
-  assert.deepEqual([...PROFILE_FIELDS], ['display_name', 'bio', 'forum_title', 'forum_post']);
+  assert.deepEqual([...PROFILE_FIELDS], ['display_name', 'bio', 'forum_title', 'forum_post', 'guest_chat']);
   assert.deepEqual([...FORUM_FIELDS], ['forum_title', 'forum_post']);
   assert.ok(PROFILE_TEXT_MAX.forum_post <= JEV_STATE_MAX_CHARS, 'a whole forum post fits the Jev state budget');
 });
