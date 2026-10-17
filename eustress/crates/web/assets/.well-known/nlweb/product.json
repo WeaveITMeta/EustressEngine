@@ -3,8 +3,9 @@
   "@type": "SoftwareApplication",
   "name": "Eustress Engine",
   "alternateName": ["Eustress", "Eustress Engine", "Eustress Player"],
-  "description": "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. Built from the ground up in 100% Rust, we deliver unprecedented performance, memory safety, and developer experience—all while remaining free forever.",
-  "applicationCategory": "GameApplication",
+  "description": "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds. It offers performance, memory safety and developer experience, and it stays free forever.",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "Simulation Software",
   "operatingSystem": ["Windows", "macOS", "Linux", "iOS", "Android", "Web", "Meta Quest", "SteamVR", "PSVR2"],
   "softwareVersion": "0.16.1",
   "offers": {
@@ -17,7 +18,7 @@
     {
       "@type": "SoftwareApplication",
       "name": "Eustress Engine",
-      "description": "Professional-grade game engine and creation suite. Build stunning 3D worlds, script gameplay logic with Soul, design UI, and publish to multiple platforms—all from one tool.",
+      "description": "Simulation and creation suite. Build 3D worlds, script behavior and gameplay logic with Soul, design UI, and publish to multiple platforms, all from one tool.",
       "applicationCategory": "DeveloperApplication",
       "features": [
         "Visual editor with hot reload",
@@ -31,7 +32,7 @@
     {
       "@type": "SoftwareApplication",
       "name": "Eustress Player",
-      "description": "Discover and play thousands of community-created experiences. Jump into games instantly through Steam, connect with friends, and explore endless creativity.",
+      "description": "Discover and play thousands of community-created simulations. Jump into games instantly through Steam, connect with friends, and explore endless creativity.",
       "applicationCategory": "GameApplication",
       "features": [
         "Instant play via Steam",
@@ -44,6 +45,12 @@
   "programmingLanguage": "Rust",
   "runtimePlatform": "Bevy Engine",
   "keywords": [
+    "simulation platform",
+    "data platform",
+    "simulation and data platform",
+    "real-time simulation",
+    "digital twin",
+    "Rust simulation engine",
     "game engine",
     "rust game engine",
     "game development",

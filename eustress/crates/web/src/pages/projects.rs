@@ -1,24 +1,48 @@
 // =============================================================================
-// Eustress Web - Projects Page (Industrial Redesign)
+// Eustress Web - Projects
 // =============================================================================
-// User's creative hub - manage all spaces, games, and experiences
+// The signed-in account's own Spaces, in the Gallery's look: where each one stands in review, its tags, who can see it, what it
+// sells, and the way to play, edit, configure, archive or sell it. Every name, picture and number is something the Worker said:
+//
+//   GET   /api/projects                            the account's own Spaces. Signed out, the Worker answers an empty list, so
+//                                                  the page asks the visitor to sign in rather than saying there is nothing.
+//   GET   /api/commerce/account (test mode)        what each published Space can sell: a card's chip and Sell button
+//                                                  (project_sell.rs)
+//   POST  /api/simulations/{id}/archive|unarchive  a card's Archive and Unarchive; the list is read again afterwards
+//   PATCH /api/simulations/{id}/tags               the tag editor in a Space's settings (project_tags.rs)
+//
+// Read and left out on purpose: `favorite_count`, which the Worker sets to 0 at publish and never counts, so the old count of
+// favorites in the header and on every card said 0. The panel about an AI training export is gone too: no route serves that export (its
+// stream figures are in docs/benchmarks/BENCHMARK_EUSTRESSSTREAM.md), and the API keys it linked to stay on /ai.
+//
+// The API keys section at the end of this file is drawn by the AI page (/ai), not by this page, and is unchanged.
+//
+// Table of Contents:
+// 1. Data types and the pure rules (tested)
+// 2. The page
+// 3. The body: header, toolbar, grid and states
+// 4. A project's card
+// 5. Loading, failed, signed-out and empty states
+// 6. API keys (drawn by /ai)
+// 7. Tests
 // =============================================================================
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use crate::api::{ApiClient};
 use crate::api::{commerce_error_text, get_commerce_account, CommerceMode, SellerSimulation};
+use crate::api::catalog::published_words;
 use crate::components::action_menu::{Action, ActionMenu, Item};
+use crate::components::play_chooser::now_ms;
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
-use crate::utils::after_event;
+use crate::utils::{after_event, format_count};
 use super::review_panel::ReviewPanel;
 use super::project_sell::{seller_for, SellButton, SellChip, SellNote};
 use super::project_tags::TagEditor;
-use crate::tags::{query_matches_tag, suggested_label};
+use crate::tags::{gallery_href, query_matches_tag, suggested_label};
 
 // -----------------------------------------------------------------------------
-// Data Types
+// 1. Data types and the pure rules
 // -----------------------------------------------------------------------------
 
 /// Project/Place status.
@@ -133,20 +157,124 @@ pub struct ProjectData {
     pub storage_url: Option<String>,
 }
 
+/// One part of the page's data: still loading, here, or its route failed (with the words for why).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Load<T> {
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+/// Who is looking: the sign-in is still being checked, nobody is signed in, or the account is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Viewer {
+    Unknown,
+    SignedOut,
+    SignedIn,
+}
+
+/// The status chips over the grid: the four that are always offered, then the rarer ones only when a Space has that status.
+const STATUS_CHIPS: [(&str, &str, bool); 8] = [
+    ("all", "All", true),
+    ("published", "Published", true),
+    ("draft", "Drafts", true),
+    ("review", "In review", true),
+    ("archived", "Archived", true),
+    ("private", "Private", false),
+    ("changes_requested", "Changes requested", false),
+    ("not_listed", "Not listed", false),
+];
+
+/// How many Spaces a status chip stands for.
+pub fn status_count(list: &[Place], status: &str) -> usize {
+    list.iter().filter(|p| status == "all" || p.status.as_str() == status).count()
+}
+
+/// The chips to offer, each with its count.
+pub fn status_chips(list: &[Place]) -> Vec<(&'static str, &'static str, usize)> {
+    STATUS_CHIPS
+        .iter()
+        .map(|(key, label, always)| (*key, *label, *always, status_count(list, key)))
+        .filter(|(_, _, always, n)| *always || *n > 0)
+        .map(|(key, label, _, n)| (key, label, n))
+        .collect()
+}
+
+/// The Spaces the grid shows: those whose name, words or tags hold the search text and whose status is the one chosen ("all" for
+/// every one), in the order asked for. Ties keep the Worker's order.
+pub fn shown(list: &[Place], query: &str, status: &str, sort: &str) -> Vec<Place> {
+    let query = query.to_lowercase();
+    let mut out: Vec<Place> = list
+        .iter()
+        .filter(|place| {
+            let matches_search = query.is_empty()
+                || place.name.to_lowercase().contains(&query)
+                || place.description.to_lowercase().contains(&query)
+                || query_matches_tag(&query, &place.tags);
+            let matches_status = status == "all" || place.status.as_str() == status;
+            matches_search && matches_status
+        })
+        .cloned()
+        .collect();
+    match sort {
+        "name" => out.sort_by_key(|p| p.name.to_lowercase()),
+        "visits" => out.sort_by(|a, b| b.visits.cmp(&a.visits)),
+        "created" => out.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        _ => out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+    }
+    out
+}
+
+/// The orders the list offers.
+const SORTS: [(&str, &str); 4] = [("updated", "Last updated"), ("created", "Newest published"), ("name", "Name"), ("visits", "Most visits")];
+
+/// The figures in the header, from the account's own Spaces: how many, their visits, how many are published, and how many are
+/// in review when any are. Nothing at all when there are none.
+pub fn figures_of(list: &[Place]) -> Vec<(&'static str, String)> {
+    if list.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![
+        ("Spaces", format_count(list.len() as u64)),
+        ("Visits", format_count(list.iter().map(|p| p.visits).sum::<u64>())),
+        ("Published", format_count(status_count(list, "published") as u64)),
+    ];
+    let review = status_count(list, "review");
+    if review > 0 {
+        out.push(("In review", format_count(review as u64)));
+    }
+    out
+}
+
+/// "Updated today", "Updated 3 days ago"; nothing when the Worker sent no time.
+pub fn edited_words(iso: &str, now_ms: f64) -> Option<String> {
+    published_words(iso.trim(), now_ms).map(|w| format!("Updated {}", w.trim_start_matches("published ")))
+}
+
+/// "Solo", or "Up to 8 players".
+pub fn room_words(max_players: u32) -> String {
+    if max_players <= 1 { "Solo".to_string() } else { format!("Up to {max_players} players") }
+}
+
+/// A card's picture: an https address or a path on this site, never a protocol-relative address.
+pub fn card_art(url: Option<&str>) -> Option<String> {
+    url.map(str::trim).filter(|u| u.starts_with("https://") || (u.starts_with('/') && !u.starts_with("//"))).map(str::to_string)
+}
+
+/// What makes a card draw again: a Space whose status, tags or last edit changed is a new card.
+fn card_key(place: &Place) -> String {
+    format!("{}|{}|{}|{}", place.id, place.status.as_str(), place.updated_at, place.tags.join(","))
+}
+
 // -----------------------------------------------------------------------------
-// Main Component
+// 2. The page
 // -----------------------------------------------------------------------------
 
 /// Projects page - manage all user's spaces and creations.
 #[component]
 pub fn ProjectsPage() -> impl IntoView {
     let app_state = expect_context::<AppState>();
-    
-    // State
-    let search_query = RwSignal::new(String::new());
-    let filter_status = RwSignal::new("all".to_string());
-    let sort_by = RwSignal::new("updated".to_string());
-    let view_mode = RwSignal::new("grid".to_string()); // "grid" or "list"
+
     // The project whose settings dialog is open, the one an Archive is waiting on, and the line that says what just happened.
     let settings_open = RwSignal::new(None::<Place>);
     let archive_ask = RwSignal::new(None::<Place>);
@@ -157,9 +285,8 @@ pub fn ProjectsPage() -> impl IntoView {
     let panel_api = app_state.api_url.clone();
 
     // API data state
-    let spaces = RwSignal::new(Vec::<Place>::new());
-    let is_loading = RwSignal::new(true);
-    
+    let spaces = RwSignal::new(Load::<Vec<Place>>::Loading);
+
     // What each published project can sell, from the account's commerce record. A project with no entry here has
     // nothing to show: no chip and no Sell button. The record is asked for once per sign-in.
     let sellers = RwSignal::new(Vec::<SellerSimulation>::new());
@@ -181,6 +308,11 @@ pub fn ProjectsPage() -> impl IntoView {
             });
         });
     }
+    let viewer = Signal::derive(move || match auth.get() {
+        AuthState::Authenticated(_) => Viewer::SignedIn,
+        AuthState::Unauthenticated => Viewer::SignedOut,
+        AuthState::Unknown => Viewer::Unknown,
+    });
 
     // Fetch projects from API on mount, and again after an archive or unarchive.
     let reload = {
@@ -189,7 +321,7 @@ pub fn ProjectsPage() -> impl IntoView {
         let api_url = api_url.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let client = ApiClient::new(&api_url);
-            
+
             // Fetch user's projects
             match client.get::<ProjectsResponse>("/api/projects").await {
                 Ok(response) => {
@@ -213,18 +345,28 @@ pub fn ProjectsPage() -> impl IntoView {
                             is_public: p.is_public,
                         }
                     }).collect();
-                    spaces.set(places);
+                    spaces.set(Load::Ready(places));
                 }
                 Err(e) => {
                     log::warn!("Failed to fetch projects: {:?}", e);
+                    // A read that fails after a good one keeps what the good one showed.
+                    if !matches!(spaces.get_untracked(), Load::Ready(_)) {
+                        spaces.set(Load::Failed(crate::api::failure_sentence(&e)));
+                    }
                 }
             }
-            is_loading.set(false);
         });
         }
     };
     let first_load = reload.clone();
     Effect::new(move |_| first_load());
+    let retry = {
+        let reload = reload.clone();
+        Callback::new(move |_| {
+            spaces.set(Load::Loading);
+            reload();
+        })
+    };
 
     // Archive and unarchive go through the Worker; the list is read again afterwards, so it shows what the Worker kept.
     let archive_api = app_state.api_url.clone();
@@ -286,286 +428,13 @@ pub fn ProjectsPage() -> impl IntoView {
         }
     };
 
-    // Filter spaces
-    let filtered_spaces = move || {
-        let query = search_query.get().to_lowercase();
-        let status = filter_status.get();
-        
-        spaces.get()
-            .into_iter()
-            .filter(|place| {
-                let matches_search = query.is_empty()
-                    || place.name.to_lowercase().contains(&query)
-                    || place.description.to_lowercase().contains(&query)
-                    || query_matches_tag(&query, &place.tags);
-                
-                let matches_status = status == "all"
-                    || place.status.as_str() == status;
-                
-                matches_search && matches_status
-            })
-            .collect::<Vec<_>>()
-    };
-    
-    // Stats
-    let total_visits = move || spaces.get().iter().map(|p| p.visits).sum::<u64>();
-    let total_favorites = move || spaces.get().iter().map(|p| p.favorites).sum::<u64>();
-    // Published means approved and public. A Space still in review is counted apart, so the number does not read as "nothing is there".
-    let published_count = move || spaces.get().iter().filter(|p| p.status == SpaceStatus::Published).count();
-    let in_review_count = move || spaces.get().iter().filter(|p| p.status == SpaceStatus::UnderReview).count();
-    
     view! {
-        <div class="page page-projects-industrial">
+        <div class="page g-page pj-page">
             <CentralNav active="projects".to_string() />
-            
-            // Background
-            <div class="projects-bg">
-                <div class="projects-grid-overlay"></div>
-                <div class="projects-glow glow-1"></div>
-                <div class="projects-glow glow-2"></div>
-            </div>
-            
-            // Hero Section
-            <section class="projects-hero">
-                <div class="hero-header">
-                    <div class="header-line"></div>
-                    <span class="header-tag">"MY PROJECTS"</span>
-                    <div class="header-line"></div>
-                </div>
-                <h1 class="projects-title">"Your Creations"</h1>
-                <p class="projects-subtitle">"Manage, customize, and publish your spaces"</p>
-                <SellNote />
-                
-                // Stats Row
-                <div class="stats-row">
-                    <div class="stat-box">
-                        <img src="/assets/icons/gamepad.svg" alt="Spaces" class="stat-icon" />
-                        <div class="stat-content">
-                            <span class="stat-value">{move || spaces.get().len()}</span>
-                            <span class="stat-label">"Total Spaces"</span>
-                        </div>
-                    </div>
-                    <div class="stat-box">
-                        <img src="/assets/icons/play.svg" alt="Visits" class="stat-icon" />
-                        <div class="stat-content">
-                            <span class="stat-value">{move || format_number(total_visits())}</span>
-                            <span class="stat-label">"Total Visits"</span>
-                        </div>
-                    </div>
-                    <div class="stat-box">
-                        <img src="/assets/icons/heart.svg" alt="Favorites" class="stat-icon" />
-                        <div class="stat-content">
-                            <span class="stat-value">{move || format_number(total_favorites())}</span>
-                            <span class="stat-label">"Favorites"</span>
-                        </div>
-                    </div>
-                    <div class="stat-box">
-                        <img src="/assets/icons/check.svg" alt="Published" class="stat-icon" />
-                        <div class="stat-content">
-                            <span class="stat-value">{published_count}</span>
-                            <span class="stat-label">"Published"</span>
-                            {move || (in_review_count() > 0).then(|| view! { <span class="stat-sub">{format!("{} in review", in_review_count())}</span> })}
-                        </div>
-                    </div>
-                </div>
-                
-                // New Project Button - Links to download page
-                <a href="/download" class="btn-create-new">
-                    <img src="/assets/icons/download.svg" alt="Download" class="btn-icon" />
-                    "Download Studio"
-                </a>
-            </section>
-            
-            // Toolbar
-            <section class="projects-toolbar">
-                <div class="toolbar-left">
-                    <div class="search-box">
-                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="11" cy="11" r="8"></circle>
-                            <path d="m21 21-4.3-4.3"></path>
-                        </svg>
-                        <input 
-                            type="text"
-                            class="search-input-industrial"
-                            placeholder="Search your spaces..."
-                            prop:value=move || search_query.get()
-                            on:input=move |e| search_query.set(event_target_value(&e))
-                        />
-                    </div>
-                    
-                    <div class="filter-chips">
-                        <button 
-                            class="chip"
-                            class:active=move || filter_status.get() == "all"
-                            on:click=move |_| filter_status.set("all".to_string())
-                        >"All"</button>
-                        <button 
-                            class="chip"
-                            class:active=move || filter_status.get() == "published"
-                            on:click=move |_| filter_status.set("published".to_string())
-                        >"Published"</button>
-                        <button 
-                            class="chip"
-                            class:active=move || filter_status.get() == "draft"
-                            on:click=move |_| filter_status.set("draft".to_string())
-                        >"Drafts"</button>
-                        <button
-                            class="chip"
-                            class:active=move || filter_status.get() == "review"
-                            on:click=move |_| filter_status.set("review".to_string())
-                        >"In review"</button>
-                        <button
-                            class="chip"
-                            class:active=move || filter_status.get() == "archived"
-                            on:click=move |_| filter_status.set("archived".to_string())
-                        >"Archived"</button>
-                    </div>
-                </div>
-                
-                <div class="toolbar-right">
-                    <select 
-                        class="sort-select-industrial"
-                        prop:value=move || sort_by.get()
-                        on:change=move |e| sort_by.set(event_target_value(&e))
-                    >
-                        <option value="updated">"Last Updated"</option>
-                        <option value="created">"Date Created"</option>
-                        <option value="name">"Name"</option>
-                        <option value="visits">"Most Visits"</option>
-                    </select>
-                    
-                    <div class="view-toggle">
-                        <button 
-                            class="view-btn"
-                            class:active=move || view_mode.get() == "grid"
-                            on:click=move |_| view_mode.set("grid".to_string())
-                            title="Grid View"
-                        >
-                            <img src="/assets/icons/grid.svg" alt="Grid" />
-                        </button>
-                        <button 
-                            class="view-btn"
-                            class:active=move || view_mode.get() == "list"
-                            on:click=move |_| view_mode.set("list".to_string())
-                            title="List View"
-                        >
-                            <img src="/assets/icons/list.svg" alt="List" />
-                        </button>
-                    </div>
-                </div>
-            </section>
-            
-            // Spaces Grid/List
-            <section class="projects-content">
-                <Show
-                    when=move || !filtered_spaces().is_empty()
-                    fallback=|| view! {
-                        <div class="empty-state-industrial">
-                            <img src="/assets/icons/folder.svg" alt="No spaces" class="empty-icon" />
-                            <h3>"No spaces found"</h3>
-                            <p>"Download Eustress Engine to create your first space"</p>
-                        </div>
-                    }
-                >
-                    <div class="spaces-grid" class:list-view=move || view_mode.get() == "list">
-                        <For
-                            each=filtered_spaces
-                            key=|place| place.id.clone()
-                            children=move |place| {
-                                view! { <PlaceCard place=place review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers /> }
-                            }
-                        />
-                    </div>
-                </Show>
-            </section>
-            
-            // Eustress Engine Protocol — AI Training Data Export
-            <section class="ai-training-section">
-                <div class="ai-section-header-centered">
-                    <h2>"Eustress Engine Protocol"</h2>
-                    <p class="ai-subtitle">"Spatial AI Training Data Export"</p>
-                    <p class="ai-description">"Export consented spatial data from your published spaces to train AI models. One API key indexes all your spaces and entities marked with "<code>"AI=true"</code>"."</p>
-                </div>
-
-                <div class="ai-protocol-grid">
-                    <div class="ai-protocol-card">
-                        <div class="ai-protocol-card-icon">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <circle cx="12" cy="12" r="10"/>
-                                <polyline points="12 6 12 12 16 14"/>
-                            </svg>
-                        </div>
-                        <h3>"Real-time Streams"</h3>
-                        <p>"Subscribe to live ECS deltas via EustressStream for spatial reasoning agents. Zero-copy rkyv serialization with sub-microsecond dispatch."</p>
-                        <div class="ai-benchmark-table">
-                            <div class="ai-bench-row ai-bench-header">
-                                <span class="ai-bench-label">"Transport"</span>
-                                <span class="ai-bench-value">"Latency"</span>
-                                <span class="ai-bench-value">"Throughput"</span>
-                            </div>
-                            <div class="ai-bench-row ai-bench-highlight">
-                                <span class="ai-bench-label">"In-process"</span>
-                                <span class="ai-bench-value">"< 1 \u{00B5}s"</span>
-                                <span class="ai-bench-value">"~85M msg/s"</span>
-                            </div>
-                            <div class="ai-bench-row">
-                                <span class="ai-bench-label">"TCP"</span>
-                                <span class="ai-bench-value">"103.6 \u{00B5}s"</span>
-                                <span class="ai-bench-value">"9,651 msg/s"</span>
-                            </div>
-                            <div class="ai-bench-row">
-                                <span class="ai-bench-label">"QUIC"</span>
-                                <span class="ai-bench-value">"182.4 \u{00B5}s"</span>
-                                <span class="ai-bench-value">"5,483 msg/s"</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="ai-protocol-card">
-                        <div class="ai-protocol-card-icon">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                                <circle cx="9" cy="7" r="4"/>
-                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                            </svg>
-                        </div>
-                        <h3>"Team Aggregation"</h3>
-                        <p>"Aggregate spatial data across team members and spaces. Shared training datasets with per-entity consent controls."</p>
-                        <ul class="ai-feature-list">
-                            <li>"Merge scene graphs from multiple contributors"</li>
-                            <li>"Per-entity AI opt-in via Instance.AI property"</li>
-                            <li>"Automatic PII redaction for player data"</li>
-                            <li>"Organization-scoped dataset namespaces"</li>
-                        </ul>
-                    </div>
-                    <div class="ai-protocol-card">
-                        <div class="ai-protocol-card-icon">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                                <line x1="8" y1="21" x2="16" y2="21"/>
-                                <line x1="12" y1="17" x2="12" y2="21"/>
-                            </svg>
-                        </div>
-                        <h3>"Scene Export"</h3>
-                        <p>"Export full scene graphs as content-addressed .echk chunks. Human-readable TOML files preserved for direct AI ingestion."</p>
-                        <ul class="ai-feature-list">
-                            <li>"Transforms, materials, physics, scripting context"</li>
-                            <li>"TOML files readable without custom deserializers"</li>
-                            <li>"Zstd-compressed .pak archives for R2 storage"</li>
-                            <li>"Incremental exports via SceneDelta stream"</li>
-                        </ul>
-                    </div>
-                </div>
-
-                <div class="ai-btn-wrap">
-                    <a href="/ai" class="ai-portal-btn">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
-                        </svg>
-                        "Manage API Keys"
-                    </a>
-                </div>
-            </section>
+            <div class="g-backdrop" aria-hidden="true"></div>
+            <main class="g-main">
+                <ProjectsBody spaces=spaces viewer=viewer review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers retry=retry />
+            </main>
 
             // A line that says what an archive just did, with the way back
             {move || toast.get().map(|t| {
@@ -679,10 +548,6 @@ fn review_id_from_query(search: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-// -----------------------------------------------------------------------------
-// Place Card Component
-// -----------------------------------------------------------------------------
-
 /// What the page says after an archive or unarchive.
 #[derive(Clone, Debug, PartialEq)]
 struct Toast {
@@ -692,6 +557,173 @@ struct Toast {
     failed: bool,
 }
 
+// -----------------------------------------------------------------------------
+// 3. The body: header, toolbar, grid and states
+// -----------------------------------------------------------------------------
+
+/// Everything under the top bar except the dialogs: the header with its figures, the account's Spaces in their state, and the
+/// band about publishing.
+#[component]
+pub fn ProjectsBody(
+    spaces: RwSignal<Load<Vec<Place>>>,
+    viewer: Signal<Viewer>,
+    review_open: RwSignal<Option<String>>,
+    on_configure: Callback<Place>,
+    on_archive: Callback<Place>,
+    sellers: RwSignal<Vec<SellerSimulation>>,
+    retry: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <div class="g-wrap pj-wrap">
+            <header class="g-glass pj-hero" aria-labelledby="pj-title">
+                <div class="pj-hero-copy">
+                    <div class="g-kicker"><span class="g-kick-rule"></span>"Projects"</div>
+                    <h1 id="pj-title" class="pj-title">"Your projects"</h1>
+                    <p class="pj-lede">"Every Space you publish from Eustress Studio: where it stands in review, its tags, who can see it, and what it sells."</p>
+                    <SellNote />
+                </div>
+                {move || {
+                    let figures = match (viewer.get(), spaces.get()) {
+                        (Viewer::SignedIn, Load::Ready(list)) => figures_of(&list),
+                        _ => Vec::new(),
+                    };
+                    (!figures.is_empty()).then(|| view! {
+                        <dl class="pj-figures">
+                            {figures.into_iter().map(|(k, v)| view! { <div><dt>{k}</dt><dd>{v}</dd></div> }).collect_view()}
+                        </dl>
+                    })
+                }}
+            </header>
+
+            <section class="g-section pj-section" aria-labelledby="pj-list-h">
+                <div class="g-head"><h2 id="pj-list-h">"Your Spaces"</h2><span class="g-rule"></span></div>
+                {move || match (viewer.get(), spaces.get()) {
+                    (Viewer::SignedOut, _) => signed_out_state().into_any(),
+                    (Viewer::Unknown, _) | (_, Load::Loading) => loading_cards().into_any(),
+                    (_, Load::Failed(why)) => failed_state(why, retry).into_any(),
+                    (_, Load::Ready(list)) if list.is_empty() => empty_state().into_any(),
+                    (_, Load::Ready(list)) => view! {
+                        <ProjectList list=list review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers />
+                    }.into_any(),
+                }}
+            </section>
+
+            <div class="g-glass g-band pj-band">
+                <div>
+                    <h2>"Publish from Eustress Studio"</h2>
+                    <p>"A Space you publish shows here at once, with its review status, and in the Gallery once review approves it. API keys for DataStoreService, HttpService and selling are on the AI page."</p>
+                </div>
+                <div class="g-actions">
+                    <a class="g-btn g-btn-primary g-btn-lg" href="/download">"Download Studio"</a>
+                    <a class="g-btn g-btn-lg" href="/docs/publishing">"How publishing works"</a>
+                    <a class="g-btn g-btn-lg" href="/ai">"API keys"</a>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+const SEARCH_GLYPH: &str = "M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14zM20 20l-3.6-3.6";
+
+/// The toolbar (search, status, order, layout) and the grid of the Spaces that pass it.
+#[component]
+fn ProjectList(
+    list: Vec<Place>,
+    review_open: RwSignal<Option<String>>,
+    on_configure: Callback<Place>,
+    on_archive: Callback<Place>,
+    sellers: RwSignal<Vec<SellerSimulation>>,
+) -> impl IntoView {
+    let all = StoredValue::new(list);
+    let search_query = RwSignal::new(String::new());
+    let filter_status = RwSignal::new("all".to_string());
+    let sort_by = RwSignal::new("updated".to_string());
+    let view_mode = RwSignal::new("grid".to_string()); // "grid" or "list"
+    let filtered_spaces = move || all.with_value(|l| shown(l, &search_query.get(), &filter_status.get(), &sort_by.get()));
+    // The grid is built once per change between "something" and "nothing"; the For inside keeps each card in step.
+    let nothing = Memo::new(move |_| filtered_spaces().is_empty());
+    let chips = all.with_value(|l| status_chips(l));
+
+    view! {
+        <div class="pj-toolbar">
+            <form class="pj-search" role="search" on:submit=move |ev: leptos::ev::SubmitEvent| ev.prevent_default()>
+                <label class="g-sr" for="pj-q">"Search your Spaces by name, words or tag"</label>
+                <svg class="pj-search-icon" viewBox="0 0 24 24" aria-hidden="true"><path d=SEARCH_GLYPH/></svg>
+                <input id="pj-q" class="pj-q" type="search" placeholder="Search your Spaces" autocomplete="off" spellcheck="false"
+                    prop:value=move || search_query.get()
+                    on:input=move |e| search_query.set(event_target_value(&e)) />
+            </form>
+            <div class="g-chips pj-filters" role="group" aria-label="Show">
+                {chips.into_iter().map(|(key, label, n)| view! {
+                    <button type="button" class="g-chip g-chip-btn" class:on=move || filter_status.get() == key aria-pressed=move || (filter_status.get() == key).to_string()
+                        on:click=move |_| filter_status.set(key.to_string())>
+                        {label}<span class="pj-n">{n}</span>
+                    </button>
+                }).collect_view()}
+            </div>
+            <div class="pj-tools">
+                <label class="pj-sort">
+                    <span class="g-sr">"Order"</span>
+                    <select prop:value=move || sort_by.get() on:change=move |e| sort_by.set(event_target_value(&e))>
+                        {SORTS.into_iter().map(|(key, label)| view! { <option value=key selected=move || sort_by.get() == key>{label}</option> }).collect_view()}
+                    </select>
+                </label>
+                <div class="pj-view" role="group" aria-label="Layout">
+                    <button type="button" class="pj-view-btn" aria-pressed=move || (view_mode.get() == "grid").to_string() on:click=move |_| view_mode.set("grid".to_string()) title="Grid">
+                        <img src="/assets/icons/grid.svg" alt="Grid" />
+                    </button>
+                    <button type="button" class="pj-view-btn" aria-pressed=move || (view_mode.get() == "list").to_string() on:click=move |_| view_mode.set("list".to_string()) title="List">
+                        <img src="/assets/icons/list.svg" alt="List" />
+                    </button>
+                </div>
+            </div>
+        </div>
+        {move || {
+            if nothing.get() {
+                let q = search_query.get();
+                let hint = if q.trim().is_empty() { "None of your Spaces has this status.".to_string() } else { format!("None of your Spaces matches \u{201c}{}\u{201d}.", q.trim()) };
+                view! {
+                    <div class="g-glass g-none pj-none">
+                        <b>"No Space matches"</b>
+                        <p>{hint}</p>
+                        <div class="g-actions">
+                            <button type="button" class="g-btn" on:click=move |_| { search_query.set(String::new()); filter_status.set("all".to_string()); }>"Show all"</button>
+                        </div>
+                    </div>
+                }.into_any()
+            } else {
+                view! {
+                    <div class="pj-grid" class:pj-list=move || view_mode.get() == "list">
+                        <For
+                            each=filtered_spaces
+                            key=card_key
+                            children=move |place| {
+                                view! { <PlaceCard place=place review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers /> }
+                            }
+                        />
+                    </div>
+                }.into_any()
+            }
+        }}
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 4. A project's card
+// -----------------------------------------------------------------------------
+
+/// A card's picture, or the cube when the Space has none. The Worker answers 404 for a capture it will not serve (animated,
+/// transparent, several images, not an image, too large), so a picture that fails to load clears art_ok and the card draws the
+/// same cube as a Space with no capture, never the browser's broken-image icon. Each card makes its own signal.
+fn card_picture(thumbnail: Option<String>, art_ok: RwSignal<bool>) -> impl IntoView {
+    move || match thumbnail.clone().filter(|_| art_ok.get()) {
+        Some(src) => view! { <img src=src alt="" class="pj-img" loading="lazy" decoding="async" on:error=move |_| art_ok.set(false) /> }.into_any(),
+        None => view! { <span class="pj-art-empty" aria-hidden="true"><img src="/assets/icons/cube.svg" alt="" /></span> }.into_any(),
+    }
+}
+
+/// A Space of the account's, built from the Gallery's card: its capture, its status, its name and words, its tags (each a link
+/// to the Gallery's filter for that tag), what it sells, its visits, its room and its last edit, and what can be done with it.
 #[component]
 fn PlaceCard(
     place: Place,
@@ -711,8 +743,13 @@ fn PlaceCard(
     let play_id = place.id.clone();
     // Edit opens Studio through its own link; Studio downloads the listing's world and opens it.
     let edit_url = format!("eustress://edit/{}", place.id);
-    let status_class = format!("status-badge {}", place.status.as_str());
-    let thumbnail = place.thumbnail_url.clone().filter(|u| u.starts_with("https://") || u.starts_with('/'));
+    let status_class = format!("g-chip g-badge pj-status {}", place.status.as_str());
+    let thumbnail = card_art(place.thumbnail_url.as_deref());
+    // A listed Space's name opens its page in the Gallery.
+    let public_href = (place.status == SpaceStatus::Published).then(|| format!("/simulation/{}", urlencoding::encode(&place.id)));
+    let edited = edited_words(&place.updated_at, now_ms());
+    let room = room_words(place.max_players);
+    let visits = place.visits;
     // This project's selling entry, once the account's commerce record has loaded. No entry: no chip and no Sell button.
     let seller_id = place.id.clone();
     let seller = Memo::new(move |_| sellers.with(|list| seller_for(list, &seller_id).cloned()));
@@ -737,67 +774,57 @@ fn PlaceCard(
     );
 
     view! {
-        <div class="place-card">
-            <div class="card-thumbnail">
-                {match thumbnail {
-                    Some(src) => view! { <img src=src alt="" class="thumbnail-image" loading="lazy" /> }.into_any(),
-                    None => view! { <img src="/assets/icons/gamepad.svg" alt="" class="thumbnail-icon" /> }.into_any(),
-                }}
-                <div class=status_class>{place.status.display_name()}</div>
+        <article class="g-card pj-card">
+            <div class="g-media">
+                {card_picture(thumbnail, RwSignal::new(true))}
+                <span class=status_class>{place.status.display_name()}</span>
             </div>
 
-            <div class="card-body">
-                <div class="card-header">
-                    <h3 class="card-title">{place.name.clone()}</h3>
+            <div class="g-body pj-body">
+                <div class="pj-head">
+                    <h3 class="g-name pj-name">
+                        {match public_href {
+                            Some(href) => view! { <a class="pj-link" href=href>{place.name.clone()}</a> }.into_any(),
+                            None => view! { <span>{place.name.clone()}</span> }.into_any(),
+                        }}
+                    </h3>
                     <div class="menu-container">
                         <ActionMenu label=format!("Options for {}", place.name) items=items />
                     </div>
                 </div>
 
-                <p class="card-description">{place.description.clone()}</p>
+                {(!place.description.trim().is_empty()).then(|| view! { <p class="pj-desc">{place.description.clone()}</p> })}
 
-                <div class="card-meta">
-                    // The number is the one the last publish stored, so it can lag until the next publish from Studio.
-                    <span class="meta-item" title="From the last publish. It updates the next time you publish from Studio.">
-                        <img src="/assets/icons/users.svg" alt="Players" class="meta-icon" />
-                        {format!("Max {}", place.max_players)}
-                    </span>
-                    <span class="meta-item card-tags">
-                        <img src="/assets/icons/tag.svg" alt="Tags" class="meta-icon" />
-                        {if card_tags.is_empty() {
-                            view! { <span class="card-tag-note">"No tags yet"</span> }.into_any()
-                        } else {
-                            card_tags.iter().map(|t| view! { <span class="card-tag">{format!("#{t}")}</span> }).collect_view().into_any()
-                        }}
-                        {tags_note.map(|words| view! { <span class="card-tag-note">{words}</span> })}
-                    </span>
+                <div class="g-chips pj-tags">
+                    {if card_tags.is_empty() {
+                        view! { <span class="pj-note">"No tags yet"</span> }.into_any()
+                    } else {
+                        card_tags.iter().map(|t| {
+                            let href = gallery_href(std::slice::from_ref(t));
+                            view! { <a class="g-chip g-tag" href=href>{t.clone()}</a> }
+                        }).collect_view().into_any()
+                    }}
+                    {tags_note.map(|words| view! { <span class="pj-note">{words}</span> })}
                 </div>
 
                 {move || seller.get().map(|sim| view! { <SellChip sim=sim /> })}
 
-                <div class="card-stats">
-                    <span class="stat">
-                        <img src="/assets/icons/play.svg" alt="Visits" class="stat-icon-sm" />
-                        {format_number(place.visits)}
-                    </span>
-                    <span class="stat">
-                        <img src="/assets/icons/heart.svg" alt="Favorites" class="stat-icon-sm" />
-                        {format_number(place.favorites)}
-                    </span>
-                    <span class="stat updated">
-                        {place.updated_at.clone()}
-                    </span>
+                <div class="g-facts pj-facts">
+                    <span><b>{format_count(visits)}</b>{if visits == 1 { " visit" } else { " visits" }}</span>
+                    // The number is the one the last publish stored, so it can lag until the next publish from Studio.
+                    <span title="From the last publish. It updates the next time you publish from Studio.">{room}</span>
+                    {edited.map(|w| view! { <span>{w}</span> })}
                 </div>
 
-                <div class="card-actions">
+                <div class="card-actions pj-actions">
                     {playable.then(|| view! {
                         <button type="button" class="action-btn primary" on:click=move |_| chooser.open(&play_id)>
-                            <img src="/assets/icons/play.svg" alt="Play" />
+                            <img src="/assets/icons/play.svg" alt="" />
                             "Play"
                         </button>
                     })}
                     <a href=edit_url.clone() class="action-btn secondary">
-                        <img src="/assets/icons/edit.svg" alt="Edit" />
+                        <img src="/assets/icons/edit.svg" alt="" />
                         "Edit"
                     </a>
                     {has_review.then(|| {
@@ -812,6 +839,68 @@ fn PlaceCard(
                     {move || seller.get().map(|sim| view! { <SellButton sim_id=sim.id /> })}
                 </div>
             </div>
+        </article>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 5. Loading, failed, signed-out and empty states
+// -----------------------------------------------------------------------------
+
+const EMPTY_GLYPH: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM8 12h8";
+const FAILED_GLYPH: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7.5v5.5M12 16.5v.01";
+const KEY_GLYPH: &str = "M7 14a4 4 0 1 1 3.5-6h9.5v4h-2v2h-3v-2h-4.5A4 4 0 0 1 7 14z";
+
+/// The shape of the grid while the Spaces load, not made-up cards.
+fn loading_cards() -> impl IntoView {
+    view! {
+        <div class="pj-grid" role="status" aria-busy="true" aria-label="Loading your Spaces">
+            {(0..3).map(|_| view! { <div class="g-card g-skel-card"><div class="g-skel g-skel-media"></div><div class="g-body"><span class="g-skel w70"></span><span class="g-skel w40"></span></div></div> }).collect_view()}
+        </div>
+    }
+}
+
+/// The read did not answer: said plainly, never shown as an account with nothing in it.
+fn failed_state(why: String, retry: Callback<()>) -> impl IntoView {
+    view! {
+        <div class="g-glass pj-state pj-failed" role="alert">
+            <span class="g-glyph" aria-hidden="true"><svg viewBox="0 0 24 24"><path d=FAILED_GLYPH/></svg></span>
+            <div>
+                <b>"Your Spaces could not load"</b>
+                <p>{why}</p>
+                <button type="button" class="g-btn g-btn-sm" on:click=move |_| retry.run(())>"Try again"</button>
+            </div>
+        </div>
+    }
+}
+
+/// Nobody is signed in: the Worker has nobody's Spaces to send.
+fn signed_out_state() -> impl IntoView {
+    view! {
+        <div class="g-glass pj-state pj-signed-out">
+            <span class="g-glyph" aria-hidden="true"><svg viewBox="0 0 24 24"><path d=KEY_GLYPH/></svg></span>
+            <div>
+                <b>"Sign in to see your projects"</b>
+                <p>"This page lists the Spaces your account published from Eustress Studio. Sign in with that account."</p>
+                <a class="g-btn g-btn-primary g-btn-sm" href="/login">"Sign in"</a>
+            </div>
+        </div>
+    }
+}
+
+/// Signed in, and nothing published yet.
+fn empty_state() -> impl IntoView {
+    view! {
+        <div class="g-glass pj-state pj-empty">
+            <span class="g-glyph" aria-hidden="true"><svg viewBox="0 0 24 24"><path d=EMPTY_GLYPH/></svg></span>
+            <div>
+                <b>"You have not published a Space yet"</b>
+                <p>"Build one in Eustress Studio and publish it. It shows here right away, with where it stands in review."</p>
+                <div class="g-actions">
+                    <a class="g-btn g-btn-primary g-btn-sm" href="/download">"Download Studio"</a>
+                    <a class="g-btn g-btn-sm" href="/docs/publishing">"How publishing works"</a>
+                </div>
+            </div>
         </div>
     }
 }
@@ -820,6 +909,7 @@ fn PlaceCard(
 // Helpers
 // -----------------------------------------------------------------------------
 
+/// "1.2K": the API keys table's usage figure.
 fn format_number(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -831,7 +921,7 @@ fn format_number(n: u64) -> String {
 }
 
 // -----------------------------------------------------------------------------
-// API Keys Section Component
+// 6. API keys (drawn by /ai)
 // -----------------------------------------------------------------------------
 
 /// API key data from backend
@@ -1237,5 +1327,359 @@ pub fn ApiKeysSection() -> impl IntoView {
                 </div>
             </Show>
         </section>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 7. Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = include_str!("projects.rs");
+    const CSS: &str = include_str!("../../style/projects.css");
+    const SELL_CSS: &str = include_str!("../../style/projects_sell.css");
+    const TAGS_CSS: &str = include_str!("../../style/project_tags.css");
+    const MAIN_CSS: &str = include_str!("../../style/main.css");
+    const INDEX: &str = include_str!("../../index.html");
+
+    /// The page's code, without these tests.
+    fn source() -> &'static str {
+        FILE.split(concat!("#[cfg", "(test)]")).next().unwrap()
+    }
+
+    /// The page's own code: everything before the API keys section, which the AI page draws.
+    fn page_source() -> &'static str {
+        let s = source();
+        &s[..s.find("/// API key data from backend").expect("the API keys section")]
+    }
+
+    fn place(id: &str, name: &str, status: SpaceStatus, visits: u64, tags: &[&str]) -> Place {
+        Place {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("What {name} is."),
+            thumbnail_url: None,
+            status,
+            visits,
+            favorites: 7,
+            max_players: 8,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            tags_source: None,
+            updated_at: "2026-10-12T09:00:00Z".to_string(),
+            created_at: "2026-09-01T09:00:00Z".to_string(),
+            is_public: true,
+        }
+    }
+
+    fn sample() -> Vec<Place> {
+        let mut a = place("a1", "Harbor Crane", SpaceStatus::Published, 1204, &["physics", "co-op"]);
+        a.thumbnail_url = Some("/assets/home/hero-city.webp".to_string());
+        let mut b = place("b2", "Grid Load Lab", SpaceStatus::UnderReview, 3, &["city"]);
+        b.tags_source = Some("judge".to_string());
+        b.thumbnail_url = Some("//evil.example/x.png".to_string());
+        let c = place("c3", "Old Bridge", SpaceStatus::Archived, 1, &[]);
+        vec![a, b, c]
+    }
+
+    fn sim(id: &str) -> SellerSimulation {
+        SellerSimulation { id: id.to_string(), name: "Harbor Crane".to_string(), spaces: Vec::new(), listed: true, can_sell: true, reason: None, products: Some(2), updated_at: None }
+    }
+
+    /// The body, rendered on the server the way the prerender renders a page, inside a router (a card's menu needs one).
+    fn render(viewer: Viewer, spaces: Load<Vec<Place>>) -> String {
+        use leptos::tachys::view::RenderHtml;
+        use leptos_router::components::Router;
+        use leptos_router::location::RequestUrl;
+        let owner = Owner::new();
+        owner.with(|| {
+            provide_context(RequestUrl::new("/projects"));
+            crate::components::play_chooser::provide_play_chooser();
+            let spaces = RwSignal::new(spaces);
+            let sellers = RwSignal::new(vec![sim("a1")]);
+            let review_open = RwSignal::new(None::<String>);
+            view! {
+                <Router>
+                    <ProjectsBody spaces=spaces viewer=Signal::stored(viewer) review_open=review_open on_configure=Callback::new(|_| ()) on_archive=Callback::new(|_| ()) sellers=sellers retry=Callback::new(|_| ()) />
+                </Router>
+            }
+            .to_html()
+        })
+    }
+
+    /// What the old page showed that no route said.
+    const STAND_INS: [&str; 10] = [
+        concat!("Eustress Engine ", "Protocol"),
+        concat!("Team ", "Aggregation"),
+        concat!("PII ", "redaction"),
+        concat!("msg", "/s"),
+        concat!("Organization-scoped ", "dataset"),
+        concat!("Your ", "Creations"),
+        concat!("heart", ".svg"),
+        concat!("Favor", "ites"),
+        concat!("total_", "favorites"),
+        concat!("page-projects-", "industrial"),
+    ];
+
+    #[test]
+    fn nothing_the_old_page_invented_comes_back() {
+        for gone in STAND_INS {
+            assert!(!page_source().contains(gone), "projects.rs shows {gone:?}");
+        }
+        for (what, html) in [
+            ("full", render(Viewer::SignedIn, Load::Ready(sample()))),
+            ("empty", render(Viewer::SignedIn, Load::Ready(vec![]))),
+            ("signed out", render(Viewer::SignedOut, Load::Ready(vec![]))),
+        ] {
+            for gone in STAND_INS {
+                assert!(!html.contains(gone), "the {what} page shows {gone:?}");
+            }
+        }
+        // The Worker fixes favorite_count at 0: the page reads the field and never shows it.
+        assert!(!page_source().contains(".favorites)") && !page_source().contains("p.favorites"), "favorites are not summed or shown");
+        assert!(!render(Viewer::SignedIn, Load::Ready(sample())).contains(">7<"), "a card's favorites figure is not drawn");
+    }
+
+    #[test]
+    fn signed_out_the_page_asks_for_a_sign_in_and_never_says_there_is_nothing() {
+        // The Worker answers a signed-out read with an empty list; the page does not read that as "nothing published".
+        let html = render(Viewer::SignedOut, Load::Ready(vec![]));
+        assert!(html.contains("Sign in to see your projects") && html.contains("href=\"/login\""), "{html}");
+        for claim in ["You have not published", "pj-figures", "<dt>", "class=\"g-card"] {
+            assert!(!html.contains(claim), "signed out, the page claims {claim}");
+        }
+    }
+
+    #[test]
+    fn each_state_says_what_it_is() {
+        let empty = render(Viewer::SignedIn, Load::Ready(vec![]));
+        assert!(empty.contains("You have not published a Space yet") && empty.contains("href=\"/download\""), "{empty}");
+        assert_eq!(empty.matches("class=\"g-glass pj-state pj-empty\"").count(), 1);
+        assert!(!empty.contains("<dt>") && !empty.contains("pj-toolbar"), "nothing is drawn for nothing");
+        let failed = render(Viewer::SignedIn, Load::Failed("Could not reach Eustress. Check your connection and try again.".to_string()));
+        assert!(failed.contains("Your Spaces could not load") && failed.contains("Could not reach Eustress") && failed.contains("Try again"), "{failed}");
+        assert!(!failed.contains("You have not published"), "a failed read is not an empty account");
+        for loading in [render(Viewer::SignedIn, Load::Loading), render(Viewer::Unknown, Load::Ready(vec![]))] {
+            assert!(loading.contains("aria-busy=\"true\""), "{loading}");
+            for claim in ["You have not published", "could not load", "Sign in to see", "<dt>"] {
+                assert!(!loading.contains(claim), "loading claims {claim}");
+            }
+        }
+        // A search or a status that matches nothing says so, with the way back.
+        assert_eq!(shown(&sample(), "zzz", "all", "updated").len(), 0);
+        assert!(source().contains("\"No Space matches\"") && source().contains("\"Show all\""));
+    }
+
+    #[test]
+    fn the_full_page_draws_a_card_per_space_with_its_real_figures() {
+        let html = render(Viewer::SignedIn, Load::Ready(sample()));
+        assert_eq!(html.matches("class=\"g-card pj-card\"").count(), 3, "{html}");
+        for (k, v) in [("Spaces", "3"), ("Visits", "1,208"), ("Published", "1"), ("In review", "1")] {
+            assert!(html.contains(&format!("<dt>{k}</dt><dd>{v}</dd>")), "{k} {v}");
+        }
+        assert!(html.contains("1,204</b> visits") && html.contains("1</b> visit<"));
+        assert!(html.contains("Up to 8 players"));
+        assert!(html.contains("pj-status published") && html.contains("pj-status review") && html.contains("pj-status archived"));
+        // A listed Space's name opens its page; the others are plain names.
+        assert!(html.contains("href=\"/simulation/a1\"") && !html.contains("href=\"/simulation/b2\""));
+        // The selling chip and the Sell button show only for the Space with an entry.
+        assert_eq!(html.matches("sell-chip is-ok").count(), 1);
+        assert_eq!(html.matches("href=\"/projects/a1\"").count(), 1);
+        // Play only where it can be played; Review only where review has something to say.
+        assert_eq!(html.matches("class=\"action-btn primary\"").count(), 1);
+        assert!(html.contains("Suggested by review"));
+    }
+
+    #[test]
+    fn a_card_picture_comes_only_from_https_or_a_path_here() {
+        let html = render(Viewer::SignedIn, Load::Ready(sample()));
+        assert!(html.contains("src=\"/assets/home/hero-city.webp\"") && !html.contains("evil.example"), "{html}");
+        for (url, ok) in [("https://cdn.eustress.dev/a.png", true), ("/assets/a.png", true), ("//evil.example/a.png", false), ("javascript:alert(1)", false), ("http://a.example/a", false)] {
+            assert_eq!(card_art(Some(url)).is_some(), ok, "{url}");
+        }
+        // No person's picture is drawn on this page; every img is a capture or an icon under /assets.
+        for chunk in html.split("<img ").skip(1) {
+            let tag = &chunk[..chunk.find('>').unwrap()];
+            assert!(tag.contains("src=\"/assets/") || tag.contains("src=\"https://"), "{tag}");
+        }
+    }
+
+    /// What a card's picture area draws for this capture, rendered on the server. art_ok is the signal the img's on:error clears.
+    fn art_html(thumbnail: Option<&str>, art_ok: bool) -> String {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| card_picture(thumbnail.map(str::to_string), RwSignal::new(art_ok)).to_html())
+    }
+
+    /// The img tag in the page's code that carries this attribute.
+    fn art_tag(code: &str, attr: &str) -> String {
+        let at = code.find(attr).unwrap_or_else(|| panic!("{attr} is not in the page"));
+        let start = code[..at].rfind("<img").expect("an img tag");
+        let end = start + code[start..].find("/>").expect("the tag ends");
+        code[start..end].to_string()
+    }
+
+    #[test]
+    fn a_card_picture_that_will_not_load_is_the_cube_a_card_without_one_draws() {
+        let url = "https://api.example.dev/a/thumbnail";
+        let loading = art_html(Some(url), true);
+        assert!(loading.contains("class=\"pj-img\"") && loading.contains(url) && !loading.contains("pj-art-empty"), "{loading}");
+        let none = art_html(None, true);
+        assert!(none.contains("class=\"pj-art-empty\"><img src=\"/assets/icons/cube.svg\""), "{none}");
+        // art_ok is false once the img's on:error has run: the card then draws exactly what it draws for a Space with no capture.
+        let failed = art_html(Some(url), false);
+        assert_eq!(failed, none, "a capture that failed shows the empty state, not the browser's broken-image icon");
+        assert!(!failed.contains("pj-img") && !failed.contains(url));
+    }
+
+    #[test]
+    fn the_cards_picture_has_an_error_handler_that_clears_its_own_signal() {
+        let code = page_source();
+        let tag = art_tag(code, "class=\"pj-img\"");
+        assert!(tag.contains("on:error=move |_| art_ok.set(false)"), "{tag}");
+        assert!(code.contains("move || match thumbnail.clone().filter(|_| art_ok.get())"), "the picture is drawn only while art_ok");
+        // One signal for each card: a signal shared by the cards would blank every card at the first failure.
+        assert!(code.contains("{card_picture(thumbnail, RwSignal::new(true))}"));
+        assert_eq!(code.matches("class=\"pj-img\"").count(), 1, "one picture tag on the card");
+    }
+
+    #[test]
+    fn a_space_without_a_picture_shows_a_neutral_cube_never_a_gamepad() {
+        // Eustress leads as a simulation and data platform: a card with no capture draws the cube, not a game controller.
+        let html = render(Viewer::SignedIn, Load::Ready(sample()));
+        assert_eq!(html.matches("class=\"pj-art-empty\"><img src=\"/assets/icons/cube.svg\"").count(), 2, "{html}");
+        assert!(!html.contains(concat!("game", "pad")), "no gamepad on the page");
+        assert!(!page_source().contains(concat!("game", "pad")), "projects.rs names no gamepad icon");
+    }
+
+    #[test]
+    fn the_tag_chips_link_to_the_gallerys_tag_filter() {
+        let html = render(Viewer::SignedIn, Load::Ready(sample()));
+        for tag in ["physics", "co-op", "city"] {
+            assert!(html.contains(&format!("href=\"/gallery?tag={tag}\"")), "{tag}");
+        }
+        assert!(!html.contains("category="), "no chip links to a category");
+        let chips = html.matches("class=\"g-chip g-tag\"").count();
+        assert_eq!(chips, 3);
+        assert_eq!(html.matches("href=\"/gallery?tag=").count(), chips, "every tag chip is a Gallery tag filter");
+        assert!(html.contains("No tags yet"), "a Space with no tags says so");
+        // The search finds a Space by its tag.
+        assert_eq!(shown(&sample(), "#co", "all", "updated").iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a1"]);
+    }
+
+    #[test]
+    fn the_order_and_the_status_chips_do_what_they_say() {
+        let mut list = sample();
+        list[2].updated_at = "2026-10-14T09:00:00Z".to_string();
+        let ids = |v: Vec<Place>| v.into_iter().map(|p| p.id).collect::<Vec<_>>();
+        assert_eq!(ids(shown(&list, "", "all", "updated")), ["c3", "a1", "b2"]);
+        assert_eq!(ids(shown(&list, "", "all", "visits")), ["a1", "b2", "c3"]);
+        assert_eq!(ids(shown(&list, "", "all", "name")), ["b2", "a1", "c3"]);
+        assert_eq!(ids(shown(&list, "", "review", "updated")), ["b2"]);
+        assert_eq!(status_chips(&list).iter().map(|c| (c.0, c.2)).collect::<Vec<_>>(), [("all", 3), ("published", 1), ("draft", 0), ("review", 1), ("archived", 1)]);
+        let mut private = list.clone();
+        private[0].status = SpaceStatus::Private;
+        assert!(status_chips(&private).iter().any(|c| c.0 == "private" && c.2 == 1), "a rarer status gets a chip when a Space has it");
+        assert_eq!(edited_words("2026-10-12T09:00:00Z", 1_791_000_000_000.0 + 86_400_000.0 * 11.0).as_deref(), Some("Updated yesterday"));
+        assert_eq!(edited_words("", 0.0), None);
+        assert_eq!(room_words(1), "Solo");
+        // The order chosen is the one drawn.
+        assert!(source().contains("shown(l, &search_query.get(), &filter_status.get(), &sort_by.get())"));
+        assert!(source().contains("key=card_key"), "a card whose status changes is drawn again");
+    }
+
+    #[test]
+    fn the_money_and_identity_calls_are_the_ones_the_page_made_before() {
+        let page = page_source();
+        for needle in [
+            "match get_commerce_account(&api_url, CommerceMode::Test).await {",
+            "match client.get::<ProjectsResponse>(\"/api/projects\").await {",
+            "let route = if archive { \"archive\" } else { \"unarchive\" };",
+            "client.post::<serde_json::Value, _>(&format!(\"/api/simulations/{}/{route}\", place.id), &serde_json::json!({})).await;",
+            "<TagEditor place_id=id.clone() place_name=tags_name tags=tags_now tags_source=tags_source locked=tags_locked on_saved=after_tags />",
+            "seller.get().map(|sim| view! { <SellChip sim=sim /> })",
+            "seller.get().map(|sim| view! { <SellButton sim_id=sim.id /> })",
+        ] {
+            assert_eq!(page.matches(needle).count(), 1, "projects.rs: {needle}");
+        }
+        assert!(!page.contains("/api/keys") && !page.contains("/api/commerce/products"), "the page itself makes no other money or key call");
+        // The API keys section the AI page draws: its routes, its payload and its passkey rule.
+        let keys = &source()[source().find("pub fn ApiKeysSection").unwrap()..];
+        for needle in [
+            "client.get::<ApiKeysResponse>(\"/api/keys\").await",
+            "\"name\": name,",
+            "\"key_type\": key_type,",
+            "\"mode\": mode",
+            "client.post::<CreateKeyResponse, _>(\"/api/keys\", &body).await",
+            "client.delete::<serde_json::Value>(&format!(\"/api/keys/{key_id}\")).await",
+            "disabled=move || passkey_session()",
+            "crate::pages::passkeys::key_change_blocked(a.user())",
+            "crate::pages::passkeys::identity_file_required_words(&e)",
+        ] {
+            assert!(keys.contains(needle), "ApiKeysSection: {needle}");
+        }
+        // The signed-out read is the same read; nothing is asked of the Worker to decide who is signed in.
+        assert_eq!(page.matches("\"/api/projects\"").count(), 1);
+    }
+
+    #[test]
+    fn the_copy_has_no_dashes_and_names_the_product_plainly() {
+        let pages = [
+            render(Viewer::SignedIn, Load::Ready(sample())),
+            render(Viewer::SignedIn, Load::Ready(vec![])),
+            render(Viewer::SignedOut, Load::Ready(vec![])),
+            render(Viewer::SignedIn, Load::Failed("x".to_string())),
+            render(Viewer::SignedIn, Load::Loading),
+        ];
+        for dash in ['\u{2014}', '\u{2013}'] {
+            assert!(!page_source().contains(dash), "projects.rs");
+            assert!(!CSS.contains(dash) && !SELL_CSS.contains(dash) && !TAGS_CSS.contains(dash), "the page's CSS");
+            for html in &pages {
+                assert!(!html.contains(dash), "the rendered page");
+            }
+        }
+        for text in pages.iter().map(|h| h.to_lowercase()).chain(std::iter::once(page_source().to_lowercase())) {
+            assert!(!text.contains("game engine"), "Eustress is not called a game engine");
+            assert!(!text.contains("experience"), "the product noun is Simulation or Space");
+        }
+    }
+
+    #[test]
+    fn projects_css_is_linked_once_and_before_topbar_css() {
+        let link = "<link data-trunk rel=\"css\" href=\"style/projects.css\">";
+        assert_eq!(INDEX.matches(link).count(), 1, "projects.css is linked once");
+        let at = INDEX.find(link).unwrap();
+        let topbar = INDEX.find("<link data-trunk rel=\"css\" href=\"style/topbar.css\">").expect("topbar.css is linked");
+        assert!(at < topbar, "projects.css comes before topbar.css, which stays last");
+        assert!(CSS.contains(".pj-hero") && CSS.contains(".pj-card") && CSS.contains("@media (max-width: 860px)"));
+        // The selling chip and the card's buttons follow the card the page draws now.
+        assert!(SELL_CSS.contains(".pj-card .sell-chip") && !SELL_CSS.contains(concat!(".place", "-card")));
+    }
+
+    #[test]
+    fn the_old_pages_rules_are_gone_from_main_css() {
+        for gone in [concat!(".page-projects-", "industrial"), concat!(".projects-", "glow"), concat!(".projects-", "title"), concat!(".ai-protocol-", "card"), concat!(".place", "-card"), concat!(".ai-bench-", "row")] {
+            assert!(!MAIN_CSS.contains(&format!("{gone} ")), "{gone} is still in main.css");
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn the_projects_address_shows_this_page() {
+        use hydration_context::{SharedContext, SsrSharedContext};
+        use leptos::tachys::view::RenderHtml;
+        use leptos_router::location::RequestUrl;
+        let _ = leptos::task::Executor::init_futures_executor();
+        let shared: std::sync::Arc<dyn SharedContext + Send + Sync> = std::sync::Arc::new(SsrSharedContext::new());
+        let owner = Owner::new_root(Some(shared));
+        let html = owner.with(|| {
+            provide_context(RequestUrl::new("/projects"));
+            crate::app::App().to_html()
+        });
+        owner.cleanup();
+        assert!(html.contains("pj-page") && html.contains(">Your projects</h1>"), "{html}");
+        assert!(html.contains("aria-busy=\"true\""), "before the sign-in is known, the page shows the loading shape");
     }
 }

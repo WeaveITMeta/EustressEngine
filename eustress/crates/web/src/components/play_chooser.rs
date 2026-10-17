@@ -590,9 +590,11 @@ pub fn launch_link(link: &str, ticket: Option<&str>, api: &str) -> String {
                 with_api(link, api)
             }
         }
-        // A solo link goes out as the Worker sent it, without `api`, until a Player that reads it ships: today's Player takes the
-        // whole query as part of the listing id, refuses it, and exits without a window. Join links carry both (an old Player
-        // ignores parameters it does not know).
+        // A solo link carries `api` on staging only. Staging is tested with a Player that reads it (build 32, P1); production keeps
+        // the link as the Worker sent it until a Player release that reads it ships, because an older Player takes the whole query
+        // as part of the listing id, refuses it, and exits without a window. Join links carry both (an old Player ignores
+        // parameters it does not know).
+        None if link.starts_with("eustress-player://play/") && api == "staging" => with_api(link, api),
         None if link.starts_with("eustress-player://play/") => link.to_string(),
         None => with_api(link, api),
     }
@@ -1417,8 +1419,11 @@ mod tests {
     #[test]
     fn a_solo_link_gets_the_api_name_and_never_a_ticket() {
         let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
-        assert_eq!(launch_link(solo, None, "production"), solo, "solo links carry no api until the Player reads it");
-        assert_eq!(launch_link(solo, None, "staging"), solo);
+        assert_eq!(launch_link(solo, None, "production"), solo, "production solo links carry no api until a Player release reads it");
+        // Staging is tested with a Player that reads `api` (build 32, P1), so its solo links name the staging API.
+        let staged = launch_link(solo, None, "staging");
+        assert_eq!(staged, format!("{solo}?api=staging"));
+        assert!(is_player_link(&staged), "the staging solo link is one the page may hand to the browser");
         assert_eq!(launch_link(&host_link(), None, "staging"), format!("{}&api=staging", host_link()));
         assert_eq!(launch_link(&host_link(), Some("tk.1_2-3"), "staging"), format!("{}&ticket=tk.1_2-3&api=staging", host_link()));
         // A ticket that would make the link something the Player's grammar does not allow is dropped, never the link.

@@ -10,6 +10,7 @@ use leptos_router::hooks::use_navigate;
 use web_sys::NotificationPermission;
 use crate::api::ApiClient;
 use crate::components::{CentralNav, Footer};
+use crate::components::nav::account_avatar;
 use crate::components::adult_content::AdultContentSetting;
 use crate::pages::email_settings::EmailSection;
 use crate::pages::passkeys::PasskeysSection;
@@ -135,10 +136,7 @@ pub fn SettingsPage() -> impl IntoView {
                 <aside class="settings-sidebar">
                     <div class="sidebar-header">
                         <div class="sidebar-avatar">
-                            {move || match avatar_url() {
-                                Some(url) => view! { <img src=url alt="Avatar" /> }.into_any(),
-                                None => view! { <img src="/assets/icons/noob-head.svg" alt="Avatar" /> }.into_any(),
-                            }}
+                            {account_avatar(avatar_url)}
                         </div>
                         <div class="sidebar-user-info">
                             <span class="sidebar-username">{username}</span>

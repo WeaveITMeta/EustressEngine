@@ -602,6 +602,13 @@ pub(crate) fn ListingCard(listing: Listing, live: RwSignal<LiveNow>) -> impl Int
     }
 }
 
+/// A live session's art in the rail, or nothing when it has none. The Worker answers 404 for art it will not serve (animated,
+/// transparent, several images, not an image, too large), so a picture that fails to load clears art_ok and the box is left
+/// empty, as for a session with no art, never the browser's broken-image icon. Each card makes its own signal.
+fn live_picture(art: Option<String>, art_ok: RwSignal<bool>) -> impl IntoView {
+    move || art.clone().filter(|_| art_ok.get()).map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" on:error=move |_| art_ok.set(false) /> })
+}
+
 /// A live session in the rail: the Space, who hosts it, where, how full it is, and Join (which opens the chooser).
 #[component]
 pub(crate) fn LiveCard(session: Session) -> impl IntoView {
@@ -617,7 +624,7 @@ pub(crate) fn LiveCard(session: Session) -> impl IntoView {
     let label = format!("Join {name}");
     view! {
         <div class="g-glass g-live-card">
-            <a class="g-live-art" href=href.clone() tabindex="-1" aria-hidden="true">{art.map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" /> })}</a>
+            <a class="g-live-art" href=href.clone() tabindex="-1" aria-hidden="true">{live_picture(art, RwSignal::new(true))}</a>
             <div class="g-live-text">
                 <b><a href=href>{name}</a></b>
                 <small>{line}</small>
@@ -700,6 +707,39 @@ mod tests {
 
     fn ids(rows: &[Listing]) -> Vec<&str> {
         rows.iter().map(|l| l.id.as_str()).collect()
+    }
+
+    /// What a live card's art box draws for this picture, rendered on the server. art_ok is the signal the img's on:error clears.
+    fn art_html(art: Option<&str>, art_ok: bool) -> String {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| live_picture(art.map(str::to_string), RwSignal::new(art_ok)).to_html())
+    }
+
+    #[test]
+    fn a_live_card_picture_that_will_not_load_leaves_the_empty_box_a_card_without_one_has() {
+        let url = "https://api.example.dev/a/thumbnail";
+        let shown = art_html(Some(url), true);
+        assert!(shown.contains("<img") && shown.contains(url), "{shown}");
+        let none = art_html(None, true);
+        assert!(!none.contains("<img"), "{none}");
+        // art_ok is false once the img's on:error has run: the card then draws exactly what it draws for a session with no art.
+        let failed = art_html(Some(url), false);
+        assert_eq!(failed, none, "a picture that failed leaves the box empty, not the browser's broken-image icon");
+        assert!(!failed.contains("<img") && !failed.contains(url));
+    }
+
+    #[test]
+    fn the_live_card_picture_has_an_error_handler_that_clears_its_own_signal() {
+        let page = include_str!("gallery.rs").split(concat!("#[cfg", "(test)]")).next().unwrap();
+        assert_eq!(page.matches("src=u alt=\"\"").count(), 1, "one picture tag in the live rail");
+        let at = page.find("src=u alt=\"\"").unwrap();
+        let start = page[..at].rfind("<img").expect("an img tag");
+        let tag = &page[start..start + page[start..].find("/>").expect("the tag ends")];
+        assert!(tag.contains("on:error=move |_| art_ok.set(false)"), "{tag}");
+        assert!(page.contains("art.clone().filter(|_| art_ok.get())"), "the picture is drawn only while art_ok");
+        // One signal for each card: a signal shared by the cards would blank every card at the first failure.
+        assert!(page.contains("{live_picture(art, RwSignal::new(true))}</a>"));
     }
 
     #[test]

@@ -139,6 +139,102 @@ mod tests {
         assert_eq!(layer_at(5, 0), 0, "none is safe");
     }
 
+    // The pages that put a listing's picture or a person's avatar into an img, and how many such imgs each one has. Each must have an
+    // on:error handler, so a picture the Worker answers 404 for (animated, transparent, several images, not an image, too large) shows
+    // the page's own empty state, never the browser's broken-image icon. The number is what the scan must find in the file: a scan
+    // that finds fewer has stopped reading it. community.rs is not scanned here. settings.rs expects none of its own: its avatar is
+    // drawn by account_avatar in nav.rs, and a bare img added there would be counted.
+    const PAGES: [(&str, &str, usize); 10] = [
+        ("projects.rs", include_str!("../pages/projects.rs"), 1),
+        ("marketplace.rs", include_str!("../pages/marketplace.rs"), 1),
+        ("marketplace_item.rs", include_str!("../pages/marketplace_item.rs"), 1),
+        ("listing.rs", include_str!("../pages/listing.rs"), 2),
+        ("profile.rs", include_str!("../pages/profile.rs"), 1),
+        ("command_palette.rs", include_str!("command_palette.rs"), 1),
+        ("dashboard.rs", include_str!("../pages/dashboard.rs"), 1),
+        ("gallery.rs", include_str!("../pages/gallery.rs"), 1),
+        ("nav.rs", include_str!("nav.rs"), 1),
+        ("settings.rs", include_str!("../pages/settings.rs"), 0),
+    ];
+
+    /// The src values that are paths under /assets by construction: the category icons, which category_icon builds.
+    const ASSET_BINDINGS: [&str; 2] = ["icon", "icon.clone()"];
+
+    /// Scan a page's code (its tests and its comment lines left out) for img tags whose src is not a literal path under /assets.
+    /// Returns how many there are, and the ones that have no on:error handler.
+    fn imgs_without_a_handler(source: &str) -> (usize, Vec<String>) {
+        let code = source.split(concat!("#[cfg", "(test)]")).next().unwrap();
+        let code = code.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        let (mut guarded, mut bare) = (0, Vec::new());
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("<img") {
+            let tail = &rest[at + 4..];
+            // An img element: the name ends at white space.
+            if !tail.starts_with(char::is_whitespace) {
+                rest = tail;
+                continue;
+            }
+            let end = tail.find("/>").expect("an img tag ends in />");
+            let tag = &tail[..end];
+            rest = &tail[end..];
+            let src = tag.match_indices("src=").find(|(i, _)| tag[..*i].ends_with(char::is_whitespace)).map(|(i, _)| &tag[i + 4..]);
+            let is_asset = match src {
+                Some(value) if value.starts_with('"') => value[1..].starts_with("/assets/"),
+                Some(value) => ASSET_BINDINGS.contains(&value.split_whitespace().next().unwrap_or("")),
+                None => false,
+            };
+            if is_asset {
+                continue;
+            }
+            guarded += 1;
+            if !tag.contains("on:error=") {
+                bare.push(tag.trim().to_string());
+            }
+        }
+        (guarded, bare)
+    }
+
+    #[test]
+    fn every_listing_picture_and_avatar_on_these_pages_has_an_error_handler() {
+        for (name, source, expected) in PAGES {
+            let (guarded, bare) = imgs_without_a_handler(source);
+            assert_eq!(guarded, expected, "{name}: the scan found a different number of pictures from outside /assets");
+            assert!(bare.is_empty(), "{name}: a picture with no on:error handler: {bare:?}");
+        }
+    }
+
+    #[test]
+    fn the_scan_tells_a_picture_from_an_asset_icon_and_a_handled_one_from_a_bare_one() {
+        let sample = concat!(
+            "view! { <img src=\"/assets/icons/cube.svg\" alt=\"\" /> }\n",
+            "// <img src=src alt=\"\" /> a comment that names one\n",
+            "view! { <img class=\"a\" src=src alt=\"\" on:error=move |_| ok.set(false) /> }\n",
+            "view! { <img src=icon.clone() alt=\"\" /> }\n",
+            "view! { <img class=\"b\" src=url alt=\"\" loading=\"lazy\" /> }\n",
+            "view! { <img class=\"c\" alt=\"\" src=move || pic.get() /> }\n",
+            "view! { <img\n  class=\"d\"\n  src=src\n  alt=\"\" /> }\n",
+            "view! { <img src=\"https://evil.example/a.png\" alt=\"\" /> }\n",
+        );
+        let (guarded, bare) = imgs_without_a_handler(sample);
+        assert_eq!(guarded, 5, "the handled one and the four bare ones; the asset literal, the comment and the icon are not pictures");
+        assert_eq!(bare.len(), 4, "{bare:?}");
+        assert!(bare.iter().all(|tag| !tag.contains("on:error")));
+    }
+
+    #[test]
+    fn the_icon_the_scan_lets_through_is_always_a_path_under_assets() {
+        use crate::pages::marketplace::{category_icon, CATEGORIES};
+        for key in CATEGORIES.iter().map(|c| c.0).chain(["", "holograms", "../x"]) {
+            let icon = category_icon(key);
+            assert!(icon.starts_with("/assets/icons/") && icon.ends_with(".svg") && !icon.contains(".."), "{key}: {icon}");
+        }
+        for (name, source, _) in PAGES {
+            if source.contains("src=icon") {
+                assert!(source.contains("let icon = category_icon("), "{name}: src=icon is not the category's icon");
+            }
+        }
+    }
+
     #[test]
     fn a_reader_who_prefers_reduced_motion_never_gets_a_cycle() {
         assert_eq!(motion_for(4, false), Motion::Cycle);

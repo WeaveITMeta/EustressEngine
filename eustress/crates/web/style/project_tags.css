@@ -1,21 +1,7 @@
 /* =============================================================================
-   Tags on /projects: the chips on a card and the tag editor in a Space's settings
-   (src/pages/projects.rs, src/pages/project_tags.rs). Linked after topbar.css.
+   Tags on /projects: the tag editor in a Space's settings (src/pages/project_tags.rs).
+   A card on /projects wears the Gallery's tag chips (gallery.css, projects.css).
    ============================================================================= */
-
-/* A card: the Space's tags on one wrapping line, then the note when the review chose them. */
-.card-tags { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); min-width: 0; }
-.card-tags .meta-icon { flex: none; }
-.card-tag {
-  padding: 0 var(--space-sm);
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-.card-tag-note { color: var(--color-text-secondary); font-size: var(--text-sm); font-style: italic; }
 
 /* The editor in the settings dialog. */
 .tag-editor { display: grid; gap: var(--space-sm); }

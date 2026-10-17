@@ -46,7 +46,7 @@ pub fn CareersPage() -> impl IntoView {
                             <p>
                                 "Eustress Engine is built and operated by "<strong>"@Simbuilder"</strong>
                                 " in collaboration with AI assistants. This unique approach allows us to move fast, 
-                                stay lean, and focus entirely on building the best game engine possible."
+                                stay lean, and focus entirely on building the best simulation and data platform possible."
                             </p>
                             <p>
                                 "By leveraging AI for development, documentation, and operations, we can deliver 

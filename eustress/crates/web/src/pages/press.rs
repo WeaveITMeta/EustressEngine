@@ -63,12 +63,12 @@ pub fn PressPage() -> impl IntoView {
                     <div class="description-card">
                         <h3>"Short Description"</h3>
                         <p class="description-text">
-                            "Eustress Engine is a next-generation game engine built 100% in Rust, offering unprecedented performance, memory safety, and developer experience—all while remaining free forever."
+                            "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds. It offers performance, memory safety and developer experience, and it stays free forever."
                         </p>
                         
                         <h3>"Long Description"</h3>
                         <p class="description-text">
-                            "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. Built from the ground up in Rust by @Simbuilder with AI assistance, Eustress delivers professional-grade tools without the overhead of traditional game engines. With zero garbage collection pauses, support for 10M+ entity instances, and built-in multiplayer networking, Eustress is designed for creators who demand performance without compromise. The platform includes Eustress Engine for game development and Eustress Player for discovering community-created experiences."
+                            "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds. It was built from the ground up by @Simbuilder with AI assistance. It has zero garbage collection pauses, supports 10M+ entity instances, and includes built-in multiplayer networking. The platform includes Eustress Engine for building simulations, games and interactive worlds, and Eustress Player for discovering community-created simulations."
                         </p>
                     </div>
                 </section>

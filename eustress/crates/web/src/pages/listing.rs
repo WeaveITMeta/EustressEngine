@@ -57,6 +57,13 @@ pub fn frames_of(listing: &Listing, previews: &[String]) -> Vec<String> {
     out
 }
 
+/// The pictures still worth showing: the pictures less every address the browser failed to load. The Worker answers 404 for a
+/// capture it will not serve (animated, transparent, several images, not an image, too large), so a picture that fails is left
+/// out of the frame and of the strip. When none is left the page shows what it shows for a Space with no picture at all.
+pub fn without_broken(frames: &[String], broken: &[String]) -> Vec<String> {
+    frames.iter().filter(|u| !broken.contains(u)).cloned().collect()
+}
+
 /// "Capture 2 / 4": which picture is up. The reader is one-based.
 pub fn capture_words(index: usize, count: usize) -> String {
     format!("Capture {} / {}", index.min(count.saturating_sub(1)) + 1, count)
@@ -157,6 +164,47 @@ pub fn ListingPage() -> impl IntoView {
     }
 }
 
+/// Note that a picture failed to load. Once: the frame and the strip draw the same address.
+fn mark_broken(broken: RwSignal<Vec<String>>, url: &str) {
+    if !broken.with_untracked(|list| list.iter().any(|u| u == url)) {
+        broken.update(|list| list.push(url.to_string()));
+    }
+}
+
+/// The frame: every picture stacked, the one at shot up. A picture that fails goes into broken and drops out of the list; with
+/// none left the frame is the quiet one a Space without a picture gets.
+fn shot_frame(list: Vec<String>, shot: RwSignal<usize>, broken: RwSignal<Vec<String>>) -> AnyView {
+    if list.is_empty() {
+        return view! { <div class="g-frame-empty" aria-hidden="true"></div> }.into_any();
+    }
+    let count = list.len();
+    view! {
+        {list.into_iter().enumerate().map(|(i, src)| {
+            let url = src.clone();
+            view! {
+                <img class="art-img" class:on=move || shot.get().min(count - 1) == i src=src alt="" decoding="async" on:error=move |_| mark_broken(broken, &url) />
+            }
+        }).collect_view()}
+        <div class="g-readout" aria-hidden="true"><span>{move || capture_words(shot.get(), count)}</span><span>"At publish"</span></div>
+    }.into_any()
+}
+
+/// The strip of captures, drawn when two or more pictures are left. A thumbnail that fails drops out with its picture.
+fn shot_caps(list: Vec<String>, shot: RwSignal<usize>, broken: RwSignal<Vec<String>>) -> impl IntoView {
+    (list.len() > 1).then(|| view! {
+        <div class="g-caps" role="group" aria-label="Captures">
+            {list.into_iter().enumerate().map(|(i, src)| {
+                let url = src.clone();
+                view! {
+                    <button type="button" class="g-cap" class:on=move || shot.get() == i aria-label=format!("Show capture {}", i + 1) aria-pressed=move || (shot.get() == i).to_string() on:click=move |_| shot.set(i)>
+                        <img src=src alt="" loading="lazy" decoding="async" on:error=move |_| mark_broken(broken, &url) />
+                    </button>
+                }
+            }).collect_view()}
+        </div>
+    })
+}
+
 #[component]
 fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
     let app_state = expect_context::<AppState>();
@@ -197,6 +245,9 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
         Memo::new(move |_| frames_of(&listing, &previews.get()))
     };
     let shot = RwSignal::new(0usize);
+    // The pictures the browser could not load; the frame and the strip draw the rest.
+    let broken = RwSignal::new(Vec::<String>::new());
+    let shown = Memo::new(move |_| frames.with(|all| broken.with(|bad| without_broken(all, bad))));
 
     let rating = rating_words(listing.rating.as_deref());
     let tags = card_tags(&listing);
@@ -241,33 +292,9 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
                 <div class="g-lmedia">
                     <div class="g-frame g-rise">
                         <span class="g-bracket tl"></span><span class="g-bracket tr"></span><span class="g-bracket bl"></span><span class="g-bracket br"></span>
-                        {move || {
-                            let list = frames.get();
-                            if list.is_empty() {
-                                view! { <div class="g-frame-empty" aria-hidden="true"></div> }.into_any()
-                            } else {
-                                let count = list.len();
-                                view! {
-                                    {list.into_iter().enumerate().map(|(i, src)| view! {
-                                        <img class="art-img" class:on=move || shot.get().min(count - 1) == i src=src alt="" decoding="async" />
-                                    }).collect_view()}
-                                    <div class="g-readout" aria-hidden="true"><span>{move || capture_words(shot.get(), count)}</span><span>"At publish"</span></div>
-                                }.into_any()
-                            }
-                        }}
+                        {move || shot_frame(shown.get(), shot, broken)}
                     </div>
-                    {move || {
-                        let list = frames.get();
-                        (list.len() > 1).then(|| view! {
-                            <div class="g-caps" role="group" aria-label="Captures">
-                                {list.into_iter().enumerate().map(|(i, src)| view! {
-                                    <button type="button" class="g-cap" class:on=move || shot.get() == i aria-label=format!("Show capture {}", i + 1) aria-pressed=move || (shot.get() == i).to_string() on:click=move |_| shot.set(i)>
-                                        <img src=src alt="" loading="lazy" decoding="async" />
-                                    </button>
-                                }).collect_view()}
-                            </div>
-                        })
-                    }}
+                    {move || shot_caps(shown.get(), shot, broken)}
                 </div>
 
                 <aside class="g-lside">
@@ -460,6 +487,66 @@ mod tests {
         l.thumbnail_url = Some("https://api.example.dev/t".to_string());
         assert_eq!(frames_of(&l, &[]), ["https://api.example.dev/t"]);
         assert!(frames_of(&listing(), &[]).is_empty(), "with no picture the frame stays quiet");
+    }
+
+    /// The frame and the strip for these pictures, with these addresses already failed, rendered on the server.
+    fn shots_html(all: &[&str], failed: &[&str]) -> (String, String) {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| {
+            let all: Vec<String> = all.iter().map(|u| u.to_string()).collect();
+            let broken = RwSignal::new(failed.iter().map(|u| u.to_string()).collect::<Vec<_>>());
+            let list = without_broken(&all, &broken.get_untracked());
+            (shot_frame(list.clone(), RwSignal::new(0), broken).to_html(), shot_caps(list, RwSignal::new(0), broken).to_html())
+        })
+    }
+
+    #[test]
+    fn a_picture_the_browser_cannot_load_is_left_out_and_with_none_left_the_frame_is_the_quiet_one() {
+        let all = ["https://a.example/t", "https://a.example/p0", "https://a.example/p1"].map(String::from);
+        assert_eq!(without_broken(&all, &[]), all);
+        assert_eq!(without_broken(&all, &["https://a.example/p0".to_string()]), ["https://a.example/t", "https://a.example/p1"]);
+        assert_eq!(without_broken(&all, &["https://elsewhere.example/x".to_string()]), all, "an address that is not shown changes nothing");
+        assert!(without_broken(&all, &all).is_empty());
+        let urls = ["https://a.example/t", "https://a.example/p0", "https://a.example/p1"];
+        // Nothing failed: three pictures in the frame, three thumbnails in the strip.
+        let (frame, caps) = shots_html(&urls, &[]);
+        assert_eq!(frame.matches("<img").count(), 3, "{frame}");
+        assert!(frame.contains("Capture 1 / 3") && !frame.contains("g-frame-empty"), "{frame}");
+        assert!(caps.contains("g-caps") && caps.matches("<img").count() == 3, "{caps}");
+        // One failed: it is gone from both, and the reader counts what is left.
+        let (frame, caps) = shots_html(&urls, &["https://a.example/p0"]);
+        assert!(frame.matches("<img").count() == 2 && !frame.contains("/p0") && frame.contains("Capture 1 / 2"), "{frame}");
+        assert!(caps.matches("<img").count() == 2 && !caps.contains("/p0"), "{caps}");
+        // One left: the frame keeps it, and a strip of one is not drawn.
+        let (frame, caps) = shots_html(&urls, &["https://a.example/p0", "https://a.example/p1"]);
+        assert!(frame.matches("<img").count() == 1 && frame.contains("/t"), "{frame}");
+        assert!(!caps.contains("g-caps") && !caps.contains("<img"), "{caps}");
+        // All failed: what the page shows with no pictures at all, and no strip.
+        let (frame, caps) = shots_html(&urls, &urls);
+        assert!(frame.contains("g-frame-empty") && !frame.contains("<img") && !frame.contains("g-readout"), "{frame}");
+        assert!(!caps.contains("g-caps") && !caps.contains("<img"), "{caps}");
+        let (none_frame, _) = shots_html(&[], &[]);
+        assert_eq!(frame, none_frame, "every picture failing looks like a Space that has none");
+    }
+
+    #[test]
+    fn each_picture_on_the_page_has_an_error_handler_and_the_page_draws_the_pictures_that_remain() {
+        let page = include_str!("listing.rs").split(concat!("#[cfg", "(test)]")).next().unwrap();
+        let tag_of = |attr: &str| {
+            let at = page.find(attr).unwrap_or_else(|| panic!("{attr} is not in the page"));
+            let start = page[..at].rfind("<img").expect("an img tag");
+            page[start..start + page[start..].find("/>").expect("the tag ends")].to_string()
+        };
+        let frame_img = tag_of("class=\"art-img\"");
+        let strip_img = tag_of("src=src alt=\"\" loading=\"lazy\"");
+        for tag in [frame_img, strip_img] {
+            assert!(tag.contains("on:error=move |_| mark_broken(broken, &url)"), "{tag}");
+        }
+        assert_eq!(page.matches("<img").count(), 2, "the frame's picture and the strip's thumbnail are the page's only imgs");
+        assert!(page.contains("{move || shot_frame(shown.get(), shot, broken)}") && page.contains("{move || shot_caps(shown.get(), shot, broken)}"));
+        assert!(page.contains("frames.with(|all| broken.with(|bad| without_broken(all, bad)))"), "the pictures that remain");
+        assert!(!page.contains("frames.get()"), "the page never draws the pictures that failed");
     }
 
     #[test]

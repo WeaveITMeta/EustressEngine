@@ -3,62 +3,55 @@
    =============================================================================
    Selling lives on the projects page (/projects) and on one project's Sell
    page (/projects/:sim_id, styled by creator.css). This file holds what the
-   consolidation added: the line under the projects heading, and the sell chip
-   and Sell button on a project's card. The top bar is in topbar.css.
+   consolidation added: the line in the projects header that points to
+   selling, and the sell chip on a project's card. The card's Sell button
+   takes the card's button look from projects.css. The top bar is in
+   topbar.css.
    ============================================================================= */
 
-/* The line under the projects heading that points to selling */
+/* The line in the projects header that points to selling */
 .projects-sell-note {
     max-width: 62ch;
-    margin: 0 auto var(--space-xl);
-    font-size: var(--text-sm);
+    margin: 0;
+    font-size: 14px;
     line-height: 1.55;
-    color: var(--color-text-muted);
+    color: var(--g-muted, #8a95a4);
 }
 
-.projects-subtitle + .projects-sell-note {
-    margin-top: calc(var(--space-md) * -1);
-}
-
-.projects-sell-note a {
-    color: #3cba54;
+/* The page sheet makes links inherit their colour; this one stays green. */
+.g-page .projects-sell-note a[href] {
+    color: var(--g-accent-bright, #5ee37a);
     text-decoration: none;
     white-space: nowrap;
 }
 
-.projects-sell-note a:hover {
+.g-page .projects-sell-note a[href]:hover {
     text-decoration: underline;
 }
 
 /* A card's line about selling */
-.place-card .sell-chip {
+.pj-card .sell-chip {
     align-self: flex-start;
     width: fit-content;
     max-width: 100%;
     margin: 0;
-    padding: 3px 10px;
-    font-size: var(--text-xs);
-    line-height: 1.4;
-    border-radius: var(--radius-full, 999px);
-    border: 1px solid rgba(128, 144, 160, 0.25);
-    color: var(--color-text-muted);
+    padding: 2px 11px;
+    font: 600 12px/1.6 var(--g-sans, inherit);
+    border-radius: 999px;
+    border: 1px solid var(--g-line, rgba(143, 160, 182, 0.18));
+    background: rgba(143, 160, 182, 0.08);
+    color: var(--g-text-2, #b4bdc9);
+    overflow-wrap: anywhere;
 }
 
-.place-card .sell-chip.is-ok {
-    border-color: rgba(60, 186, 84, 0.35);
-    color: #3cba54;
+.pj-card .sell-chip.is-ok {
+    border-color: rgba(60, 186, 84, 0.45);
+    background: rgba(60, 186, 84, 0.14);
+    color: var(--g-accent-bright, #5ee37a);
 }
 
-.place-card .sell-chip.is-held {
-    border-color: rgba(240, 163, 58, 0.4);
-    color: #f0a33a;
-}
-
-/* Four buttons (Play, Edit, Review, Sell) wrap instead of squeezing */
-.place-card .card-actions {
-    flex-wrap: wrap;
-}
-
-.place-card .card-actions .action-btn {
-    min-width: 84px;
+.pj-card .sell-chip.is-held {
+    border-color: rgba(227, 179, 65, 0.45);
+    background: rgba(227, 179, 65, 0.1);
+    color: var(--g-warn, #e3b341);
 }

@@ -83,7 +83,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("/learn/ide", "Edit Eustress scripts from an external editor, with the Rune extension for VS Code-compatible editors."),
     ("/learn/lsp", "eustress-lsp, the language server for Rune scripts, over stdio or TCP."),
     ("/license", "Eustress is source-available under PolyForm Shield 1.0.0: free for everyone except for competing with Eustress itself. Commercial licenses cover the rest."),
-    ("/marketplace", "The Eustress Marketplace: assets, Soul scripts and avatar items from the community."),
+    ("/marketplace", "The Eustress Marketplace: models, scripts, audio, textures and avatar items from creators, with who made each one and what it costs."),
     ("/premium", "Eustress plans and pricing, billed monthly or yearly."),
     ("/press", "Official assets and information for press coverage of Eustress."),
     ("/privacy", "The Eustress privacy policy: what data Eustress collects, why, and the choices you have."),

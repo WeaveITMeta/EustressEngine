@@ -2,7 +2,7 @@
   "$schema": "https://nlweb.ai/schemas/nlweb-manifest.json",
   "version": "1.0",
   "name": "Eustress Engine",
-  "description": "Next-generation game engine built 100% in Rust. Create, share, and play interactive 3D experiences with unprecedented performance.",
+  "description": "Eustress is a source-available simulation and data platform built in Rust; it also builds games and interactive worlds. Create, share, and play simulations.",
   "url": "https://eustress.dev",
   "logo": "https://eustress.dev/assets/logo.svg",
   "endpoints": {

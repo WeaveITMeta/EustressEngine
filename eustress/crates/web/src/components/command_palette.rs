@@ -186,6 +186,13 @@ pub fn CommandPaletteHost() -> impl IntoView {
     view! { {move || slot.open.get().then(|| view! { <Palette on_close=Callback::new(move |_| slot.close()) /> })} }
 }
 
+/// A Space row's thumbnail, or nothing when the Space has no picture. The Worker answers 404 for a capture it will not serve
+/// (animated, transparent, several images, not an image, too large), so a picture that fails to load clears art_ok and the box
+/// is left empty, as for a Space with no picture, never the browser's broken-image icon. Each row makes its own signal.
+fn row_thumb(art: Option<String>, art_ok: RwSignal<bool>) -> impl IntoView {
+    move || art.clone().filter(|_| art_ok.get()).map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" on:error=move |_| art_ok.set(false) /> })
+}
+
 #[component]
 fn Palette(on_close: Callback<()>) -> impl IntoView {
     let app_state = expect_context::<AppState>();
@@ -360,7 +367,7 @@ fn Palette(on_close: Callback<()>) -> impl IntoView {
                                     let players = (l.max_players > 1).then(|| format!("up to {} players", l.max_players));
                                     let sub = [Some(by).filter(|s| !s.is_empty()), tag, players].into_iter().flatten().collect::<Vec<_>>().join(" \u{00b7} ");
                                     view! {
-                                        <span class="cp-thumb">{art.map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" /> })}</span>
+                                        <span class="cp-thumb">{row_thumb(art, RwSignal::new(true))}</span>
                                         <span class="cp-text"><b>{if l.name.is_empty() { "Untitled Space".to_string() } else { l.name.clone() }}</b><small>{sub}</small></span>
                                     }.into_any()
                                 }
@@ -473,6 +480,39 @@ mod tests {
         assert_eq!(move_active(2, 3, true), 0);
         assert_eq!(move_active(0, 3, false), 2);
         assert_eq!(move_active(5, 0, true), 0);
+    }
+
+    /// What a Space row's thumbnail box draws for this picture, rendered on the server. art_ok is the signal the img's on:error clears.
+    fn thumb_html(art: Option<&str>, art_ok: bool) -> String {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| row_thumb(art.map(str::to_string), RwSignal::new(art_ok)).to_html())
+    }
+
+    #[test]
+    fn a_row_thumbnail_that_will_not_load_leaves_the_empty_box_a_row_without_one_has() {
+        let url = "https://api.example.dev/a/thumbnail";
+        let shown = thumb_html(Some(url), true);
+        assert!(shown.contains("<img") && shown.contains(url), "{shown}");
+        let none = thumb_html(None, true);
+        assert!(!none.contains("<img"), "{none}");
+        // art_ok is false once the img's on:error has run: the row then draws exactly what it draws for a Space with no picture.
+        let failed = thumb_html(Some(url), false);
+        assert_eq!(failed, none, "a picture that failed leaves the box empty, not the browser's broken-image icon");
+        assert!(!failed.contains("<img") && !failed.contains(url));
+    }
+
+    #[test]
+    fn the_row_thumbnail_has_an_error_handler_that_clears_its_own_signal() {
+        let page = include_str!("command_palette.rs").split(concat!("#[cfg", "(test)]")).next().unwrap();
+        assert_eq!(page.matches("src=u alt=\"\"").count(), 1, "one picture tag in the palette");
+        let at = page.find("src=u alt=\"\"").unwrap();
+        let start = page[..at].rfind("<img").expect("an img tag");
+        let tag = &page[start..start + page[start..].find("/>").expect("the tag ends")];
+        assert!(tag.contains("on:error=move |_| art_ok.set(false)"), "{tag}");
+        assert!(page.contains("art.clone().filter(|_| art_ok.get())"), "the picture is drawn only while art_ok");
+        // One signal for each row: a signal shared by the rows would blank every row at the first failure.
+        assert!(page.contains("<span class=\"cp-thumb\">{row_thumb(art, RwSignal::new(true))}</span>"));
     }
 
     #[test]

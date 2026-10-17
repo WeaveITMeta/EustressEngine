@@ -587,6 +587,19 @@ pub fn ProfilePage() -> impl IntoView {
 const CHECK_ICON: &str = "M5 12.5l4.2 4.2L19 7.5";
 const LOCK_ICON: &str = "M7 10.5V8a5 5 0 0 1 10 0v2.5M5.5 10.5h13v10h-13z";
 
+/// The avatar picture, or the monogram when the profile has no safe picture or the browser could not load the one it has. failed
+/// holds the address that failed, not a flag, so a new picture (an edit saved from the panel) gets its own try.
+fn avatar_face(profile: &ProfileReply, failed: RwSignal<Option<String>>) -> AnyView {
+    let picture = safe_avatar(profile.avatar_url.as_deref()).filter(|src| failed.with(|bad| bad.as_deref() != Some(src.as_str())));
+    match picture {
+        Some(src) => {
+            let url = src.clone();
+            view! { <img src=src alt="" width="128" height="128" decoding="async" on:error=move |_| failed.set(Some(url.clone())) /> }.into_any()
+        }
+        None => view! { <span class="pn-monogram" aria-hidden="true">{monogram(&name_of(profile))}</span> }.into_any(),
+    }
+}
+
 /// The profile itself. `account` is present only on your own profile; everything private is inside the panel it opens, and
 /// Edit profile is there too. `viewer` decides the Follow control on anyone else's profile.
 #[component]
@@ -603,17 +616,13 @@ pub fn ProfileBody(profile: ProfileReply, account: Signal<Option<Account>>, view
     let made_name = username.clone();
     let follow_name = username.clone();
     let customizing = RwSignal::new(false);
+    // The avatar address the browser could not load: the monogram stands in for it.
+    let avatar_failed = RwSignal::new(None::<String>);
 
     view! {
         <header class="g-glass pn-head" aria-labelledby="pn-name">
             <div class="pn-avatar">
-                {move || {
-                    let p = shown.get();
-                    match safe_avatar(p.avatar_url.as_deref()) {
-                        Some(src) => view! { <img src=src alt="" width="128" height="128" decoding="async" /> }.into_any(),
-                        None => view! { <span class="pn-monogram" aria-hidden="true">{monogram(&name_of(&p))}</span> }.into_any(),
-                    }
-                }}
+                {move || shown.with(|p| avatar_face(p, avatar_failed))}
             </div>
             <div class="pn-id">
                 <div class="pn-name-row">
@@ -1280,6 +1289,45 @@ mod tests {
         assert!(img.contains("object-fit: cover") && img.contains("width: 100%") && img.contains("height: 100%"), "the picture fills it without stretching: {img}");
         let html = render(worker_reply(false, "[]"), None, Shelf::Loading, LiveNow::default());
         assert!(html.contains("pn-monogram") && html.contains(">A<"), "no picture, the letter");
+    }
+
+    /// The avatar area for this profile picture, with this address already failed, rendered on the server.
+    fn avatar_html(avatar: Option<&str>, failed: Option<&str>) -> String {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| {
+            let mut profile = worker_reply(false, "[]");
+            profile.avatar_url = avatar.map(str::to_string);
+            avatar_face(&profile, RwSignal::new(failed.map(str::to_string))).to_html()
+        })
+    }
+
+    #[test]
+    fn an_avatar_that_will_not_load_is_the_letter_a_profile_without_one_draws() {
+        let shown = avatar_html(Some("/assets/avatars/a.png"), None);
+        assert!(shown.contains("<img") && shown.contains("src=\"/assets/avatars/a.png\"") && !shown.contains("pn-monogram"), "{shown}");
+        let none = avatar_html(None, None);
+        assert!(none.contains("pn-monogram") && none.contains(">A<") && !none.contains("<img"), "{none}");
+        // The address the img's on:error recorded: the profile then draws exactly what it draws with no avatar.
+        let failed = avatar_html(Some("/assets/avatars/a.png"), Some("/assets/avatars/a.png"));
+        assert_eq!(failed, none, "an avatar that failed shows the letter, not the browser's broken-image icon");
+        // A different picture (an edit was saved) is a new try.
+        let replaced = avatar_html(Some("/assets/avatars/b.png"), Some("/assets/avatars/a.png"));
+        assert!(replaced.contains("src=\"/assets/avatars/b.png\"") && !replaced.contains("pn-monogram"), "{replaced}");
+    }
+
+    #[test]
+    fn the_avatar_has_an_error_handler_that_records_its_own_address() {
+        let page = SOURCE.split(concat!("#[cfg", "(test)]")).next().unwrap();
+        let at = page.find("width=\"128\"").expect("the avatar's picture");
+        let start = page[..at].rfind("<img").expect("an img tag");
+        let tag = &page[start..start + page[start..].find("/>").expect("the tag ends")];
+        assert!(tag.contains("on:error=move |_| failed.set(Some(url.clone()))"), "{tag}");
+        assert!(page.contains("filter(|src| failed.with(|bad| bad.as_deref() != Some(src.as_str())))"), "a failed address is not drawn again");
+        // One signal for each profile body, kept apart from the profile so a saved edit does not reset it.
+        assert!(page.contains("let avatar_failed = RwSignal::new(None::<String>);"));
+        assert!(page.contains("{move || shown.with(|p| avatar_face(p, avatar_failed))}"));
+        assert_eq!(page.matches("width=\"128\"").count(), 1, "one avatar picture");
     }
 
     #[test]

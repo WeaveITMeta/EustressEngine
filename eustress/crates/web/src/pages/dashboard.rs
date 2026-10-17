@@ -38,6 +38,16 @@ pub fn day_of(iso: &str) -> String {
     iso.split('T').next().unwrap_or(iso).to_string()
 }
 
+/// A recent Space's thumbnail, or the cube when it has none. The Worker answers 404 for a capture it will not serve (animated,
+/// transparent, several images, not an image, too large), so a picture that fails to load clears art_ok and the card draws the
+/// same cube as a Space with no capture, never the browser's broken-image icon. Each card makes its own signal.
+fn recent_picture(thumbnail: Option<String>, art_ok: RwSignal<bool>) -> impl IntoView {
+    move || match thumbnail.clone().filter(|_| art_ok.get()) {
+        Some(url) => view! { <img src=url alt="" loading="lazy" decoding="async" on:error=move |_| art_ok.set(false) /> }.into_any(),
+        None => view! { <span class="rp-thumb-empty"><img src="/assets/icons/cube.svg" alt="" /></span> }.into_any(),
+    }
+}
+
 /// User dashboard page.
 #[component]
 pub fn DashboardPage() -> impl IntoView {
@@ -257,10 +267,7 @@ pub fn DashboardPage() -> impl IntoView {
                                         view! {
                                             <article class="rp-card">
                                                 <a class="rp-thumb" href=page.clone() aria-label=format!("Open the page of {}", project.name)>
-                                                    {match project.thumbnail_url.clone() {
-                                                        Some(url) => view! { <img src=url alt="" loading="lazy" decoding="async" /> }.into_any(),
-                                                        None => view! { <span class="rp-thumb-empty"><img src="/assets/icons/cube.svg" alt="" /></span> }.into_any(),
-                                                    }}
+                                                    {recent_picture(project.thumbnail_url.clone(), RwSignal::new(true))}
                                                 </a>
                                                 <div class="rp-info">
                                                     <h3><a href=page>{project.name.clone()}</a></h3>
@@ -329,6 +336,39 @@ mod tests {
         assert_eq!(shown.len(), RECENT);
         assert_eq!(shown[0].id, "s9");
         assert_eq!(shown[5].id, "s4");
+    }
+
+    /// What a recent Space's thumbnail box draws for this picture, rendered on the server. art_ok is the signal the img's on:error clears.
+    fn thumb_html(thumbnail: Option<&str>, art_ok: bool) -> String {
+        use leptos::tachys::view::RenderHtml;
+        let owner = Owner::new();
+        owner.with(|| recent_picture(thumbnail.map(str::to_string), RwSignal::new(art_ok)).to_html())
+    }
+
+    #[test]
+    fn a_recent_space_picture_that_will_not_load_is_the_cube_a_space_without_one_gets() {
+        let url = "https://api.example.dev/a/thumbnail";
+        let shown = thumb_html(Some(url), true);
+        assert!(shown.contains("<img") && shown.contains(url) && !shown.contains("rp-thumb-empty"), "{shown}");
+        let none = thumb_html(None, true);
+        assert!(none.contains("class=\"rp-thumb-empty\"><img src=\"/assets/icons/cube.svg\""), "{none}");
+        // art_ok is false once the img's on:error has run: the card then draws exactly what it draws for a Space with no capture.
+        let failed = thumb_html(Some(url), false);
+        assert_eq!(failed, none, "a capture that failed shows the cube, not the browser's broken-image icon");
+        assert!(!failed.contains(url));
+    }
+
+    #[test]
+    fn the_recent_space_picture_has_an_error_handler_that_clears_its_own_signal() {
+        let page = include_str!("dashboard.rs").split(concat!("#[cfg", "(test)]")).next().unwrap();
+        assert_eq!(page.matches("src=url alt=\"\"").count(), 1, "one picture tag on the dashboard");
+        let at = page.find("src=url alt=\"\"").unwrap();
+        let start = page[..at].rfind("<img").expect("an img tag");
+        let tag = &page[start..start + page[start..].find("/>").expect("the tag ends")];
+        assert!(tag.contains("on:error=move |_| art_ok.set(false)"), "{tag}");
+        assert!(page.contains("thumbnail.clone().filter(|_| art_ok.get())"), "the picture is drawn only while art_ok");
+        // One signal for each card: a signal shared by the cards would blank every card at the first failure.
+        assert!(page.contains("{recent_picture(project.thumbnail_url.clone(), RwSignal::new(true))}"));
     }
 
     #[test]

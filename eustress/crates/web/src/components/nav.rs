@@ -316,10 +316,7 @@ pub fn CentralNav(
                                     <div class="nav-user-dropdown">
                                         <button class="nav-user-trigger">
                                             <div class="nav-avatar">
-                                                {match avatar_url {
-                                                    Some(url) => view! { <img src=url alt="Avatar" /> }.into_any(),
-                                                    None => view! { <img src="/assets/icons/noob-head.svg" alt="Avatar" /> }.into_any(),
-                                                }}
+                                                {account_avatar(move || avatar_url.clone())}
                                             </div>
                                             <span class="nav-username" title=username.clone()>{username.clone()}</span>
                                             <img src="/assets/icons/chevron-down.svg" alt="Menu" class="dropdown-chevron" />
@@ -486,10 +483,7 @@ pub fn CentralNav(
                                 view! {
                                     <div class="drawer-user-info">
                                         <div class="drawer-avatar">
-                                            {match avatar_url {
-                                                Some(url) => view! { <img src=url alt="Avatar" /> }.into_any(),
-                                                None => view! { <img src="/assets/icons/noob-head.svg" alt="Avatar" /> }.into_any(),
-                                            }}
+                                            {account_avatar(move || avatar_url.clone())}
                                         </div>
                                         <div class="drawer-user-details">
                                             <span class="drawer-username">{username}</span>
@@ -636,6 +630,25 @@ pub(crate) fn format_short(amount: f64) -> String {
     format_short_count(amount.floor() as u64)
 }
 
+/// The signed-in person's avatar: their picture, or the stock head when they have none or the browser could not load theirs.
+/// url is read again whenever it changes. It makes its own signal for the address that failed, so each place that draws the avatar
+/// falls back on its own, and a new avatar gets its own try. The top bar, the mobile drawer and the Settings sidebar draw it here.
+pub fn account_avatar(url: impl Fn() -> Option<String> + Send + Sync + 'static) -> impl IntoView {
+    let failed = RwSignal::new(None::<String>);
+    move || avatar_picture(url(), failed)
+}
+
+/// The picture or the stock head. failed holds the address that failed to load; call this where a change to it redraws.
+fn avatar_picture(url: Option<String>, failed: RwSignal<Option<String>>) -> AnyView {
+    match url.filter(|u| failed.with(|bad| bad.as_deref() != Some(u.as_str()))) {
+        Some(url) => {
+            let bad = url.clone();
+            view! { <img src=url alt="Avatar" on:error=move |_| failed.set(Some(bad.clone())) /> }.into_any()
+        }
+        None => view! { <img src="/assets/icons/noob-head.svg" alt="Avatar" /> }.into_any(),
+    }
+}
+
 /// The Tickets pill.
 fn tickets_pill(balance: u64) -> impl IntoView {
     view! {
@@ -703,6 +716,45 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap_or_else(|| panic!("no rule for {selector}"));
         &css[at + 1..at + css[at..].find('}').unwrap()]
+    }
+
+    /// The avatar for this address, with this address already failed, rendered on the server.
+    fn avatar_html(url: Option<&str>, failed: Option<&str>) -> String {
+        let owner = Owner::new();
+        owner.with(|| avatar_picture(url.map(str::to_string), RwSignal::new(failed.map(str::to_string))).to_html())
+    }
+
+    #[test]
+    fn an_avatar_that_will_not_load_is_the_stock_head_an_account_without_one_gets() {
+        let url = "https://cdn.example.dev/a.png";
+        let shown = avatar_html(Some(url), None);
+        assert!(shown.contains("src=\"https://cdn.example.dev/a.png\"") && !shown.contains("noob-head"), "{shown}");
+        let none = avatar_html(None, None);
+        assert!(none.contains("src=\"/assets/icons/noob-head.svg\""), "{none}");
+        // The address the img's on:error recorded: the avatar then draws exactly what it draws with no avatar.
+        let failed = avatar_html(Some(url), Some(url));
+        assert_eq!(failed, none, "an avatar that failed shows the stock head, not the browser's broken-image icon");
+        // A different address (a new avatar was saved) is a new try.
+        let replaced = avatar_html(Some("https://cdn.example.dev/b.png"), Some(url));
+        assert!(replaced.contains("src=\"https://cdn.example.dev/b.png\"") && !replaced.contains("noob-head"), "{replaced}");
+    }
+
+    #[test]
+    fn the_account_avatar_has_an_error_handler_and_every_place_that_draws_it_uses_it() {
+        let nav = code();
+        let at = nav.find("alt=\"Avatar\" on:error").expect("the avatar's picture");
+        let start = nav[..at].rfind("<img").expect("an img tag");
+        let tag = &nav[start..start + nav[start..].find("/>").expect("the tag ends")];
+        assert!(tag.contains("on:error=move |_| failed.set(Some(bad.clone()))"), "{tag}");
+        assert!(nav.contains("failed.with(|bad| bad.as_deref() != Some(u.as_str()))"), "a failed address is not drawn again");
+        // The top bar and the mobile drawer each draw it through account_avatar, each with a signal of its own.
+        assert_eq!(nav.matches("{account_avatar(move || avatar_url.clone())}").count(), 2);
+        assert!(nav.contains("let failed = RwSignal::new(None::<String>);"));
+        assert!(!nav.contains("<img src=url alt=\"Avatar\" />"), "a bare avatar img is back");
+        // So does the Settings sidebar.
+        let settings = include_str!("../pages/settings.rs");
+        assert!(settings.contains("{account_avatar(avatar_url)}"));
+        assert!(!settings.contains("<img src=url alt=\"Avatar\" />"), "a bare avatar img is back in Settings");
     }
 
     #[test]
