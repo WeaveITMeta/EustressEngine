@@ -686,8 +686,12 @@ pub fn bake_from_world_at(
 /// flat `.toml` beside `_service.toml`. Anything that is not a `Reference` is
 /// skipped, because a `Website` folder may reasonably hold a note.
 fn collect_references(source: &dyn SpaceSource) -> Result<Vec<Reference>, BakeError> {
-    let Ok(entries) = source.list(SERVICE_FOLDER) else {
-        return Ok(Vec::new());
+    // No Website folder is a Space with no references. A folder that is there but cannot be listed fails the bake: skipping it
+    // would publish a partial or empty site with no error.
+    let entries = match source.list(SERVICE_FOLDER) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(BakeError::Service(format!("cannot list the {SERVICE_FOLDER} folder: {e}"))),
     };
 
     // Sorted so a bake is deterministic and two runs of the same Space produce
@@ -912,6 +916,41 @@ impl BakedManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// A Space whose `Website` folder listing fails with `kind`, and that holds nothing else.
+    struct ListFails(std::io::ErrorKind);
+
+    impl SpaceSource for ListFails {
+        fn read(&self, rel: &str) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, rel.to_string()))
+        }
+        fn list(&self, rel_dir: &str) -> std::io::Result<Vec<crate::space::space_source::SourceEntry>> {
+            Err(std::io::Error::new(self.0, format!("listing {rel_dir}")))
+        }
+        fn exists(&self, _rel: &str) -> bool {
+            false
+        }
+        fn is_fjall(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_space_with_no_website_folder_has_no_references() {
+        let refs = collect_references(&ListFails(std::io::ErrorKind::NotFound)).expect("no folder is not an error");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn a_website_folder_that_cannot_be_listed_fails_the_bake() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::InvalidData] {
+            match collect_references(&ListFails(kind)) {
+                Err(BakeError::Service(message)) => assert!(message.contains(SERVICE_FOLDER), "{message}"),
+                other => panic!("{kind:?} must fail the bake, got {other:?}"),
+            }
+        }
+    }
 
     fn at(iso: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(iso)
