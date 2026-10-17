@@ -2,16 +2,22 @@
 // digest cannot be sent (a mail outage), the queue must not lapse in silence: once any entry has waited 24 hours, staff get one
 // staff_failure alert a day on the legal lane, with counts, ages and kinds only, and the entries are kept 30 days, well past
 // that. GET /api/admin/legal/staff-alerts shows the same state, audited before it is answered (fail-closed).
-// Security's note on commit 65a9db55.
+// Security's note on commit 65a9db55; and on 62193467: the queue is read from the list alone (each key's metadata), and the
+// digests and the overdue check run after the case steps, the digests capped, so a filing flood cannot spend the cron run's
+// storage budget on them.
 //
 // Source note: plain ASCII only.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker, fakeEnv, fakeKv, mintToken, ctx } from './helpers/load_worker.mjs';
-import { alertStaffQueueOverdue } from '../src/takedown.mjs';
+import { createHash } from 'node:crypto';
+import { alertStaffQueueOverdue, sweepTakedowns, renderMail } from '../src/takedown.mjs';
 import { takeMailSlot, STAFF_ALERTS_PER_DAY } from '../src/mail_limits.mjs';
-import { staffQueueState, STAFF_OVER_CAP_TTL_SECONDS, STAFF_QUEUE_OVERDUE_MS, STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS, STAFF_QUEUE_OVERDUE_ALERT_KEY } from '../src/staff_alerts.mjs';
+import {
+  staffQueueState, sendStaffAlert, sendStaffDigests, alertOverdueStaffQueue, STAFF_OVER_CAP_TTL_SECONDS, STAFF_QUEUE_OVERDUE_MS,
+  STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS, STAFF_QUEUE_OVERDUE_ALERT_KEY, STAFF_DIGEST_MAX_ENTRIES, STAFF_QUEUE_LEGACY_READS,
+} from '../src/staff_alerts.mjs';
 
 const worker = await loadWorker();
 const STAFF = 'security@example.com';
@@ -36,8 +42,44 @@ function readMail(m) {
   return { to: m.to, subject: encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : subjectLine, text: part('text/plain'), raw: m.raw };
 }
 
+/// A KV namespace in memory that keeps what the real one does and the shared fake does not: each key's metadata (at most
+/// 1024 bytes) and expiration, both returned by list, a list paged 1000 keys at a time with a cursor, and every operation
+/// counted (`ops`).
+function metaKv() {
+  const store = new Map();
+  const meta = new Map();
+  const exp = new Map();
+  const ops = [];
+  return {
+    store, meta, exp, ops,
+    async get(key) { ops.push(['get', key]); return store.has(key) ? store.get(key) : null; },
+    async put(key, value, opts = {}) {
+      ops.push(['put', key]);
+      store.set(key, typeof value === 'string' ? value : String(value));
+      if (opts.metadata !== undefined) {
+        const json = JSON.stringify(opts.metadata);
+        if (Buffer.byteLength(json) > 1024) throw new Error('KV metadata is over 1024 bytes');
+        meta.set(key, JSON.parse(json));
+      } else meta.delete(key);
+      if (opts.expirationTtl) exp.set(key, Math.floor(Date.now() / 1000) + opts.expirationTtl); else exp.delete(key);
+    },
+    async delete(key) { ops.push(['delete', key]); store.delete(key); meta.delete(key); exp.delete(key); },
+    async list({ prefix = '', limit = 1000, cursor } = {}) {
+      ops.push(['list', prefix]);
+      const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const page = all.slice(start, start + Math.min(limit, 1000));
+      const end = start + page.length;
+      return {
+        keys: page.map((name) => ({ name, ...(exp.has(name) ? { expiration: exp.get(name) } : {}), ...(meta.has(name) ? { metadata: meta.get(name) } : {}) })),
+        list_complete: end >= all.length, ...(end < all.length ? { cursor: String(end) } : {}),
+      };
+    },
+  };
+}
+
 function environment() {
-  const env = { ...fakeEnv(), __EmailMessage: StubMessage, SECURITY_MAILBOX: STAFF, mail: [], refuse: null };
+  const env = { ...fakeEnv(), USERS: metaKv(), __EmailMessage: StubMessage, SECURITY_MAILBOX: STAFF, mail: [], refuse: null };
   env.EMAIL = { send: async (m) => { if (env.refuse && env.refuse(readMail(m))) throw new Error('the mail binding failed'); env.mail.push(m); } };
   return env;
 }
@@ -69,11 +111,14 @@ async function runCron(env) {
 
 const queueKeys = (env) => [...env.USERS.store.keys()].filter((k) => k.startsWith('staffmail-queue:'));
 
-/// Moves every queued entry's time back by `ms`, as if it had waited that long.
+/// Moves every queued entry's time back by `ms`, as if it had waited that long: its value and its metadata.
 function age(env, ms) {
   for (const k of queueKeys(env)) {
     const e = JSON.parse(env.USERS.store.get(k));
-    env.USERS.store.set(k, JSON.stringify({ ...e, queued_at: new Date(Date.parse(e.queued_at) - ms).toISOString() }));
+    const at = new Date(Date.parse(e.queued_at) - ms).toISOString();
+    env.USERS.store.set(k, JSON.stringify({ ...e, queued_at: at }));
+    assert.ok(env.USERS.meta.has(k), 'a queue entry is written with its metadata');
+    env.USERS.meta.set(k, { ...env.USERS.meta.get(k), queued_at: at });
   }
 }
 
@@ -244,4 +289,124 @@ test('the admin read answers the count, the oldest age and each kind, with one a
   // Not an administrator: refused.
   const res = await worker.fetch(new Request('https://api.eustress.dev/api/admin/legal/staff-alerts', { headers: { Authorization: `Bearer ${mintToken('44444444-4444-4444-8444-444444444444')}` } }), env, ctx);
   assert.equal(res.status, 403);
+});
+
+// --- the storage budget (Security on 62193467) ---
+
+const tag = (text) => createHash('sha256').update(String(text)).digest('hex').slice(0, 32);
+const RENDERED = { subject: 'A staff alert for the test', text: 'A staff alert for the test.', html: '<p>A staff alert for the test.</p>' };
+const queueGets = (env) => env.USERS.ops.filter(([op, k]) => op === 'get' && k.startsWith('staffmail-queue:')).length;
+
+test('a queue of 3000 entries is read from the list alone: no read per entry, one list per 1000', async () => {
+  const env = environment();
+  // Three through the real write path (the general lane spent), the rest seeded as that path writes them.
+  for (let i = 0; i < STAFF_ALERTS_PER_DAY; i++) await takeMailSlot(env, STAFF, 'staff');
+  for (let i = 0; i < 3; i++) await quiet(() => sendStaffAlert(env, [STAFF], RENDERED, { alertId: `real-${i}`, kind: 'staff_new', reference: `EC-REAL-${i}`, required: true }));
+  assert.equal(queueKeys(env).length, 3);
+  for (const k of queueKeys(env)) assert.deepEqual(Object.keys(env.USERS.meta.get(k)).sort(), ['kind', 'lane', 'queued_at', 'reason', 'reference', 'required']);
+  const addr = tag(STAFF);
+  const old = new Date(Date.now() - 30 * HOUR).toISOString();
+  const fresh = new Date().toISOString();
+  for (let i = 0; i < 2997; i++) {
+    const e = { kind: i % 3 ? 'staff_new' : 'staff_review', lane: 'general', reference: `EC-SEED-${i}`, queued_at: i < 10 ? old : fresh, required: i % 2 === 0 };
+    await env.USERS.put(`staffmail-queue:${addr}:${tag(`seed-${i}`)}`, JSON.stringify({ alert_id: `seed-${i}`, ...e, digested_at: null }), { expirationTtl: STAFF_OVER_CAP_TTL_SECONDS, metadata: e });
+  }
+  env.USERS.ops.length = 0;
+  const s = await staffQueueState(env);
+  assert.equal(env.USERS.ops.filter(([op]) => op === 'get').length, 0, 'no read of any entry');
+  assert.equal(env.USERS.ops.filter(([op]) => op === 'list').length, 3, 'three lists of 1000');
+  assert.equal(env.USERS.ops.length, 3);
+  assert.equal(s.count, 3000);
+  assert.equal(s.overdue, 10);
+  assert.deepEqual(s.by_kind, { staff_new: 3 + 1998, staff_review: 999 });
+  assert.equal(s.required, 3 + 1499);
+  assert.equal(s.legacy_reads, 0);
+  assert.equal(s.unknown_age, 0);
+  assert.equal(s.at_least, false);
+  // The overdue check over it: its once-a-day mark, the lists and the alert's own mail, never an entry.
+  env.USERS.ops.length = 0;
+  const r = await quiet(() => alertOverdueStaffQueue(env, [STAFF], () => RENDERED));
+  assert.equal(r.alerted, true);
+  assert.equal(queueGets(env), 0);
+  assert.ok(env.USERS.ops.length <= 12, `the check took ${env.USERS.ops.length} operations`);
+});
+
+test('entries from before metadata: aged by their 7-day expiration with no read, and at most 50 read when they have neither', async () => {
+  const env = environment();
+  const addr = tag(STAFF);
+  const queuedAt = Date.now() - 25 * HOUR;
+  for (let i = 0; i < 10; i++) {
+    const key = `staffmail-queue:${addr}:${tag(`ttl-${i}`)}`;
+    env.USERS.store.set(key, JSON.stringify({ kind: 'staff_new', queued_at: new Date(queuedAt).toISOString(), required: true }));
+    env.USERS.exp.set(key, Math.floor(queuedAt / 1000) + 7 * 86400);
+  }
+  for (let i = 0; i < 80; i++) env.USERS.store.set(`staffmail-queue:${addr}:${tag(`bare-${i}`)}`, JSON.stringify({ kind: 'staff_review', queued_at: new Date(queuedAt).toISOString(), required: true }));
+  env.USERS.ops.length = 0;
+  const s = await staffQueueState(env);
+  assert.equal(s.count, 90);
+  assert.equal(queueGets(env), STAFF_QUEUE_LEGACY_READS, 'at most 50 entries read');
+  assert.equal(s.legacy_reads, STAFF_QUEUE_LEGACY_READS);
+  assert.equal(s.unknown_age, 80 - STAFF_QUEUE_LEGACY_READS);
+  assert.equal(s.overdue, 10 + STAFF_QUEUE_LEGACY_READS, 'the expiration says 25 hours');
+  assert.ok(s.oldest_age_seconds >= 25 * 3600 - 2 && s.oldest_age_seconds <= 25 * 3600 + 2, String(s.oldest_age_seconds));
+});
+
+test('one run of digests names at most STAFF_DIGEST_MAX_ENTRIES alerts, every address together, under 200 storage operations', async () => {
+  const env = environment();
+  const addresses = [STAFF, 'second.staff@example.com', 'third.staff@example.com'];
+  for (const a of addresses) for (let i = 0; i < STAFF_ALERTS_PER_DAY; i++) await takeMailSlot(env, a, 'staff');
+  for (let i = 0; i < 120; i++) await quiet(() => sendStaffAlert(env, addresses, RENDERED, { alertId: `cap-${i}`, kind: 'staff_new', reference: `EC-CAP-${i}`, required: true }));
+  assert.equal(queueKeys(env).length, 360);
+  const render = (d) => renderMail('staff_digest', { ...d, at: new Date().toISOString() });
+  const now = Date.now();
+  env.USERS.ops.length = 0;
+  const r = await quiet(() => sendStaffDigests(env, addresses, render, { now }));
+  assert.equal(r.digests, 3);
+  assert.equal(r.named, 3 * Math.floor(STAFF_DIGEST_MAX_ENTRIES / 3), 'an equal share each');
+  assert.ok(r.named <= STAFF_DIGEST_MAX_ENTRIES);
+  assert.ok(env.USERS.ops.length <= 200, `the digests took ${env.USERS.ops.length} operations`);
+  assert.equal(queueGets(env), 0, 'named from the metadata, no read per entry');
+  assert.equal(queueKeys(env).length, 360 - r.named);
+  const first = staffMail(env).filter((m) => DIGEST.test(m.subject));
+  assert.equal(first.length, 1);
+  assert.ok(first[0].subject.includes('120 waiting'), first[0].subject);
+  assert.match(first[0].text, new RegExp(`${120 - Math.floor(STAFF_DIGEST_MAX_ENTRIES / 3)} more are waiting`));
+  // One address alone gets the whole share; the rest are named in the hours after.
+  env.USERS.ops.length = 0;
+  const solo = await quiet(() => sendStaffDigests(env, [STAFF], render, { now: now + HOUR }));
+  assert.equal(solo.named, STAFF_DIGEST_MAX_ENTRIES);
+  assert.ok(env.USERS.ops.length <= 200, `the digest took ${env.USERS.ops.length} operations`);
+});
+
+test('the sweep runs the TAKE IT DOWN case steps first, then the digests, then the overdue check', async () => {
+  const env = environment();
+  // A case that owes its staff step: the staff mail failed at filing.
+  env.refuse = (m) => m.subject.startsWith('TAKE IT DOWN request received');
+  await quiet(() => file(env, 50));
+  env.refuse = null;
+  // An alert past the allowance waiting 25 hours, and a digest that cannot be sent.
+  for (let i = 0; i < STAFF_ALERTS_PER_DAY; i++) await takeMailSlot(env, STAFF, 'staff');
+  await quiet(() => file(env, 51));
+  assert.equal(queueKeys(env).length, 2, 'the failed send and the one past the allowance');
+  age(env, 25 * HOUR);
+  env.refuse = (m) => DIGEST.test(m.subject);
+  // One log, in order, of the case steps' storage and the staff mail's.
+  const log = env.USERS.ops;
+  for (const op of ['get', 'put', 'delete', 'list']) {
+    const inner = env.SOCIAL[op].bind(env.SOCIAL);
+    env.SOCIAL[op] = async (a, ...rest) => { log.push([`social_${op}`, op === 'list' ? a?.prefix : a]); return inner(a, ...rest); };
+  }
+  log.length = 0;
+  const out = await quiet(() => sweepTakedowns(env, {}));
+  assert.ok(out.cases >= 1, 'a case step ran');
+  assert.equal(out.digest.failed, 1, 'the digest ran, and could not be sent');
+  assert.equal(out.staff_queue.alerted, true, 'the overdue check ran');
+  const at = (pred) => log.findIndex(pred);
+  const lastAt = (pred) => log.length - 1 - [...log].reverse().findIndex(pred);
+  const caseStep = ([op, k]) => (op === 'social_list' && (k === 'tdpending:' || k === 'tdactive:')) || (op === 'social_put' && String(k).startsWith('tdcase:'));
+  const digestOp = ([op, k]) => (op === 'list' && String(k).startsWith('staffmail-queue:') && k !== 'staffmail-queue:') || (op === 'get' && String(k).startsWith('staffmail-digest:'));
+  const overdueOp = ([op, k]) => (op === 'get' && k === STAFF_QUEUE_OVERDUE_ALERT_KEY) || (op === 'list' && k === 'staffmail-queue:');
+  assert.ok(at(caseStep) >= 0 && at(digestOp) >= 0 && at(overdueOp) >= 0);
+  assert.ok(lastAt(caseStep) < at(digestOp), `the digest ran after the case steps (${lastAt(caseStep)} < ${at(digestOp)})`);
+  assert.ok(lastAt(digestOp) < at(overdueOp), 'the overdue check ran after the digest');
 });

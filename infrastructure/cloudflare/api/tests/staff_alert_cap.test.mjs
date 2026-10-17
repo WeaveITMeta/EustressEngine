@@ -115,13 +115,15 @@ test('250 filings in a day: each required alert is sent or carried by a digest t
   assert.equal(queued.length, 250 - minors.size - STAFF_ALERTS_PER_DAY, 'every alert past the allowance stays owed: none was counted as told');
   for (const ref of queued) assert.match((await caseOf(env, ref)).step_errors.staff.error, /hourly digest/);
 
-  // The hourly cron: the digest first, then the owed steps.
+  // The hourly cron: the owed steps, then the digest (last, so it spends only what the steps left).
   await quiet(() => runCron(env));
   const digests = staffMail(env).filter((m) => DIGEST.test(m.subject));
   assert.equal(digests.length, 1, 'one digest');
   assert.ok(queued.length <= STAFF_DIGEST_MAX_ENTRIES);
   for (const ref of queued) assert.ok(digests[0].text.includes(ref), `the digest names ${ref}`);
   assert.ok(digests[0].subject.includes(`${queued.length} waiting`), digests[0].subject);
+  // The next run's steps find each alert carried by the digest that sent.
+  await quiet(() => runCron(env));
   for (const ref of refs) {
     const rec = await caseOf(env, ref);
     assert.ok(!rec.pending.includes('staff'), `the staff step of ${ref} is done`);
@@ -149,13 +151,14 @@ test('a required alert past the allowance is delivered only once a digest carryi
   assert.ok(rec.pending.includes('staff'), 'a digest that did not send delivers nothing');
   assert.equal(rec.step_errors.staff.tries, 2);
   assert.equal(staffMail(env).filter((m) => DIGEST.test(m.subject)).length, 0);
-  // The next try sends it, and the step's retry finds it carried.
+  // The next run sends it after the steps, and the step's retry on the run after finds it carried.
   env.refuse = null;
   await quiet(() => runCron(env));
-  rec = await caseOf(env, ref);
   const digests = staffMail(env).filter((m) => DIGEST.test(m.subject));
   assert.equal(digests.length, 1);
   assert.ok(digests[0].text.includes(ref));
+  await quiet(() => runCron(env));
+  rec = await caseOf(env, ref);
   assert.ok(!rec.pending.includes('staff'), 'carried by a digest that sent: delivered');
 });
 
@@ -165,7 +168,7 @@ test('a required alert refused for any reason throws, stays owed, and the hourly
   const ref = await quiet(() => file(env, 2));
   let rec = await caseOf(env, ref);
   assert.ok(rec.pending.includes('staff'), 'a refused required alert is not counted as told');
-  assert.match(rec.step_errors.staff.error, /no staff address could be emailed/);
+  assert.match(rec.step_errors.staff.error, /the send failed\) and waits for the hourly digest/, 'a required alert whose send failed waits on the list');
   env.refuse = null;
   await quiet(() => runCron(env));
   rec = await caseOf(env, ref);

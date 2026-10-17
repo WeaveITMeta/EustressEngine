@@ -1230,30 +1230,33 @@ export function staffLaneOf(kind, facts) {
 
 /// Emails staff an alert of `kind` (renderMail) with `facts`, in its lane (staffLaneOf), never under any account's notice
 /// allowance. `required`: an alert no staff address has (not sent now, and not carried by a digest that sent) throws, so the
-/// step is retried; past the lane's allowance it waits on the over-cap list for the hourly digest (src/staff_alerts.mjs), and
-/// `alertId` (stable across retries) is how the retry finds that a digest carried it. With no mail binding nothing can be
-/// sent and the log is all there is: a required alert throws then too, so the step stays owed.
+/// step is retried; past the lane's allowance, and for a required or legal-lane alert on any failed send, it waits on the
+/// over-cap list for the hourly digest (src/staff_alerts.mjs), and `alertId` (stable across retries) is how the retry finds
+/// that a digest carried it. With no mail binding nothing can be sent and the log is all there is: a required alert throws
+/// then too, so the step stays owed.
 async function alertStaff(env, kind, facts, { required = false, alertId = null } = {}) {
   const rendered = renderMail(kind, facts);
   console.error(`takedown staff alert: ${rendered.subject}`);
   const reference = facts?.reference || (Array.isArray(facts?.references) && facts.references.length ? facts.references.join(', ') : null) || facts?.id || (facts?.case_id ? `${facts.case_kind || 'case'} ${facts.case_id}` : null);
   const r = await sendStaffAlert(env, await staffAddresses(env), rendered, { lane: staffLaneOf(kind, facts), alertId, kind, reference, required, fromName: FROM_NAME });
   if (required && !r.delivered) {
-    throw new Error(r.queued ? 'the staff alert is past the daily allowance and waits for the hourly digest' : 'no staff address could be emailed');
+    throw new Error(r.queued ? 'the staff alert was not sent (past the daily allowance, or the send failed) and waits for the hourly digest' : 'no staff address could be emailed');
   }
   return { at: nowIso(), sent: r.sent, queued: r.queued, digested: r.digested };
 }
 
-/// From the hourly sweep (sweepTakedowns, first): the over-cap digest to each staff address (src/staff_alerts.mjs).
-export async function sendStaffDigest(env, { now = Date.now() } = {}) {
-  return sendStaffDigests(env, await staffAddresses(env), (d) => renderMail('staff_digest', { ...d, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
+/// From the hourly sweep (sweepTakedowns, after the case steps): the over-cap digest to each staff address
+/// (src/staff_alerts.mjs). `recipients`: the staff addresses, when the caller has them already.
+export async function sendStaffDigest(env, { now = Date.now(), recipients = null } = {}) {
+  return sendStaffDigests(env, recipients || (await staffAddresses(env)), (d) => renderMail('staff_digest', { ...d, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
 }
 
-/// From the hourly sweep, after the digest: a staff_failure alert on the legal lane when an alert has waited on the over-cap
-/// queue 24 hours (src/staff_alerts.mjs alertOverdueStaffQueue), at most once a day. Counts, ages and kinds only.
-export async function alertStaffQueueOverdue(env, { now = Date.now() } = {}) {
+/// From the hourly sweep, after the case steps and the digest: a staff_failure alert on the legal lane when an alert has
+/// waited on the over-cap queue 24 hours (src/staff_alerts.mjs alertOverdueStaffQueue), at most once a day. Counts, ages and
+/// kinds only.
+export async function alertStaffQueueOverdue(env, { now = Date.now(), recipients = null } = {}) {
   const api = String(env.PUBLIC_API_ORIGIN || 'https://api.eustress.dev').replace(/\/$/, '');
-  return alertOverdueStaffQueue(env, await staffAddresses(env), (s) => renderMail('staff_queue_overdue', { ...s, at: new Date(now).toISOString(), admin_url: `${api}/api/admin/legal/staff-alerts` }), { now, fromName: FROM_NAME });
+  return alertOverdueStaffQueue(env, recipients || (await staffAddresses(env)), (s) => renderMail('staff_queue_overdue', { ...s, at: new Date(now).toISOString(), admin_url: `${api}/api/admin/legal/staff-alerts` }), { now, fromName: FROM_NAME });
 }
 
 /// A forum post reported as csam (src/moderation.mjs fileForumReport), on this module's staff alert path: the same mailboxes,
@@ -1271,21 +1274,21 @@ export async function alertStaffEvidence(env, facts) {
 /// A legal report is queued or held (src/legal_reports.mjs), on this module's staff alert path. `facts`: id, kind, status,
 /// reference, destination, reason, admin_url. Never the content and never the reported account's identity.
 export async function alertStaffLegalReport(env, facts) {
-  return alertStaff(env, 'staff_legal_report', facts, { required: false });
+  return alertStaff(env, 'staff_legal_report', facts, { required: false, alertId: `legal-report:${facts?.id}:${facts?.status}:${facts?.reason || ''}` });
 }
 
 /// A legal report debt is stuck (src/legal_reports.mjs recordStuckReport), on this module's staff alert path, at once and then
 /// daily while it stands. `facts`: reference, case_kind, case_id, report_kind, reason, since, stuck_at, alerts, admin_url.
 /// Never the content, the account or an address.
 export async function alertStaffStuckReport(env, facts) {
-  return alertStaff(env, 'staff_legal_stuck', facts, { required: false });
+  return alertStaff(env, 'staff_legal_stuck', facts, { required: false, alertId: `legal-stuck:${facts?.case_kind}:${facts?.case_id}:${facts?.stuck_at}:${facts?.alerts ?? 1}` });
 }
 
 /// A case now owes a legal report its try could not write (src/legal_reports.mjs alertReportOwed), on this module's staff alert
 /// path, once when the debt is created. `facts`: reference, case_kind, case_id, category, reason, since, admin_url. Never the
 /// content, the account or an address.
 export async function alertStaffReportOwed(env, facts) {
-  return alertStaff(env, 'staff_legal_owed', facts, { required: false });
+  return alertStaff(env, 'staff_legal_owed', facts, { required: false, alertId: `legal-owed:${facts?.case_kind}:${facts?.case_id}:${facts?.since || 'unknown'}` });
 }
 
 function staffFacts(rec, ctx) {
@@ -1486,10 +1489,10 @@ export function renderMail(kind, d) {
       return mail({
         subject: `Staff alerts past the day's allowance: ${d.total}${d.at_least ? ' or more' : ''} waiting`, heading: 'Staff alerts past the allowance', label: 'Staff Notice',
         paragraphs: [
-          `${d.total}${d.at_least ? ' or more' : ''} staff alert(s) went past the day's allowance for this address and were not sent one by one. Each is named below by its kind and reference; open the queue for the case.`,
+          `${d.total}${d.at_least ? ' or more' : ''} staff alert(s) for this address were not sent one by one: past the day's allowance, or a send that failed. Each is named below by its kind and reference; open the queue for the case.`,
           ...(d.more ? [`${d.more} more are waiting and are named in the next digest, within the hour.`] : []),
         ],
-        rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}`]),
+        rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}${e.reason && e.reason !== 'daily_cap' ? ', after its send failed' : ''}`]),
       });
     case 'staff_queue_overdue': {
       const kinds = (o) => Object.entries(o || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';
@@ -1794,10 +1797,24 @@ async function adminRoute(request, url, env, cors, deps) {
 /// on. It finishes what a request or a person's decision started; it never restores anything on its own.
 export async function sweepTakedowns(env, deps = {}, { cases = 50, scanPages = 6 } = {}) {
   const out = { cases: 0, completed: 0, still_pending: 0, removal_owed: 0, copies_locked: 0, copy_candidates: 0, scan_done: null };
-  // The staff alerts past the day's allowance go out first, so a required alert the digest carries is delivered when its step
-  // runs again below.
-  try { out.digest = await sendStaffDigest(env); } catch (e) { console.error('takedown: the staff digest failed:', e?.name || 'Error'); }
-  try { out.staff_queue = await alertStaffQueueOverdue(env); } catch (e) { console.error('takedown: the overdue staff queue check failed:', e?.name || 'Error'); }
+  try {
+    await sweepCases(env, deps, out, { cases, scanPages });
+  } finally {
+    // The staff mail past the day's allowance goes last, each part in its own try, so it spends only what the case steps left
+    // of the run's storage budget, and runs even when a step threw. A required alert the digest carries is found delivered when
+    // its step runs again, on the next run.
+    let recipients = null;
+    try { recipients = await staffAddresses(env); } catch (e) { console.error('takedown: listing the staff addresses failed:', e?.name || 'Error'); }
+    if (recipients) {
+      try { out.digest = await sendStaffDigest(env, { recipients }); } catch (e) { console.error('takedown: the staff digest failed:', e?.name || 'Error'); }
+      try { out.staff_queue = await alertStaffQueueOverdue(env, { recipients }); } catch (e) { console.error('takedown: the overdue staff queue check failed:', e?.name || 'Error'); }
+    }
+  }
+  return out;
+}
+
+/// The case steps of one sweep: every case that owes a step, the locks in force, the identical-copy scan.
+async function sweepCases(env, deps, out, { cases, scanPages }) {
   const ctx = contextFor(env, deps, null);
   const listed = await env.SOCIAL.list({ prefix: 'tdpending:', limit: cases });
   for (const k of listed?.keys || []) {
@@ -1824,7 +1841,6 @@ export async function sweepTakedowns(env, deps = {}, { cases = 50, scanPages = 6
   out.copy_candidates = scan.candidates;
   out.scan_done = scan.done;
   if (ctx.locksWritten) await refreshServingCaches(env, ctx);
-  return out;
 }
 
 /// A takedown in force keeps its listings locked whatever else moved the lock (a person releasing a moderation hold on the same
