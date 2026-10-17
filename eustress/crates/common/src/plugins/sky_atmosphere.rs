@@ -75,7 +75,10 @@ use bevy::light::{
     Atmosphere as PlanetAtmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfig,
     EnvironmentMapLight, FogVolume, GeneratedEnvironmentMapLight, Skybox, VolumetricFog,
 };
-use bevy::pbr::{AtmosphereMode, AtmosphereSettings};
+use bevy::pbr::resources::{AtmosphereTextures, GpuAtmosphere};
+use bevy::pbr::{AtmosphereMode, AtmosphereSettings, ExtractedAtmosphere, GpuAtmosphereSettings};
+use bevy::render::sync_world::RenderEntity;
+use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
@@ -158,6 +161,17 @@ impl Plugin for SkyAtmospherePlugin {
                 super::orthographic_sky::patch_sky_shaders
                     .run_if(resource_exists::<Assets<bevy::shader::Shader>>),
             );
+    }
+
+    fn finish(&self, app: &mut App) {
+        // In `finish`, after every plugin's `build`, so the render app is
+        // there whatever order the plugins were added in. No renderer, no-op.
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.add_systems(
+                ExtractSchedule,
+                drop_idle_atmosphere_views.after(bevy::pbr::extract_atmosphere),
+            );
+        }
     }
 }
 
@@ -846,6 +860,51 @@ fn sync_camera_atmosphere_settings(
             settings.rendering_method = desired.rendering_method;
             settings.sky_max_samples = desired.sky_max_samples;
         }
+    }
+}
+
+/// The atmosphere views to drop from the render world this frame: every
+/// inactive one while some atmosphere view is active, and none while none is.
+///
+/// Bevy 0.19's atmosphere is single-view. It extracts and prepares every
+/// camera with `AtmosphereSettings`, active or not, and an
+/// `AtmosphereEnvironmentMapLight` probe borrows the LUTs of the first such
+/// view its query yields, once, when the probe is made
+/// (`prepare_probe_textures`, bevy_pbr `atmosphere/environment.rs`). Play
+/// leaves the editor camera inactive with its atmosphere and adds two Play
+/// cameras, the scripted one inactive, so the avatar camera's probe could
+/// take the LUTs of a camera that no longer renders. Its reflections and sky
+/// fill then froze at the sky Play began under, while the sky itself and the
+/// exposure went on with the clock: driven into dusk, the scene was lit by
+/// the afternoon sky at a night exposure, a pale blue-white wash with every
+/// normal map glittering. `write_atmosphere_buffer` also takes `single()`
+/// over the prepared views, and wrote nothing while there were three.
+///
+/// While no atmosphere view is active (the frames between Play turning the
+/// editor camera off and the avatar camera arriving) nothing is dropped, so
+/// the editor camera's LUT textures stay in the texture cache and its probe
+/// finds them again after Stop.
+pub fn idle_atmosphere_views<T: Copy>(views: impl IntoIterator<Item = (T, bool)>) -> Vec<T> {
+    let views: Vec<(T, bool)> = views.into_iter().collect();
+    if !views.iter().any(|&(_, active)| active) {
+        return Vec::new();
+    }
+    views.into_iter().filter(|&(_, active)| !active).map(|(view, _)| view).collect()
+}
+
+/// Render world: take the atmosphere's per-view state off the views
+/// [`idle_atmosphere_views`] names, after bevy's `extract_atmosphere` has
+/// given it to them this frame. An idle camera draws nothing, so it loses
+/// nothing; once it is the active one again, the next extraction and
+/// prepare give it all back.
+fn drop_idle_atmosphere_views(
+    mut commands: Commands,
+    cameras: Extract<Query<(RenderEntity, &Camera), (With<Camera3d>, With<AtmosphereSettings>)>>,
+) {
+    for view in idle_atmosphere_views(cameras.iter().map(|(view, camera)| (view, camera.is_active))) {
+        commands
+            .entity(view)
+            .remove::<(ExtractedAtmosphere, GpuAtmosphereSettings, GpuAtmosphere, AtmosphereTextures)>();
     }
 }
 
@@ -2269,6 +2328,31 @@ pub fn clear_raw_environment_map(commands: &mut Commands, camera: Entity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Play holds three atmosphere cameras: the editor's, off; the scripted
+    /// Play camera, off; the avatar's, on. Exactly one may keep its
+    /// atmosphere, or the avatar camera's probe can light the scene from a
+    /// sky that stopped at the moment Play began.
+    #[test]
+    fn play_keeps_exactly_one_atmosphere_view() {
+        let (editor, scripted, avatar) = (1u32, 2u32, 3u32);
+        let play = [(editor, false), (scripted, false), (avatar, true)];
+        let dropped = idle_atmosphere_views(play);
+        assert_eq!(dropped, [editor, scripted]);
+        let kept: Vec<u32> = play.iter().map(|&(v, _)| v).filter(|v| !dropped.contains(v)).collect();
+        assert_eq!(kept, [avatar], "exactly one atmosphere view in Play");
+
+        // Edit: the editor camera alone keeps its atmosphere.
+        assert!(idle_atmosphere_views([(editor, true)]).is_empty());
+
+        // The frames between Play turning the editor camera off and the
+        // avatar camera arriving: nothing is dropped, so the editor camera's
+        // LUT textures stay cached for its probe after Stop.
+        assert!(idle_atmosphere_views([(editor, false), (scripted, false)]).is_empty());
+
+        // After Stop: the editor camera is active again, nothing else is left.
+        assert!(idle_atmosphere_views([(editor, true)]).is_empty());
+    }
 
     #[test]
     fn face_directions_are_unit_and_cover_all_axes() {
