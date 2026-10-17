@@ -1221,7 +1221,7 @@ async function staffAddresses(env) {
 /// file uploaded again, an evidence seal that failed, and every alert about a possible-CSAM case have the priority lane's own
 /// allowance. A legal report and a stuck report debt, which only the legal report path writes, are not capped.
 export const STAFF_PRIORITY_KINDS = Object.freeze(['staff_csam', 'staff_forum_csam', 'staff_evidence_failure']);
-export const STAFF_LEGAL_KINDS = Object.freeze(['staff_legal_report', 'staff_legal_stuck']);
+export const STAFF_LEGAL_KINDS = Object.freeze(['staff_legal_report', 'staff_legal_stuck', 'staff_legal_owed']);
 export function staffLaneOf(kind, facts) {
   if (STAFF_LEGAL_KINDS.includes(kind)) return 'legal';
   if (STAFF_PRIORITY_KINDS.includes(kind) || facts?.possible_csam === true) return 'priority';
@@ -1272,6 +1272,13 @@ export async function alertStaffLegalReport(env, facts) {
 /// Never the content, the account or an address.
 export async function alertStaffStuckReport(env, facts) {
   return alertStaff(env, 'staff_legal_stuck', facts, { required: false });
+}
+
+/// A case now owes a legal report its try could not write (src/legal_reports.mjs alertReportOwed), on this module's staff alert
+/// path, once when the debt is created. `facts`: reference, case_kind, case_id, category, reason, since, admin_url. Never the
+/// content, the account or an address.
+export async function alertStaffReportOwed(env, facts) {
+  return alertStaff(env, 'staff_legal_owed', facts, { required: false });
 }
 
 function staffFacts(rec, ctx) {
@@ -1476,6 +1483,16 @@ export function renderMail(kind, d) {
           ...(d.more ? [`${d.more} more are waiting and are named in the next digest, within the hour.`] : []),
         ],
         rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}`]),
+      });
+    case 'staff_legal_owed':
+      return mail({
+        subject: `A legal report is owed and was not written yet: ${d.reference || `${d.case_kind} ${d.case_id}`}`, heading: 'A legal report is owed', label: 'Staff Notice',
+        paragraphs: [
+          'A case owes a legal report, and the try to write it did not succeed. The debt is kept on the case and nothing about it was dropped; the sealed evidence stays.',
+          'The hourly sweep writes it once its setting is on; until then it waits. This email names the case only, and is sent once for this debt.',
+          `The legal report queue, with an administrator session: ${d.admin_url}.`,
+        ],
+        rows: [['Case', d.reference || 'not yet referenced'], ['Case kind', d.case_kind], ['Case id', d.case_id], ['Category', d.category || 'unknown'], ['Why it was not written', d.reason || 'unknown'], ['Owed since', d.since ? when(d.since) : 'unknown']],
       });
     case 'staff_legal_stuck':
       return mail({

@@ -317,6 +317,18 @@ test('every sender is off by default: reports stay ready_to_send, and an NCMEC s
   }
 });
 
+test('LISTING_LEGAL_OWED_SWEEP and FORUM_LEGAL_OWED_SWEEP are on only at the exact "on": On, ON, " on" and "on " leave them off', async () => {
+  for (const value of ['On', 'ON', ' on', 'on ', 'true', '1']) {
+    for (const name of ['LISTING_LEGAL_OWED_SWEEP', 'FORUM_LEGAL_OWED_SWEEP']) {
+      assert.equal(legalSettingsFrom({ [name]: value })[name === 'LISTING_LEGAL_OWED_SWEEP' ? 'listing_owed_sweep' : 'forum_owed_sweep'], false, `${name}=${JSON.stringify(value)}`);
+    }
+    const env = environment({ LISTING_LEGAL_OWED_SWEEP: value, FORUM_LEGAL_OWED_SWEEP: value });
+    const swept = await sweepLegalReports(env);
+    assert.deepEqual([swept.owed_listing_reports, swept.owed_reports, swept.stuck], ['off', 'off', 'off'], JSON.stringify(value));
+  }
+  assert.equal(legalSettingsFrom({ LISTING_LEGAL_OWED_SWEEP: 'on' }).listing_owed_sweep, true);
+});
+
 // ── threats: built, off ──────────────────────────────────────────────────────
 
 const CLEAN = { religious_speech: false, political_speech: false, criticism: false, hyperbole: false, joke: false };

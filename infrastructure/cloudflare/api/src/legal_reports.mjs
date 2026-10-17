@@ -39,8 +39,11 @@
 //   FORUM_LEGAL_OWED_SWEEP             let the hourly sweep write the reports forum cases owe (writeOwedForumReports). Turned on
 //                                      with the forums; off, the sweep makes no call into the forum code.
 //   LISTING_LEGAL_OWED_SWEEP           let the hourly sweep write the reports listing cases owe (writeOwedListingReports, with its
-//                                      heal over the quarantined queue) and send the daily re-alert for stuck debts. Off, the
-//                                      sweep touches no listing case, no owed index and sends no stuck mail.
+//                                      heal over the quarantined queue). Off, the sweep touches no listing case and no listing
+//                                      owed index.
+//   Each owed sweep setting also gates the daily re-alert of its own kind's stuck debts: forum stuck debts under
+//   FORUM_LEGAL_OWED_SWEEP, listing stuck debts under LISTING_LEGAL_OWED_SWEEP. With both off no stuck mail is re-sent. A
+//   listing debt is told to staff once when it is created, whatever the setting (alertReportOwed).
 //
 // Storage (SOCIAL):
 //   legalreport:{id}                            the report
@@ -52,19 +55,30 @@
 //   legalowed:{caseKind}:{caseId}               a case that owes a report (src/moderation.mjs writeOwedForumReports and
 //                                               writeOwedListingReports), retried hourly
 //   legalstuck:{caseKind}:{caseId}              a report debt no retry can pay, waiting for a person (recordStuckReport)
+//   legalstuck-cursor:{caseKind}                where the daily stuck re-alert left off (alertStuckReports)
+//   legalalert:owed:{caseKind}:{caseId}:{since} the one staff alert of a debt when it was created (alertReportOwed)
 //
 // Report debts. A case that owes a report keeps the debt until it is paid, and nothing clears or drops one silently. What a
 // try at the report comes to (reportDebtOutcome): `paid` (written, or the case has one); `settled` (a decision that no report
 // is owed: not a reported kind, a borderline finding, the threat criteria not met), closed with its reason recorded and
-// audited first; `owed` (unavailable, busy, the sweep's budget), kept and tried again every hour; `stuck` (a defect in the
-// data, such as no account for a threat, or any reason not named here), moved to the stuck index, staff alerted at once and
-// then daily (no content, account or address in the alert), shown at GET /api/admin/legal/stuck, and cleared only by a person
-// with a rationale, audited before anything changes (POST /api/admin/legal/stuck/{caseKind}/{caseId}/clear). The sealed
-// evidence is kept whatever the outcome.
+// audited first; `owed` (unavailable, busy, the sweep's budget), kept and tried again every hour, at most REPORT_DEBT_MAX_TRIES
+// times, then stuck as `retries_exhausted` (a try that fails the same way every hour is a defect, not an outage); `stuck` (a
+// defect in the data, such as no account for a threat, or any reason not named here), moved to the stuck index, staff alerted
+// at once and then daily (no content, account or address in the alert), shown at GET /api/admin/legal/stuck, and cleared only
+// by a person with a rationale, audited before anything changes (POST /api/admin/legal/stuck/{caseKind}/{caseId}/clear). A
+// case keeps one debt per report kind (a forum post can owe a threat report and a csam report at once), and a clear removes
+// only a debt that is stuck, never a payable one. The sealed evidence is kept whatever the outcome.
+//
+// NOT DECIDED (counsel): a listing a person RELEASES from its quarantine keeps the csam debt its quarantine owed, and the
+// sweep still writes the report (queued ready_to_send, sent by no one while every sender is off). Whether a person's release
+// settles the debt is counsel's call; the code does not decide it.
 //
 // A CSAM report is written when the account is not known (no account id on the case) or was deleted: the duty in 2258A comes
-// from knowing of the content, not from knowing who posted it, so the report goes with `who.account_status` 'unknown' or
-// 'deleted' and the fields the account would give empty. NEEDS LEGAL REVIEW: counsel should confirm this reading.
+// from knowing of the content, not from knowing who posted it. `who.account_status` says which: 'unknown' (no account id, or
+// no account store to ask) with every field the account would give empty; 'deleted' (the store answered that no user record
+// exists) with the account id kept, the email empty, and whatever the identity record (KYC_STATUS) still holds (the verified
+// name, the date of birth, the country). A read that fails is never reported as a fact: the report is not written, and the
+// debt stays owed for the next try. NEEDS LEGAL REVIEW: counsel should confirm this reading.
 // =============================================================================
 
 import { assignCaseReference } from './case_reference.mjs';
@@ -223,9 +237,19 @@ const parse = (raw) => { try { return raw ? JSON.parse(raw) : null; } catch { re
 
 /// The reported account as a report carries it, built field by field from the user record and the identity record. Only
 /// these fields; never the document images, the selfie, their storage keys, the document number or the check's analysis.
+/// A read of the account store that failed. writeLegalReport answers 'unavailable' (owed), so the report is written on a later
+/// try from what the store says then, never from a guess.
+export class AccountReadError extends Error {
+  constructor(what) { super(`the ${what} could not be read`); this.name = 'AccountReadError'; }
+}
+const readOrThrow = async (binding, key, what) => {
+  if (!binding) return null;
+  try { return await binding.get(key); } catch { throw new AccountReadError(what); }
+};
+
 export async function reportedAccount(env, accountId) {
-  const user = parse(await env.USERS?.get(`user:${accountId}`).catch(() => null));
-  const kyc = parse(await env.KYC_STATUS?.get(`kyc-${accountId}-front`).catch(() => null));
+  const user = parse(await readOrThrow(env.USERS, `user:${accountId}`, 'user record'));
+  const kyc = parse(await readOrThrow(env.KYC_STATUS, `kyc-${accountId}-front`, 'identity record'));
   const verified = !!kyc && (kyc.status === 'verified' || kyc.status === 'linked');
   let dob = null;
   if (verified) {
@@ -234,7 +258,7 @@ export async function reportedAccount(env, accountId) {
   }
   const country = clean(kyc?.jurisdiction || kyc?.iso2 || null, 2);
   let email = null;
-  try { email = clean(await readAccountEmail(env, user ? { ...user, id: user.id || accountId } : null), 254); } catch { email = null; }
+  try { email = clean(await readAccountEmail(env, user ? { ...user, id: user.id || accountId } : null), 254); } catch { throw new AccountReadError('account email'); }
   return {
     account_id: accountId,
     identity_verified: verified,
@@ -395,8 +419,9 @@ export async function writeLegalReport(env, finding, deps = {}) {
     let reference = finding.caseRef || null;
     if (!reference) { try { reference = await assignCaseReference(env, finding.caseKind, finding.caseId); } catch { reference = null; } }
     const who = accountKnown ? await reportedAccount(env, accountId) : unknownAccount();
-    // Whether the account is known: 'known', 'deleted' (an id with no account record), or 'unknown' (no id at all).
-    const accountStatus = !accountKnown ? 'unknown' : (await env.USERS?.get(`user:${accountId}`).catch(() => null)) ? 'known' : 'deleted';
+    // Whether the account is known: 'known', 'deleted' (the store answered that the id has no user record), or 'unknown' (no
+    // id, or no store to ask). A read that fails throws (AccountReadError): the report is owed, never written on a guess.
+    const accountStatus = !accountKnown || !env.USERS ? 'unknown' : (await readOrThrow(env.USERS, `user:${accountId}`, 'user record')) ? 'known' : 'deleted';
     const ips = uploadIpsOf(finding.uploader?.upload_ips);
     const view = recordedViewOf(finding.detection);
     const viewed = !!view;
@@ -496,6 +521,11 @@ export const OWED_REPORT_REASONS = Object.freeze(['unavailable', 'busy', 'budget
 export const DEBT_CASE_KINDS = Object.freeze(['forum', 'moderation']);
 /// A stuck debt's alert is sent again this often while it stands.
 export const STUCK_ALERT_EVERY_MS = 86400000;
+/// An owed debt is tried at most this many times (hourly, about a day), then it is stuck as RETRIES_EXHAUSTED for a person.
+export const REPORT_DEBT_MAX_TRIES = 24;
+export const RETRIES_EXHAUSTED = 'retries_exhausted';
+/// The stuck debts GET /api/admin/legal/stuck answers per request.
+export const STUCK_LIST_PAGE = 200;
 
 /// What one try at a report comes to: 'paid', 'settled', 'owed' or 'stuck'. `result` is writeLegalReport's answer, or null
 /// when the try did not get that far (owed). A reason named nowhere above is stuck, so a person sees it.
@@ -531,9 +561,11 @@ async function alertStuck(env, rec, nowMs) {
     if (!(told?.sent > 0 || told?.digested > 0)) return false;
     rec.alerted_at = new Date(nowMs).toISOString();
     rec.alerts = (rec.alerts || 0) + 1;
-    // A debt a person cleared meanwhile is not written back.
+    // Written back only onto the same stuck record, as it is now: one a person cleared meanwhile is not restored, and one
+    // recorded again since (a new stuck_at) is not overwritten with this one.
     const key = legalStuckKey(rec.case_kind, rec.case_id);
-    if (await env.SOCIAL.get(key)) await env.SOCIAL.put(key, JSON.stringify(rec));
+    const current = parse(await env.SOCIAL.get(key));
+    if (current && current.stuck_at === rec.stuck_at) await env.SOCIAL.put(key, JSON.stringify({ ...current, alerted_at: rec.alerted_at, alerts: Math.max(rec.alerts, (current.alerts || 0) + 1) }));
     return true;
   } catch (e) {
     console.error('legal reports: the stuck report alert failed:', e?.name || 'Error');
@@ -563,29 +595,65 @@ export async function recordStuckReport(env, { caseKind, caseId, reportKind = nu
   }
 }
 
-/// From the hourly sweep: every stuck debt not alerted in the last STUCK_ALERT_EVERY_MS (or never) is alerted again. A page of
-/// `limit` at a time, at most `maxPages`. Never throws. `{ stuck, alerted }`.
-export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 5 } = {}) {
+export const stuckCursorKey = (caseKind) => `legalstuck-cursor:${caseKind}`;
+
+/// From the hourly sweep: every stuck debt of `caseKinds` not alerted in the last STUCK_ALERT_EVERY_MS (or never) is alerted
+/// again. A page of `limit` at a time, at most `maxPages` a run per kind, carrying on from where the last run stopped
+/// (legalstuck-cursor:{caseKind}), so every stuck debt is reached however many there are; the run that reaches the end starts
+/// the next from the beginning. Never throws. `{ stuck, alerted }` (the debts read this run).
+export async function alertStuckReports(env, { now = Date.now(), limit = 200, maxPages = 5, caseKinds = DEBT_CASE_KINDS } = {}) {
   const out = { stuck: 0, alerted: 0 };
-  try {
-    let cursor;
-    for (let page = 0; page < maxPages; page++) {
-      const listed = await env.SOCIAL.list({ prefix: 'legalstuck:', limit, ...(cursor ? { cursor } : {}) });
-      for (const k of listed?.keys || []) {
-        const rec = parse(await env.SOCIAL.get(k.name));
-        if (!rec) continue;
-        out.stuck += 1;
-        const last = Date.parse(rec.alerted_at || '');
-        if (Number.isFinite(last) && now - last < STUCK_ALERT_EVERY_MS) continue;
-        if (await alertStuck(env, rec, now)) out.alerted += 1;
+  for (const caseKind of caseKinds.filter((k) => DEBT_CASE_KINDS.includes(k))) {
+    try {
+      let cursor;
+      try { cursor = (await env.SOCIAL.get(stuckCursorKey(caseKind))) || undefined; } catch { cursor = undefined; }
+      let pages = 0;
+      while (pages < maxPages) {
+        let listed;
+        try { listed = await env.SOCIAL.list({ prefix: `legalstuck:${caseKind}:`, limit, ...(cursor ? { cursor } : {}) }); }
+        catch { if (!cursor) break; cursor = undefined; continue; }
+        pages += 1;
+        for (const k of listed?.keys || []) {
+          const rec = parse(await env.SOCIAL.get(k.name));
+          if (!rec) continue;
+          out.stuck += 1;
+          const last = Date.parse(rec.alerted_at || '');
+          if (Number.isFinite(last) && now - last < STUCK_ALERT_EVERY_MS) continue;
+          if (await alertStuck(env, rec, now)) out.alerted += 1;
+        }
+        if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; break; }
+        cursor = listed.cursor;
       }
-      if (listed?.list_complete !== false || !listed.cursor) break;
-      cursor = listed.cursor;
+      try {
+        if (cursor) await env.SOCIAL.put(stuckCursorKey(caseKind), cursor);
+        else await env.SOCIAL.delete(stuckCursorKey(caseKind));
+      } catch { /* the next run reads from where KV says, or from the start */ }
+    } catch (e) {
+      console.error('legal reports: the stuck reports were not alerted:', e?.name || 'Error');
     }
-  } catch (e) {
-    console.error('legal reports: the stuck reports were not alerted:', e?.name || 'Error');
   }
   return out;
+}
+
+/// Staff are told once, at once, that a case now owes a legal report its try could not write (src/moderation.mjs, when a
+/// listing debt is created), on the staff mail path (src/takedown.mjs, the legal lane): the case, the kind, the reason and the
+/// date, never the content, the account or an address. Sent once per case and debt (`since`); one not sent is tried again the
+/// next time the debt is tried. Never throws. `true` when staff have it.
+export async function alertReportOwed(env, { caseKind, caseId, reference = null, category = null, reason = null, since = null } = {}) {
+  try {
+    if (!DEBT_CASE_KINDS.includes(caseKind) || typeof caseId !== 'string' || !STUCK_CASE_ID.test(caseId)) return false;
+    const key = `legalalert:owed:${caseKind}:${caseId}:${clean(since, 40) || 'unknown'}`;
+    if (await env.SOCIAL.get(key)) return true;
+    const { alertStaffReportOwed } = await import('./takedown.mjs');
+    const api = String(env.PUBLIC_API_ORIGIN || 'https://api.eustress.dev').replace(/\/$/, '');
+    const told = await alertStaffReportOwed(env, { reference: clean(reference, 80), case_kind: caseKind, case_id: caseId, category: clean(category, 60), reason: clean(reason, 60), since: clean(since, 40), admin_url: `${api}/api/admin/legal/reports` });
+    if (!(told?.sent > 0 || told?.digested > 0)) return false;
+    await env.SOCIAL.put(key, new Date().toISOString(), { expirationTtl: 400 * 86400 });
+    return true;
+  } catch (e) {
+    console.error('legal reports: the owed report alert failed:', e?.name || 'Error');
+    return false;
+  }
 }
 
 /// A person clears a stuck debt. Only a person: `by` is the administrator (never 'system'), with a `rationale` of 10 to 2000
@@ -598,8 +666,10 @@ export async function clearStuckReport(env, { caseKind, caseId, by, rationale } 
     if (typeof by !== 'string' || !by || by === 'system') return { ok: false, code: 'person_required' };
     const why = typeof rationale === 'string' ? rationale.trim() : '';
     if (why.length < 10 || why.length > 2000) return { ok: false, code: 'rationale_required' };
-    if (!(await loadStuckReport(env, caseKind, caseId))) return { ok: false, code: 'not_stuck' };
-    const r = await (await import('./moderation.mjs')).clearReportDebt(env, { caseKind, caseId, by, rationale: why });
+    const stuck = await loadStuckReport(env, caseKind, caseId);
+    if (!stuck) return { ok: false, code: 'not_stuck' };
+    // Only the debt that is stuck is cleared (the kind the stuck record names); a payable debt the case also owes stays owed.
+    const r = await (await import('./moderation.mjs')).clearReportDebt(env, { caseKind, caseId, by, rationale: why, reportKind: stuck.report_kind || null });
     if (!r?.ok) return { ok: false, code: r?.code || 'unavailable' };
     await env.SOCIAL.delete(legalStuckKey(caseKind, caseId));
     return { ok: true };
@@ -921,17 +991,18 @@ export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date
   } else {
     out.owed_reports = 'off';
   }
-  // Listings whose report is owed, and the daily re-alert for stuck debts, once LISTING_LEGAL_OWED_SWEEP is on. Off, nothing below
-  // is reached: no listing case or owed index is read and no stuck mail is sent.
+  // Listings whose report is owed, once LISTING_LEGAL_OWED_SWEEP is on. Off, nothing below is reached for listings: no listing
+  // case or owed index is read.
   if (settings.listing_owed_sweep) {
     try { out.owed_listing_reports = await (await import('./moderation.mjs')).writeOwedListingReports(env, deps); }
     catch (e) { console.error('legal reports: the owed listing reports were not written:', e?.name || 'Error'); out.owed_listing_reports = null; }
-    // Stuck debts: staff are alerted again once a day while each stands.
-    out.stuck = await alertStuckReports(env, { now });
   } else {
     out.owed_listing_reports = 'off';
-    out.stuck = 'off';
   }
+  // Stuck debts: staff are alerted again once a day while each stands, each kind under its own sweep's setting. With both off
+  // no stuck index is read and no stuck mail is sent.
+  const stuckKinds = [...(settings.forum_owed_sweep ? ['forum'] : []), ...(settings.listing_owed_sweep ? ['moderation'] : [])];
+  out.stuck = stuckKinds.length ? await alertStuckReports(env, { now, caseKinds: stuckKinds }) : 'off';
   out.scam_batch = await weeklyScamBatch(env, now, deps);
   return out;
 }
@@ -1004,20 +1075,25 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
   }
   if (url.pathname === '/api/admin/legal/stuck') {
     if (request.method !== 'GET') return deps.json({ error: 'Method not allowed' }, 405, cors);
+    // One page of STUCK_LIST_PAGE a request (each item is a read, so a request stays inside the per-invocation storage budget):
+    // `?cursor=` (the `next_cursor` of the page before) goes on from there; `next_cursor` is null at the end.
     const items = [];
-    let cursor;
-    for (let page = 0; page < 5; page++) {
-      const listed = await env.SOCIAL.list({ prefix: 'legalstuck:', limit: 200, ...(cursor ? { cursor } : {}) });
+    let cursor = url.searchParams.get('cursor') || undefined;
+    for (let page = 0; page < 1; page++) {
+      let listed;
+      try { listed = await env.SOCIAL.list({ prefix: 'legalstuck:', limit: STUCK_LIST_PAGE, ...(cursor ? { cursor } : {}) }); }
+      catch { return deps.json({ error: 'The cursor is not valid, or the list is unavailable.', code: 'bad_cursor' }, 400, headers); }
       for (const k of listed?.keys || []) {
         const rec = parse(await env.SOCIAL.get(k.name));
         if (rec) items.push({ case_kind: rec.case_kind, case_id: rec.case_id, reference: rec.reference || null, report_kind: rec.report_kind || null, category: rec.category || null, reason: rec.reason, since: rec.since || null, stuck_at: rec.stuck_at, alerted_at: rec.alerted_at || null, alerts: rec.alerts || 0 });
       }
-      if (listed?.list_complete !== false || !listed.cursor) break;
+      if (listed?.list_complete !== false || !listed.cursor) { cursor = undefined; break; }
       cursor = listed.cursor;
     }
-    // The list is cases, reasons and dates (no content, no account, no address): audited as the report queue is.
-    await audit('LEGAL_STUCK_LISTED', 'stuck', { route: 'GET /api/admin/legal/stuck', count: items.length });
-    return deps.json({ items }, 200, headers);
+    // The list names cases by id: it is not served unless its read is on the audit log first, like a report's read.
+    try { await auditOrThrow('LEGAL_STUCK_LISTED', 'stuck', { route: 'GET /api/admin/legal/stuck', count: items.length, page_cursor: url.searchParams.get('cursor') ? 'given' : null }); }
+    catch { return deps.json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
+    return deps.json({ items, next_cursor: cursor || null }, 200, headers);
   }
   m = /^\/api\/admin\/legal\/stuck\/(moderation|forum)\/([A-Za-z0-9-]{1,64})\/clear$/.exec(url.pathname);
   if (m) {
@@ -1026,10 +1102,13 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
     if (!note) return deps.json({ error: 'note is required: 10 to 2000 characters saying why', code: 'note_required' }, 400, cors);
     const stuck = await loadStuckReport(env, m[1], m[2]);
     if (!stuck) return deps.json({ error: 'No stuck report debt for this case.', code: 'not_stuck' }, 404, cors);
-    // Only a person clears a debt, and never unaudited: the audit is written first, or nothing changes.
-    try { await auditOrThrow('LEGAL_STUCK_CLEARED', stuck.reference || `${m[1]}:${m[2]}`, { case_kind: m[1], case_id: m[2], reason: stuck.reason, note }); }
+    // Only a person clears a debt, and never unaudited: the attempt is audited first, or nothing changes; then its outcome, as
+    // it came out (LEGAL_STUCK_CLEARED only for a clear that was made, LEGAL_STUCK_CLEAR_FAILED with the code otherwise).
+    const target = stuck.reference || `${m[1]}:${m[2]}`;
+    try { await auditOrThrow('LEGAL_STUCK_CLEAR_REQUESTED', target, { case_kind: m[1], case_id: m[2], reason: stuck.reason, note }); }
     catch { return deps.json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
     const r = await clearStuckReport(env, { caseKind: m[1], caseId: m[2], by: adminId, rationale: note });
+    await audit(r.ok ? 'LEGAL_STUCK_CLEARED' : 'LEGAL_STUCK_CLEAR_FAILED', target, { case_kind: m[1], case_id: m[2], reason: stuck.reason, note, ...(r.ok ? {} : { code: r.code }) });
     return deps.json(r.ok ? { ok: true } : { error: r.code, code: r.code }, r.ok ? 200 : r.code === 'busy' || r.code === 'unavailable' ? 503 : 409, headers);
   }
   m = /^\/api\/admin\/legal\/notices\/(moderation|forum)\/([A-Za-z0-9-]{1,64})\/release$/.exec(url.pathname);

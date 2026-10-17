@@ -410,11 +410,17 @@ test('a stuck debt leaves the owed list for its own index, staff are alerted at 
   }
   // Not retried and not alerted again within the day; alerted again a day later.
   const sent = env.mail.length;
-  // The daily re-alert waits for LISTING_LEGAL_OWED_SWEEP: off, a day later still sends nothing.
+  // A forum stuck debt's daily re-alert waits for FORUM_LEGAL_OWED_SWEEP (D-9): off, a day later still sends nothing, and
+  // LISTING_LEGAL_OWED_SWEEP on alone does not re-alert it either.
   const off = await quiet(() => sweepLegalReports(env, {}, { now: Date.now() + STUCK_ALERT_EVERY_MS + 60_000 }));
   assert.equal(off.stuck, 'off');
   assert.equal(env.mail.length, sent, 'no re-alert while the setting is off');
   env.LISTING_LEGAL_OWED_SWEEP = 'on';
+  const listingOnly = await quiet(() => sweepLegalReports(env, {}, { now: Date.now() + STUCK_ALERT_EVERY_MS + 60_000 }));
+  assert.deepEqual([listingOnly.stuck.stuck, listingOnly.stuck.alerted], [0, 0], 'the listing setting re-alerts listing debts only');
+  assert.equal(env.mail.length, sent);
+  delete env.LISTING_LEGAL_OWED_SWEEP;
+  env.FORUM_LEGAL_OWED_SWEEP = 'on';
   const again = await quiet(() => sweepLegalReports(env, {}, { now: Date.now() }));
   assert.deepEqual([again.stuck.stuck, again.stuck.alerted], [1, 0]);
   assert.equal(env.mail.length, sent);
