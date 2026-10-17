@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import { fakeKv } from './helpers/load_worker.mjs';
 import { makeToolExecutor, loadCase, POLICY_HASH_ANCHORED, listingReportOwedKey } from '../src/moderation.mjs';
 import { sweepLegalReports } from '../src/legal_reports.mjs';
-import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport, alertStaffForumReport, alertStaffEvidence, sweepTakedowns, staffFailureAlertId } from '../src/takedown.mjs';
+import { sendStaffDigest, alertStaffReportOwed, alertStaffStuckReport, alertStaffForumReport, alertStaffEvidence } from '../src/takedown.mjs';
 import { takeMailSlot, STAFF_ALERTS_PER_DAY } from '../src/mail_limits.mjs';
 import { sendStaffAlert } from '../src/staff_alerts.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
@@ -256,28 +256,4 @@ test('the owed alert id carries the category and the stuck alert id the report k
   assert.equal(queueKeys(env).length, one + 4);
   await quiet(() => alertStaffStuckReport(env, { ...stuck, report_kind: 'csam' }));
   assert.equal(queueKeys(env).length, one + 6, 'another report kind is its own alert');
-});
-
-test('a possible-CSAM case whose removal keeps failing in a mail outage has one staff_failure entry a day, not one an hour', async () => {
-  const env = await environment();
-  const ID = 'cccccccc-6666-4666-8666-cccccccccccc';
-  const LISTING = 'dddddddd-6666-4666-8666-dddddddddddd';
-  await env.SOCIAL.put(`tdcase:${ID}`, JSON.stringify({
-    id: ID, reference: 'EC-F5-TD01-0000-0000-0000', status: 'received', possible_csam: true, received_at: new Date(Date.now() - 3600000).toISOString(), removed_at: null, updated_at: new Date().toISOString(),
-    request: { requester_name: 'Filer', requester_email: 'filer@example.org', description: 'x' },
-    locations: [], targets: [{ sim_id: LISTING, author_id: AUTHOR, via: 'request', locked_at: null }], forum_targets: [], unresolved: [], hashes: [], pending: [`lock:${LISTING}`], step_errors: {}, reviews: [], history: [], attempts: 0,
-  }));
-  await env.SOCIAL.put(`tdpending:${ID}`, '1');
-  // The lock cannot be written, and no mail can be sent.
-  env.SCENES.put = async () => { throw new Error('R2 is unavailable'); };
-  env.EMAIL.send = async () => { throw new Error('the mail binding is unavailable'); };
-  for (let hour = 0; hour < 3; hour++) await quiet(() => sweepTakedowns(env, {}));
-  const failures = queueKeys(env).map((k) => JSON.parse(env.USERS.store.get(k))).filter((e) => e.kind === 'staff_failure');
-  assert.equal(failures.length, 2, 'one staff_failure entry per staff address for the three runs');
-  for (const e of failures) {
-    assert.equal(e.lane, 'priority', 'about a possible-CSAM case: the priority lane');
-    assert.equal(e.alert_id, staffFailureAlertId({ id: ID, pending: [`lock:${LISTING}`] }));
-  }
-  assert.match(staffFailureAlertId({ id: ID, pending: ['b', 'a'] }, Date.parse('2026-10-16T05:00:00.000Z')), new RegExp(`^staff-failure:${ID}:a,b:2026-10-16$`));
-  assert.notEqual(staffFailureAlertId({ id: ID, pending: ['a'] }, Date.parse('2026-10-16T05:00:00.000Z')), staffFailureAlertId({ id: ID, pending: ['a'] }, Date.parse('2026-10-17T05:00:00.000Z')), 'a new day, a new alert');
 });

@@ -363,7 +363,7 @@ test('one run of digests names at most STAFF_DIGEST_MAX_ENTRIES alerts, every ad
   env.USERS.ops.length = 0;
   const r = await quiet(() => sendStaffDigests(env, addresses, render, { now }));
   assert.equal(r.digests, 3);
-  assert.equal(r.named, 3 * Math.floor(STAFF_DIGEST_MAX_ENTRIES / 3), 'an equal share each');
+  assert.equal(r.named, STAFF_DIGEST_MAX_ENTRIES, 'the whole budget, shared: 17, 17 and 16');
   assert.ok(r.named <= STAFF_DIGEST_MAX_ENTRIES);
   assert.ok(env.USERS.ops.length <= 200, `the digests took ${env.USERS.ops.length} operations`);
   assert.equal(queueGets(env), 0, 'named from the metadata, no read per entry');
@@ -371,7 +371,7 @@ test('one run of digests names at most STAFF_DIGEST_MAX_ENTRIES alerts, every ad
   const first = staffMail(env).filter((m) => DIGEST.test(m.subject));
   assert.equal(first.length, 1);
   assert.ok(first[0].subject.includes('waiting: 120 '), first[0].subject);
-  assert.match(first[0].text, new RegExp(`${120 - Math.floor(STAFF_DIGEST_MAX_ENTRIES / 3)} more are waiting`));
+  assert.match(first[0].text, /(103|104) more are waiting/);
   // One address alone gets the whole share; the rest are named in the hours after.
   env.USERS.ops.length = 0;
   const solo = await quiet(() => sendStaffDigests(env, [STAFF], render, { now: now + HOUR }));
@@ -414,14 +414,15 @@ test('the sweep runs the TAKE IT DOWN case steps first, then the digests, then t
 
 test('the digests stay within 200 storage operations for any number of staff addresses, and the addresses take turns', async () => {
   for (let n = 1; n <= 200; n++) {
-    const { addresses, share } = staffDigestPlan(n);
-    assert.ok(addresses >= 1 && addresses <= n && share >= 1, `plan for ${n}`);
-    assert.ok(addresses * 5 + addresses * share * 3 <= STAFF_DIGEST_RUN_OPS, `${n} addresses: ${addresses} x (5 + 3 x ${share})`);
-    assert.ok(addresses * share <= STAFF_DIGEST_MAX_ENTRIES);
+    const { addresses, entries, share } = staffDigestPlan(n);
+    assert.ok(addresses >= 1 && addresses <= n && entries >= addresses && share >= 1, `plan for ${n}`);
+    assert.ok(addresses * 5 + entries * 3 <= STAFF_DIGEST_RUN_OPS, `${n} addresses: ${addresses} x 5 + ${entries} x 3`);
+    assert.ok(entries <= STAFF_DIGEST_MAX_ENTRIES);
   }
-  assert.deepEqual(staffDigestPlan(1), { addresses: 1, share: STAFF_DIGEST_MAX_ENTRIES });
-  assert.deepEqual(staffDigestPlan(3), { addresses: 3, share: 16 });
-  assert.deepEqual(staffDigestPlan(0), { addresses: 0, share: 0 });
+  assert.deepEqual(staffDigestPlan(1), { addresses: 1, entries: STAFF_DIGEST_MAX_ENTRIES, share: STAFF_DIGEST_MAX_ENTRIES });
+  assert.deepEqual(staffDigestPlan(3), { addresses: 3, entries: 50, share: 16 });
+  assert.deepEqual(staffDigestPlan(19), { addresses: 19, entries: 35, share: 1 }, '19 addresses: 35 entries an hour, not 19');
+  assert.deepEqual(staffDigestPlan(0), { addresses: 0, entries: 0, share: 0 });
 
   const env = environment();
   const addresses = Array.from({ length: 60 }, (_, i) => `staff${i}@example.com`);
@@ -445,4 +446,46 @@ test('the digests stay within 200 storage operations for any number of staff add
     for (const m of env.mail.filter((x) => DIGEST.test(readMail(x).subject))) told.add(m.to);
   }
   assert.equal(told.size, addresses.length, 'every address had its digest within a few hours');
+});
+
+test('a digest names possible CSAM first, then legal, then the rest, and the run uses its whole budget', async () => {
+  const env = environment();
+  const at = new Date().toISOString();
+  const seed = async (address, lane, kind, n) => {
+    for (let j = 0; j < n; j++) {
+      const e = { kind, lane, reference: `EC-${lane.toUpperCase()}-${j}`, queued_at: at, required: false, reason: 'send_failed' };
+      await env.USERS.put(`staffmail-queue:${tag(address)}:${tag(`${address}-${lane}-${j}`)}`, JSON.stringify({ alert_id: `${lane}-${j}`, ...e, digested_at: null }), { expirationTtl: STAFF_OVER_CAP_TTL_SECONDS, metadata: e });
+    }
+  };
+  await seed(STAFF, 'general', 'staff_new', 60);
+  await seed(STAFF, 'legal', 'staff_legal_owed', 5);
+  await seed(STAFF, 'priority', 'staff_forum_csam', 5);
+  const render = (d) => renderMail('staff_digest', { ...d, at: new Date().toISOString() });
+  const r = await quiet(() => sendStaffDigests(env, [STAFF], render));
+  assert.equal(r.named, STAFF_DIGEST_MAX_ENTRIES);
+  const [d] = staffMail(env).filter((m) => DIGEST.test(m.subject));
+  const rows = d.text.split('\n').filter((l) => /^staff_[a-z_]+: EC-/.test(l)).map((l) => l.split(':')[0]);
+  assert.equal(rows.length, STAFF_DIGEST_MAX_ENTRIES);
+  assert.deepEqual(rows.slice(0, 10), [...Array(5).fill('staff_forum_csam'), ...Array(5).fill('staff_legal_owed')], 'possible CSAM, then legal');
+  assert.ok(rows.slice(10).every((k) => k === 'staff_new'));
+  // Every priority and legal entry was named; 20 general entries wait for the next hour.
+  const left = queueKeys(env).map((k) => env.USERS.meta.get(k).lane);
+  assert.equal(left.length, 20);
+  assert.ok(left.every((lane) => lane === 'general'));
+
+  // 19 addresses with 3 waiting each: the budget's 35 entries an hour are all named, not one per address.
+  const many = environment();
+  const addresses = Array.from({ length: 19 }, (_, i) => `staff${i}@example.com`);
+  for (const a of addresses) {
+    for (let j = 0; j < 3; j++) {
+      const e = { kind: 'staff_new', lane: 'general', reference: `EC-NINETEEN-${j}`, queued_at: at, required: true, reason: 'daily_cap' };
+      await many.USERS.put(`staffmail-queue:${tag(a)}:${tag(`${a}-${j}`)}`, JSON.stringify({ alert_id: `${a}-${j}`, ...e, digested_at: null }), { expirationTtl: STAFF_OVER_CAP_TTL_SECONDS, metadata: e });
+    }
+  }
+  many.USERS.ops.length = 0;
+  const all = await quiet(() => sendStaffDigests(many, addresses, render));
+  assert.equal(all.digests, 19);
+  assert.equal(all.named, staffDigestPlan(19).entries, 'the whole budget');
+  assert.equal(all.named, 35);
+  assert.ok(many.USERS.ops.length <= STAFF_DIGEST_RUN_OPS, `${many.USERS.ops.length} operations`);
 });

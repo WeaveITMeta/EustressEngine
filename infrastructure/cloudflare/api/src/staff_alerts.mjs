@@ -23,7 +23,9 @@
 // an hour (sendStaffDigests, from the hourly takedown sweep) names how many are waiting and their references. A REQUIRED alert
 // past the allowance counts as delivered only once a digest that carries it has SENT: until then its caller throws, and the
 // caller's retry finds the digest's mark (`digested_at`) on the next try. An alert is identified by `alertId` (stable across
-// retries, so a retry finds its own entry); without one it is listed once.
+// retries, so a retry finds its own entry); without one it is listed once. The mark means delivered only for a retry of that
+// same alert (`once`: a required alert, or a single alert its caller retries); it never stops a new reminder sent under the
+// same id, which is sent again, and queued again if that send fails.
 //
 // A REQUIRED alert, every priority-lane alert (possible CSAM) and every legal-lane alert (a legal report, a report debt owed
 // or stuck) goes on the same list when its send fails for any other reason too (the mail binding failed or threw, or there
@@ -68,16 +70,21 @@ const DIGEST_ADDRESS_OPS = 5;
 const DIGEST_ENTRY_OPS = 3;
 
 /// How one run's digests spend STAFF_DIGEST_RUN_OPS over `addressCount` staff addresses: `addresses`, how many get a digest
-/// this run (each costs DIGEST_ADDRESS_OPS and names at least one entry), and `share`, the entries each names, from what the
-/// addresses leave of the budget (at most STAFF_DIGEST_MAX_ENTRIES together). Past `addresses`, the run's addresses rotate
-/// by the hour, so every address has its digest within a few hours.
+/// this run (each costs DIGEST_ADDRESS_OPS and names at least one entry), and `entries`, how many entries they name together,
+/// from what the addresses leave of the budget (at most STAFF_DIGEST_MAX_ENTRIES). The run shares `entries` among its
+/// addresses by what each has waiting, so none of it is left unused; `share` is the even split. Past `addresses`, the run's
+/// addresses rotate by the hour, so every address has its digest within a few hours.
 export function staffDigestPlan(addressCount) {
   const n = Math.max(0, Math.floor(addressCount) || 0);
   const addresses = Math.min(n, Math.floor(STAFF_DIGEST_RUN_OPS / (DIGEST_ADDRESS_OPS + DIGEST_ENTRY_OPS)));
-  if (!addresses) return { addresses: 0, share: 0 };
+  if (!addresses) return { addresses: 0, entries: 0, share: 0 };
   const entries = Math.min(STAFF_DIGEST_MAX_ENTRIES, Math.floor((STAFF_DIGEST_RUN_OPS - DIGEST_ADDRESS_OPS * addresses) / DIGEST_ENTRY_OPS));
-  return { addresses, share: Math.max(1, Math.floor(entries / addresses)) };
+  return { addresses, entries, share: Math.floor(entries / addresses) };
 }
+
+// The order a digest names entries in: possible CSAM first, then legal, then the rest (an entry with no metadata last).
+const LANE_RANK = { priority: 0, legal: 1, general: 2 };
+const laneRank = (k) => LANE_RANK[k?.metadata?.lane] ?? 3;
 /// How long an over-cap entry is kept, so a retry of its alert finds whether a digest carried it. Far longer than
 /// STAFF_QUEUE_OVERDUE_MS, so an entry still undelivered is alerted on every day before it can expire.
 export const STAFF_OVER_CAP_TTL_SECONDS = 30 * 86400;
@@ -124,18 +131,25 @@ const hasMeta = (k) => typeof k?.metadata?.queued_at === 'string';
 /// `digested` counts the addresses a digest already carried this alert to; `delivered` is true when at least one address has
 /// it (sent now, or carried by a digest that sent). An alert already queued for an address and not yet carried is sent
 /// directly when the allowance allows (a new day), and leaves the list. A REQUIRED, priority-lane or legal-lane alert whose
-/// send fails for any other reason goes on the list too (`queueOnFailure`, which the overdue-queue alert sets false: it describes the list).
-export async function sendStaffAlert(env, recipients, rendered, { lane = 'general', alertId = null, kind = null, reference = null, required = false, fromName, queueOnFailure = null } = {}) {
+/// send fails for any other reason goes on the list too (`queueOnFailure`, which the overdue-queue alert sets false: it
+/// describes the list). `once` (default: `required`): this call is a retry of one alert, so a digest that carried it delivered
+/// it. Otherwise a call is a new reminder under the same id: a digest's mark does not stop it.
+export async function sendStaffAlert(env, recipients, rendered, { lane = 'general', alertId = null, kind = null, reference = null, required = false, fromName, queueOnFailure = null, once = null } = {}) {
   const out = { sent: 0, queued: 0, digested: 0, failed: 0, delivered: false };
   const mailKind = STAFF_LANES[lane] || STAFF_LANES.general;
   const holdOnFailure = typeof queueOnFailure === 'boolean' ? queueOnFailure : (required === true || lane === 'legal' || lane === 'priority');
+  const retry = typeof once === 'boolean' ? once : required === true;
   const id = typeof alertId === 'string' && alertId ? alertId : `once:${crypto.randomUUID()}`;
   const alert = await alertTag(id);
   for (const to of recipients) {
     const addr = await addressTag(to);
     let held = null;
     try { held = env.USERS ? parse(await env.USERS.get(overKey(addr, alert))) : null; } catch { held = null; }
-    if (held?.digested_at) { out.digested += 1; continue; }
+    if (held?.digested_at) {
+      // Carried by a digest that sent: delivered, for a retry of that same alert. A new reminder is sent (and queued) afresh.
+      if (retry) { out.digested += 1; continue; }
+      held = null;
+    }
     let r;
     try { [r] = await sendNotice(env, [to], rendered, { kind: mailKind, ...(fromName ? { fromName } : {}) }); }
     catch (e) { console.error('staff alert: the send threw:', e?.name || 'Error'); r = { sent: false, reason: 'send_failed' }; }
@@ -173,14 +187,17 @@ export async function sendStaffAlert(env, recipients, rendered, { lane = 'genera
 /// keys' metadata). `render({ total, entries, more })` builds the mail. Once a digest is SENT each entry it named is marked
 /// `digested_at` and leaves the queue; one that fails to send changes nothing, so the next hour tries again. The digest itself
 /// is not counted against a lane. The run stays within STAFF_DIGEST_RUN_OPS (staffDigestPlan): with more staff addresses than
-/// it covers, `rotated` counts the ones whose turn is a later hour. Never throws. `{ digests, named, waiting, failed, rotated }`.
+/// it covers, `rotated` counts the ones whose turn is a later hour. Each digest names priority-lane entries first, then legal,
+/// then general. Never throws. `{ digests, named, waiting, failed, rotated }`.
 export async function sendStaffDigests(env, recipients, render, { now = Date.now(), fromName } = {}) {
   const out = { digests: 0, named: 0, waiting: 0, failed: 0, rotated: 0 };
   if (!env.USERS || !recipients.length) return out;
-  const { addresses, share } = staffDigestPlan(recipients.length);
+  const { addresses, entries: budget } = staffDigestPlan(recipients.length);
   const start = (Math.floor(now / STAFF_DIGEST_EVERY_MS) * addresses) % recipients.length;
   const turn = Array.from({ length: addresses }, (_, i) => recipients[(start + i) % recipients.length]);
   out.rotated = recipients.length - turn.length;
+  // What each address in this run's turn has waiting (its list), most urgent lane first.
+  const due = [];
   for (const to of turn) {
     try {
       const addr = await addressTag(to);
@@ -189,13 +206,27 @@ export async function sendStaffDigests(env, recipients, render, { now = Date.now
       if (!keys.length) continue;
       out.waiting += keys.length;
       if (await env.USERS.get(digestKey(addr, now))) continue;
+      due.push({ to, addr, keys: [...keys].sort((a, b) => laneRank(a) - laneRank(b)), at_least: listed?.list_complete === false, take: 0 });
+    } catch (e) {
+      console.error('staff alert: the digest failed:', e?.name || 'Error');
+      out.failed += 1;
+    }
+  }
+  // The run's entries shared one at a time among the addresses that have more waiting, so none of the budget is left unused.
+  for (let left = budget, gave = true; left > 0 && gave;) {
+    gave = false;
+    for (const d of due) if (left > 0 && d.take < d.keys.length) { d.take += 1; left -= 1; gave = true; }
+  }
+  for (const { to, addr, keys, at_least, take } of due) {
+    if (!take) continue;
+    try {
       const entries = [];
-      for (const k of keys.slice(0, share)) {
+      for (const k of keys.slice(0, take)) {
         const e = hasMeta(k) && 'reference' in k.metadata ? k.metadata : parse(await env.USERS.get(k.name));
         if (e) entries.push({ key: k.name, alert: k.name.slice(queuePrefix(addr).length), ...e });
       }
       if (!entries.length) continue;
-      const rendered = render({ total: keys.length, entries: entries.map(({ kind, lane, reference, queued_at, required, reason }) => ({ kind, lane, reference, queued_at, required, reason: reason || 'daily_cap' })), more: Math.max(0, keys.length - entries.length), at_least: listed?.list_complete === false });
+      const rendered = render({ total: keys.length, entries: entries.map(({ kind, lane, reference, queued_at, required, reason }) => ({ kind, lane, reference, queued_at, required, reason: reason || 'daily_cap' })), more: Math.max(0, keys.length - entries.length), at_least });
       const [r] = await sendNotice(env, [to], rendered, { kind: 'staff_digest', ...(fromName ? { fromName } : {}) });
       if (!r?.sent) { out.failed += 1; continue; }
       out.digests += 1;

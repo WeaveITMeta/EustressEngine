@@ -1234,11 +1234,11 @@ export function staffLaneOf(kind, facts) {
 /// over-cap list for the hourly digest (src/staff_alerts.mjs), and `alertId` (stable across retries) is how the retry finds
 /// that a digest carried it. With no mail binding nothing can be sent and the log is all there is: a required alert throws
 /// then too, so the step stays owed.
-async function alertStaff(env, kind, facts, { required = false, alertId = null } = {}) {
+async function alertStaff(env, kind, facts, { required = false, alertId = null, once = null } = {}) {
   const rendered = renderMail(kind, facts);
   console.error(`takedown staff alert: ${rendered.subject}`);
   const reference = facts?.reference || (Array.isArray(facts?.references) && facts.references.length ? facts.references.join(', ') : null) || facts?.id || (facts?.case_id ? `${facts.case_kind || 'case'} ${facts.case_id}` : null);
-  const r = await sendStaffAlert(env, await staffAddresses(env), rendered, { lane: staffLaneOf(kind, facts), alertId, kind, reference, required, fromName: FROM_NAME });
+  const r = await sendStaffAlert(env, await staffAddresses(env), rendered, { lane: staffLaneOf(kind, facts), alertId, kind, reference, required, once, fromName: FROM_NAME });
   if (required && !r.delivered) {
     throw new Error(r.queued ? 'the staff alert was not sent (past the daily allowance, or the send failed) and waits for the hourly digest' : 'no staff address could be emailed');
   }
@@ -1262,38 +1262,40 @@ export async function alertStaffQueueOverdue(env, { now = Date.now(), recipients
 /// A forum post reported as csam (src/moderation.mjs fileForumReport), on this module's staff alert path: the same mailboxes,
 /// the staff-only possible-CSAM notice. `facts`: reference, post_id, thread_id, at, queue_url. Never a reporter or a note.
 export async function alertStaffForumReport(env, facts) {
-  return alertStaff(env, 'staff_forum_csam', facts, { required: false, alertId: `forum-csam:${facts?.post_id}:${facts?.at || ''}` });
+  return alertStaff(env, 'staff_forum_csam', facts, { required: false, once: true, alertId: `forum-csam:${facts?.post_id}:${facts?.at || ''}` });
 }
 
 /// A seal into the evidence vault failed (src/evidence_vault.mjs), on this module's staff alert path. `facts`: reference,
 /// case_kind, case_id, item, category, attempts, error, material_kept. Never the content, the uploader or an address.
 export async function alertStaffEvidence(env, facts) {
-  return alertStaff(env, 'staff_evidence_failure', facts, { required: false, alertId: `evidence-failure:${facts?.case_kind}:${facts?.case_id}:${facts?.item}:${facts?.attempts ?? 1}` });
+  return alertStaff(env, 'staff_evidence_failure', facts, { required: false, once: true, alertId: `evidence-failure:${facts?.case_kind}:${facts?.case_id}:${facts?.item}:${facts?.attempts ?? 1}` });
 }
 
 /// A legal report is queued or held (src/legal_reports.mjs), on this module's staff alert path. `facts`: id, kind, status,
 /// reference, destination, reason, admin_url. Never the content and never the reported account's identity.
 export async function alertStaffLegalReport(env, facts) {
-  return alertStaff(env, 'staff_legal_report', facts, { required: false, alertId: `legal-report:${facts?.id}:${facts?.status}:${facts?.reason || ''}` });
+  return alertStaff(env, 'staff_legal_report', facts, { required: false, once: true, alertId: `legal-report:${facts?.id}:${facts?.status}:${facts?.reason || ''}` });
 }
 
 /// A legal report debt is stuck (src/legal_reports.mjs recordStuckReport), on this module's staff alert path, at once and then
 /// daily while it stands. `facts`: reference, case_kind, case_id, report_kind, reason, since, stuck_at, alerts, admin_url.
 /// Never the content, the account or an address.
 export async function alertStaffStuckReport(env, facts) {
-  return alertStaff(env, 'staff_legal_stuck', facts, { required: false, alertId: `legal-stuck:${facts?.case_kind}:${facts?.case_id}:${facts?.report_kind || 'unknown'}:${facts?.stuck_at}:${facts?.alerts ?? 1}` });
+  return alertStaff(env, 'staff_legal_stuck', facts, { required: false, once: true, alertId: `legal-stuck:${facts?.case_kind}:${facts?.case_id}:${facts?.report_kind || 'unknown'}:${facts?.stuck_at}:${facts?.alerts ?? 1}` });
 }
 
 /// A case now owes a legal report its try could not write (src/legal_reports.mjs alertReportOwed), on this module's staff alert
 /// path, once when the debt is created. `facts`: reference, case_kind, case_id, category, reason, since, admin_url. Never the
 /// content, the account or an address.
 export async function alertStaffReportOwed(env, facts) {
-  return alertStaff(env, 'staff_legal_owed', facts, { required: false, alertId: `legal-owed:${facts?.case_kind}:${facts?.case_id}:${facts?.category || 'unknown'}:${facts?.since || 'unknown'}` });
+  return alertStaff(env, 'staff_legal_owed', facts, { required: false, once: true, alertId: `legal-owed:${facts?.case_kind}:${facts?.case_id}:${facts?.category || 'unknown'}:${facts?.since || 'unknown'}` });
 }
 
-/// The alert id of a case's failing-step alert: the case, the steps still owed and the UTC day, so a mail outage leaves one
-/// entry a day per case and failing state on the over-cap list (src/staff_alerts.mjs), not one an hour.
-export const staffFailureAlertId = (rec, nowMs = Date.now()) => `staff-failure:${rec.id}:${[...(rec.pending || [])].sort().join(',')}:${new Date(nowMs).toISOString().slice(0, 10)}`;
+/// The alert id of a case's failing-step alert: the case, the steps still owed and the UTC hour while a lock step is owed
+/// (staff are reminded every hour of the 48), else the UTC day. A mail outage leaves one entry per case and failing state an
+/// hour (a lock owed) or a day on the over-cap list (src/staff_alerts.mjs). A reminder is never a retry (`once: false`): a
+/// digest that carried an earlier one does not stop it.
+export const staffFailureAlertId = (rec, nowMs = Date.now()) => `staff-failure:${rec.id}:${[...(rec.pending || [])].sort().join(',')}:${new Date(nowMs).toISOString().slice(0, (rec.pending || []).some(LOCK_STEP) ? 13 : 10)}`;
 
 function staffFacts(rec, ctx) {
   return {
