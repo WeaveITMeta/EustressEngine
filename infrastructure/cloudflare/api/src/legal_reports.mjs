@@ -87,6 +87,7 @@ import { sendNotice } from './account_notices.mjs';
 import { renderEmail, html, paragraph, facts as factRows } from './email_shell.mjs';
 import { isAdmin } from './admin_check.mjs';
 import { writeAuditRecord } from './evidence_vault.mjs';
+import { staffQueueState } from './staff_alerts.mjs';
 
 export const REPORT_VERSION = 1;
 export const REPORT_KINDS = Object.freeze(['csam', 'threat', 'scam_batch']);
@@ -1018,6 +1019,8 @@ export async function sweepLegalReports(env, deps = {}, { limit = 50, now = Date
 //   GET  /api/admin/legal/stuck                               the stuck report debts (case, kind, reason, dates), audited
 //   POST /api/admin/legal/stuck/{caseKind}/{caseId}/clear     a person clears a stuck debt: { note }, the rationale, audited
 //                                                             before anything changes (fail-closed)
+//   GET  /api/admin/legal/staff-alerts                        the staff alert over-cap queue's state (src/staff_alerts.mjs
+//                                                             staffQueueState): counts, ages, kinds; audited (fail-closed)
 
 export async function handleLegalReportRoute(request, url, env, cors, deps) {
   if (!url.pathname.startsWith('/api/admin/legal/')) return null;
@@ -1094,6 +1097,16 @@ export async function handleLegalReportRoute(request, url, env, cors, deps) {
     try { await auditOrThrow('LEGAL_STUCK_LISTED', 'stuck', { route: 'GET /api/admin/legal/stuck', count: items.length, page_cursor: url.searchParams.get('cursor') ? 'given' : null }); }
     catch { return deps.json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
     return deps.json({ items, next_cursor: cursor || null }, 200, headers);
+  }
+  if (url.pathname === '/api/admin/legal/staff-alerts') {
+    if (request.method !== 'GET') return deps.json({ error: 'Method not allowed' }, 405, cors);
+    // Counts, ages and kinds only (no reference, account or address). Not served unless its read is on the audit log first.
+    try { await auditOrThrow('STAFF_ALERT_QUEUE_READ', 'staffmail-queue', { route: 'GET /api/admin/legal/staff-alerts' }); }
+    catch { return deps.json({ error: 'audit_unavailable', code: 'audit_unavailable' }, 503, headers); }
+    let queue;
+    try { queue = await staffQueueState(env); }
+    catch { return deps.json({ error: 'The staff alert queue is unavailable.', code: 'unavailable' }, 503, headers); }
+    return deps.json({ queue }, 200, headers);
   }
   m = /^\/api\/admin\/legal\/stuck\/(moderation|forum)\/([A-Za-z0-9-]{1,64})\/clear$/.exec(url.pathname);
   if (m) {

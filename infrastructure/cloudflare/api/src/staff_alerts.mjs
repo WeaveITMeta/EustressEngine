@@ -25,12 +25,20 @@
 // caller's retry finds the digest's mark (`digested_at`) on the next try. An alert is identified by `alertId` (stable across
 // retries, so a retry finds its own entry); without one it is listed once.
 //
+// A digest that cannot be sent (a mail outage) leaves its entries on the queue. Once any entry has waited there 24 hours,
+// staff get one failure alert on the legal lane, which no allowance stops (alertOverdueStaffQueue, from the same hourly
+// sweep, after the digest): how many wait, the oldest's age and the count of each kind, never a reference, an account, an
+// address or content. It is sent at most once a day while the queue stays overdue, and tried again every hour until one is
+// sent. Entries are kept 30 days, so a queue that stays undelivered is alerted on every day of those 30 before any entry can
+// expire. GET /api/admin/legal/staff-alerts shows the same state (staffQueueState), audited before it is answered.
+//
 // Storage (USERS):
 //   mailcap:acct-staff:{address}:{day}, mailcap:acct-staff_priority:{address}:{day}   the lanes' counts (src/mail_limits.mjs)
 //   staffmail-over:{address}:{alert}     an alert past its lane's allowance: { alert_id, kind, lane, reference, queued_at,
-//                                        required, digested_at }, kept 7 days so a retry finds it
+//                                        required, digested_at }, kept 30 days so a retry finds it
 //   staffmail-queue:{address}:{alert}    the same while no digest has carried it
 //   staffmail-digest:{address}:{hour}    the hour's digest was sent (one an hour)
+//   staffmail-overdue-alerted            when the last overdue-queue alert was sent (kept 2 days; one a day)
 // The address and the alert id are keyed by their SHA-256, never stored in a key in the clear.
 // =============================================================================
 
@@ -42,8 +50,17 @@ export const STAFF_LANES = Object.freeze({ general: 'staff', priority: 'staff_pr
 export const STAFF_DIGEST_EVERY_MS = 3600000;
 /// The most alerts one digest names; the rest are counted in it and named by the next.
 export const STAFF_DIGEST_MAX_ENTRIES = 100;
-/// How long an over-cap entry is kept, so a retry of its alert finds whether a digest carried it.
-export const STAFF_OVER_CAP_TTL_SECONDS = 7 * 86400;
+/// How long an over-cap entry is kept, so a retry of its alert finds whether a digest carried it. Far longer than
+/// STAFF_QUEUE_OVERDUE_MS, so an entry still undelivered is alerted on every day before it can expire.
+export const STAFF_OVER_CAP_TTL_SECONDS = 30 * 86400;
+/// An entry still on the queue (no digest carried it, and it was not sent) this long is overdue: staff are alerted.
+export const STAFF_QUEUE_OVERDUE_MS = 24 * 3600000;
+/// While the queue stays overdue, its alert is sent at most this often.
+export const STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS = 86400000;
+/// The most queue entries one read of the queue's state looks at; past it the state says `at_least`.
+export const STAFF_QUEUE_SCAN_MAX = 5000;
+const QUEUE_ALL = 'staffmail-queue:';
+export const STAFF_QUEUE_OVERDUE_ALERT_KEY = 'staffmail-overdue-alerted';
 
 async function sha256Hex(text) {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text))));
@@ -139,6 +156,74 @@ export async function sendStaffDigests(env, recipients, render, { now = Date.now
       console.error('staff alert: the digest failed:', e?.name || 'Error');
       out.failed += 1;
     }
+  }
+  return out;
+}
+
+/// The over-cap queue as it stands, across every staff address: how many alerts wait undelivered, how many of them have waited
+/// STAFF_QUEUE_OVERDUE_MS or longer, the oldest's time and age, and the count of each kind (and of the overdue ones). No
+/// reference, account, address or content. Reads at most STAFF_QUEUE_SCAN_MAX entries (`at_least` past it). Throws when the
+/// queue cannot be listed.
+export async function staffQueueState(env, { now = Date.now() } = {}) {
+  const out = { count: 0, overdue: 0, required: 0, oldest_queued_at: null, oldest_age_seconds: null, by_kind: {}, overdue_by_kind: {}, addresses: 0, at_least: false };
+  if (!env.USERS) return out;
+  const addresses = new Set();
+  let oldest = null;
+  let cursor;
+  do {
+    const listed = await env.USERS.list({ prefix: QUEUE_ALL, limit: 1000, ...(cursor ? { cursor } : {}) });
+    for (const k of listed?.keys || []) {
+      if (out.count >= STAFF_QUEUE_SCAN_MAX) { out.at_least = true; break; }
+      out.count += 1;
+      addresses.add(k.name.slice(QUEUE_ALL.length).split(':')[0]);
+      const e = parse(await env.USERS.get(k.name));
+      const kind = typeof e?.kind === 'string' && e.kind ? e.kind.slice(0, 60) : 'unknown';
+      out.by_kind[kind] = (out.by_kind[kind] || 0) + 1;
+      if (e?.required === true) out.required += 1;
+      const at = Date.parse(e?.queued_at || '');
+      if (!Number.isFinite(at)) continue;
+      if (oldest === null || at < oldest) oldest = at;
+      if (now - at >= STAFF_QUEUE_OVERDUE_MS) {
+        out.overdue += 1;
+        out.overdue_by_kind[kind] = (out.overdue_by_kind[kind] || 0) + 1;
+      }
+    }
+    cursor = !out.at_least && listed?.list_complete === false && listed.cursor ? listed.cursor : undefined;
+  } while (cursor);
+  out.addresses = addresses.size;
+  if (oldest !== null) {
+    out.oldest_queued_at = new Date(oldest).toISOString();
+    out.oldest_age_seconds = Math.max(0, Math.floor((now - oldest) / 1000));
+  }
+  return out;
+}
+
+/// From the hourly sweep, after the digest: when any alert has waited on the over-cap queue STAFF_QUEUE_OVERDUE_MS or longer
+/// (its digest did not send), one failure alert to `recipients` on the legal lane, which no allowance stops. `render(state)`
+/// builds it from staffQueueState: counts, ages and kinds only. At most one per STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS while the
+/// condition stands; the mark is written only once an alert is SENT, so one that cannot be sent is tried again next hour.
+/// Never throws. `{ overdue, alerted, skipped, sent, failed }`.
+export async function alertOverdueStaffQueue(env, recipients, render, { now = Date.now(), fromName } = {}) {
+  const out = { overdue: 0, alerted: false, skipped: null, sent: 0, failed: 0 };
+  if (!env.USERS) return { ...out, skipped: 'no_storage' };
+  try {
+    const last = Date.parse((await env.USERS.get(STAFF_QUEUE_OVERDUE_ALERT_KEY)) || '');
+    if (Number.isFinite(last) && now - last < STAFF_QUEUE_OVERDUE_ALERT_EVERY_MS) return { ...out, skipped: 'alerted_today' };
+    const state = await staffQueueState(env, { now });
+    out.overdue = state.overdue;
+    if (!state.overdue) return out;
+    console.error(`staff alert: ${state.overdue} staff alert(s) undelivered on the over-cap queue past 24 hours, the oldest ${state.oldest_age_seconds}s`);
+    const day = new Date(now).toISOString().slice(0, 10);
+    const r = await sendStaffAlert(env, recipients, render(state), { lane: 'legal', alertId: `staffqueue-overdue:${day}`, kind: 'staff_failure', reference: null, required: false, fromName });
+    out.sent = r.sent;
+    out.failed = r.failed;
+    if (r.sent > 0) {
+      await env.USERS.put(STAFF_QUEUE_OVERDUE_ALERT_KEY, new Date(now).toISOString(), { expirationTtl: 2 * 86400 });
+      out.alerted = true;
+    }
+  } catch (e) {
+    console.error('staff alert: the overdue-queue check failed:', e?.name || 'Error');
+    out.failed += 1;
   }
   return out;
 }

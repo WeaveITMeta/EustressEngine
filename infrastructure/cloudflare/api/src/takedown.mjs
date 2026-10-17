@@ -116,7 +116,7 @@ import {
 } from './moderation.mjs';
 import { assignCaseReference } from './case_reference.mjs';
 import { sendNotice, scrubAddresses } from './account_notices.mjs';
-import { sendStaffAlert, sendStaffDigests } from './staff_alerts.mjs';
+import { sendStaffAlert, sendStaffDigests, alertOverdueStaffQueue } from './staff_alerts.mjs';
 import { renderEmail, html, paragraph, note as noteLine, facts, formatWhen } from './email_shell.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { accountTimeZone } from './account_time_zone.mjs';
@@ -1249,6 +1249,13 @@ export async function sendStaffDigest(env, { now = Date.now() } = {}) {
   return sendStaffDigests(env, await staffAddresses(env), (d) => renderMail('staff_digest', { ...d, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
 }
 
+/// From the hourly sweep, after the digest: a staff_failure alert on the legal lane when an alert has waited on the over-cap
+/// queue 24 hours (src/staff_alerts.mjs alertOverdueStaffQueue), at most once a day. Counts, ages and kinds only.
+export async function alertStaffQueueOverdue(env, { now = Date.now() } = {}) {
+  const api = String(env.PUBLIC_API_ORIGIN || 'https://api.eustress.dev').replace(/\/$/, '');
+  return alertOverdueStaffQueue(env, await staffAddresses(env), (s) => renderMail('staff_queue_overdue', { ...s, at: new Date(now).toISOString(), admin_url: `${api}/api/admin/legal/staff-alerts` }), { now, fromName: FROM_NAME });
+}
+
 /// A forum post reported as csam (src/moderation.mjs fileForumReport), on this module's staff alert path: the same mailboxes,
 /// the staff-only possible-CSAM notice. `facts`: reference, post_id, thread_id, at, queue_url. Never a reporter or a note.
 export async function alertStaffForumReport(env, facts) {
@@ -1484,6 +1491,19 @@ export function renderMail(kind, d) {
         ],
         rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}`]),
       });
+    case 'staff_queue_overdue': {
+      const kinds = (o) => Object.entries(o || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';
+      const hours = Math.floor((d.oldest_age_seconds || 0) / 3600);
+      return mail({
+        subject: `Staff alerts undelivered for ${hours} hours: ${d.overdue}${d.at_least ? ' or more' : ''} past 24 hours`, heading: 'Staff alerts are not being delivered', label: 'Staff Notice',
+        paragraphs: [
+          "Staff alerts past the day's allowance wait on a queue for the hourly digest, and at least one has waited more than 24 hours: the digest is not being sent. A required alert on the queue is not counted as delivered, so its step is still owed.",
+          'Check the mail binding. Entries are kept 30 days; this alert is sent once a day while any has waited past 24 hours. It names counts and kinds only, never a case.',
+          `The queue's state, with an administrator session: ${d.admin_url}.`,
+        ],
+        rows: [['Waiting', `${d.count}${d.at_least ? ' or more' : ''}`], ['Past 24 hours', String(d.overdue)], ['Required', String(d.required ?? 0)], ['Oldest queued', d.oldest_queued_at ? when(d.oldest_queued_at) : 'unknown'], ['Oldest age', `${hours} hours`], ['Kinds waiting', kinds(d.by_kind)], ['Kinds past 24 hours', kinds(d.overdue_by_kind)], ['Staff addresses', String(d.addresses ?? 0)]],
+      });
+    }
     case 'staff_legal_owed':
       return mail({
         subject: `A legal report is owed and was not written yet: ${d.reference || `${d.case_kind} ${d.case_id}`}`, heading: 'A legal report is owed', label: 'Staff Notice',
@@ -1777,6 +1797,7 @@ export async function sweepTakedowns(env, deps = {}, { cases = 50, scanPages = 6
   // The staff alerts past the day's allowance go out first, so a required alert the digest carries is delivered when its step
   // runs again below.
   try { out.digest = await sendStaffDigest(env); } catch (e) { console.error('takedown: the staff digest failed:', e?.name || 'Error'); }
+  try { out.staff_queue = await alertStaffQueueOverdue(env); } catch (e) { console.error('takedown: the overdue staff queue check failed:', e?.name || 'Error'); }
   const ctx = contextFor(env, deps, null);
   const listed = await env.SOCIAL.list({ prefix: 'tdpending:', limit: cases });
   for (const k of listed?.keys || []) {
