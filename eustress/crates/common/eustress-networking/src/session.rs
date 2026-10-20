@@ -69,9 +69,10 @@ use crate::repl::{
     ValueLimits, WorldFrame,
 };
 use crate::wire::{
-    decode_body, decode_datagram, encode_datagram, encode_frame, sanitize_chat, sanitize_name, sanitize_receipts,
-    sanitize_ticket, AvatarFrame, Datagram, Hello, PeerId, PeerInfo, ToHost, ToPlayer, Welcome, CHUNK_PIECE_BYTES,
-    HOST_PEER, MAX_APPEARANCE_BYTES, MAX_SIM_ID_CHARS, PROTOCOL_VERSION,
+    decode_body, decode_datagram, encode_datagram, encode_frame, explain_transport_failure, sanitize_chat,
+    sanitize_name, sanitize_receipts, sanitize_ticket, AvatarFrame, Datagram, Hello, PeerId, PeerInfo, ToHost,
+    ToPlayer, Welcome, WireError, CHUNK_PIECE_BYTES, HOST_PEER, MAX_APPEARANCE_BYTES, MAX_SIM_ID_CHARS,
+    PROTOCOL_VERSION,
 };
 
 /// Avatar samples per second, each direction.
@@ -1616,7 +1617,19 @@ fn host_pump(
                 Ok(ToHost::Tracks(ops)) => host_tracks(&link, &mut host, &mut tracks, conn, ops, now),
                 Ok(ToHost::Avatar(frame)) => keep_newest(&mut samples, conn, frame),
                 Ok(msg) => host_message(&mut commands, &link, &mut host, &mut remotes, &mut notices, conn, msg, now),
-                Err(e) => kick(&link, &mut host, conn, &format!("unreadable message: {e}")),
+                Err(e) => {
+                    // Logged here, before the connection goes away. A version
+                    // mismatch used to die inside bincode and `kick` said
+                    // nothing, so the host's log was empty.
+                    let reason = peer_decode_reason(&e);
+                    error!("net: {reason}");
+                    let ready = host.peers.get(&conn).is_some_and(|p| p.stage == PeerStage::Ready);
+                    if ready {
+                        kick(&link, &mut host, conn, &reason);
+                    } else {
+                        refuse(&link, &mut host, conn, &reason);
+                    }
+                }
             },
             LinkEvent::Datagram { conn, bytes } => match decode_datagram(&bytes) {
                 Ok(Datagram::Avatar(frame)) => keep_newest(&mut samples, conn, frame),
@@ -2151,6 +2164,16 @@ fn host_avatar_frame(
     }
 }
 
+/// The words for a frame this host could not read. A version mismatch is
+/// already a sentence; anything else keeps the "unreadable message" prefix,
+/// and a bare bincode trailing-bytes failure is said as a version mismatch.
+fn peer_decode_reason(err: &WireError) -> String {
+    match err {
+        WireError::VersionMismatch { .. } => err.to_string(),
+        other => explain_transport_failure(&format!("unreadable message: {other}")),
+    }
+}
+
 fn kick(link: &NetLink, host: &mut HostSession, conn: ConnId, reason: &str) {
     link.send(conn, &ToPlayer::Kicked { reason: reason.to_string() });
     link.close(conn, reason);
@@ -2337,7 +2360,7 @@ fn player_pump(
                     msg,
                     now,
                 ),
-                Err(e) => Err(format!("the host sent an unreadable message: {e}")),
+                Err(e) => Err(peer_decode_reason(&e)),
             },
             LinkEvent::Datagram { bytes, .. } => {
                 match decode_datagram(&bytes) {
@@ -2348,7 +2371,9 @@ fn player_pump(
                 }
                 Ok(())
             }
-            LinkEvent::Closed { reason, .. } => Err(format!("the host closed the connection: {reason}")),
+            LinkEvent::Closed { reason, .. } => {
+                Err(explain_transport_failure(&format!("the host closed the connection: {reason}")))
+            }
             LinkEvent::Failed { reason } => Err(reason),
             LinkEvent::Listening { .. } => Ok(()),
         };

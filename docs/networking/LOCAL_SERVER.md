@@ -63,6 +63,12 @@ eustress-client --connect 192.168.1.20:7777 --key 9f2c... --pin 3f9a...
 `--name` sets the name other players see. Without it the Player uses
 `EUSTRESS_PLAYER_NAME`, then the computer's user name.
 
+The link a host prints is always `eustress-player://join/...`, which opens the
+Player. A link written the older way, `eustress://join/...`, still parses.
+Before either side reads the rest of a message, they compare protocol versions.
+A Player and a host that do not speak the same protocol each say so, including
+a host from before that check (stable 0.3.7). Update whichever one is older.
+
 Joining downloads the host's world, opens it, and places the avatar near the
 Space's SpawnLocation, each player on its own spot around it. Chunks are cached
 under the local data folder (`eustress/echk/`), so joining the same host again
