@@ -33,7 +33,11 @@ On GitHub: Actions → **Player Release** → **Run workflow**. The workflow fil
 | `channel` | `staging` (the default) | `production` |
 | `publish` | on, to upload. Off builds the installers and keeps them as run artifacts | the same |
 
-`channel=staging` uploads into the `eustress-downloads` bucket under the prefix `staging/player`. The manifest's `channel` field is `staging`. Its `changelog_url` is the GitHub Actions run that built it (`/actions/runs/<id>`), not `releases/tag/player-vX.Y.Z`, because a staging publish does not create that tag. A production publish still points `changelog_url` at the tag release. The verify step then fetches that channel:
+`channel=staging` uploads into the `eustress-downloads` bucket under the prefix `staging/player`. The manifest's `channel` field is `staging`. Its `changelog_url` is the GitHub Actions run that built it (`/actions/runs/<id>`), not `releases/tag/player-vX.Y.Z`, because a staging publish does not create that tag. A production publish still points `changelog_url` at the tag release.
+
+A staging build is compiled for `https://api-staging.eustress.dev`. The Windows, macOS and Linux cargo builds set `EUSTRESS_DEFAULT_API_URL` to that address, and only when the channel is staging. A production build leaves the variable unset, so the Player stays on `https://api.eustress.dev`. Gallery pages follow that API (`https://staging.eustress-cbb.pages.dev` for staging, through `site_base`); there is no separate gallery address to set. Run the workflow from the branch that contains this compile-time default. Install the new build: a Player from an earlier staging publish still uses production until it is replaced.
+
+The verify step then fetches that channel:
 
 | Path on `https://downloads.eustress.dev` | What it is |
 |---|---|
@@ -123,14 +127,15 @@ On Windows the installed Player is `%LOCALAPPDATA%\Programs\Eustress Player\eust
 | `eustress-client "eustress-player://join/<host:port>?key=...&pin=..."` | Join a host by its link |
 | `eustress-client --sim <simulation id>` | Play a published simulation |
 | `eustress-client "eustress-player://play/<simulation id>"` | The same, by its link |
-| `eustress-client --api-url <url>` | Use this Eustress server, for testing (see below) |
+| `eustress-client --env staging` or `--env production` | Use that named server for this run |
+| `eustress-client --api-url <url>` | Use this Eustress server. Wins over `--env` |
 | `eustress-client --version` | Print the version and exit |
 
 Links written with `eustress://` in place of `eustress-player://` open the same way.
 
 | Environment variable | What it does |
 |---|---|
-| `EUSTRESS_API_URL` | The Eustress server, as `--api-url` sets it |
+| `EUSTRESS_API_URL` | The Eustress server for this run. Wins over the server compiled into the build (`EUSTRESS_DEFAULT_API_URL`). `--api-url` sets the same variable. `--env` selects `staging` or `production` and is overridden by `--api-url` |
 | `EUSTRESS_SPACE` | An absolute path to a Space folder to open when the Player starts with no link |
 | `EUSTRESS_WORKSPACE` | Your Eustress folder; the default is `Documents/Eustress` in your home folder |
 | `EUSTRESS_PLAYER_NAME` | Your display name when joining; otherwise your computer's user name |
@@ -142,15 +147,22 @@ Setup registers the installed Player for `eustress-player://` links, for your ac
 
 ## Production and staging
 
-A Gallery link names the Eustress server it belongs to (`api=production` or `api=staging`), and a Player opens only links for its own server. A link for the other server shows "This link is for the staging server; this Player is set up for the production server." and nothing is downloaded or joined.
+A Gallery link names the Eustress server it belongs to (`api=production` or `api=staging`). The Player opens a link only when that name is the server the Player is using. A link for the other server shows "This link is for the staging server; this Player is set up for production." and nothing is downloaded or joined.
 
-To test against staging on Windows, start the installed Player once with the staging server:
+The server for a run is the first of these that is set:
+
+1. `--api-url <url>` on the command line.
+2. `--env staging` or `--env production` on the command line.
+3. `EUSTRESS_API_URL` in the environment.
+4. The server compiled into that build (`EUSTRESS_DEFAULT_API_URL`). A Player from the staging download channel is compiled for `https://api-staging.eustress.dev`. A production Player has no compiled default and uses `https://api.eustress.dev`.
+
+Play on the staging Gallery works with a staging-channel Player and no extra flag. To point that copy at production for one run:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Eustress Player\eustress-client.exe" --api-url https://api-staging.eustress.dev
+& "$env:LOCALAPPDATA\Programs\Eustress Player\eustress-client.exe" --env production
 ```
 
-It registers itself with that server, so links from the staging Gallery open it. Start the Player normally to return links to production. On Linux the desktop entry always starts the production Player; run it from a terminal with `--api-url` and the link instead.
+On Windows the Player registers itself each time it starts. When its server is not production, the registered command includes `--api-url` for that server, so later links from the staging Gallery keep opening the staging Player. Start a production Player to hand links back to production. `EUSTRESS_PLAYER_REGISTER=0` leaves the registration as it is. On Linux the desktop entry starts the installed Player with no flag; a staging-channel install is already compiled for staging. To open one link against the other server, run `eustress-client --env production` (or `--env staging`) and the link from a terminal.
 
 ## Logs and problems
 

@@ -9,8 +9,13 @@ name: Player Release
 # downloads.eustress.dev/staging/player, puts "channel": "staging" in
 # latest.json, points changelog_url at this workflow run (there is no
 # player-v* tag), and does not create a GitHub Release. It does not touch
-# player/latest.json. A player-v* tag, or channel=production, writes the
-# production player/ paths below.
+# player/latest.json. A staging build is compiled for
+# https://api-staging.eustress.dev (EUSTRESS_DEFAULT_API_URL on the three
+# cargo builds only). A production build leaves that variable unset, so the
+# Player stays on https://api.eustress.dev. The Gallery site follows the API
+# (site_base in eustress-common); there is no separate gallery URL to set.
+# A player-v* tag, or channel=production, writes the production player/
+# paths below.
 #
 # The Player's counterpart to release.yml, which ships Studio. Same bucket,
 # same Worker, same credentials. The Player publishes under the bucket's
@@ -84,6 +89,7 @@ jobs:
       r2_prefix: ${{ steps.channel.outputs.r2_prefix }}
       download_base: ${{ steps.channel.outputs.download_base }}
       release_channel: ${{ steps.channel.outputs.release_channel }}
+      default_api_url: ${{ steps.channel.outputs.default_api_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,12 +127,14 @@ jobs:
             echo "r2_prefix=player" >> "$GITHUB_OUTPUT"
             echo "download_base=https://downloads.eustress.dev/player" >> "$GITHUB_OUTPUT"
             echo "release_channel=stable" >> "$GITHUB_OUTPUT"
-            echo "Production: R2 prefix player/ (${EVENT_NAME})."
+            echo "default_api_url=" >> "$GITHUB_OUTPUT"
+            echo "Production: R2 prefix player/ (${EVENT_NAME}). EUSTRESS_DEFAULT_API_URL is unset."
           else
             echo "r2_prefix=staging/player" >> "$GITHUB_OUTPUT"
             echo "download_base=https://downloads.eustress.dev/staging/player" >> "$GITHUB_OUTPUT"
             echo "release_channel=staging" >> "$GITHUB_OUTPUT"
-            echo "Staging: R2 prefix staging/player/. player/latest.json is not written, and no GitHub Release is created."
+            echo "default_api_url=https://api-staging.eustress.dev" >> "$GITHUB_OUTPUT"
+            echo "Staging: R2 prefix staging/player/. The Player is compiled for https://api-staging.eustress.dev. player/latest.json is not written, and no GitHub Release is created."
           fi
 
       # RELEASE.md's promotion model applies to the Player as it does to
@@ -183,7 +191,13 @@ jobs:
       - name: Build
         working-directory: eustress
         shell: pwsh
+        env:
+          # Empty on a production build. Drop it so option_env! is None.
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:EUSTRESS_DEFAULT_API_URL)) {
+            Remove-Item Env:\EUSTRESS_DEFAULT_API_URL -ErrorAction SilentlyContinue
+          }
           cargo build --release --locked --package eustress-client --bin eustress-client `
             --target x86_64-pc-windows-msvc `
             --config "target.x86_64-pc-windows-msvc.rustflags=['-C','target-feature=+crt-static']"
@@ -307,7 +321,14 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --locked --package eustress-client --bin eustress-client --target aarch64-apple-darwin
+        env:
+          # Empty on a production build. Drop it so option_env! is None.
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
+        run: |
+          if [ -z "${EUSTRESS_DEFAULT_API_URL:-}" ]; then
+            unset EUSTRESS_DEFAULT_API_URL
+          fi
+          cargo build --release --locked --package eustress-client --bin eustress-client --target aarch64-apple-darwin
 
       - name: Check the reported version
         run: |
@@ -486,12 +507,18 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --locked --package eustress-client --bin eustress-client
+        run: |
+          # Empty on a production build. Drop it so option_env! is None.
+          if [ -z "${EUSTRESS_DEFAULT_API_URL:-}" ]; then
+            unset EUSTRESS_DEFAULT_API_URL
+          fi
+          cargo build --release --locked --package eustress-client --bin eustress-client
         # The system linker, not mold: under mold the Player started with
         # Luau's C++ static initializers unrun (kSizeClassConfig all zero), and
         # lua_newstate divided by a zero block size (SIGFPE) at startup.
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
 
       # A linker that drops a C++ static initializer passes every Rust check
       # and fails only at run time, so the binary is checked for Luau's.
