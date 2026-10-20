@@ -185,15 +185,25 @@ pub fn start_host(options: HostOptions) -> Result<NetLink, String> {
     Ok(link)
 }
 
-/// Connect to a host. Returns at once; the link reports
-/// [`LinkEvent::Opened`] when the session is up, or [`LinkEvent::Failed`].
-pub fn start_join(link: &JoinLink) -> Result<NetLink, String> {
+/// Why a join without a pin is refused. Loopback may omit the pin; anywhere
+/// else the certificate has to be pinned.
+pub fn pin_required_reason(link: &JoinLink) -> Option<String> {
     if link.pin.is_none() && !link.is_loopback() {
-        return Err(format!(
+        Some(format!(
             "{}:{} is not on this machine, so the join link must carry the host's certificate pin. \
              Copy the full link the host shows.",
             link.host, link.port
-        ));
+        ))
+    } else {
+        None
+    }
+}
+
+/// Connect to a host. Returns at once; the link reports
+/// [`LinkEvent::Opened`] when the session is up, or [`LinkEvent::Failed`].
+pub fn start_join(link: &JoinLink) -> Result<NetLink, String> {
+    if let Some(reason) = pin_required_reason(link) {
+        return Err(reason);
     }
     let target = link.clone();
     let (net, ends) = link_pair();
@@ -209,6 +219,21 @@ pub fn start_join(link: &JoinLink) -> Result<NetLink, String> {
             }
         })
         .map_err(|e| format!("could not start the network thread: {e}"))?;
+    Ok(net)
+}
+
+/// Connect on a runtime the caller already owns, as one task. The stress
+/// run uses this so every bot shares one multi-thread runtime instead of
+/// a runtime and a thread per join. The pin rule is the same as [`start_join`].
+pub fn join_on(handle: &tokio::runtime::Handle, link: &JoinLink) -> Result<NetLink, String> {
+    if let Some(reason) = pin_required_reason(link) {
+        return Err(reason);
+    }
+    let target = link.clone();
+    let (net, ends) = link_pair();
+    handle.spawn(async move {
+        join_main(target, ends).await;
+    });
     Ok(net)
 }
 
@@ -606,10 +631,31 @@ async fn pump_connection(
         }
         "the session ended".to_string()
     };
+    let path_stats = async {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let quic = connection.quic_connection().stats();
+            let rtt_ms = connection.rtt().as_secs_f64() as f32 * 1000.0;
+            if events
+                .send(LinkEvent::PathStats {
+                    conn,
+                    rtt_ms,
+                    sent_bytes: quic.udp_tx.bytes,
+                    recv_bytes: quic.udp_rx.bytes,
+                })
+                .is_err()
+            {
+                return "the session ended".to_string();
+            }
+        }
+    };
     tokio::select! {
         r = reader => r,
         r = datagrams => r,
         r = writer => r,
+        r = path_stats => r,
     }
 }
 
@@ -651,6 +697,9 @@ mod tests {
     fn remote_joins_need_a_pin() {
         let link = JoinLink { host: "192.168.1.9".into(), port: 7777, key: Some("abcdef".into()), pin: None };
         let err = start_join(&link).err().expect("should refuse");
+        assert!(err.contains("certificate pin"));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let err = join_on(rt.handle(), &link).err().expect("join_on should refuse too");
         assert!(err.contains("certificate pin"));
     }
 

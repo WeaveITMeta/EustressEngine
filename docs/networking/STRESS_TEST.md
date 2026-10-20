@@ -1,8 +1,8 @@
 # Stress Test: synthetic players on the real protocol
 
-Status: **design, not built.** Work starts after build 8's two-window join test
-passes (the Gallery play goal comes first). Owner: Multiplayer. The dialog's
-chrome (`engine/ui/slint/stress_test.slint`) is UI's.
+Status: **bots, Studio panel, and `eustress-stress` are built.** Driving,
+per-system host timings, and a RemoteFunction lane are still the design
+below and are not implemented. Owner: Multiplayer.
 
 ## What it is for
 
@@ -14,16 +14,41 @@ remote lanes), move and interact through those lanes, and reports what
 players would feel (join time, latency, loss, disconnects) beside what the
 host pays (frame time and the network's share of it).
 
-## What is there today, and why it measures nothing
+## What is built
 
-`engine/src/network_benchmark.rs` (357 lines) opens raw quinn connections with
-a certificate verifier that accepts anything, then writes JSON strings like
-`{"type":"position"}` on new unidirectional streams. The host speaks
-WebTransport with length-prefixed bincode frames and ignores them, so no bot
-ever joins. The latency it reports is the time to write a stream locally.
-`simulate_interactions` is never read, and Start in the dialog shows the
-"unbuilt feature" notice (`slint_ui.rs` ~7782). UI's slider write-back fix
-lands in build 9.
+The bots live in `eustress-networking/src/stress.rs`. Each one joins the way
+the Player does: WebTransport, `Hello`, `Welcome`, chunk pieces checked with
+`eustress_echk::content_hash`, `WorldReady`, then avatar datagrams and input.
+`PROTOCOL_VERSION` is 5 (`wire.rs`). The host that serves this is Studio
+(F9 / Network > Start Server) or `eustress-headless` with
+`EUSTRESS_HOST_ON_PLAY=1`. `eustress-server`'s `main` says it loads no world
+and hosts no session. Forge's Nomad job (`crates/forge/src/jobs.rs`) launches
+that binary with `--experience-id`, `--max-players` and `--quic-port`, which
+`eustress-server`'s arguments do not define. A pasted full join link is the
+way to aim the bots at a remote host, and only if that process serves this
+session.
+
+Studio's Network > Stress Testing dialog starts the run. An empty join link
+uses the in-process host (the player cap is raised to the bot count plus 8
+and restored when the run ends), then a fresh host file on
+`EUSTRESS_HOST_PORT` or 7777, then asks the local server to start. A pasted
+link is parsed by `resolve_link`; loopback with no key or pin reads the host
+file, and a remote link without a pin is refused. Live tiles cover connected
+clients, input tick rate, RTT (`LinkEvent::PathStats` from quinn's RTT and
+UDP byte counters), bandwidth, join failures, relay latency and loss, and
+this process's CPU and memory when Studio itself is the host. That CPU
+includes the bots. When the host is another process the CPU and memory tiles
+are n/a.
+
+Headless: `eustress-stress --connect <link-or-host:port>`. Exit 0 when every
+client joined and none was kicked or dropped.
+
+`cargo test -p eustress-networking --lib` (113 tests, including
+`bots_join_a_loopback_host_move_and_leave`: 4 bots, one chunk, movement,
+input, relay, no kicks) passed on this branch. Studio itself was not
+play-tested here. Driving, `HostNetStats`, a replica tree per bot, and
+RemoteFunction timing are not built. `stress-invoke-p95-ms` and
+`stress-host-net-ms` stay at 0.
 
 ## Design
 
@@ -197,15 +222,15 @@ failure, disconnect or error, relay loss above 1%, host frame p95 above
 
 ## Order of work
 
-1. `LinkEvent::PathStats` and `native::join_on` in `eustress-networking`, plus
-   unit tests.
-2. `stress.rs`: the bot state machine against a loopback host in a networking
-   test (`start_host` with a tiny world, 20 bots join, move, and leave; the
-   host sees 20 `PeerJoined`, relays arrive, and no kicks).
-3. Studio's side: the bot runtime and its CPU reading, the stats reader,
-   `HostNetStats`, and `set_max_players`.
-4. The dialog wiring with UI.
-5. Proof on a build: Box Head hosted, 50 bots for 60 s, the report compared
+1. Done. `LinkEvent::PathStats` and `native::join_on`, with the pin test.
+2. Done for the join, download, walk, input, chat, jump, and leave path.
+   The loopback test uses 4 bots and one chunk, not 20, and does not build
+   a replica tree. `HostNetStats` is not built.
+3. Done for the bot runtime, in-process CPU and memory, and
+   `set_max_players`. Per-system host timings are not built.
+4. Done for the dialog: ramp, join link, connected, tick rate, server CPU
+   and memory.
+5. Not run. Proof on a build: Box Head hosted, 50 bots for 60 s, the report compared
    with the microprofiler's host frame (the microprofiler is the only frame
    time that counts; the dialog's number must agree with it).
 6. Driving bots, once one real player drives in F9 (the Vehicle Simulator

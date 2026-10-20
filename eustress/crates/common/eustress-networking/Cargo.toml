@@ -59,15 +59,26 @@ avian3d = { workspace = true }
 # case only: joining a host on loopback without a certificate pin. `quinn`
 # exposes the QUIC transport settings, for the packet size cap in `native`.
 wtransport = { version = "0.6.1", default-features = false, features = ["self-signed", "ring", "dangerous-configuration", "quinn"], optional = true }
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util"], optional = true }
 
 [features]
 default = ["native"]
 native = ["dep:wtransport", "dep:tokio"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+
 [dev-dependencies]
-bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos"] }
+# `x11` is a bevy_winit platform, not a default of `bevy_winit` when Bevy is
+# built with default features off. Without it, `winit` fails to compile on
+# Linux (`cargo test` of this crate). Windows selects its platform by cfg.
+bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos", "x11"] }
 
 [[bench]]
 name = "stress_test"
 harness = false
+
+[[bin]]
+name = "eustress-stress"
+path = "src/bin/eustress_stress.rs"
+required-features = ["native"]

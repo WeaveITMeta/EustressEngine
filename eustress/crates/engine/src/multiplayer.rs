@@ -110,6 +110,23 @@ impl HostRequest {
     pub fn is_hosting(&self) -> bool {
         self.active.is_some()
     }
+
+    /// Start hosting, the same as Start Server, when nothing is already up.
+    pub fn request_start(&mut self) {
+        if self.active.is_none() && self.pending.is_none() {
+            self.wanted = true;
+        }
+    }
+
+    /// The link a player would use, once the listener has a port and a pin.
+    pub fn join_link(&self) -> Option<JoinLink> {
+        let active = self.active.as_ref()?;
+        let pin = active.pin?;
+        if active.port == 0 {
+            return None;
+        }
+        Some(join_link(active, Some(pin)))
+    }
 }
 
 /// Adds hosting. Registered in `app_core`, so the headless engine can host

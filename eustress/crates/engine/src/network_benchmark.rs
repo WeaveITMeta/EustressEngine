@@ -1,18 +1,22 @@
-//! # Network Stress Test
+//! Stress test: headless clients on the real session protocol.
 //!
-//! Spawns synthetic QUIC clients against the local PlayServer to measure
-//! throughput, latency, and error rates.  Hardware capabilities are detected
-//! via `sysinfo` so the UI can auto-scale defaults.
+//! The bots live in `eustress_networking::stress`. This module owns the
+//! Studio side: the machine cap, starting and stopping a run, and pushing
+//! the live numbers into the dialog. When Studio itself is the host, the
+//! player cap is raised for the run and this process's CPU and memory are
+//! shown. A pasted join link targets that host instead (a local dedicated
+//! server, or a Forge allocation that serves the session and published a link).
 
-use bevy::prelude::*;
+use std::time::{Duration, Instant};
+
 use bevy::ecs::system::NonSend;
-use sysinfo::System;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering}};
-use std::time::Instant;
+use bevy::prelude::*;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
-// ── Hardware detection ─────────────────────────────────────────────────────────
+use eustress_networking::stress::{resolve_link, StressConfig, StressRun, StressSnapshot};
+use eustress_networking::JoinLink;
 
-/// Detected machine capabilities used to size stress-test defaults.
+/// Detected machine capabilities used to size the Players slider.
 #[derive(Resource, Debug, Clone)]
 pub struct MachineCapabilities {
     pub cpu_cores: usize,
@@ -22,7 +26,11 @@ pub struct MachineCapabilities {
 
 impl Default for MachineCapabilities {
     fn default() -> Self {
-        Self { cpu_cores: 4, total_ram_mb: 8192, recommended_max_clients: 50 }
+        Self {
+            cpu_cores: 4,
+            total_ram_mb: 8192,
+            recommended_max_clients: 50,
+        }
     }
 }
 
@@ -35,268 +43,227 @@ impl MachineCapabilities {
         let cpu_cores = sys.cpus().len().max(1);
         let total_ram_mb = sys.total_memory() / (1024 * 1024);
 
-        // Each synthetic client uses ~1 tokio task + ~4 KB state.
-        // Heuristic: allow up to cores × 25 clients, capped by RAM (1 MB per 4 clients).
+        // Each bot is one task plus its connection. Cap by cores and RAM,
+        // and never offer more than the protocol run accepts.
         let by_cpu = (cpu_cores * 25) as i32;
         let by_ram = (total_ram_mb / 4) as i32;
         let recommended_max_clients = by_cpu.min(by_ram).min(500).max(10);
 
         info!(
-            "🖥️  Machine capabilities: {} cores, {} MB RAM → max {} stress clients",
+            "Machine capabilities: {} cores, {} MB RAM → max {} stress clients",
             cpu_cores, total_ram_mb, recommended_max_clients
         );
 
-        Self { cpu_cores, total_ram_mb, recommended_max_clients }
-    }
-}
-
-// ── Stress test runtime state ──────────────────────────────────────────────────
-
-/// Shared counters updated by async client tasks, read by Bevy system each frame.
-#[derive(Clone)]
-pub struct StressCounters {
-    pub total_messages: Arc<AtomicU64>,
-    pub total_errors: Arc<AtomicU32>,
-    pub latency_sum_us: Arc<AtomicU64>,
-    pub latency_count: Arc<AtomicU64>,
-    pub running: Arc<AtomicBool>,
-    pub clients_connected: Arc<AtomicU32>,
-}
-
-impl Default for StressCounters {
-    fn default() -> Self {
         Self {
-            total_messages: Arc::new(AtomicU64::new(0)),
-            total_errors: Arc::new(AtomicU32::new(0)),
-            latency_sum_us: Arc::new(AtomicU64::new(0)),
-            latency_count: Arc::new(AtomicU64::new(0)),
-            running: Arc::new(AtomicBool::new(false)),
-            clients_connected: Arc::new(AtomicU32::new(0)),
+            cpu_cores,
+            total_ram_mb,
+            recommended_max_clients,
         }
     }
+}
+
+/// What Start asked for, kept until a host link exists.
+struct PendingLaunch {
+    config: StressConfig,
+    /// Empty: use the server Studio is hosting, or the host file on 7777.
+    join_link: String,
+    asked_host: bool,
+    previous_max: Option<u16>,
+    /// True when the bots are connecting to the host inside this process.
+    in_process: bool,
 }
 
 /// Bevy resource that owns the stress test lifecycle.
 #[derive(Resource)]
 pub struct StressTestState {
-    pub counters: StressCounters,
-    pub start_time: Option<Instant>,
-    pub duration_secs: u64,
-    pub target_clients: i32,
-    pub message_rate: i32,
-    pub simulate_movement: bool,
-    pub simulate_interactions: bool,
-    /// Handle to the tokio runtime running the clients.
-    pub abort_handle: Option<tokio::task::JoinHandle<()>>,
+    pending: Option<PendingLaunch>,
+    run: Option<StressRun>,
+    /// Player cap to put back when the run ends.
+    restore_max: Option<u16>,
+    in_process_host: bool,
+    status: String,
+    report_extra: String,
+    frame_ms: Vec<f32>,
+    last_frame: Option<Instant>,
+    sys: System,
+    last_sample: Option<Instant>,
+    server_cpu: f32,
+    server_mem_mb: f32,
+    finalized: bool,
 }
 
 impl Default for StressTestState {
     fn default() -> Self {
         Self {
-            counters: StressCounters::default(),
-            start_time: None,
-            duration_secs: 60,
-            target_clients: 1,
-            message_rate: 10,
-            simulate_movement: true,
-            simulate_interactions: false,
-            abort_handle: None,
+            pending: None,
+            run: None,
+            restore_max: None,
+            in_process_host: false,
+            status: String::new(),
+            report_extra: String::new(),
+            frame_ms: Vec::new(),
+            last_frame: None,
+            sys: System::new(),
+            last_sample: None,
+            server_cpu: -1.0,
+            server_mem_mb: -1.0,
+            finalized: false,
         }
     }
 }
 
-// ── Stress test runner ─────────────────────────────────────────────────────────
+impl StressTestState {
+    pub fn request_stop(&mut self) {
+        self.pending = None;
+        if let Some(run) = &self.run {
+            run.request_stop();
+        }
+        if self.status.is_empty() || self.run.is_some() {
+            self.status = "Stopping…".into();
+        }
+    }
 
-/// Launch `num_clients` synthetic QUIC connections to localhost:server_port.
-/// Each client sends `msg_rate` messages per second for `duration_secs`.
-pub fn start_stress_test(
+    pub fn is_running(&self) -> bool {
+        self.pending.is_some() || self.run.as_ref().is_some_and(|run| run.is_running())
+    }
+}
+
+/// Numbers from the dialog.
+pub struct StressLaunch {
+    pub clients: i32,
+    pub avatar_hz: i32,
+    pub duration_secs: i32,
+    pub ramp_secs: i32,
+    pub movement: bool,
+    pub interactions: bool,
+    pub download: bool,
+    pub join_link: String,
+}
+
+/// Start, or wait for the local server if Studio is not hosting and no link
+/// was pasted. Returns the status line for the Output.
+pub fn begin(
     state: &mut StressTestState,
-    server_port: u16,
-) {
-    // Already running — don't double-start
-    if state.counters.running.load(Ordering::Relaxed) { return; }
-    let counters = state.counters.clone();
-    counters.running.store(true, Ordering::SeqCst);
-    counters.total_messages.store(0, Ordering::SeqCst);
-    counters.total_errors.store(0, Ordering::SeqCst);
-    counters.latency_sum_us.store(0, Ordering::SeqCst);
-    counters.latency_count.store(0, Ordering::SeqCst);
-    counters.clients_connected.store(0, Ordering::SeqCst);
-    state.start_time = Some(Instant::now());
-
-    let num_clients = state.target_clients as usize;
-    let msg_rate = state.message_rate as u64;
-    let duration = std::time::Duration::from_secs(state.duration_secs);
-    let simulate_movement = state.simulate_movement;
-
-    let handle = tokio::spawn(async move {
-        // Stagger client connections over 1 second to avoid thundering herd
-        let stagger = std::time::Duration::from_millis(
-            (1000 / num_clients.max(1) as u64).max(5)
-        );
-
-        let mut client_handles = Vec::with_capacity(num_clients);
-
-        for i in 0..num_clients {
-            let c = counters.clone();
-            let h = tokio::spawn(run_synthetic_client(
-                i, server_port, msg_rate, duration, simulate_movement, c,
-            ));
-            client_handles.push(h);
-            tokio::time::sleep(stagger).await;
-
-            if !counters.running.load(Ordering::SeqCst) {
-                break; // Early stop requested
-            }
-        }
-
-        // Wait for all clients to finish
-        for h in client_handles {
-            let _ = h.await;
-        }
-
-        counters.running.store(false, Ordering::SeqCst);
+    host: Option<&mut eustress_networking::HostSession>,
+    request: Option<&mut crate::multiplayer::HostRequest>,
+    launch: StressLaunch,
+) -> String {
+    if state.is_running() {
+        return "A stress test is already running.".into();
+    }
+    let clients = launch.clients.max(1) as u32;
+    let config = StressConfig {
+        clients,
+        duration: Duration::from_secs(launch.duration_secs.max(1) as u64),
+        ramp: Duration::from_secs(launch.ramp_secs.max(0) as u64),
+        avatar_hz: launch.avatar_hz.max(1) as u32,
+        movement: launch.movement,
+        interactions: launch.interactions,
+        download_world: launch.download,
+    };
+    state.finalized = false;
+    state.frame_ms.clear();
+    state.last_frame = Some(Instant::now());
+    state.report_extra.clear();
+    state.server_cpu = -1.0;
+    state.server_mem_mb = -1.0;
+    state.run = None;
+    state.restore_max = None;
+    state.pending = Some(PendingLaunch {
+        config,
+        join_link: launch.join_link.trim().to_string(),
+        asked_host: false,
+        previous_max: None,
+        in_process: false,
     });
-
-    state.abort_handle = Some(handle);
+    try_launch(state, host, request)
 }
 
-/// A single synthetic client that connects, sends messages, and measures latency.
-async fn run_synthetic_client(
-    id: usize,
-    server_port: u16,
-    msg_rate: u64,
-    duration: std::time::Duration,
-    simulate_movement: bool,
-    counters: StressCounters,
-) {
-    // Build a self-signed QUIC client config (skip server cert verification for localhost)
-    let crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
-
-    let client_config = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap()
-    ));
-
-    let mut endpoint = match quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()) {
-        Ok(e) => e,
-        Err(_) => {
-            counters.total_errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
+/// Start the bots once a join link is known. Called from Start and once a
+/// frame while a launch is waiting for the local server.
+pub fn try_launch(
+    state: &mut StressTestState,
+    host: Option<&mut eustress_networking::HostSession>,
+    request: Option<&mut crate::multiplayer::HostRequest>,
+) -> String {
+    let Some(pending) = state.pending.as_mut() else {
+        return state.status.clone();
     };
-    endpoint.set_default_client_config(client_config);
-
-    let addr = format!("127.0.0.1:{}", server_port).parse().unwrap();
-    let connection = match endpoint.connect(addr, "localhost") {
-        Ok(connecting) => match connecting.await {
-            Ok(conn) => conn,
-            Err(_) => {
-                counters.total_errors.fetch_add(1, Ordering::Relaxed);
-                return;
+    let link = if !pending.join_link.is_empty() {
+        let mut paths = vec![eustress_bridge_client::default_workspace_root()];
+        if let Ok(cwd) = std::env::current_dir() {
+            paths.push(cwd);
+        }
+        match resolve_link(&pending.join_link, &paths) {
+            Ok(link) => link,
+            Err(reason) => {
+                state.pending = None;
+                state.status = reason.clone();
+                return reason;
             }
-        },
-        Err(_) => {
-            counters.total_errors.fetch_add(1, Ordering::Relaxed);
-            return;
         }
-    };
-
-    counters.clients_connected.fetch_add(1, Ordering::Relaxed);
-
-    let interval = std::time::Duration::from_millis((1000 / msg_rate.max(1)).max(1));
-    let deadline = Instant::now() + duration;
-
-    while Instant::now() < deadline && counters.running.load(Ordering::Relaxed) {
-        let send_start = Instant::now();
-
-        // Build a payload — position update if simulating movement, else a ping
-        let payload = if simulate_movement {
-            let t = send_start.elapsed().as_secs_f32();
-            format!(
-                r#"{{"type":"position","id":{},"x":{},"y":0,"z":{}}}"#,
-                id,
-                (t * 0.5 + id as f32).sin() * 50.0,
-                (t * 0.3 + id as f32).cos() * 50.0,
-            )
+    } else if let Some(link) = request.as_ref().and_then(|r| r.join_link()) {
+        pending.in_process = true;
+        link
+    } else if let Some(link) = read_local_host_file() {
+        pending.in_process = false;
+        link
+    } else {
+        if !pending.asked_host {
+            if let Some(request) = request {
+                request.request_start();
+                pending.asked_host = true;
+            }
+        }
+        let status = if pending.asked_host {
+            "Starting the local server. The bots connect once it is listening.".to_string()
         } else {
-            format!(r#"{{"type":"ping","id":{}}}"#, id)
+            "No host is listening. Start the local server (F9) or paste a join link.".to_string()
         };
+        state.status = status.clone();
+        return status;
+    };
 
-        match connection.open_uni().await {
-            Ok(mut stream) => {
-                let data = payload.as_bytes();
-                if stream.write_all(data).await.is_ok() {
-                    let _ = stream.finish();
-                    let latency_us = send_start.elapsed().as_micros() as u64;
-                    counters.total_messages.fetch_add(1, Ordering::Relaxed);
-                    counters.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
-                    counters.latency_count.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    counters.total_errors.fetch_add(1, Ordering::Relaxed);
-                }
+    if pending.in_process {
+        if let Some(host) = host {
+            let cap = (pending.config.clients as u16).saturating_add(8);
+            if pending.previous_max.is_none() {
+                pending.previous_max = Some(host.max_players());
             }
-            Err(_) => {
-                counters.total_errors.fetch_add(1, Ordering::Relaxed);
+            if host.max_players() < cap {
+                host.set_max_players(cap);
             }
         }
-
-        tokio::time::sleep(interval).await;
     }
-
-    counters.clients_connected.fetch_sub(1, Ordering::Relaxed);
-    connection.close(0u32.into(), b"stress test done");
-}
-
-/// Skip TLS verification for localhost stress testing.
-#[derive(Debug)]
-struct SkipServerVerification;
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-        ]
+    let previous_max = pending.previous_max;
+    let in_process = pending.in_process;
+    let config = pending.config.clone();
+    let label = format!("{}:{}", link.host, link.port);
+    match StressRun::start(link, config) {
+        Ok(run) => {
+            state.restore_max = previous_max;
+            state.in_process_host = in_process;
+            state.pending = None;
+            state.run = Some(run);
+            state.status = format!("Connecting to {label}");
+            state.status.clone()
+        }
+        Err(reason) => {
+            state.pending = None;
+            state.status = reason.clone();
+            reason
+        }
     }
 }
 
-// ── Bevy plugin ────────────────────────────────────────────────────────────────
+fn read_local_host_file() -> Option<JoinLink> {
+    let port = std::env::var("EUSTRESS_HOST_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7777u16);
+    let root = eustress_bridge_client::default_workspace_root();
+    eustress_networking::native::read_host_file(&root, port)
+}
 
 pub struct NetworkBenchmarkPlugin;
 
@@ -309,49 +276,165 @@ impl Plugin for NetworkBenchmarkPlugin {
     }
 }
 
-/// Each frame: push stress counters into Slint UI properties.
 fn sync_stress_test_to_ui(
-    stress: Res<StressTestState>,
+    mut stress: ResMut<StressTestState>,
     caps: Res<MachineCapabilities>,
+    mut host: Option<ResMut<eustress_networking::HostSession>>,
+    mut request: Option<ResMut<crate::multiplayer::HostRequest>>,
     slint: Option<NonSend<crate::ui::slint_ui::SlintUiState>>,
 ) {
+    if stress.pending.is_some() {
+        try_launch(&mut stress, host.as_deref_mut(), request.as_deref_mut());
+    }
+    sample_host(&mut stress);
+    let running =
+        stress.run.as_ref().is_some_and(|run| run.is_running()) || stress.pending.is_some();
+    if running {
+        if let Some(last) = stress.last_frame {
+            let dt = last.elapsed().as_secs_f32() * 1000.0;
+            if dt > 0.0 && dt < 1000.0 && stress.frame_ms.len() < 20_000 {
+                stress.frame_ms.push(dt);
+            }
+        }
+        stress.last_frame = Some(Instant::now());
+    }
+
+    let snap = stress.run.as_ref().map(|run| run.snapshot());
+    if let Some(snap) = snap.as_ref() {
+        if !snap.running && !stress.finalized {
+            stress.finalized = true;
+            stress.report_extra = host_note(&stress);
+            if let Some(max) = stress.restore_max.take() {
+                if let Some(host) = host.as_deref_mut() {
+                    host.set_max_players(max);
+                }
+            }
+            stress.status = "Finished".into();
+        }
+    }
+
     let Some(slint) = slint else { return };
     let ui = &slint.window;
-
-    // Push hardware-derived max into slider maximum
     let max = caps.recommended_max_clients;
     if ui.get_stress_max_clients() != max {
         ui.set_stress_max_clients(max);
     }
-
-    // Push live counters
-    let c = &stress.counters;
-    let running = c.running.load(Ordering::Relaxed);
     ui.set_stress_running(running);
-    ui.set_stress_total_messages(c.total_messages.load(Ordering::Relaxed) as i32);
-    ui.set_stress_errors(c.total_errors.load(Ordering::Relaxed) as i32);
+    let Some(snap) = snap else {
+        if !stress.status.is_empty() {
+            ui.set_stress_status(stress.status.clone().into());
+        }
+        return;
+    };
+    push_snapshot(ui, &snap, &stress);
+}
 
-    let count = c.latency_count.load(Ordering::Relaxed);
-    let avg = if count > 0 {
-        (c.latency_sum_us.load(Ordering::Relaxed) as f64 / count as f64 / 1000.0) as f32
+fn push_snapshot(
+    ui: &crate::ui::slint_ui::StudioWindow,
+    snap: &StressSnapshot,
+    state: &StressTestState,
+) {
+    let progress = if snap.duration_secs > 0.0 {
+        (snap.elapsed_secs / snap.duration_secs).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    ui.set_stress_avg_latency(avg);
+    ui.set_stress_progress(progress);
+    let status = if state.status.is_empty() {
+        format!(
+            "{} connected · {:.0}s / {:.0}s · {:.0} Hz",
+            snap.connected, snap.elapsed_secs, snap.duration_secs, snap.tick_hz
+        )
+    } else if snap.running {
+        format!(
+            "{} · {} connected · {:.0}s / {:.0}s",
+            state.status, snap.connected, snap.elapsed_secs, snap.duration_secs
+        )
+    } else {
+        state.status.clone()
+    };
+    ui.set_stress_status(status.into());
+    ui.set_stress_total_messages(snap.frames_received.min(i32::MAX as u64) as i32);
+    ui.set_stress_errors((snap.failed + snap.disconnects + snap.kicks).min(i32::MAX as u32) as i32);
+    ui.set_stress_avg_latency(snap.relay_mean_ms);
+    ui.set_stress_joined(snap.joined.min(i32::MAX as u32) as i32);
+    ui.set_stress_join_failures(snap.failed.min(i32::MAX as u32) as i32);
+    ui.set_stress_disconnects(snap.disconnects.min(i32::MAX as u32) as i32);
+    ui.set_stress_join_p95_ms(snap.join_p95_ms);
+    ui.set_stress_relay_p50_ms(snap.relay_p50_ms);
+    ui.set_stress_relay_p95_ms(snap.relay_p95_ms);
+    ui.set_stress_relay_loss(snap.relay_loss);
+    ui.set_stress_rtt_ms(snap.rtt_ms);
+    ui.set_stress_down_kbps(snap.down_kbps);
+    ui.set_stress_up_kbps(snap.up_kbps);
+    ui.set_stress_bot_cores(snap.bot_cores);
+    ui.set_stress_connected(snap.connected.min(i32::MAX as u32) as i32);
+    ui.set_stress_tick_hz(snap.tick_hz);
+    ui.set_stress_server_cpu(state.server_cpu);
+    ui.set_stress_server_mem_mb(state.server_mem_mb);
+    let frame_p95 = percentile(&state.frame_ms, 0.95);
+    ui.set_stress_host_frame_p95_ms(frame_p95);
+    let budget = if frame_p95 <= 0.0 {
+        0.0
+    } else {
+        frame_p95 / 16.7
+    };
+    ui.set_stress_host_budget(budget);
+    let report = if state.report_extra.is_empty() {
+        snap.report.clone()
+    } else {
+        format!("{}\n{}", snap.report, state.report_extra)
+    };
+    ui.set_stress_report(report.into());
+}
 
-    // Progress
-    if let Some(start) = stress.start_time {
-        let elapsed = start.elapsed().as_secs_f32();
-        let total = stress.duration_secs as f32;
-        ui.set_stress_progress((elapsed / total).min(1.0));
-        let connected = c.clients_connected.load(Ordering::Relaxed);
-        ui.set_stress_status(
-            format!("{} clients connected • {:.0}s / {:.0}s", connected, elapsed, total).into(),
-        );
-
-        // Auto-stop when time elapsed
-        if elapsed >= total && running {
-            c.running.store(false, Ordering::SeqCst);
-        }
+fn sample_host(state: &mut StressTestState) {
+    if !state.in_process_host {
+        state.server_cpu = -1.0;
+        state.server_mem_mb = -1.0;
+        return;
     }
+    let due = state
+        .last_sample
+        .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+    if !due {
+        return;
+    }
+    state.last_sample = Some(Instant::now());
+    let pid = Pid::from_u32(std::process::id());
+    state
+        .sys
+        .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    if let Some(proc) = state.sys.process(pid) {
+        state.server_cpu = proc.cpu_usage();
+        state.server_mem_mb = proc.memory() as f32 / (1024.0 * 1024.0);
+    }
+}
+
+fn host_note(state: &StressTestState) -> String {
+    let frame_p95 = percentile(&state.frame_ms, 0.95);
+    if state.in_process_host {
+        format!(
+            "Host process: CPU {:.0}%   memory {:.0} MB\n\
+             This process is the host, and it is also running the bots, so the CPU includes both.\n\
+             Studio frame p95: {frame_p95:.1} ms",
+            state.server_cpu.max(0.0),
+            state.server_mem_mb.max(0.0),
+        )
+    } else {
+        format!(
+            "Server CPU and memory: not visible from this process. The host is another process or machine.\n\
+             Studio frame p95: {frame_p95:.1} ms"
+        )
+    }
+}
+
+fn percentile(values: &[f32], p: f64) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((v.len() - 1) as f64 * p).round() as usize;
+    v[idx.min(v.len() - 1)]
 }

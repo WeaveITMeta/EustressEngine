@@ -90,6 +90,9 @@ export component StressTestDialog inherits Rectangle {
     // Avatar updates each bot sends per second; 20 is the Player's rate.
     in-out property <int> message-rate: 20;
     in-out property <int> duration-seconds: 60;
+    // Spread the joins across this many seconds from the start.
+    in-out property <int> ramp-seconds: 5;
+    in-out property <string> join-link: "";
     in-out property <bool> simulate-movement: true;
     in-out property <bool> simulate-interactions: false;
     // Bots download the Space before playing, as real players do.
@@ -125,6 +128,11 @@ export component StressTestDialog inherits Rectangle {
     in property <float> up-kbps: 0;
     // CPU the bots themselves kept busy, in cores (they run inside Studio).
     in property <float> bot-cores: 0;
+    // Live figures. Server CPU and memory are negative when this process is not the host.
+    in property <int> connected: 0;
+    in property <float> tick-hz: 0;
+    in property <float> server-cpu: -1;
+    in property <float> server-mem-mb: -1;
     // The end-of-run summary, selectable so it can be copied.
     in property <string> report: "";
 
@@ -135,6 +143,11 @@ export component StressTestDialog inherits Rectangle {
     // One decimal place.
     pure function d1(v: float) -> string {
         return round(v * 10) / 10;
+    }
+
+    pure function maybe(v: float, suffix: string) -> string {
+        if (v < 0) { return "n/a"; }
+        return round(v * 10) / 10 + suffix;
     }
 
     property <bool> has-results: root.total-messages > 0 || root.joined > 0 || root.join-failures > 0 || root.report != "";
@@ -166,7 +179,7 @@ export component StressTestDialog inherits Rectangle {
                 height: min(body.preferred-height + footer.preferred-height + 45px, parent.height - 40px);
                 icon: @image-url("../../assets/icons/ui/stress.svg");
                 title: "Stress test";
-                subtitle: "Synthetic players join the local server the way the Player does";
+                subtitle: "Synthetic players join a live host the way the Player does";
                 close => { root.on-close(); }
 
                 body-scroll := ScrollView {
@@ -180,7 +193,7 @@ export component StressTestDialog inherits Rectangle {
 
                         SettingsGroup {
                             title: "LOAD";
-                            note: "Start hosts the local server first when Studio is not already hosting.";
+                            note: "Empty join link uses the server Studio is hosting, or the host file on port 7777. Otherwise Start hosts locally first.";
 
                             SettingRow {
                                 label: "Players";
@@ -207,13 +220,25 @@ export component StressTestDialog inherits Rectangle {
 
                             SettingRow {
                                 label: "Duration";
-                                description: "How long the test runs";
+                                description: "How long the test runs, from the start";
                                 SliderControl {
                                     minimum: 10;
                                     maximum: 300;
                                     value: root.duration-seconds;
                                     unit: "s";
                                     changed(v) => { root.duration-seconds = v; }
+                                }
+                            }
+
+                            SettingRow {
+                                label: "Ramp-up";
+                                description: "Spread the joins across this many seconds. Keep it shorter than the duration.";
+                                SliderControl {
+                                    minimum: 0;
+                                    maximum: 60;
+                                    value: root.ramp-seconds;
+                                    unit: "s";
+                                    changed(v) => { root.ramp-seconds = v; }
                                 }
                             }
                         }
@@ -238,6 +263,22 @@ export component StressTestDialog inherits Rectangle {
                                 label: "Download the world";
                                 description: "Players download the Space before playing, as real players do. Off measures steady play alone.";
                                 KitSwitch { checked <=> root.download-world; }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            KitSectionLabel { text: "TARGET"; }
+                            Text {
+                                text: "Join link. Leave empty for the local server. A remote or Forge host needs the full link, key and pin included.";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-xs;
+                                wrap: word-wrap;
+                            }
+                            TextEdit {
+                                height: 32px;
+                                text <=> root.join-link;
+                                font-size: 12px;
                             }
                         }
 
@@ -269,6 +310,14 @@ export component StressTestDialog inherits Rectangle {
                         // Results
                         if root.has-results: VerticalLayout {
                             spacing: 12px;
+
+                            ResultRow {
+                                title: "LIVE";
+                                StatTile { value: root.connected; label: "Connected"; }
+                                StatTile { value: d1(root.tick-hz) + " Hz"; label: "Input tick rate"; }
+                                StatTile { value: root.maybe(root.server-cpu, "%"); label: "Server CPU"; }
+                                StatTile { value: root.server-mem-mb < 0 ? "n/a" : round(root.server-mem-mb) + " MB"; label: "Server memory"; }
+                            }
 
                             ResultRow {
                                 title: "JOIN";
