@@ -542,6 +542,9 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      # The upload script lives in the repo. This job otherwise has only
+      # the build artifacts.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -598,34 +601,14 @@ jobs:
           '
 
       - name: Upload to R2
-        working-directory: dist
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           BUCKET: ${{ env.R2_BUCKET }}
           PREFIX: ${{ env.R2_PREFIX }}
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN is not set, so downloads.eustress.dev cannot serve this release."
-            exit 1
-          fi
-
-          # wrangler, not the S3 API, as in release.yml: one credential shape
-          # for every Cloudflare interaction, and --remote so a typo cannot
-          # quietly write to local simulated storage instead.
-          for f in *; do
-            [ "$f" = "latest.json" ] && continue
-            echo "uploading $f"
-            npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/v${VERSION}/${f}" \
-              --file "$f" --remote
-          done
-
-          # The stable path the website polls. Short cache: a release must be
-          # visible in minutes, not in an hour.
-          npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/latest.json" \
-            --file latest.json --remote \
-            --content-type application/json \
-            --cache-control "public, max-age=60"
+        run: bash .github/scripts/r2-upload.sh dist
 
       - name: Verify the release is actually served
         run: |

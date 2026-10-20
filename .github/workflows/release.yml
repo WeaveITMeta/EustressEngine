@@ -95,6 +95,19 @@ jobs:
           fi
           echo "OK: crate version ${HAVE} matches."
 
+      # A dispatched run can publish without a tag. v0.3.7 shipped that way.
+      # This does not create the tag.
+      - name: Warn when this version has no git tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --tags --force
+          WANT="v${{ steps.v.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/${WANT}" >/dev/null; then
+            echo "OK: ${WANT} exists."
+          else
+            echo "::warning::${WANT} has no git tag. This workflow does not create one. A dispatched publish can ship a build that is not tagged, which is how v0.3.7 went out."
+          fi
+
   # ─────────────────────────────────────────────────────────────────────
   # Windows x64
   # ─────────────────────────────────────────────────────────────────────
@@ -103,12 +116,16 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     env:
-      # The engine crate is the largest compile in the workspace. With thin LTO
-      # and parallel jobs, rustc ran the 16 GB runner out of memory
-      # (STATUS_STACK_BUFFER_OVERRUN after "memory allocation ... failed").
-      # Linux takes the same two settings for the same reason.
+      # The engine crate is the largest compile in the workspace. The
+      # 2026-10-17 Windows job died with "memory allocation of 18432 bytes
+      # failed": the process was out of memory, so even a tiny allocation
+      # failed. The global profile still asks for 16 codegen units, which
+      # this job used to inherit. One codegen unit, one rustc job, no LTO,
+      # and no debug info keeps the link inside the runner.
       CARGO_PROFILE_RELEASE_LTO: "off"
-      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -323,8 +340,14 @@ jobs:
     runs-on: ubuntu-22.04 # oldest supported glibc, so the binary runs widely
     timeout-minutes: 90
     env:
+      # Same OOM class as Windows. The 2026-10-17 Linux job lost the runner
+      # ("The hosted runner lost communication with the server") while linking
+      # the engine. One codegen unit, one job, and an 8G swap file give the
+      # linker somewhere to go other than the OOM killer.
       CARGO_PROFILE_RELEASE_LTO: "off"
-      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -338,6 +361,14 @@ jobs:
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo apt-get clean
           df -h /
+
+      - name: Add swap so a link is not evicted
+        run: |
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -419,6 +450,7 @@ jobs:
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -477,34 +509,14 @@ jobs:
           '
 
       - name: Upload to R2
-        working-directory: dist
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           VERSION: ${{ needs.version.outputs.version }}
           BUCKET: ${{ env.R2_BUCKET }}
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN is not set. Artifacts will be attached to the GitHub Release, but downloads.eustress.dev will not serve them."
-            exit 1
-          fi
-
-          # wrangler, not the S3 API: one credential shape for every
-          # Cloudflare interaction in this repo, and --remote so a typo
-          # cannot quietly write to local simulated storage instead.
-          for f in *; do
-            [ "$f" = "latest.json" ] && continue
-            echo "uploading $f"
-            npx --yes wrangler@4 r2 object put "${BUCKET}/v${VERSION}/${f}" \
-              --file "$f" --remote
-          done
-
-          # The stable path the updater and the website both poll. Short
-          # cache: a release must be visible in minutes, not in an hour.
-          npx --yes wrangler@4 r2 object put "${BUCKET}/latest.json" \
-            --file latest.json --remote \
-            --content-type application/json \
-            --cache-control "public, max-age=60"
+        run: bash .github/scripts/r2-upload.sh dist
 
       - name: Verify the release is actually served
         env:
