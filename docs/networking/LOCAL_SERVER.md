@@ -70,21 +70,44 @@ downloads only the chunks that changed.
 
 ## 3. Let other computers in
 
-By default a host accepts players from its own computer only. To open it:
+By default a host accepts players from its own computer only. To open it, the
+way a game server is hosted at home (the plain-language guide for creators is
+<https://eustress.dev/docs/hosting>, from Studio's "Port forwarding guide"
+button):
 
-1. Set `EUSTRESS_HOST_LAN=1` before starting Studio. The host then listens on
-   every network interface, and the join link carries the computer's local
-   network address.
+1. In **Settings > Hosting**, turn on **Players on other computers can join**.
+   The host then listens on every network interface, and the join link carries
+   the computer's local network address.
 2. Allow inbound **UDP 7777** in the firewall.
 3. For players outside your network, forward **UDP 7777** on the router to
-   this computer, and share the link with your public address in place of the
-   local one.
+   this computer. Leave **Public address** empty and Studio asks Cloudflare's
+   trace page (`https://1.1.1.1/cdn-cgi/trace`) for it when the server starts;
+   type it (`host` or `host:port`) when you know better. The Output then
+   prints `Players on the internet join with: <link>`.
+
+Settings > Hosting shows the session's status: where players reach it
+(`Hosting on 81.2.69.160:7777`) and what to forward (`Players outside your
+network need UDP 7777 forwarded to this computer (192.168.1.20)`). Studio
+cannot test the forward from inside the network, so the line says what is
+needed, not that it works. Settings apply at the next server start. The
+values live in Studio's `settings.json` (`host_lan`, `host_port`,
+`host_public_address`, `host_list_in_gallery`).
 
 The key in the link keeps anyone without it out, and the pin makes sure a
 player reaches your computer rather than an impostor. Both change every time a
-server starts, so share the link from the current session.
+server starts, so share the link from the current session. An address alone
+cannot join: the Player needs the key and the pin, so "direct connect" is the
+whole link, pasted on the hosting guide page or passed to `eustress-client`.
+
+IPv6: a host listens on IPv4 only. An IPv6 public address keeps the session
+off the gallery, and the echo's answer is used only when it is a public IPv4
+address.
 
 ### Settings
+
+Each variable wins over Settings > Hosting while it is set; unset, the
+setting decides. The headless engine has no settings file, so the variables
+are all it reads.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -94,10 +117,15 @@ server starts, so share the link from the current session.
 | `EUSTRESS_HOST_ON_PLAY` | off | `1` hosts whenever Play starts. |
 | `EUSTRESS_HOST_PUBLIC` | unset | The address players reach this host at, for the gallery's live link (`host` or `host:port`, an IPv4 address or a name): this computer's local network address when players come in through the tunnel's private route, a public name later. A host listens on IPv4 only, so an IPv6 address keeps the session off the gallery, and the Output says why. |
 
-A published simulation hosted by its author, signed in, with
-`EUSTRESS_HOST_LAN=1` and `EUSTRESS_HOST_PUBLIC` set, shows as live in the
-gallery: Studio tells the API every 30 seconds, and again when the server
-stops. The address is only ever the configured one.
+A published simulation hosted by its author, signed in, with **List in
+Gallery** and **Players on other computers can join** on (or
+`EUSTRESS_HOST_LAN=1` and `EUSTRESS_HOST_PUBLIC` set, which lists as before),
+shows as live in the gallery: Studio tells the API every 30 seconds, and
+again when the server stops. The address is the typed one, else the echo's
+public IPv4 answer; never a guess at this computer's adapters. List in
+Gallery is off by default, because a listed session shows the public address
+to signed-in visitors. Every join to a listed session is admitted by the
+gallery first (`docs/networking/HOSTED_ADMISSION.md`).
 
 ## 4. What a session shares
 
@@ -125,7 +153,7 @@ authority by construction.
 
 | Check | Rule |
 |---|---|
-| Who can connect | This computer only, unless `EUSTRESS_HOST_LAN=1`. |
+| Who can connect | This computer only, unless Settings > Hosting or `EUSTRESS_HOST_LAN=1` opens it. |
 | Join key | 128 random bits, compared in constant time before a session is accepted. |
 | Host identity | Every server start mints a self-signed ECDSA P-256 certificate valid for 14 days. Players verify its SHA-256 (the pin). A Player refuses to join another computer's host without a pin. |
 | Avatar samples | Finite numbers, within 100 km of the origin, at most 80 m/s plus 6 m of slack between samples. A player with more than 60 violations in 10 seconds is removed. |
@@ -146,12 +174,12 @@ dedicated host. The standalone `eustress-server` binary does not host.
 
 | Symptom | Cause |
 |---|---|
-| `could not join: ... timed out` | Nothing is listening at that address: the server is stopped, the firewall blocks UDP 7777, or `EUSTRESS_HOST_LAN` is off on the host. |
+| `could not join: ... timed out` | Nothing is listening at that address: the server is stopped, the firewall blocks UDP 7777, the router does not forward it, or Players on other computers can join (`EUSTRESS_HOST_LAN`) is off on the host. |
 | `the host did not answer within 20 seconds` | The connection opened but the host never welcomed the player. Restart the server. |
 | The join is refused at once | The key is wrong. Copy the link from the current session. |
 | `This host speaks protocol 3 and your Player speaks 2` | Studio and the Player were built from different versions. Rebuild or update both. |
 | A certificate error | The pin is from an earlier session. Every server start has a new one. |
-| `Could not start the server` with an address in use | Another program holds port 7777. Set `EUSTRESS_HOST_PORT`. |
+| `Could not start the server` with an address in use | Another program holds port 7777. Change the port in Settings > Hosting (or set `EUSTRESS_HOST_PORT`). |
 | `The Space is still opening` | The Space's database was still loading. Start the server again in a moment. |
 
 ## 8. Browsers

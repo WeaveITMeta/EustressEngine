@@ -37,13 +37,19 @@
 //! through the public API. Direct `tiny-skia` + `cosmic-text` use IS the
 //! same stack Slint's `SoftwareRenderer` uses underneath, just one layer
 //! lower.
+//!
+//! ## SurfaceGui
+//!
+//! A SurfaceGui is drawn with the same raster and the same quad, on a face
+//! of its parent part, into a texture of its own instead of an atlas tile:
+//! see [`SurfaceGuiRender`].
 
 use bevy::prelude::*;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::render::render_resource::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
-use eustress_common::classes::{BillboardGui, ClassName, Folder, Instance};
+use eustress_common::classes::{BasePart, BillboardGui, ClassName, Folder, Instance, NormalId, SurfaceGui};
 use eustress_common::gui::billboard_renderer::{BillboardGuiMarker, GuiElementDisplay};
 use std::collections::HashMap;
 
@@ -2518,6 +2524,12 @@ fn meters_from_pixels(size_px: [f32; 2]) -> (f32, f32) {
 fn create_atlas_image(images: &mut Assets<Image>, rows: u32, cols: u32) -> Handle<Image> {
     let width = cols * TILE_W;
     let height = BillboardAtlas::atlas_h_px_for_rows(rows);
+    images.add(gui_texture(width, height, "BillboardAtlas", TextureFormat::Rgba8Unorm))
+}
+
+/// A blank texture for the billboard pipeline to sample: the atlas, or a
+/// SurfaceGui's own. `label` names it in a GPU capture.
+fn gui_texture(width: u32, height: u32, label: &'static str, format: TextureFormat) -> Image {
     let size = Extent3d {
         width,
         height,
@@ -2530,10 +2542,10 @@ fn create_atlas_image(images: &mut Assets<Image>, rows: u32, cols: u32) -> Handl
         // vec depending on the construction path.
         data: Some(vec![0u8; total_bytes]),
         texture_descriptor: TextureDescriptor {
-            label: Some("BillboardAtlas"),
+            label: Some(label),
             size,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
+            format,
             mip_level_count: 1,
             sample_count: 1,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
@@ -2554,7 +2566,7 @@ fn create_atlas_image(images: &mut Assets<Image>, rows: u32, cols: u32) -> Handl
         // descriptor with mag/min set to Linear and mipmap Nearest —
         // the exact filter set the WGSL fragment shader wants.
         sampler: ImageSampler::Descriptor(ImageSamplerDescriptor {
-            label: Some("BillboardAtlasSampler".into()),
+            label: Some(format!("{label}Sampler")),
             address_mode_u: ImageAddressMode::ClampToEdge,
             address_mode_v: ImageAddressMode::ClampToEdge,
             address_mode_w: ImageAddressMode::ClampToEdge,
@@ -2563,7 +2575,7 @@ fn create_atlas_image(images: &mut Assets<Image>, rows: u32, cols: u32) -> Handl
         ..default()
     };
     image.resize(size);
-    images.add(image)
+    image
 }
 
 pub(crate) fn label_hash(flat: &[FlatElem]) -> u64 {
@@ -2604,6 +2616,287 @@ pub(crate) fn label_hash(flat: &[FlatElem]) -> u64 {
     h.finish()
 }
 
+// ── SurfaceGui ─────────────────────────────────────────────────────────────
+//
+// A SurfaceGui draws its GUI children on a face of its parent part with the
+// billboards' pieces: `collect_subtree` lays the children out on its canvas,
+// `render_element` rasterizes them, and the billboard pipeline's quad shows
+// them in its `LOCK_ROTATION` variant, which takes the entity's own rotation
+// instead of turning to the camera. Two things are its own. The quad covers
+// its part's face, as Roblox draws a SurfaceGui (`place_surface_guis`). And
+// the texture is the SurfaceGui's own, `canvas_size` pixels, which set only
+// its resolution, where a billboard has an atlas tile: a tile is 192 px
+// square, so an 859 x 1075 canvas would raster at 18% and its 32 px text at
+// under 6 px.
+
+/// Largest side of a SurfaceGui's texture, in pixels. A larger canvas
+/// rasters scaled down to fit, as an oversized billboard does in its tile.
+/// 2048 is within every GPU's texture limit, WebGL2's included.
+const SURFACE_TEXTURE_MAX_PX: f32 = 2048.0;
+
+/// How far a SurfaceGui's quad sits off its face, in metres, so the depth
+/// test keeps it in front of the face it lies on.
+const SURFACE_LIFT_M: f32 = 0.001;
+
+/// SurfaceGui textures painted per frame, at most; the rest wait a frame. A
+/// screen-sized raster takes a few milliseconds.
+const MAX_SURFACE_RASTERS_PER_FRAME: usize = 2;
+
+/// A SurfaceGui's own texture and what it shows, on the SurfaceGui's entity
+/// beside the billboard pipeline's components. `place_surface_guis` inserts
+/// them and `render_surface_guis` paints the texture.
+#[derive(Component)]
+pub struct SurfaceGuiRender {
+    texture: Handle<Image>,
+    width: u32,
+    height: u32,
+    /// Texture pixels per canvas pixel: 1, or less for a canvas larger than
+    /// `SURFACE_TEXTURE_MAX_PX`.
+    content_scale: f32,
+    /// `label_hash` of what the texture shows; 0 until the first paint, and
+    /// again whenever the texture is remade.
+    last_label_hash: u64,
+    /// Something it draws may have changed since the last paint.
+    stale: bool,
+}
+
+/// Give every new SurfaceGui its texture and the pipeline's components, and
+/// keep every SurfaceGui's quad over its part's face, shown as its class
+/// says. Recomputed every frame: SurfaceGuis are few, and what places
+/// one (its class, its part's size, a re-parent, a file reload that rewrites
+/// its `Transform`, the camera) changes in many places. Each value is
+/// written only when it differs, so a SurfaceGui at rest changes nothing.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn place_surface_guis(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    fresh: Query<(Entity, &SurfaceGui), Without<SurfaceGuiRender>>,
+    // A SurfaceGui whose class was converted to another stops drawing.
+    orphaned: Query<Entity, (With<SurfaceGuiRender>, Without<SurfaceGui>)>,
+    mut guis: Query<(
+        &SurfaceGui,
+        Option<&ChildOf>,
+        &GlobalTransform,
+        &mut Transform,
+        &mut Visibility,
+        &mut SurfaceGuiRender,
+        &mut crate::billboard_pipeline::BillboardAtlasTexture,
+        &mut crate::billboard_pipeline::BillboardDepth,
+    )>,
+    parts: Query<(&BasePart, &Transform), Without<SurfaceGui>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    mut shared_quad: Local<Option<Handle<Mesh>>>,
+) {
+    for (entity, gui) in &fresh {
+        let (width, height, content_scale) = surface_texture_size(gui.canvas_size);
+        let texture = images.add(gui_texture(width, height, "SurfaceGui", TextureFormat::Rgba8UnormSrgb));
+        let mesh = shared_quad
+            .get_or_insert_with(|| meshes.add(crate::billboard_pipeline::build_billboard_quad_mesh()))
+            .clone();
+        commands.entity(entity).insert((
+            SurfaceGuiRender { texture: texture.clone(), width, height, content_scale, last_label_hash: 0, stale: true },
+            crate::billboard_pipeline::Billboard,
+            crate::billboard_pipeline::BillboardMesh(mesh),
+            crate::billboard_pipeline::BillboardAtlasTexture(texture),
+            // The whole texture, edge to edge.
+            crate::billboard_pipeline::BillboardUv::default(),
+            crate::billboard_pipeline::BillboardDepth(!gui.always_on_top),
+            // It lies on its face: never turned to the camera.
+            crate::billboard_pipeline::BillboardLockAxis { y_axis: false, rotation: true },
+        ));
+    }
+    for entity in &orphaned {
+        commands.entity(entity).remove::<(
+            SurfaceGuiRender,
+            crate::billboard_pipeline::Billboard,
+            crate::billboard_pipeline::BillboardMesh,
+            crate::billboard_pipeline::BillboardAtlasTexture,
+            crate::billboard_pipeline::BillboardUv,
+            crate::billboard_pipeline::BillboardDepth,
+            crate::billboard_pipeline::BillboardLockAxis,
+        )>();
+    }
+
+    let cam_pos = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation());
+    for (gui, child_of, global, mut transform, mut visibility, mut render, mut texture, mut depth) in &mut guis {
+        // Only a part's own SurfaceGui has a face to draw on; one under a
+        // Folder, a Model or StarterGui is hidden.
+        let placed = child_of
+            .and_then(|c| parts.get(c.parent()).ok())
+            .map(|(part, part_transform)| surface_transform(gui.face, part.size, part_transform.scale));
+        if let Some(placed) = placed {
+            if *transform != placed {
+                *transform = placed;
+            }
+        }
+        // `MaxDistance` 0 draws at any distance, as a billboard's does.
+        let in_range = gui.max_distance <= 0.0
+            || cam_pos.is_none_or(|cam| {
+                global.translation().distance_squared(cam) <= gui.max_distance * gui.max_distance
+            });
+        let want = if gui.enabled && placed.is_some() && in_range {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != want {
+            *visibility = want;
+        }
+        let want_depth = !gui.always_on_top;
+        if depth.0 != want_depth {
+            depth.0 = want_depth;
+        }
+        // A new canvas size remakes the texture; either change repaints.
+        let (width, height, content_scale) = surface_texture_size(gui.canvas_size);
+        if (width, height) != (render.width, render.height) {
+            render.texture = images.add(gui_texture(width, height, "SurfaceGui", TextureFormat::Rgba8UnormSrgb));
+            texture.0 = render.texture.clone();
+            render.width = width;
+            render.height = height;
+            render.last_label_hash = 0;
+        }
+        if render.content_scale != content_scale {
+            render.content_scale = content_scale;
+            render.last_label_hash = 0;
+        }
+    }
+}
+
+/// Where a SurfaceGui's quad sits in its part's frame: over the whole face
+/// `face` names, as Roblox draws one, `SURFACE_LIFT_M` off it and turned to
+/// be read from outside. The canvas only sets how many pixels cover it.
+/// `size` is the part's `BasePart.size`, its Size: the box the face belongs
+/// to, whatever the part's shape. `scale` is its `Transform.scale`, the frame
+/// a child's `Transform` is in: parts are unit meshes scaled to their size,
+/// so a face centre is half the size over the scale out from the centre, as
+/// a face light's emitter is (`light_classes::emitter_transform`), and a
+/// length along an axis is that length over the scale on it.
+fn surface_transform(face: NormalId, size: Vec3, scale: Vec3) -> Transform {
+    let safe = |v: f32| if v.abs() > 1e-6 { v } else { 1.0 };
+    let scale = Vec3::new(safe(scale.x), safe(scale.y), safe(scale.z));
+    let normal = face.to_normal();
+    // The face's right and up as seen from outside, the way a Texture's quad
+    // and the planar UVs lay a face out (`planar_uv`): upright on the four
+    // sides, and with right along +X on the top and the bottom.
+    let (right, up) = match face {
+        NormalId::Top => (Vec3::X, Vec3::NEG_Z),
+        NormalId::Bottom => (Vec3::X, Vec3::Z),
+        _ => (Vec3::Y.cross(normal), Vec3::Y),
+    };
+    // The locked quad is read from its local -Z, and the shader mirrors its
+    // x, so the texture's right runs along local -X and its up along +Y.
+    let rotation = Quat::from_mat3(&Mat3::from_cols(-right, up, -normal));
+    // A vector's length along one of the part's axes.
+    let along = |v: Vec3, axis: Vec3| (v * axis.abs()).element_sum();
+    Transform {
+        translation: normal * (size * 0.5 + Vec3::splat(SURFACE_LIFT_M)) / scale,
+        rotation,
+        // The face's width and height, in the part's frame.
+        scale: Vec3::new(along(size, right) / along(scale, right), along(size, up) / along(scale, up), 1.0),
+    }
+}
+
+/// A SurfaceGui texture's size for a canvas, and the raster scale that fits
+/// the canvas into it: the canvas's own size, scaled down uniformly when a
+/// side would pass `SURFACE_TEXTURE_MAX_PX`.
+fn surface_texture_size(canvas: [f32; 2]) -> (u32, u32, f32) {
+    let (w, h) = (canvas[0].max(1.0), canvas[1].max(1.0));
+    let scale = (SURFACE_TEXTURE_MAX_PX / w).min(SURFACE_TEXTURE_MAX_PX / h).min(1.0);
+    (((w * scale).round() as u32).max(1), ((h * scale).round() as u32).max(1), scale)
+}
+
+/// Paint each SurfaceGui's children into its texture when what they show
+/// changed: laid out on its canvas by `collect_subtree` and rasterized by
+/// `render_element`, as a billboard's are. The gate is the billboards': a GUI
+/// element added, changed, re-parented or removed, a GUI image file changed
+/// on disk, or the SurfaceGui's own class changing marks it stale; a stale
+/// one is laid out and hashed, and painted only when the hash moved. A
+/// hidden one waits until it shows.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn render_surface_guis(
+    mut text_state: NonSendMut<BillboardTextState>,
+    mut images: ResMut<Assets<Image>>,
+    mut gui_images: ResMut<GuiImages>,
+    mut guis: Query<(Entity, Ref<SurfaceGui>, &Visibility, &mut SurfaceGuiRender)>,
+    gui_elements: Query<(Entity, &GuiElementDisplay, &ChildOf)>,
+    changed_gui: Query<
+        (),
+        (
+            With<GuiElementDisplay>,
+            Or<(Changed<GuiElementDisplay>, Changed<ChildOf>)>,
+        ),
+    >,
+    mut removed_gui: RemovedComponents<GuiElementDisplay>,
+    mut seen_images: Local<u64>,
+    throttle: Option<Res<GuiLoadThrottle>>,
+    root: Option<Res<crate::apply::PlayAssetRoot>>,
+) {
+    // A Space with no SurfaceGui pays nothing past this.
+    if guis.is_empty() {
+        return;
+    }
+    let images_now = gui_images.generation();
+    let removed = removed_gui.read().count() > 0;
+    let gui_changed = removed || images_now != *seen_images || !changed_gui.is_empty();
+    *seen_images = images_now;
+    for (_, gui, _, mut render) in &mut guis {
+        if gui_changed || gui.is_changed() {
+            render.stale = true;
+        }
+    }
+    // While a bulk load streams entities in, paint on UI sync ticks only.
+    if throttle.as_deref().is_some_and(|t| t.bulk_loading && !t.sync_tick) {
+        return;
+    }
+    let space_root = root.as_deref().map(|r| r.0.clone()).unwrap_or_default();
+    let mut child_index: Option<GuiChildIndex<'_>> = None;
+    let mut rasters = 0usize;
+    for (entity, gui, visibility, mut render) in &mut guis {
+        if (!render.stale && render.last_label_hash != 0)
+            || *visibility == Visibility::Hidden
+            || rasters >= MAX_SURFACE_RASTERS_PER_FRAME
+        {
+            continue;
+        }
+        let children_of = child_index.get_or_insert_with(|| build_gui_child_index(&gui_elements));
+        // Laid out in canvas pixels; `render_element` scales to the texture.
+        let canvas_w = gui.canvas_size[0].max(1.0);
+        let canvas_h = gui.canvas_size[1].max(1.0);
+        let mut flat: Vec<FlatElem> = Vec::new();
+        collect_subtree(entity, 0.0, 0.0, canvas_w, canvas_h, None, children_of, &mut flat);
+        flat.sort_by_key(|f| f.elem.z_order);
+        render.stale = false;
+        // The images it draws are part of what it shows, as for a billboard.
+        let hash = label_hash(&flat) ^ images_now.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if hash == render.last_label_hash {
+            continue;
+        }
+        let Some(mut pixmap) = Pixmap::new(render.width, render.height) else { continue };
+        for f in flat.iter().filter(|f| f.elem.visible) {
+            render_element(
+                &mut pixmap,
+                &f.elem,
+                f.abs_x,
+                f.abs_y,
+                f.clip_rect,
+                render.content_scale,
+                &mut text_state,
+                &mut gui_images,
+                &space_root,
+            );
+        }
+        if let Some(mut image) = images.get_mut(&render.texture) {
+            image.data = Some(pixmap.take());
+        }
+        render.last_label_hash = hash;
+        rasters += 1;
+    }
+}
+
 // ── Plugin ─────────────────────────────────────────────────────────────────
 
 // ── Class-component → GuiElementDisplay sync ──────────────────────────────
@@ -2637,19 +2930,22 @@ pub fn gui_sync_tick(throttle: Option<Res<GuiLoadThrottle>>) -> bool {
     throttle.map_or(true, |t| t.sync_tick)
 }
 
-/// Billboard drawing, in two stages. Anything that writes the elements a
-/// billboard draws (Studio's class-to-display syncs) runs between them.
+/// Billboard and SurfaceGui drawing, in two stages. Anything that writes the
+/// elements they draw (Studio's class-to-display syncs) runs between them.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BillboardDrawSet {
-    /// Markers, atlas slots, render state and properties.
+    /// Markers, atlas slots, render state and properties; SurfaceGui
+    /// placement.
     Prepare,
-    /// Distance culling, rasterizing and the atlas upload.
+    /// Distance culling, rasterizing and the atlas upload; SurfaceGui
+    /// painting.
     Render,
 }
 
-/// Draws every BillboardGui into the shared atlas. Pair it with
-/// [`crate::billboard_pipeline::BillboardPipelinePlugin`], which puts the atlas
-/// on screen.
+/// Draws every BillboardGui into the shared atlas, and every SurfaceGui onto
+/// its part's face. Pair it with
+/// [`crate::billboard_pipeline::BillboardPipelinePlugin`], which puts them on
+/// screen.
 pub struct BillboardDrawPlugin;
 
 impl Plugin for BillboardDrawPlugin {
@@ -2698,7 +2994,11 @@ impl Plugin for BillboardDrawPlugin {
                 (cull_billboards_by_distance, update_and_render_billboards, upload_atlas_to_gpu)
                     .chain()
                     .in_set(BillboardDrawSet::Render),
-            );
+            )
+            // SurfaceGuis: placed with the billboards' render state, and
+            // painted after the class-to-display syncs, as billboards are.
+            .add_systems(Update, place_surface_guis.in_set(BillboardDrawSet::Prepare))
+            .add_systems(Update, render_surface_guis.in_set(BillboardDrawSet::Render));
     }
 }
 

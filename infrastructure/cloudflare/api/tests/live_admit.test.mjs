@@ -275,14 +275,19 @@ test('the join link goes to a signed-in account, and an anonymous visitor sees o
   assert.equal(anon.headers.get('Cache-Control'), 'no-store');
 });
 
-test('a guest holding a live lease gets the link; an ended, forged or missing lease does not', async () => {
+test('a guest holding a live lease gets the guest-only session\'s link; an ended, forged or missing lease does not', async () => {
   const env = await hosting(environment());
+  // The same listing also hosted as a guest-only session, at another pin (GUEST_PLAY.md section 13).
+  env.GUEST_PLAY = 'on';
+  assert.equal((await beat(env, PIN2, { guest_only: true, guest_caps: ['no_guest_chat', 'guest_name', 'ended_guests', 'host_chat_checked' /* ADJUSTED (fix): round 3 adds host_chat_checked */] })).status, 200);
   const ip = { 'CF-Connecting-IP': '203.0.113.7' };
   const open = await call(env, 'POST', '/api/guest/play', { headers: ip, body: { sim_id: SIM, character: 'F' } });
   assert.equal(open.status, 200, JSON.stringify(open.body));
   const lease = { 'X-Eustress-Lease': open.body.ticket };
 
-  assert.equal((await call(env, 'GET', live, { headers: lease })).body.link, linkFor(PIN), 'a live lease');
+  const guest = (await call(env, 'GET', live, { headers: lease })).body;
+  assert.deepEqual([guest.link, guest.guest_only], [linkFor(PIN2), true], 'a live lease: the guest session, never the account session');
+  assert.equal((await call(env, 'GET', live, { token: player })).body.link, linkFor(PIN), 'an account: the account session');
   assert.equal((await call(env, 'GET', live, { headers: { 'X-Eustress-Lease': open.body.ticket.slice(0, -3) + 'abc' } })).body.link_hidden, true, 'a forged one');
   assert.equal((await call(env, 'GET', live, { headers: { 'X-Eustress-Lease': 'egl1.junk.junk' } })).body.link_hidden, true, 'a made-up one');
   assert.equal((await call(env, 'GET', live)).body.link_hidden, true, 'none');

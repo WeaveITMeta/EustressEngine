@@ -14,7 +14,7 @@ pub fn TermsPage() -> impl IntoView {
             <div class="legal-container">
                 <div class="legal-header">
                     <h1>"Terms of Service"</h1>
-                    <p class="legal-updated">"Last updated: December 6, 2025"</p>
+                    <p class="legal-updated">"Last updated: October 16, 2026"</p>
                 </div>
                 
                 <div class="legal-content">
@@ -42,7 +42,17 @@ pub fn TermsPage() -> impl IntoView {
                             <li>"All activities that occur under your account"</li>
                             <li>"Providing accurate account information"</li>
                         </ul>
-                        <p>"You must be at least 13 years old to create an account. Users under 18 require parental consent."</p>
+                        <p>"You must be at least 18 years old, or the age of majority where you live if that is higher, to create an account. Creating an account requires identity verification: you provide your date of birth and a government-issued photo ID, and no account is opened unless the ID shows that you meet this age."</p>
+                        <h3>"Playing as a Guest"</h3>
+                        <p>"You may play approved Spaces without an account, as a guest. Guest play is open to people of any age. A guest is not asked for a name, email address, age or other information about themselves."</p>
+                        <p>"As a guest:"</p>
+                        <ul>
+                            <li>"Guests never see or play adult content. Joining a live session as a guest is open only for Spaces rated for all ages."</li>
+                            <li>"You cannot buy anything, hold Tickets, Delta or Bliss, publish content, or post in the community."</li>
+                            <li>"Your chat messages in a live session are not delivered to other players."</li>
+                            <li>"Guest play may be limited in how many Spaces you start and how long you play each day."</li>
+                        </ul>
+                        <p>"These Terms apply to guest play as they apply to any other use of the Service."</p>
                     </section>
                     
                     <section class="legal-section">

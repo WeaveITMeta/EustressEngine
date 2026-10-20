@@ -14,9 +14,16 @@
 // serves a listing or its content; the site only renders what it is given.
 //
 //     viewer                                         highest band shown
-//     signed out, or Adult content off               mature_17
+//     signed out                                     ages_10
+//     signed in, Adult content off                   mature_17
 //     on, verified age under 21 (or none on record)  adult_18
 //     on, verified age 21 or over                    adult_21
+//
+// McKale, 2026-10-16: a visitor with no session (who may be a child, and is
+// every guest) sees and plays G to PG only: `all_ages` and `ages_10`. A
+// listing above that is left out of every list for them and refused on every
+// surface that serves it (listing page, download, world, play, live), with
+// `sign_in_required`; signing in opens it up to `mature_17`.
 //
 // The age is the date of birth requireVerifiedAdult (index.js) resolves: the one
 // read off the identity document first, then the one pinned to the identity
@@ -74,8 +81,11 @@ export const ADULT_RATING = 'adult_18';
 export const AGE_21_RATING = 'adult_21';
 /// The bands the Adult content setting gates.
 export const ADULT_RATINGS = Object.freeze([ADULT_RATING, AGE_21_RATING]);
-/// The highest rating a viewer whose Adult content is off is shown.
+/// The highest rating a signed-in viewer whose Adult content is off is shown.
 export const OFF_CAP = 'mature_17';
+/// The highest rating a visitor with no session is shown: G to PG (McKale, 2026-10-16).
+export const SIGNED_OUT_CAP = 'ages_10';
+export const SIGN_IN_REQUIRED = 'This listing is rated for older players. Sign in to see it.';
 /// The highest rating a viewer whose Adult content is on, and whose verified age is under 21 or not on record, is shown.
 export const UNDER_21_CAP = 'adult_18';
 /// The verified age the `adult_21` band needs.
@@ -213,9 +223,11 @@ export async function viewerOf(request, env, authenticate, nowMs = Date.now()) {
   return viewerFor(env, accountId, nowMs);
 }
 
-/// The highest band this viewer is shown: `mature_17` while Adult content is off or signed out, `adult_18` when it is on and
-/// the verified age is under 21 or not on record, and every band when it is on and the verified age is 21 or over.
+/// The highest band this viewer is shown: `ages_10` signed out, `mature_17` signed in while Adult content is off,
+/// `adult_18` when it is on and the verified age is under 21 or not on record, and every band when it is on and the verified
+/// age is 21 or over.
 export function viewerCap(viewer) {
+  if (viewer?.signedIn !== true) return SIGNED_OUT_CAP;
   if (viewer?.adult !== true) return OFF_CAP;
   return viewer.age21 === true ? AGE_21_RATING : UNDER_21_CAP;
 }
@@ -228,38 +240,45 @@ export function ratingCap(asked, viewer) {
   return RATINGS.indexOf(wanted) > RATINGS.indexOf(cap) ? cap : wanted;
 }
 
-/// Whether this viewer may see and play this listing: anything that is not adult content; adult content up to the viewer's
-/// cap (`adult_18` with the setting on, `adult_21` too with a verified age of 21 or over); and the author's own listing always.
+/// Whether this viewer may see and play this listing: anything up to the viewer's cap (viewerCap: `ages_10` signed out,
+/// `mature_17` signed in, `adult_18` with the setting on, `adult_21` too with a verified age of 21 or over); and the
+/// author's own listing always.
 ///
 ///     mayView(sim, viewer) -> boolean
 ///       sim     the listing record as stored (`sim:{id}`): reads `moderation.rating` and `author_id`
 ///       viewer  `{ accountId, signedIn, adult, age21 }` from viewerOf(request, env, verifyAuth); SIGNED_OUT or undefined is off
 export function mayView(sim, viewer) {
-  if (!isAdultListing(sim)) return true;
+  if (!isAdultListing(sim) && (viewer?.signedIn === true || withinSignedOutCap(sim))) return true;
   if (!!viewer?.accountId && viewer.accountId === sim?.author_id) return true;
   return RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(viewerCap(viewer));
 }
 
 /// What a refusal says to this viewer: `adult_content_off` while the setting is off, and `age_21_required` to a viewer who
 /// has it on, since only the 21+ band can still be closed to them. `{ error, code, signed_in }`.
-export function refusalOf(viewer) {
+export function refusalOf(viewer, sim) {
   const signed_in = viewer?.signedIn === true;
+  if (!signed_in && sim && !isAdultListing(sim)) return { error: SIGN_IN_REQUIRED, code: 'sign_in_required', signed_in };
   if (viewer?.adult === true) return { error: AGE_21_REQUIRED, code: 'age_21_required', signed_in };
   return { error: ADULT_CONTENT_OFF, code: 'adult_content_off', signed_in };
 }
 
 /// The refusal every gated surface gives. Never stored by a cache, so turning the setting on, or a birthday, takes effect at once.
-export function adultRefusal(json, cors, viewer) {
-  return json(refusalOf(viewer), 403, { ...cors, 'Cache-Control': 'private, no-store' });
+export function adultRefusal(json, cors, viewer, sim) {
+  return json(refusalOf(viewer, sim), 403, { ...cors, 'Cache-Control': 'private, no-store' });
 }
 
 /// The refusal when `sim` is adult content this request's viewer may not see, else null. The session, the setting and the
 /// age are read only for an adult listing, so every other listing costs nothing. `deps`: authenticate, json, cors.
+/// Also refuses a visitor with no session a listing above SIGNED_OUT_CAP (`sign_in_required`); a listing at or under it
+/// costs nothing.
 export async function refuseAdult(request, env, sim, deps) {
-  if (!isAdultListing(sim)) return null;
+  if (!isAdultListing(sim) && withinSignedOutCap(sim)) return null;
   const viewer = await viewerOf(request, env, deps.authenticate);
-  return mayView(sim, viewer) ? null : adultRefusal(deps.json, deps.cors, viewer);
+  return mayView(sim, viewer) ? null : adultRefusal(deps.json, deps.cors, viewer, sim);
 }
+
+/// Whether anyone, signed out included, may see this listing by its rating: `all_ages` or `ages_10`.
+export const withinSignedOutCap = (sim) => RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(SIGNED_OUT_CAP);
 
 /// Headers for an answer that depends on the viewer's setting. One computed for a signed-in viewer is `private, no-store`:
 /// only a signed-in viewer can have Adult content on, so no cache, shared or the browser's own, ever keeps an answer that

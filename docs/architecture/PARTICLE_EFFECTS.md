@@ -73,9 +73,12 @@ seconds.
   particles carried between steps). Steps run in parallel with rayon above a
   threshold. Deterministic for a given seed and step sequence.
 - **`write_instances`**: fills `BillboardInstance` (64 bytes, `Pod`) per live
-  particle, in world space, sorted back to front for alpha blending (radix
-  sort on quantised depth, so 200,000 particles sort in about a millisecond)
-  and unsorted for additive.
+  particle, in world space, sorted back to front for alpha blending and
+  unsorted for additive. The sort is one parallel radix partition on view
+  depth, then a sort inside each bucket, written straight into instance
+  order: 250,000 particles take 2 to 3 ms on the dev machine. `ZOffset` is
+  applied here (each particle moves toward the camera), so the renderer does
+  not apply it again.
 - **Budget**: a session-wide `VfxBudget` caps live particles (default 250,000)
   and scales each emitter's rate down by distance and screen size before it
   hits the cap, so the cap is a backstop, not the usual state.
@@ -97,7 +100,7 @@ and target format, `RenderLayers` so the Slint overlay camera draws nothing).
   Depth test on, depth write off.
 - **Vertex shader** expands each instance into a quad: camera-facing from the
   view's right and up vectors, or stretched along the velocity axis for
-  streaks, rotated, offset toward the camera by `ZOffset`.
+  streaks, and rotated in its plane.
 - **Fragment**: texture times colour, flipbook frame from the atlas grid,
   emissive brightness above 1.0 for HDR bloom, and a cheap lit term for smoke
   (half-Lambert on a normal bent outward from the quad centre, against the
@@ -117,7 +120,7 @@ and target format, `RenderLayers` so the Slint overlay camera draws nothing).
 | --- | --- |
 | Studio Edit | The spawner attaches the simulation to the emitter entity; the preview runs live, as authors expect, and stops when the entity is hidden or Play starts. |
 | Studio Play and the Player | `play-runtime/src/particles.rs` maps each DataModel emitter to an `EffectDesc` and feeds the same renderer; the sphere path stays for `ParticleSimulation` clouds only. |
-| Scripts | `Emit(n)` and `Clear()` reach `EmitterSim::burst` and `clear`. |
+| Scripts | `Emit(n)` and `Clear()` reach `EmitterSim::emit` and `clear`. |
 
 ## Phases
 

@@ -187,6 +187,18 @@ fn flag(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true")
 }
 
+/// A typed hosting port: a whole number from 1 to 65535. Anything else
+/// (a half-typed field, a letter) keeps the saved port.
+fn host_port(value: &str) -> Option<u16> {
+    value.trim().parse::<u16>().ok().filter(|p| *p != 0)
+}
+
+/// A typed public address as saved: trimmed, without spaces or control
+/// characters inside, and no longer than a DNS name (253) plus a port.
+fn host_address(value: &str) -> String {
+    value.trim().chars().filter(|c| !c.is_whitespace() && !c.is_control()).take(260).collect()
+}
+
 /// A 0 to 100 slider value as a 0 to 1 level.
 fn level(value: &str) -> Option<f32> {
     value.trim().parse::<f32>().ok().map(|v| (v / 100.0).clamp(0.0, 1.0))
@@ -353,6 +365,31 @@ fn apply_set(settings: &mut ResMut<EditorSettings>, preview: &mut VolumePreview,
                 settings.ray_tracing = v;
             }
         }
+        // Settings > Hosting, read when a server next starts.
+        "host_lan" => {
+            let v = flag(value);
+            if settings.host_lan != v {
+                settings.host_lan = v;
+            }
+        }
+        "host_port" => {
+            let Some(v) = host_port(value) else { return };
+            if settings.host_port != v {
+                settings.host_port = v;
+            }
+        }
+        "host_public_address" => {
+            let v = host_address(value);
+            if settings.host_public_address != v {
+                settings.host_public_address = v;
+            }
+        }
+        "host_list_in_gallery" => {
+            let v = flag(value);
+            if settings.host_list_in_gallery != v {
+                settings.host_list_in_gallery = v;
+            }
+        }
         other => warn!("Settings: unknown preference {other:?}"),
     }
 }
@@ -364,6 +401,7 @@ fn sync_to_slint(
     settings: Res<EditorSettings>,
     preview: Res<VolumePreview>,
     ray_tracing_note: Option<Res<crate::raytracing::RaytracingNote>>,
+    reach: Option<Res<crate::multiplayer::HostingReach>>,
     mut pushed: Local<bool>,
 ) {
     let Some(slint) = slint else { return };
@@ -371,11 +409,20 @@ fn sync_to_slint(
     // first push; the performance guard can record "too slow"), so it is a
     // reason to push too.
     let note_changed = ray_tracing_note.as_ref().is_some_and(|note| note.is_changed());
-    if *pushed && !settings.is_changed() && !note_changed {
+    // Settings > Hosting's status line follows the server, not the settings.
+    let reach_changed = reach.as_ref().is_some_and(|r| r.is_changed());
+    if *pushed && !settings.is_changed() && !note_changed && !reach_changed {
         return;
     }
     *pushed = true;
     let g = slint.window.global::<Preferences>();
+    g.set_host_lan(settings.host_lan);
+    g.set_host_port(settings.host_port.to_string().into());
+    g.set_host_public_address(settings.host_public_address.as_str().into());
+    g.set_host_list_in_gallery(settings.host_list_in_gallery);
+    if let Some(reach) = &reach {
+        g.set_host_status(reach.status.as_str().into());
+    }
     g.set_show_grid(settings.show_grid);
     g.set_snap(settings.snap_enabled);
     g.set_auto_save(settings.auto_save_enabled);
@@ -626,5 +673,26 @@ fn apply_volumes(
             let v = gain(playback.as_deref());
             sink.set_volume(v);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Settings > Hosting keeps a port only when it is one, and an address
+    /// without the spaces a paste brings along.
+    #[test]
+    fn hosting_port_and_address_are_saved_only_when_usable() {
+        assert_eq!(host_port("7777"), Some(7777));
+        assert_eq!(host_port(" 25565 "), Some(25565));
+        assert_eq!(host_port("65535"), Some(65535));
+        for refused in ["", "0", "65536", "77a", "-1", "7 777"] {
+            assert_eq!(host_port(refused), None, "{refused:?}");
+        }
+        assert_eq!(host_address("  81.2.69.160:30000\n"), "81.2.69.160:30000");
+        assert_eq!(host_address("play. example.com"), "play.example.com");
+        assert_eq!(host_address(""), "");
+        assert_eq!(host_address(&"a".repeat(400)).len(), 260);
     }
 }

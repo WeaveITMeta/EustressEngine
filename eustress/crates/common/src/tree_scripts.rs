@@ -320,6 +320,7 @@ fn cast_ray(
         normal: Vector3::from_vec3(hit.normal),
         distance: hit.distance as f64,
         terrain: colliders.get(hit.entity).map_or(false, |(_, _, terrain)| terrain),
+        material: None,
     })
 }
 

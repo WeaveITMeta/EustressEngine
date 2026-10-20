@@ -127,14 +127,21 @@ test('the players the play route shows are what the host claims up to the player
   assert.deepEqual(r.body.live, { players: 0, max_players: 10_000 });
 });
 
-test('a live host: a guest holding a live lease gets the link', async () => {
+test('a live host: a guest holding a live lease gets the guest-only session\'s link, and only that', async () => {
   const env = await seed(environment());
   await host(env);
   const open = await call(env, 'POST', '/api/guest/play', { headers: { 'CF-Connecting-IP': '203.0.113.7' }, body: { sim_id: SIM, character: 'F' } });
   assert.equal(open.status, 200, open.text);
+  // Only an account session: a guest is told it is not live for them and plays solo.
+  const solo = await call(env, 'POST', play, { headers: { 'X-Eustress-Lease': open.body.ticket } });
+  assert.equal(solo.body.status, 'solo');
+  // A guest-only session too (GUEST_PLAY.md section 13): the guest gets its link.
+  env.GUEST_PLAY = 'on';
+  const GUEST_LINK = LINK.replace(PIN, 'cd'.repeat(32));
+  assert.equal((await host(env, { link: GUEST_LINK, guest_only: true, guest_caps: ['no_guest_chat', 'guest_name', 'ended_guests', 'host_chat_checked' /* ADJUSTED (fix): round 3 adds host_chat_checked */] })).status, 200);
   const r = await call(env, 'POST', play, { headers: { 'X-Eustress-Lease': open.body.ticket } });
   assert.equal(r.body.status, 'live');
-  assert.equal(r.body.launch.link, LINK);
+  assert.equal(r.body.launch.link, GUEST_LINK);
 });
 
 test('an unapproved listing: its author plays and joins their own host; no one else can play it at all', async () => {

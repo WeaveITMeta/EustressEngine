@@ -196,6 +196,15 @@ const SHIP: &[Topic] = &[
         is_new: false,
     },
     Topic {
+        href: "/docs/hosting",
+        title: "Hosting",
+        icon: "/assets/icons/network.svg",
+        summary: "Host a Space from your own computer: the firewall, the router's port forward, and joining by link.",
+        level: "Beginner",
+        minutes: 8,
+        is_new: true,
+    },
+    Topic {
         href: "/docs/publishing",
         title: "Publishing",
         icon: "/assets/icons/upload.svg",

@@ -20,13 +20,17 @@
 // The index never holds a join link, a key or a pin. A listing is shown only while it is LISTED (the same
 // overlay the list route uses), so an unlisted, archived, pending or held listing never appears, and the totals count the
 // same listings the strip may show. The author's id is held to apply the cap and is never returned.
-// One instance, named by LIVE_INDEX_NAME. Design: docs/networking/LIVE_INDEX.md.
+// One instance, named by LIVE_INDEX_NAME. Guest-only sessions (live.mjs) have their own instance, GUEST_LIVE_INDEX_NAME,
+// read by GET /api/guest/live, so a guest's Play chooser picks from sessions that take guests and the Gallery's strip from
+// sessions that take accounts. Design: docs/networking/LIVE_INDEX.md, docs/architecture/GUEST_PLAY.md section 13.
 
 import { RATINGS, legalLockedIds, withLegalLockFrom } from './moderation.mjs';
 import { cachedValue, defaultCache } from './body_cache.mjs';
 import { ratingCap, ratingOf, viewerHeaders } from './adult_content.mjs';
 
 export const LIVE_INDEX_NAME = 'all';
+/// The index of guest-only sessions.
+export const GUEST_LIVE_INDEX_NAME = 'guest';
 /// An entry with no beat for this long is gone. The same three missed 30 s beats as HEARTBEAT_TTL_MS in live.mjs
 /// (a test holds the two together).
 export const LIVE_INDEX_TTL_MS = 90_000;
@@ -179,8 +183,8 @@ export class LiveIndex {
 // Calls into it
 // -----------------------------------------------------------------------------
 
-async function indexCall(env, op, args) {
-  const stub = env.LIVE_INDEX.get(env.LIVE_INDEX.idFromName(LIVE_INDEX_NAME));
+async function indexCall(env, op, args, name = LIVE_INDEX_NAME) {
+  const stub = env.LIVE_INDEX.get(env.LIVE_INDEX.idFromName(name || LIVE_INDEX_NAME));
   let timer;
   const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${op}: timed out`)), LIVE_INDEX_CALL_TIMEOUT_MS); });
   try {
@@ -196,10 +200,11 @@ async function indexCall(env, op, args) {
 
 /// Tell the index about a host: op `beat` or `stop`. Never throws and never waits long: an index that is missing,
 /// failing or slow costs the host nothing, since the heartbeat is what matters. Returns whether the index took it.
-export async function tellLiveIndex(env, op, args) {
+/// `name` picks the index: LIVE_INDEX_NAME (the default) or GUEST_LIVE_INDEX_NAME.
+export async function tellLiveIndex(env, op, args, name = LIVE_INDEX_NAME) {
   try {
     if (!env?.LIVE_INDEX) return false;
-    return (await indexCall(env, op, args)).ok !== false;
+    return (await indexCall(env, op, args, name)).ok !== false;
   } catch (e) {
     console.error(`live index ${op} failed:`, e?.message || e);
     return false;
@@ -211,8 +216,8 @@ export async function tellLiveIndex(env, op, args) {
 // -----------------------------------------------------------------------------
 
 /// The strip for one age slice: the live entries that are LISTED, newest first, with the totals of all of them.
-async function liveNowFor(env, maxIdx, isListable, view) {
-  const held = await indexCall(env, 'list', { now: Date.now() });
+async function liveNowFor(env, maxIdx, isListable, view, name, keep) {
+  const held = await indexCall(env, 'list', { now: Date.now() }, name);
   if (!held || held.ok === false || !Array.isArray(held.sessions)) throw new Error('the live index did not answer');
 
   const locked = await legalLockedIds(env);
@@ -227,6 +232,7 @@ async function liveNowFor(env, maxIdx, isListable, view) {
     if (!isListable(sim)) continue;
     // No rating, or one this Worker does not know, reads as adult_21, the most restrictive band (ratingOf).
     if (RATINGS.indexOf(ratingOf(sim)) > maxIdx) continue;
+    if (keep && !keep(sim)) continue;
     sessionsTotal += 1;
     playersTotal += entry.players;
     if (shown.length >= LIVE_SESSIONS_SHOWN) continue;
@@ -252,9 +258,11 @@ async function liveNowFor(env, maxIdx, isListable, view) {
 
 /// `deps` carries json and isListable (index.js), `view(sim)`, the Gallery's card for a listing (its name,
 /// author, thumbnail and cover; awaited, so it may sign an adult card's image URLs), and `viewer`, who asked (src/adult_content.mjs viewerOf; signed out when absent).
-/// `deps.cache` replaces the platform's cache (a test hands in its own).
+/// `deps.cache` replaces the platform's cache (a test hands in its own). `deps.index` reads another index
+/// (GUEST_LIVE_INDEX_NAME), and `deps.keep(sim)` drops a listing that index may not show.
 export async function handleLiveNow(url, env, cors, deps) {
   const { json, isListable, view, viewer } = deps;
+  const name = deps.index || LIVE_INDEX_NAME;
   const unavailable = () => json({ error: 'The live list is not available right now', code: 'live_unavailable' }, 503, { ...cors, 'Cache-Control': 'no-store' });
   if (!env.LIVE_INDEX) return unavailable();
 
@@ -267,7 +275,8 @@ export async function handleLiveNow(url, env, cors, deps) {
   const cache = deps.cache === undefined ? defaultCache() : deps.cache;
   let body;
   try {
-    body = await cachedValue(cache, `${url?.origin || 'https://api.eustress.dev'}/__cache/live?rating_max=${slice}`, LIVE_INDEX_CACHE_SECONDS, () => liveNowFor(env, maxIdx, isListable, view));
+    const which = name === LIVE_INDEX_NAME ? 'live' : `live-${name}`;
+    body = await cachedValue(cache, `${url?.origin || 'https://api.eustress.dev'}/__cache/${which}?rating_max=${slice}`, LIVE_INDEX_CACHE_SECONDS, () => liveNowFor(env, maxIdx, isListable, view, name, deps.keep));
   } catch (e) {
     console.error('live index list failed:', e?.message || e);
     return unavailable();

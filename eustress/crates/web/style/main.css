@@ -21782,3 +21782,22 @@ body:has(.kyc-banner) { padding-top: 60px; }
 /* The "Most Popular" badge stays on one line and the card's icon sits below it, not under it. */
 .pricing-card .popular-badge { white-space: nowrap; }
 .pricing-card.popular .card-icon { margin-top: 18px; }
+
+/* Hosting guide: the direct join box (pages/docs_hosting.rs) */
+.direct-join {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin: 12px 0 18px;
+}
+.direct-join .form-input {
+    flex: 1 1 320px;
+    min-width: 0;
+}
+.direct-join-problem {
+    flex-basis: 100%;
+    margin: 0;
+    color: #f87171;
+    font-size: 0.9rem;
+}

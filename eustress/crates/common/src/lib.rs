@@ -155,6 +155,8 @@ pub mod services;
 pub mod soul;
 #[cfg(feature = "mlua")]
 pub mod mlua;
+#[cfg(feature = "scripting-vm")]
+pub mod scripting_vm;
 /// Shared (language-agnostic) script-plugin data types — used by both the
 /// `luau` and `realism-scripting` backends, so it stays unconditional
 /// (its own types are per-variant `#[cfg]`-gated internally instead).

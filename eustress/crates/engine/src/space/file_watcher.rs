@@ -1218,6 +1218,78 @@ fn handle_file_modified(
                                             commands.entity(entity).insert(echem.to_component());
                                         }
 
+                                        // Folder-form GUI leaves and frames
+                                        // (`Name/_instance.toml`, the Insert
+                                        // convention): the display re-applied
+                                        // from the bytes this handler just
+                                        // read, as the GuiElement branch does
+                                        // for a flat file, and built the way
+                                        // Space open builds it
+                                        // (`spawn_gui_element` for a leaf, the
+                                        // GuiContainer arm for a Frame). Not
+                                        // `load_gui_definition`: on an open
+                                        // database Space it serves the tree's
+                                        // copy from before this edit.
+                                        // `folder_load` names the GUI classes,
+                                        // so a part, a model or a script never
+                                        // takes this path.
+                                        if let Ok(gui_def) = super::gui_loader::load_gui_definition_from_str(&toml_content) {
+                                            use super::file_loader::FolderLoad;
+                                            let gui_class = gui_def.metadata.class_name.as_str();
+                                            let arm = eustress_common::classes::ClassName::from_str(gui_class)
+                                                .ok()
+                                                .map(super::file_loader::folder_load);
+                                            if matches!(arm, Some(FolderLoad::GuiLeaf | FolderLoad::GuiContainer)) {
+                                                let display = if arm == Some(FolderLoad::GuiContainer) {
+                                                    super::gui_loader::gui_display_from_props(
+                                                        &gui_def.gui,
+                                                        gui_def.text.as_ref(),
+                                                        &gui_class.to_lowercase(),
+                                                    )
+                                                } else {
+                                                    let mut gui = gui_def.gui.clone();
+                                                    gui.size = gui.resolved_size();
+                                                    match gui_class {
+                                                        // Its picture: `[asset].path`, else
+                                                        // `[image].image`, against its folder
+                                                        // (`spawn_image_element`).
+                                                        "ImageLabel" | "ImageButton" => {
+                                                            let mut d = super::gui_loader::gui_display_from_props(&gui, None, gui_class);
+                                                            let picture = gui_def
+                                                                .asset
+                                                                .as_ref()
+                                                                .and_then(|a| a.get("path"))
+                                                                .and_then(|p| p.as_str())
+                                                                .map(str::to_string)
+                                                                .or_else(|| gui_def.image.as_ref().map(|i| i.image.clone()))
+                                                                .filter(|s| !s.is_empty());
+                                                            if let (Some(rel), Some(dir)) = (picture, event.path.parent()) {
+                                                                d.image_path = dir.join(rel).to_string_lossy().to_string();
+                                                            }
+                                                            d
+                                                        }
+                                                        // Drawn as its class name until it renders.
+                                                        "ViewportFrame" => {
+                                                            let label = super::gui_loader::GuiTomlText {
+                                                                text: "[ViewportFrame]".to_string(),
+                                                                text_color: [0.5, 0.5, 0.5, 0.8],
+                                                                font_size: 12.0,
+                                                                text_x_alignment: "Center".to_string(),
+                                                                text_y_alignment: "Center".to_string(),
+                                                                ..Default::default()
+                                                            };
+                                                            super::gui_loader::gui_display_from_props(&gui, Some(&label), gui_class)
+                                                        }
+                                                        _ => super::gui_loader::gui_display_from_props(&gui, gui_def.text.as_ref(), gui_class),
+                                                    }
+                                                };
+                                                if let Ok(mut ec) = commands.get_entity(entity) {
+                                                    ec.insert(display);
+                                                }
+                                                debug!("🔄 Hot-reloaded folder GUI element: {:?}", event.path);
+                                            }
+                                        }
+
                                         // BillboardGui class hot-reload. The
                                         // InstanceDefinition path above only
                                         // re-inserts Transform + material; a
@@ -1256,6 +1328,25 @@ fn handle_file_modified(
                                             }
                                         }
 
+                                        // SurfaceGui class hot-reload, as for a
+                                        // BillboardGui above: re-insert the class
+                                        // from the `[gui]` section so a `face` or
+                                        // `canvas_size` edit applies live. Parsed
+                                        // from `toml_content`, the bytes this
+                                        // handler just read: on an open database
+                                        // Space `load_gui_definition` serves the
+                                        // tree's copy, which takes this edit only
+                                        // after the handler returns.
+                                        if let Ok(gui_def) = super::gui_loader::load_gui_definition_from_str(&toml_content) {
+                                            if gui_def.metadata.class_name == "SurfaceGui" {
+                                                let sg_class = super::gui_loader::surface_class_from_props(&gui_def.gui);
+                                                if let Ok(mut ec) = commands.get_entity(entity) {
+                                                    ec.insert(sg_class);
+                                                }
+                                                debug!("🔄 Hot-reloaded SurfaceGui class: {:?}", event.path);
+                                            }
+                                        }
+
                                         // One line per saved edit (or per reconcile
                                         // hot update), naming what was applied.
                                         info!(
@@ -1287,7 +1378,20 @@ fn handle_file_modified(
         FileType::GuiElement => {
             // Hot-reload GUI element TOML (Frame, TextLabel, TextButton, etc.)
             if let Some(entity) = registry.get_entity(&event.path) {
-                match super::gui_loader::load_gui_definition(&event.path) {
+                // Parsed from the bytes on disk, the edit this event is for:
+                // on an open database Space `load_gui_definition` serves the
+                // tree's copy, which takes this edit only after the handler
+                // returns (`sync_toml_edits_to_fjall`), so the reload put the
+                // old values back. An empty or unreadable file is an editor
+                // mid-save; the next event carries the content.
+                let text = match std::fs::read_to_string(&event.path) {
+                    Ok(text) if !text.trim().is_empty() => text,
+                    _ => {
+                        debug!("GUI element reload of {:?} deferred: empty or unreadable mid-write", event.path);
+                        return;
+                    }
+                };
+                match super::gui_loader::load_gui_definition_from_str(&text) {
                     Ok(gui_def) => {
                         let gui_type = super::gui_loader::gui_class_from_extension(&event.path);
                         let display = super::gui_loader::gui_display_from_props(
@@ -1771,6 +1875,98 @@ fn handle_file_created(
                     },
                 );
                 info!("✅ Hot-loaded restored BillboardGui: {:?}", bb_dir);
+                return;
+            }
+
+            // SurfaceGui hot-create (trash restore via undo, an MCP create):
+            // the spawn of `file_loader.rs`'s SurfaceGui branch, so a folder
+            // that appears while Studio runs loads as it does at the next
+            // open. As for a BillboardGui above, its child UI elements arrive
+            // as their own `_instance.toml` events and take the
+            // gui-descendant route below.
+            if is_instance_marker && matches!(gui_class_name.as_deref(), Some("SurfaceGui")) {
+                let sg_dir = event.path.parent().unwrap_or(event.path.as_path()).to_path_buf();
+                let dir_name = sg_dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("SurfaceGui")
+                    .to_string();
+
+                // One read of the file, parsed as Space open parses it
+                // (`parse_instance_text`, whose GUI classes include
+                // SurfaceGui): its `[gui]` and its UUID. The class default
+                // fills in for a missing field.
+                let parsed = std::fs::read_to_string(&event.path)
+                    .ok()
+                    .map(|text| super::file_loader::parse_instance_text(&text));
+                let sg_uuid = parsed.as_ref().map(|p| p.uuid.clone()).unwrap_or_default();
+                let mut sg_class = eustress_common::classes::SurfaceGui::default();
+                let mut sg_adornee = String::new();
+                let mut sg_tags: Vec<String> = Vec::new();
+                if let Some(Ok(gui_def)) = parsed.and_then(|p| p.gui) {
+                    sg_tags = gui_def.tags.clone();
+                    sg_adornee = gui_def.gui.adornee.clone().unwrap_or_default();
+                    sg_class = super::gui_loader::surface_class_from_props(&gui_def.gui);
+                }
+
+                let marker = eustress_common::gui::billboard_renderer::SurfaceGuiMarker {
+                    face: sg_class.face.as_str().to_string(),
+                    target_part: sg_adornee,
+                    pixels_per_meter: sg_class.pixels_per_unit,
+                };
+
+                let entity = commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_name.clone(),
+                        class_name: eustress_common::classes::ClassName::SurfaceGui,
+                        archivable: true,
+                        id: 0,
+                        ai: false,
+                        uuid: sg_uuid,
+                    },
+                    sg_class,
+                    marker,
+                    super::file_loader::LoadedFromFile {
+                        path: sg_dir.clone(),
+                        file_type: super::file_loader::FileType::Directory,
+                        service: event.service.clone(),
+                    },
+                    super::instance_loader::InstanceFile {
+                        toml_path: event.path.clone(),
+                        mesh_path: std::path::PathBuf::new(),
+                        name: dir_name.clone(),
+                    },
+                    Name::new(dir_name.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                )).id();
+                if !sg_tags.is_empty() {
+                    commands.entity(entity).insert(eustress_common::attributes::Tags(sg_tags));
+                }
+
+                // Parent to the containing folder if we can resolve it.
+                if let Some(gp) = sg_dir.parent() {
+                    let marker_path = gp.join("_instance.toml");
+                    if let Some(parent_entity) = registry.get_entity(&marker_path)
+                        .or_else(|| registry.get_entity(gp))
+                    {
+                        commands.entity(entity).insert(ChildOf(parent_entity));
+                    }
+                }
+
+                // Under the folder and its marker, as Space open registers it,
+                // so a Remove of either despawns it.
+                let dir_meta = super::file_loader::FileMetadata {
+                    path: sg_dir.clone(),
+                    file_type: super::file_loader::FileType::Directory,
+                    service: event.service.clone(),
+                    name: dir_name,
+                    size: 0,
+                    modified: std::time::SystemTime::now(),
+                    children: Vec::new(),
+                };
+                registry.register(sg_dir.clone(), entity, dir_meta.clone());
+                registry.register(event.path.clone(), entity, dir_meta);
+                info!("✅ Hot-loaded SurfaceGui: {:?}", sg_dir);
                 return;
             }
 

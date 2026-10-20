@@ -154,6 +154,7 @@ fn cast(boxes: &[(u64, Vector3, Vector3)], q: &RayQuery) -> Option<RayHit> {
                 normal: Vector3::new(normal[0], normal[1], normal[2]),
                 distance,
                 terrain: false,
+                material: None,
             });
         }
     }

@@ -43,8 +43,11 @@ eustress-networking = { path = "../common/eustress-networking", default-features
 # (space_read.rs:416-424, datamodel/record.rs:1492-1521). Without it this
 # Player's tree holds authored studs where the host's holds metres, every
 # replicated write lands in a different world, and nothing fails to compile.
-eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1"] }
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1", "realism-scripting", "mlua"] }
 eustress-play-runtime = { path = "../play-runtime" }
+# Named directly so Bevy's derive macros (Resource, Component) emit
+# `bevy_ecs::` paths that resolve here; same as crates/engine/Cargo.toml.
+bevy_ecs = { version = "0.19", default-features = false, features = ["trace"] }
 avian3d = { workspace = true }
 bevy = { workspace = true, features = [
     # The browser's event loop, canvas and input.

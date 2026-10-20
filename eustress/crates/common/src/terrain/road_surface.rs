@@ -108,6 +108,11 @@ pub struct RoadSurface {
     pub spline: Entity,
 }
 
+/// The material of a road's ribbon, its bed. A raycast hit on the ribbon
+/// reports it, since the ribbon has no instance of its own.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoadMaterial(pub super::material::TerrainMaterial);
+
 /// Marks one surface of a designed road (its carriageway, a shoulder, the
 /// markings), a child of the road's [`RoadSurface`] entity.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,6 +323,11 @@ pub fn sync_road_surfaces(
                     ))
                     .id(),
             };
+            // The ribbon wears the bed's material; a raycast hit reports it.
+            let road_material = bed
+                .and_then(|slot| slots.as_deref().and_then(|s| s.get(slot)))
+                .map_or(super::material::TerrainMaterial::Asphalt, |s| s.base);
+            commands.entity(surface).try_insert(RoadMaterial(road_material));
             let parts = build_designed_surface(
                 &mut commands,
                 surface,

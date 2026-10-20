@@ -854,10 +854,14 @@ test('the popular tags follow the viewer\'s rating limit, like the list does', a
   await seed(env, { name: 'Kids', tags: ['kid-safe', 'shared'], rating: 'all_ages' });
   await seed(env, { name: 'Teens', tags: ['teen-stuff', 'shared'], rating: 'teen_13' });
   await seed(env, { name: 'Adults', tags: ['adult-only', 'shared'], rating: 'adult_18' });
-  // Signed out, Adult content is off: an adult listing's tags are not named (src/adult_content.mjs).
+  // Signed out sees G to PG only (src/adult_content.mjs, McKale 2026-10-16): the teen and adult listings' tags are not named.
   const out = (await get(env, '/api/simulations/tags')).body.tags;
-  assert.deepEqual(out[0], { tag: 'shared', count: 2 });
-  assert.ok(!out.some((t) => t.tag === 'adult-only'));
+  assert.deepEqual(out.map((t) => t.tag).sort(), ['kid-safe', 'shared']);
+  assert.ok(!out.some((t) => t.tag === 'adult-only' || t.tag === 'teen-stuff'));
+  // Signed in with the setting off: up to mature_17, so the teen listing counts and the adult one does not.
+  const off = (await get(env, '/api/simulations/tags', { Authorization: `Bearer ${mintToken('55555555-5555-4555-8555-555555555555')}` })).body.tags;
+  assert.deepEqual(off[0], { tag: 'shared', count: 2 });
+  assert.ok(!off.some((t) => t.tag === 'adult-only'));
   // A viewer who turned Adult content on has every rating, and rating_max still narrows it.
   const VIEWER = '44444444-4444-4444-8444-444444444444';
   await env.USERS.put(`adult-content:${VIEWER}`, '1');

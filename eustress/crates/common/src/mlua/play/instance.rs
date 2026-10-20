@@ -1450,6 +1450,8 @@ pub struct RayHit {
     pub distance: f64,
     /// The hit is on a terrain chunk collider, which reports as the Terrain.
     pub terrain: bool,
+    /// The material of a road's ribbon, which has no instance to read one from.
+    pub material: Option<crate::terrain::material::TerrainMaterial>,
 }
 
 /// The engine's ray caster for the current frame. It borrows the frame's
@@ -1521,9 +1523,13 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastPa
     } else {
         with_dm(lua, |dm| {
             let inst = dm.by_entity(hit.entity);
-            let material = inst
-                .and_then(|i| dm.get_prop(i, "Material"))
-                .unwrap_or(DmValue::Enum(EnumItem::new("Material", "Plastic")));
+            // A road ribbon has no instance; it reports the bed material it wears.
+            let material = match (inst, hit.material) {
+                (None, Some(road)) => DmValue::Enum(EnumItem::new("Material", road.name())),
+                _ => inst
+                    .and_then(|i| dm.get_prop(i, "Material"))
+                    .unwrap_or(DmValue::Enum(EnumItem::new("Material", "Plastic"))),
+            };
             (inst, material)
         })?
     };

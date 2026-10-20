@@ -26,6 +26,7 @@ Every guide describes what Eustress Engine does today and ends with a What's Nex
 - [Realism](https://eustress.dev/docs/realism): the physical-law libraries (materials, thermodynamics, electrochemistry) and a worked battery case study
 - [Universes](https://eustress.dev/docs/universes): how a Space is stored (files, the WorldDb, git history), branching, the op-log, and several engines on one Universe
 - [Networking](https://eustress.dev/docs/networking): what runs in one process today, the authority rules in code, and the multiplayer plan
+- [Hosting](https://eustress.dev/docs/hosting): host a Space from your own computer, with the firewall and router steps, and join a host by link
 - [Publishing](https://eustress.dev/docs/publishing): publishing a Universe from Studio, the package, review, the Gallery and listing pages
 - [Website Service](https://eustress.dev/docs/website): let a website read live values out of a published Space
 - [Earning](https://eustress.dev/docs/earning): how contributions are scored, the daily Bliss (BLS) emission, the USD treasury drip, and Tickets (TKT)

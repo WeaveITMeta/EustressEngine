@@ -135,11 +135,16 @@ test('a listing with no rating, or a rating this Worker does not know, is adult 
   }
 });
 
-test('the slice: off caps at mature_17 whatever is asked, on and under 21 at adult_18, on and 21 or over takes what is asked; rating_max narrows and never widens', () => {
+test('the slice: signed out caps at ages_10, off at mature_17 whatever is asked, on and under 21 at adult_18, on and 21 or over takes what is asked; rating_max narrows and never widens', () => {
   const on = { accountId: ON, signedIn: true, adult: true, age21: true };
   const young = { accountId: YOUNG, signedIn: true, adult: true, age21: false };
   const off = { accountId: OFF, signedIn: true, adult: false, age21: false };
-  for (const viewer of [off, SIGNED_OUT, undefined, { accountId: OFF, signedIn: true, adult: false, age21: true }]) {
+  // Signed out (McKale, 2026-10-16): G to PG only.
+  for (const viewer of [SIGNED_OUT, undefined, { accountId: null, signedIn: false, adult: true, age21: true }]) {
+    for (const asked of [null, 'adult_18', 'adult_21', 'nonsense', 'mature_17', 'teen_13']) assert.equal(ratingCap(asked, viewer), 'ages_10', String(asked));
+    assert.equal(ratingCap('all_ages', viewer), 'all_ages');
+  }
+  for (const viewer of [off, { accountId: OFF, signedIn: true, adult: false, age21: true }]) {
     assert.equal(ratingCap(null, viewer), 'mature_17');
     assert.equal(ratingCap('adult_18', viewer), 'mature_17');
     assert.equal(ratingCap('adult_21', viewer), 'mature_17');
@@ -169,7 +174,12 @@ test('the slice: off caps at mature_17 whatever is asked, on and under 21 at adu
   assert.equal(mayView({ author_id: AUTHOR }, young), false, 'no rating reads as adult_21');
   assert.equal(mayView(adult, { accountId: AUTHOR, signedIn: true, adult: false }), true, 'the author always sees their own');
   assert.equal(mayView(adult21, { accountId: AUTHOR, signedIn: true, adult: false }), true, 'the author always sees their own');
-  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'mature_17' } }, SIGNED_OUT), true);
+  // Signed out: G to PG only (McKale, 2026-10-16). Signed in with the setting off: up to mature_17.
+  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'mature_17' } }, SIGNED_OUT), false);
+  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'teen_13' } }, undefined), false);
+  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'ages_10' } }, SIGNED_OUT), true);
+  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'all_ages' } }, SIGNED_OUT), true);
+  assert.equal(mayView({ author_id: AUTHOR, moderation: { rating: 'mature_17' } }, off), true);
 });
 
 // ── the setting ──────────────────────────────────────────────────────────────
@@ -271,13 +281,15 @@ test('the Gallery list hides adult content by default, signed out and signed in,
   const everyone = [KIDS, MATURE, ADULT, UNRATED, ADULT_PAK, LONE_ADULT].sort();
   const safe = [KIDS, MATURE].sort();
   for (const path of ['/api/simulations', '/api/gallery']) {
-    assert.deepEqual(ids(await call(env, 'GET', path)), safe, `${path} signed out`);
+    // Signed out sees G to PG only (McKale, 2026-10-16): the mature_17 listing is left out too.
+    assert.deepEqual(ids(await call(env, 'GET', path)), [KIDS], `${path} signed out`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'off' })), safe, `${path} off`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'author' })), safe, `${path}: the browse list follows the setting, the author's too`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'on' })), everyone, `${path} on`);
   }
   // Search, tags and genre are the same list, cut the same way.
-  assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world')), safe);
+  assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world')), [KIDS], 'signed out');
+  assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world', { who: 'off' })), safe);
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?tag=adult-18-tag', { who: 'off' })), []);
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?tag=adult-18-tag', { who: 'on' })), [ADULT, ADULT_PAK, LONE_ADULT].sort());
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?genre=all', { who: 'off' })), safe);
@@ -287,7 +299,9 @@ test('rating_max narrows the list and never widens it past the setting', async (
   const env = await environment();
   for (const who of [undefined, 'off']) {
     for (const asked of ['adult_18', 'ADULT_18', 'nonsense', '']) {
-      assert.deepEqual(ids(await call(env, 'GET', `/api/simulations?rating_max=${asked}`, { who })), [KIDS, MATURE].sort(), `${who || 'signed out'} ${asked}`);
+      // Signed out is capped at ages_10, so the mature_17 listing is never in its list.
+      const expected = who ? [KIDS, MATURE].sort() : [KIDS];
+      assert.deepEqual(ids(await call(env, 'GET', `/api/simulations?rating_max=${asked}`, { who })), expected, `${who || 'signed out'} ${asked}`);
     }
     assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?rating_max=all_ages', { who })), [KIDS]);
   }
@@ -383,9 +397,10 @@ test('a cached slice computed for a viewer who turned it on is never served to a
         assert.ok(!makers.text.includes('loner'), `makers${query}, ${who || 'signed out'}`);
       }
     }
-    // One entry per slice, never one per account: the off viewers share one more entry for each route.
-    assert.equal(cache.store.size, held + 2);
-    assert.ok([...cache.store.keys()].every((k) => /rating_max=(all_ages|teen_13|mature_17|adult_18|adult_21)$/.test(k)), [...cache.store.keys()].join(' '));
+    // One entry per slice, never one per account: the off viewers share one more entry for each route, and the signed-out
+    // viewers (capped at ages_10) one more again.
+    assert.equal(cache.store.size, held + 4);
+    assert.ok([...cache.store.keys()].every((k) => /rating_max=(all_ages|ages_10|teen_13|mature_17|adult_18|adult_21)$/.test(k)), [...cache.store.keys()].join(' '));
     assert.ok(![...cache.store.keys()].some((k) => k.includes(ON) || k.includes(OFF)), 'no account in a key');
   } finally { restore(); }
 });
@@ -564,7 +579,7 @@ test('the lists: adult_21 is hidden from a viewer who is off and from one who is
   const adult18 = [ADULT, ADULT_PAK, LONE_ADULT];
   const adult21 = [ADULT21, ADULT21_PAK, LONE21, UNRATED];
   for (const path of ['/api/simulations', '/api/gallery', '/api/simulations?q=world', '/api/simulations?genre=all', '/api/simulations?rating_max=adult_21']) {
-    assert.deepEqual(ids(await call(env, 'GET', path)), safe.sort(), `${path} signed out`);
+    assert.deepEqual(ids(await call(env, 'GET', path)), [KIDS], `${path} signed out (G to PG only)`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'off' })), safe.sort(), `${path} off`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'young' })), [...safe, ...adult18].sort(), `${path} on, 19`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'on' })), [...safe, ...adult18, ...adult21].sort(), `${path} on, 30`);
@@ -704,10 +719,10 @@ test('a cached slice computed for a viewer of 21 or over is never served to a vi
         assert.ok(!(await call(env, 'GET', `/api/makers${query}`, { who })).text.includes('solo21'));
       }
     }
-    // One entry per slice and route, never one per account: adult_21, adult_18 and mature_17.
-    assert.equal(cache.store.size, held + 4);
+    // One entry per slice and route, never one per account: adult_21, adult_18, mature_17 and ages_10 (signed out).
+    assert.equal(cache.store.size, held + 6);
     const keys = [...cache.store.keys()];
-    for (const slice of ['adult_21', 'adult_18', 'mature_17']) assert.equal(keys.filter((k) => k.endsWith(`rating_max=${slice}`)).length, 2, slice);
+    for (const slice of ['adult_21', 'adult_18', 'mature_17', 'ages_10']) assert.equal(keys.filter((k) => k.endsWith(`rating_max=${slice}`)).length, 2, slice);
     assert.ok(!keys.some((k) => k.includes(ON) || k.includes(YOUNG) || k.includes(OFF)), 'no account in a key');
   } finally { restore(); }
 });

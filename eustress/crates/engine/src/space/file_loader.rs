@@ -427,6 +427,7 @@ pub(crate) fn parse_instance_text(text: &str) -> ParsedInstance {
             | ClassName::Frame
             | ClassName::ScrollingFrame
             | ClassName::BillboardGui
+            | ClassName::SurfaceGui
             | ClassName::TextLabel
             | ClassName::TextButton
             | ClassName::TextBox
@@ -1900,6 +1901,8 @@ pub(crate) enum FolderLoad {
     GuiContainer,
     /// A 3D quad host with its own render pipeline.
     BillboardGui,
+    /// UI drawn on a face of its parent part.
+    SurfaceGui,
     /// An Image or a Video.
     Media,
     /// A Rune script folder, a full leaf.
@@ -1928,6 +1931,7 @@ pub(crate) fn folder_load(class_name: eustress_common::classes::ClassName) -> Fo
         C::ScreenGui => FolderLoad::ScreenGui,
         C::Frame | C::ScrollingFrame => FolderLoad::GuiContainer,
         C::BillboardGui => FolderLoad::BillboardGui,
+        C::SurfaceGui => FolderLoad::SurfaceGui,
         C::Image | C::Video => FolderLoad::Media,
         C::SoulScript => FolderLoad::SoulScript,
         c if eustress_common::datamodel::record::loads_as_part(c) => FolderLoad::Part,
@@ -2561,6 +2565,66 @@ pub fn spawn_directory_entry(
         // for Parts so MCP / ECS queries see GUI tags identically.
         if !bb_tags.is_empty() {
             commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
+        }
+        entity
+    } else if folder_arm == FolderLoad::SurfaceGui {
+        // SurfaceGui: UI drawn on a face of its parent part. The `[gui]`
+        // section maps through `surface_class_from_props`, the builder the
+        // file watcher's hot create and hot modify share, so an absent field
+        // keeps the class default. Its UI children spawn under it in the
+        // loop below.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let mut sg_class = eustress_common::classes::SurfaceGui::default();
+        let mut sg_adornee = String::new();
+        // Collected from `gui_def.tags` so we can attach the ECS Tags
+        // component after spawn (lives outside the `if let Ok` scope).
+        let mut sg_tags: Vec<String> = Vec::new();
+
+        if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
+            sg_tags = gui_def.tags.clone();
+            sg_adornee = gui_def.gui.adornee.clone().unwrap_or_default();
+            sg_class = super::gui_loader::surface_class_from_props(&gui_def.gui);
+        }
+
+        // The shared SurfaceGui marker, from the class. `target_part` is the
+        // authored adornee name; empty means the parent part.
+        let marker = eustress_common::gui::billboard_renderer::SurfaceGuiMarker {
+            face: sg_class.face.as_str().to_string(),
+            target_part: sg_adornee,
+            pixels_per_meter: sg_class.pixels_per_unit,
+        };
+
+        // `InstanceFile` keys the Properties panel's rich-class display, as
+        // for a BillboardGui above.
+        let entity = commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+                // The file's UUID, which the engine bridge finds an
+                // instance by.
+                uuid: instance_uuid.clone(),
+            },
+            sg_class,
+            marker,
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            super::instance_loader::InstanceFile {
+                toml_path: instance_toml,
+                mesh_path: std::path::PathBuf::new(),
+                name: dir_meta.name.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Transform::default(),
+            Visibility::default(),
+        )).id();
+        if !sg_tags.is_empty() {
+            commands.entity(entity).insert(eustress_common::attributes::Tags(sg_tags));
         }
         entity
     } else if folder_arm == FolderLoad::Media {
@@ -4810,6 +4874,7 @@ mod folder_load_tests {
             (C::Frame, FolderLoad::GuiContainer),
             (C::ScrollingFrame, FolderLoad::GuiContainer),
             (C::BillboardGui, FolderLoad::BillboardGui),
+            (C::SurfaceGui, FolderLoad::SurfaceGui),
             (C::Image, FolderLoad::Media),
             (C::Video, FolderLoad::Media),
             (C::SoulScript, FolderLoad::SoulScript),

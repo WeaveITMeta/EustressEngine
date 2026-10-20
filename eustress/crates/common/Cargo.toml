@@ -186,6 +186,9 @@ streaming = ["dep:eustress-stream", "tokio", "bytes", "notify", "rstar"]
 realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
 # Enable Luau scripting runtime (Roblox Luau compatibility)
 mlua = ["dep:mlua", "ureq"]
+# Backend-neutral scripting interface (see src/scripting_vm/DRAFT_INTERFACE.md).
+# No deps of its own; backends add theirs behind their own features.
+scripting-vm = []
 # Enable Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
 gui = ["dep:slint"]
 # Dynamic Unit System v1 — convert authored-unit values to engine-native

@@ -161,17 +161,29 @@ test('new anonymous visits to one listing are held to the platform limiter\'s al
   assert.equal((await call(env, 'GET', `/api/simulations/${SIM}/download`, { headers: { 'CF-Connecting-IP': '198.51.100.99' } })).status, 200);
 });
 
-test('an address is keyed under a key derived for this purpose, not under the Worker\'s own secret', async () => {
+test('an address is keyed under a key derived for this purpose and this UTC day, not under the Worker\'s own secret', async () => {
   const { createHmac } = await import('node:crypto');
   const secret = 'a secret';
-  const subkey = createHmac('sha256', secret).update('eustress-visit-v1').digest();
+  const now = Date.UTC(2026, 9, 16, 12, 0, 0);
+  const subkey = createHmac('sha256', secret).update('eustress-visit-v2:2026-10-16').digest();
   const expected = `d:${createHmac('sha256', subkey).update('203.0.113.7').digest('hex').slice(0, 32)}`;
-  assert.equal(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7'), expected);
+  assert.equal(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7', now), expected);
+  assert.equal(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7', now + 11 * 3600 * 1000), expected, 'the same all day');
+  assert.notEqual(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7', now + 12 * 3600 * 1000), expected, 'the next UTC day cannot be matched to this one');
   const direct = `d:${createHmac('sha256', secret).update('203.0.113.7').digest('hex').slice(0, 32)}`;
-  assert.notEqual(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7'), direct, 'the secret itself signs nothing here');
-  assert.notEqual(await deviceKey({ JWT_SECRET: 'another' }, '203.0.113.7'), expected);
+  assert.notEqual(await deviceKey({ JWT_SECRET: secret }, '203.0.113.7', now), direct, 'the secret itself signs nothing here');
+  assert.notEqual(await deviceKey({ JWT_SECRET: 'another' }, '203.0.113.7', now), expected);
   assert.equal(await deviceKey({}, '203.0.113.7'), 'd:unknown');
   assert.equal(await deviceKey({ JWT_SECRET: secret }, ''), 'd:unknown');
+});
+
+test('a visit marker is kept at most 25 hours', async () => {
+  const { KEY_TTL_SECONDS } = await import('../src/visits.mjs');
+  assert.ok(KEY_TTL_SECONDS <= 25 * 3600 && KEY_TTL_SECONDS >= 24 * 3600, String(KEY_TTL_SECONDS));
+  const ttls = [];
+  const env = { JWT_SECRET: 's', SOCIAL: { async get() { return null; }, async put(k, v, o) { if (k.startsWith('visit:')) ttls.push(o?.expirationTtl); } } };
+  assert.equal(await countVisit(env, { id: 'x', author_id: 'a' }, 'd:abc'), true);
+  assert.deepEqual(ttls, [KEY_TTL_SECONDS]);
 });
 
 test('a read that fetches nothing, or is refused, counts nothing', async () => {

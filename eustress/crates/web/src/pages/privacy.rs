@@ -14,7 +14,7 @@ pub fn PrivacyPage() -> impl IntoView {
             <div class="legal-container">
                 <div class="legal-header">
                     <h1>"Privacy Policy"</h1>
-                    <p class="legal-updated">"Last updated: December 6, 2025"</p>
+                    <p class="legal-updated">"Last updated: October 16, 2026"</p>
                 </div>
                 
                 <div class="legal-content">
@@ -36,6 +36,15 @@ pub fn PrivacyPage() -> impl IntoView {
                             <li>"Marketplace transactions"</li>
                             <li>"Device and browser information"</li>
                             <li>"IP address and general location"</li>
+                        </ul>
+
+                        <h3>"Playing as a Guest"</h3>
+                        <p>"You can play without an account, as a guest. We do not ask guests for a name, email address, age or any other information about themselves."</p>
+                        <ul>
+                            <li>"When you start a guest session, we keep a one-way fingerprint of your network address, made with a key that changes every day, so it cannot be turned back into your address or matched from one day to the next. We use it only to count how many Spaces you start and how many minutes you play that day, and we delete it, with those counts, within 25 hours of the start of that day (UTC)."</li>
+                            <li>"The character you choose (Male or Female) is carried in your guest session's ticket and is not stored."</li>
+                            <li>"When the Player downloads a Space without an account, the download is counted once a day by a one-way fingerprint of your network address, which we keep for 2 days."</li>
+                            <li>"We do not use cookies for guest play, and we do not link guest play to an account you create later."</li>
                         </ul>
                     </section>
                     
@@ -82,12 +91,9 @@ pub fn PrivacyPage() -> impl IntoView {
                     
                     <section class="legal-section">
                         <h2>"6. Children's Privacy"</h2>
-                        <p>"Users under 13 are not permitted to create accounts. For users 13-17, we implement additional protections including:"</p>
-                        <ul>
-                            <li>"Parental consent requirements"</li>
-                            <li>"Restricted social features"</li>
-                            <li>"Purchase limits and approvals"</li>
-                        </ul>
+                        <p>"Accounts are for adults only. No one under 18, or under the age of majority where they live if that is higher, can create an account, and every account is verified against a government-issued photo ID at sign-up. If we learn that an account belongs to someone under 18, we close it and delete its data."</p>
+                        <p>"Guest play, described in section 1, is open to people of any age and asks for no information about the player. Guests never see or play adult content, cannot buy anything or publish or post content, and their chat messages in live sessions are not delivered to other players."</p>
+                        <p>"A parent or guardian with a question about a child's use of Eustress can contact privacy@eustress.dev."</p>
                     </section>
                     
                     <section class="legal-section">

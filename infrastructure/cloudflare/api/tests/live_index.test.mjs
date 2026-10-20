@@ -282,9 +282,12 @@ test('the viewer\'s age slice is honoured: sessions above it are neither listed 
   await hosting(env, 2, { players: 2, admitted: 1 });
   await adultOn(env, STRANGER); // the joiners of an adult session turned Adult content on
   await hosting(env, 3, { players: 4, admitted: 3 });
-  // Signed out, Adult content is off: the adult session is neither listed nor counted (src/adult_content.mjs).
-  assert.equal((await liveNow(env)).body.players_total, 3);
-  assert.equal((await liveNow(env, '?rating_max=adult_18')).body.sessions_total, 2, 'rating_max cannot widen past the setting');
+  // Signed out sees G to PG only (src/adult_content.mjs, McKale 2026-10-16): the teen and adult sessions are neither listed
+  // nor counted. Signed in with Adult content off, the adult session is not.
+  assert.equal((await liveNow(env)).body.players_total, 1);
+  assert.equal((await liveNow(env, '?rating_max=adult_18')).body.sessions_total, 1, 'rating_max cannot widen past the cap');
+  assert.equal((await liveNow(env, '', { who: 'author' })).body.players_total, 3);
+  assert.equal((await liveNow(env, '?rating_max=adult_18', { who: 'author' })).body.sessions_total, 2, 'rating_max cannot widen past the setting');
   // A viewer who turned it on sees every rating, and rating_max narrows it.
   await adultOn(env);
   const on = { who: ADULT_VIEWER };
@@ -483,7 +486,10 @@ test('the strip is computed once a window: a hammered URL costs one scan, and an
     assert.equal(cache.store.size, 1);
 
     // One strip per age slice, and no more slices than there are: the adult slice only for a viewer who turned it on.
-    for (const slice of ['all_ages', 'teen_13', 'mature_17']) await liveNow(env, `?rating_max=${slice}`);
+    // Signed out is capped at ages_10 (its default strip), so asking for teen_13 signed out is that strip; a signed-in
+    // viewer with the setting off has the mature_17 strip.
+    for (const slice of ['all_ages', 'teen_13']) await liveNow(env, `?rating_max=${slice}`);
+    await liveNow(env, '', { who: 'stranger' });
     assert.equal(cache.store.size, 3);
     assert.equal(scans.length, 3);
     await adultOn(env);
@@ -924,7 +930,9 @@ test('no network address is stored or shown: the heartbeat carries one, and neit
     JSON.stringify([...env.LIVE_HOSTS.instances.get(idOf(1)).storage.map.entries()]),
     JSON.stringify(indexRows(env)),
   ].join('\n');
-  for (const leak of ['203.0.113', 'Tucson', '85701', '32.22', '110.97', '7922', 'Phoenix', 'LAX']) assert.ok(!seen.includes(leak), `${leak} is held or shown`);
+  for (const leak of ['203.0.113', 'Tucson', '85701', '32.22', '110.97', 'Phoenix', 'LAX']) assert.ok(!seen.includes(leak), `${leak} is held or shown`);
+  // The ASN as a whole number only: a timestamp or an id can hold the digits 7922 by chance (round 3, R-10).
+  assert.ok(!/7922/.test(seen), 'the ASN 7922 is held or shown');
 });
 
 test('the heartbeat answers what it always did, and the live read keeps every field it had', async () => {

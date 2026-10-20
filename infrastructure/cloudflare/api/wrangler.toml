@@ -328,6 +328,19 @@ namespace_id = "2005"
   limit = 60
   period = 60
 
+# Guest chat checks (src/guest.mjs POST /api/guest/chat/check), keyed on the
+# guest's seat in one guest-only session: each line a guest sends is checked
+# by Jev before the host delivers it, so this caps one guest's lines a minute
+# and what they cost. A line over the limit is not delivered. Unbound, the
+# route delivers nothing (it fails closed).
+[[ratelimits]]
+name = "GUEST_CHAT_RATE_LIMITER"
+namespace_id = "2006"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
 # Hourly: each run makes sure yesterday's settlement has started (a repeat
 # does nothing) and sweeps moderation (resumes stalled reviews); the midnight
 # run also refreshes the model catalog and the legacy backfill. See
@@ -348,6 +361,21 @@ name = "EMAIL"
 
 [vars]
 FORK_ID = "eustress.dev"
+# Hosted guest play (src/guest.mjs, docs/architecture/GUEST_PLAY.md section 13):
+# guest join tickets, guest admission, guest-only sessions and the guest chat
+# check. On only when this is exactly "on"; anything else, or unset, is off.
+# Solo guest play (a lease, the browser or desktop Player alone) does not read
+# it. It stays "off" until the host side ships the guest protections
+# (guest_caps) and McKale turns it on.
+GUEST_PLAY = "off"
+# Daily caps on guest chat checks that reach Jev (each a paid model call;
+# src/guest.mjs guestChatCaps, GUEST_PLAY.md section 13): per listing, per host
+# account, and for the whole deployment. Unset, or not a whole number, is the
+# default shown. Past a cap a line is not delivered and nobody is kicked.
+# McKale sets the final numbers.
+# GUEST_CHAT_CAP_LISTING = "5000"
+# GUEST_CHAT_CAP_HOST = "5000"
+# GUEST_CHAT_CAP_TOTAL = "50000"
 # An approved listing serves only while the objects stored are the ones its approval
 # was bound to (src/moderation.mjs, the approval binding). With this set, an approved
 # marker with no binding reads as pending, so no listing serves bytes nobody reviewed;
@@ -470,6 +498,13 @@ namespace_id = "3005"
   limit = 60
   period = 60
 
+[[env.staging.ratelimits]]
+name = "GUEST_CHAT_RATE_LIMITER"
+namespace_id = "3006"
+  [env.staging.ratelimits.simple]
+  limit = 20
+  period = 60
+
 [[env.staging.durable_objects.bindings]]
 name = "WALLETS"
 class_name = "Wallet"
@@ -546,6 +581,12 @@ name = "EMAIL"
 enabled = true
 
 [env.staging.vars]
+# Hosted guest play: off until switched on here, as in production (see [vars]).
+GUEST_PLAY = "off"
+# Guest chat check caps: the defaults apply unless set (see [vars]).
+# GUEST_CHAT_CAP_LISTING = "5000"
+# GUEST_CHAT_CAP_HOST = "5000"
+# GUEST_CHAT_CAP_TOTAL = "50000"
 # An administrator may replace a key here (src/identity_routes.mjs). Production leaves it unset.
 ADMIN_REPLACE_KEY_ENABLED = "true"
 FORK_ID = "eustress.dev"
