@@ -41,6 +41,103 @@ export const MAX_ADMITTED = 5000;
 const pinOf = (link) => new URLSearchParams(String(link).split('?')[1] || '').get('pin');
 
 // -----------------------------------------------------------------------------
+// Server credentials
+// -----------------------------------------------------------------------------
+//
+// A dedicated server on the author's computer is not a signed-in Studio
+// session. The author mints one credential for a listing (POST
+// /api/simulations/{id}/server-credential). The server sends it as
+// `Authorization: Bearer esrv_…` on the heartbeat, the stop, and admission.
+// The token is 32 random bytes. Only its SHA-256 is stored, under
+// `srvcred:<hash>`, and `srvcred-sim:<sim>` names the hash that is current.
+// Minting again replaces the previous one. The credential is tied to the
+// listing's author: it can mark that listing live and nothing else, and it
+// stops working if the listing's author_id is no longer the one it was minted
+// for.
+
+const SERVER_CREDENTIAL = /^esrv_[0-9a-f]{64}$/;
+const credentialKey = (hash) => `srvcred:${hash}`;
+const credentialSimKey = (simId) => `srvcred-sim:${simId}`;
+
+/// The bearer token, or `''`.
+export function bearerOf(request) {
+  const header = request?.headers?.get?.('Authorization') || '';
+  return header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+}
+
+/// SHA-256 of `text`, lowercase hex.
+export async function sha256HexText(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/// The author id a server credential stands for on this listing, or null.
+/// A credential minted for another listing, another author, or one that has
+/// been replaced, is null.
+export async function authorFromServerCredential(env, token, simId, authorId) {
+  if (typeof token !== 'string' || !SERVER_CREDENTIAL.test(token) || !env?.SOCIAL) return null;
+  const hash = await sha256HexText(token);
+  const raw = await env.SOCIAL.get(credentialKey(hash));
+  if (!raw) return null;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (record?.sim_id !== simId || record?.author_id !== authorId) return null;
+  if ((await env.SOCIAL.get(credentialSimKey(simId))) !== hash) return null;
+  return record.author_id;
+}
+
+/// Mint or revoke the listing's server credential. The author's session only:
+/// a server credential cannot mint another one.
+export async function handleServerCredential(request, env, cors, simId, deps) {
+  const { verifyAuth, json } = deps;
+  if (!env.SOCIAL) {
+    return json({ error: 'Live hosting is not configured on this deployment', code: 'live_unavailable' }, 503, cors);
+  }
+  const raw = await env.SOCIAL.get(`sim:${simId}`);
+  if (!raw) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(raw);
+  const presented = bearerOf(request);
+  if (presented.startsWith('esrv_')) {
+    return json({ error: 'Sign in as the author to mint a server credential', code: 'author_session_required' }, 403, cors);
+  }
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  if (userId !== sim.author_id) {
+    return json({ error: 'Only the author can create a server credential', code: 'not_author' }, 403, cors);
+  }
+  if (request.method === 'DELETE') {
+    const hash = await env.SOCIAL.get(credentialSimKey(simId));
+    if (hash) await env.SOCIAL.delete(credentialKey(hash));
+    await env.SOCIAL.delete(credentialSimKey(simId));
+    return json({ ok: true }, 200, cors);
+  }
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, cors);
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const minted = `esrv_${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+  const hash = await sha256HexText(minted);
+  const previous = await env.SOCIAL.get(credentialSimKey(simId));
+  if (previous && previous !== hash) await env.SOCIAL.delete(credentialKey(previous));
+  await env.SOCIAL.put(credentialKey(hash), JSON.stringify({
+    v: 1,
+    sim_id: simId,
+    author_id: sim.author_id,
+    created_at: new Date().toISOString(),
+  }));
+  await env.SOCIAL.put(credentialSimKey(simId), hash);
+  return json({
+    ok: true,
+    token: minted,
+    sim_id: simId,
+    author_id: sim.author_id,
+  }, 200, cors);
+}
+
+// -----------------------------------------------------------------------------
 // Join links
 // -----------------------------------------------------------------------------
 
@@ -141,38 +238,184 @@ const ADMITTED_COUNT = 'adm_n';
 /// the listing's own live read and the play route all show this, so no page shows a bigger number than another.
 export const cappedPlayers = (claimed, admitted) => Math.min(claimed, (admitted || 0) + 1);
 
+/// 0 unknown, 1 low, 2 mid, 3 high. The same steps as
+/// `eustress/crates/forge/src/local_launch.rs`.
+export function hardwareTier(hardware) {
+  const tier = typeof hardware === 'string' ? hardware : hardware?.tier;
+  return { unknown: 0, low: 1, mid: 2, high: 3 }[tier] ?? 0;
+}
+
+/// A missing latency scores 0. It is not treated as 0 ms.
+export function pingScore(latency) {
+  if (!Number.isSafeInteger(latency) || latency < 1) return 0;
+  return 1 - Math.min(latency, 300) / 300;
+}
+
+/// score = 0.5 * fullness + 0.3 * (tier / 3) + 0.2 * ping
+export function rankScore(server) {
+  const max = Math.max(1, server?.max_players || 0);
+  const players = Math.min(server?.players || 0, max);
+  const fullness = players / max;
+  return 0.5 * fullness + 0.3 * (hardwareTier(server?.hardware) / 3) + 0.2 * pingScore(server?.latency_ms);
+}
+
+/// Busiest server that is not full, then the rest. Full servers last.
+export function rankServers(servers) {
+  return [...(servers || [])].sort((a, b) => {
+    if (!!a.full !== !!b.full) return a.full ? 1 : -1;
+    const delta = rankScore(b) - rankScore(a);
+    if (delta !== 0) return delta;
+    return (b.players || 0) - (a.players || 0);
+  });
+}
+
+const SERVER_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/// Players the page shows. The default server stays on the admission cap.
+/// Any other id shows its own claim, up to its own max: the admitted count
+/// is for the listing, not for that process.
+function shownPlayers(server, admitted) {
+  if (!server) return 0;
+  if (server.id === 'default') return cappedPlayers(server.players, admitted);
+  return Math.min(server.players || 0, server.max_players || 0);
+}
+
+function publicServer(server, admitted, showLink) {
+  const players = shownPlayers(server, admitted);
+  const max = server.max_players || 0;
+  const row = {
+    id: server.id,
+    players,
+    max_players: max,
+    free: Math.max(0, max - players),
+    full: max > 0 && players >= max,
+    region: server.region_name || null,
+    country: server.country?.country || null,
+    hardware: server.hardware && typeof server.hardware === 'object'
+      ? server.hardware
+      : { gpu: '', cpu: '', tier: 'unknown' },
+  };
+  if (Number.isSafeInteger(server.latency_ms) && server.latency_ms >= 1) row.latency_ms = server.latency_ms;
+  if (showLink) {
+    row.link = server.link;
+    if (typeof server.cert_sha256 === 'string' && /^[0-9a-f]{64}$/.test(server.cert_sha256)) row.cert_sha256 = server.cert_sha256;
+  }
+  return row;
+}
+
+function freshServers(host, now) {
+  const list = Array.isArray(host?.servers) ? host.servers : [];
+  return list.filter((s) => s && now - s.last_seen <= HEARTBEAT_TTL_MS);
+}
+
+function winnerOf(servers, admitted) {
+  const ranked = rankServers(servers.map((s) => ({ ...publicServer(s, admitted, false), _raw: s })));
+  const winner = ranked.find((s) => !s.full) || ranked[0];
+  return { ranked, winner, allFull: ranked.length > 0 && ranked.every((s) => s.full) };
+}
+
 const LIVE_OPS = {
-  async beat({ host_id, link, players, max_players, protocol, connected, country, now }) {
+  async beat({ host_id, link, players, max_players, protocol, connected, country, cert_sha256, now, server_id, region_name, latency_ms, hardware }) {
+    const id = typeof server_id === 'string' && SERVER_ID.test(server_id) ? server_id : 'default';
     const prev = await this.storage.get('host');
-    // `since` is when the host started answering at this link. A restart
+    let servers = freshServers(prev, now).map((s) => ({ ...s }));
+    if (prev && !Array.isArray(prev.servers)) {
+      servers = [{
+        id: 'default', link: prev.link, players: prev.players, max_players: prev.max_players, protocol: prev.protocol,
+        last_seen: prev.last_seen, since: prev.since, cert_sha256: prev.cert_sha256 || null, region_name: null, latency_ms: null, hardware: null, country: prev.region,
+      }];
+    }
+    const prior = servers.find((s) => s.id === id);
+    // `since` is when this process started answering at this link. A restart
     // brings a new certificate, so a new pin and a new link, and a new since.
-    const continuing = prev && prev.link === link && now - prev.last_seen <= HEARTBEAT_TTL_MS;
-    // A new hosting session starts with no admitted tickets.
-    if (prev && !continuing) await clearAdmitted(this.storage);
-    const host = {
-      host_id,
+    const continuing = prior && prior.link === link && now - prior.last_seen <= HEARTBEAT_TTL_MS;
+    // A new default session starts with no admitted tickets. Another process
+    // on the same listing does not wipe tickets admitted to the default one.
+    if (id === 'default' && prev && !continuing) await clearAdmitted(this.storage);
+    const entry = {
+      id,
       link,
       players,
       max_players,
       protocol,
-      // Ticket ids of the players still connected, for the guest leases they hold.
-      connected: connected || [],
-      since: continuing ? prev.since : now,
       last_seen: now,
+      since: continuing ? prior.since : now,
+      cert_sha256: typeof cert_sha256 === 'string' ? cert_sha256 : null,
+      region_name: region_name || null,
+      latency_ms: Number.isSafeInteger(latency_ms) && latency_ms >= 1 ? latency_ms : null,
+      hardware: hardware || null,
+      country: cleanRegion(country),
+    };
+    servers = servers.filter((s) => s.id !== id);
+    servers.push(entry);
+    const admitted = (await this.storage.get(ADMITTED_COUNT)) || 0;
+    const { winner } = winnerOf(servers, admitted);
+    const raw = servers.find((s) => s.id === winner.id) || entry;
+    const host = {
+      host_id,
+      link: raw.link,
+      players: raw.players,
+      max_players: raw.max_players,
+      protocol: raw.protocol,
+      // Ticket ids of the players still connected, for the guest leases they hold.
+      // Kept from the default server: admission is listing-wide.
+      connected: id === 'default' ? (connected || []) : (prev?.connected || []),
+      since: raw.since,
+      last_seen: Math.max(...servers.map((s) => s.last_seen)),
       // The country the host came in from, as the platform names it: never an address, and never the data centre, which
       // names a city. A host that moves has the new country on its next beat.
+      // This object stays { country } only. A region name the host reports is on the server, not here.
       region: cleanRegion(country),
+      cert_sha256: raw.cert_sha256 || null,
+      servers,
     };
     await this.storage.put('host', host);
-    await this.storage.setAlarm(now + HEARTBEAT_TTL_MS);
-    return { ok: true, expires_at: new Date(now + HEARTBEAT_TTL_MS).toISOString(), since: host.since, region: host.region, admitted: (await this.storage.get(ADMITTED_COUNT)) || 0 };
+    const soonest = Math.min(...servers.map((s) => s.last_seen)) + HEARTBEAT_TTL_MS;
+    await this.storage.setAlarm(soonest);
+    return {
+      ok: true,
+      expires_at: new Date(now + HEARTBEAT_TTL_MS).toISOString(),
+      since: raw.since,
+      region: host.region,
+      admitted,
+      shown_players: shownPlayers(raw, admitted),
+      max_players: raw.max_players,
+    };
   },
 
-  async stop() {
-    await this.storage.delete('host');
-    await this.storage.deleteAlarm();
-    await clearAdmitted(this.storage);
-    return { ok: true };
+  async stop({ server_id, now }) {
+    if (server_id === undefined || server_id === null || server_id === '') {
+      await this.storage.delete('host');
+      await this.storage.deleteAlarm();
+      await clearAdmitted(this.storage);
+      return { ok: true, live: false };
+    }
+    const host = await this.storage.get('host');
+    const nowMs = now || Date.now();
+    const servers = freshServers(host, nowMs).filter((s) => s.id !== server_id);
+    if (!host || servers.length === 0) {
+      await this.storage.delete('host');
+      await this.storage.deleteAlarm();
+      await clearAdmitted(this.storage);
+      return { ok: true, live: false };
+    }
+    const admitted = (await this.storage.get(ADMITTED_COUNT)) || 0;
+    const { winner } = winnerOf(servers, admitted);
+    const raw = servers.find((s) => s.id === winner.id);
+    host.servers = servers;
+    host.link = raw.link;
+    host.players = raw.players;
+    host.max_players = raw.max_players;
+    host.protocol = raw.protocol;
+    host.since = raw.since;
+    host.cert_sha256 = raw.cert_sha256 || null;
+    host.last_seen = Math.max(...servers.map((s) => s.last_seen));
+    await this.storage.put('host', host);
+    await this.storage.setAlarm(Math.min(...servers.map((s) => s.last_seen)) + HEARTBEAT_TTL_MS);
+    return {
+      ok: true, live: true, since: raw.since, region: host.region, admitted,
+      shown_players: shownPlayers(raw, admitted), max_players: raw.max_players,
+    };
   },
 
   /// The host asks whether one joining player may be admitted. A ticket is
@@ -218,19 +461,51 @@ const LIVE_OPS = {
 
   async status({ now }) {
     const host = await this.storage.get('host');
-    if (!host || now - host.last_seen > HEARTBEAT_TTL_MS) return { ok: true, live: false };
+    // The top-level link is what Play hands out. A record whose link is not
+    // the join grammar is not live, even if a nested server row still holds
+    // an older valid link: that row is not handed out either.
+    if (!host || !checkJoinLink(host.link).ok) return { ok: true, live: false };
+    let servers = freshServers(host, now).filter((s) => checkJoinLink(s.link).ok);
+    if (servers.length === 0) {
+      // A host written before per-server rows. The top-level fields are that one server.
+      if (now - host.last_seen <= HEARTBEAT_TTL_MS) {
+        servers = [{
+          id: 'default',
+          link: host.link,
+          players: host.players,
+          max_players: host.max_players,
+          protocol: host.protocol,
+          last_seen: host.last_seen,
+          since: host.since,
+          cert_sha256: host.cert_sha256 || null,
+          region_name: null,
+          latency_ms: null,
+          hardware: null,
+          country: host.region,
+        }];
+      } else {
+        return { ok: true, live: false };
+      }
+    }
+    const admitted = (await this.storage.get(ADMITTED_COUNT)) || 0;
+    const { winner, allFull } = winnerOf(servers, admitted);
+    const raw = servers.find((s) => s.id === winner.id);
     return {
       ok: true,
       live: true,
-      link: host.link,
-      players: host.players,
+      link: raw.link,
+      players: raw.players,
+      shown_players: shownPlayers(raw, admitted),
       // How many the Worker admitted to this hosting session: what the players a reader shows are capped at (cappedPlayers).
-      admitted: (await this.storage.get(ADMITTED_COUNT)) || 0,
-      max_players: host.max_players,
-      protocol: host.protocol,
-      since: host.since,
-      last_seen: host.last_seen,
+      admitted,
+      max_players: raw.max_players,
+      protocol: raw.protocol,
+      since: raw.since,
+      last_seen: raw.last_seen,
       region: publicRegion(host.region),
+      cert_sha256: raw.cert_sha256 || null,
+      servers,
+      all_full: allFull,
     };
   },
 };
@@ -269,8 +544,28 @@ export class LiveHost {
   async alarm() {
     const host = await this.storage.get('host');
     if (!host) return;
-    const due = host.last_seen + HEARTBEAT_TTL_MS;
-    if (Date.now() >= due) {
+    const now = Date.now();
+    const servers = freshServers(host, now);
+    if (servers.length === 0) {
+      await this.storage.delete('host');
+      await clearAdmitted(this.storage);
+      return;
+    }
+    if (!Array.isArray(host.servers) || servers.length !== host.servers.length) {
+      const admitted = (await this.storage.get(ADMITTED_COUNT)) || 0;
+      const { winner } = winnerOf(servers, admitted);
+      const raw = servers.find((s) => s.id === winner.id);
+      host.servers = servers;
+      host.link = raw.link;
+      host.players = raw.players;
+      host.max_players = raw.max_players;
+      host.since = raw.since;
+      host.cert_sha256 = raw.cert_sha256 || null;
+      host.last_seen = Math.max(...servers.map((s) => s.last_seen));
+      await this.storage.put('host', host);
+    }
+    const due = Math.min(...servers.map((s) => s.last_seen)) + HEARTBEAT_TTL_MS;
+    if (now >= due) {
       await this.storage.delete('host');
       await clearAdmitted(this.storage);
     } else {
@@ -288,8 +583,10 @@ export async function livePlayInfo(env, simId, { signedIn, lease, now }) {
   if (!env.LIVE_HOSTS) return null;
   const s = await liveCall(env, simId, 'status', { now });
   if (s.ok === false || !s.live) return null;
-  if (!checkJoinLink(s.link).ok) return null;
-  return { players: cappedPlayers(s.players, s.admitted), max_players: s.max_players, link: signedIn || lease ? s.link : null };
+  if (!s.all_full && !checkJoinLink(s.link).ok) return null;
+  const players = Number.isSafeInteger(s.shown_players) ? s.shown_players : cappedPlayers(s.players, s.admitted);
+  if (s.all_full) return { players, max_players: s.max_players, link: null, all_full: true };
+  return { players, max_players: s.max_players, link: signedIn || lease ? s.link : null, all_full: false };
 }
 
 async function liveCall(env, simId, op, args) {
@@ -345,9 +642,10 @@ export async function handleLive(request, env, cors, simId, deps) {
     const s = await liveCall(env, simId, 'status', { now });
     if (s.ok === false) return json({ error: s.error }, s.status || 500, cors);
     if (!s.live) return json({ live: false }, 200, headers);
+    const shown = Number.isSafeInteger(s.shown_players) ? s.shown_players : cappedPlayers(s.players, s.admitted);
     const body = {
       live: true,
-      players: cappedPlayers(s.players, s.admitted),
+      players: shown,
       max_players: s.max_players,
       protocol: s.protocol,
       since: new Date(s.since).toISOString(),
@@ -360,15 +658,38 @@ export async function handleLive(request, env, cors, simId, deps) {
     // is no longer a capability a pasted copy could use.
     const signedIn = await verifyAuth(request, env);
     const lease = signedIn ? false : await leaseIsLive(env, request.headers.get('X-Eustress-Lease'), now);
-    if (signedIn || lease) body.link = s.link;
-    else body.link_hidden = true;
+    const showLink = !!(signedIn || lease);
+    const servers = rankServers((Array.isArray(s.servers) ? s.servers : []).map((server) => publicServer(server, s.admitted, showLink)));
+    if (servers.length) body.servers = servers;
+    const allFull = servers.length > 0 && servers.every((server) => server.full);
+    if (allFull) {
+      // No join link, and not link_hidden: the page must not ask the visitor to sign in.
+      body.all_full = true;
+    } else if (showLink) {
+      body.link = s.link;
+      // The pin, also on its own, so a browser can pass it to
+      // serverCertificateHashes without parsing the link.
+      if (typeof s.cert_sha256 === 'string' && /^[0-9a-f]{64}$/.test(s.cert_sha256)) body.cert_sha256 = s.cert_sha256;
+    } else body.link_hidden = true;
     return json(body, 200, headers);
   }
 
-  const userId = await verifyAuth(request, env);
-  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
-  if (userId !== sim.author_id) {
-    return json({ error: 'Only the author can host this simulation for now', code: 'not_author' }, 403, cors);
+  // A dedicated server presents `esrv_…` instead of the author's session.
+  // Anything else is still the author's own sign-in. Checked before
+  // verifyAuth so a credential is never treated as a user id.
+  const presented = bearerOf(request);
+  let userId;
+  if (presented.startsWith('esrv_')) {
+    userId = await authorFromServerCredential(env, presented, simId, sim.author_id);
+    if (!userId) {
+      return json({ error: 'This server credential is not valid for this listing', code: 'bad_server_credential' }, 401, cors);
+    }
+  } else {
+    userId = await verifyAuth(request, env);
+    if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+    if (userId !== sim.author_id) {
+      return json({ error: 'Only the author can host this simulation for now', code: 'not_author' }, 403, cors);
+    }
   }
 
   // The host asks whether a joining player may be admitted.
@@ -411,10 +732,20 @@ export async function handleLive(request, env, cors, simId, deps) {
   }
 
   if (request.method === 'DELETE') {
-    const r = await liveCall(env, simId, 'stop', { now });
+    const serverId = new URL(request.url).searchParams.get('server_id');
+    if (serverId !== null && !SERVER_ID.test(serverId)) {
+      return json({ error: 'server_id must be 1 to 64 letters, digits, _ or -', code: 'bad_server_id' }, 400, cors);
+    }
+    const r = await liveCall(env, simId, 'stop', { now, server_id: serverId });
     if (r.ok === false) return json({ error: r.error }, r.status || 500, cors);
-    // The live index drops the session at once. An index that fails never fails a stop.
-    await tellLiveIndex(env, 'stop', { sim_id: simId });
+    if (r.live && isListable(sim)) {
+      await tellLiveIndex(env, 'beat', {
+        sim_id: simId, author: sim.author_id, players: r.shown_players, max_players: r.max_players, region: r.region ?? null, since: r.since, now,
+      });
+    } else if (!r.live) {
+      // The live index drops the session at once. An index that fails never fails a stop.
+      await tellLiveIndex(env, 'stop', { sim_id: simId });
+    }
     return json({ ok: true }, 200, cors);
   }
 
@@ -422,6 +753,18 @@ export async function handleLive(request, env, cors, simId, deps) {
     const body = await request.json().catch(() => ({}));
     const link = checkJoinLink(body.link);
     if (!link.ok) return json({ error: link.error, code: 'bad_link' }, 400, cors);
+    // The certificate hash the browser pins. It is the pin already in the
+    // link. Sending it again is how a dedicated server publishes it; a
+    // mismatch is refused so the stored hash cannot disagree with the link.
+    const pin = link.pin.toLowerCase();
+    let certSha256 = pin;
+    if (body.cert_sha256 !== undefined) {
+      const presented = typeof body.cert_sha256 === 'string' ? body.cert_sha256.toLowerCase() : '';
+      if (!/^[0-9a-f]{64}$/.test(presented) || presented !== pin) {
+        return json({ error: 'cert_sha256 must be the SHA-256 pin in the join link (64 hex characters)', code: 'bad_cert' }, 400, cors);
+      }
+      certSha256 = presented;
+    }
     const players = count(body.players, 0, MAX_PLAYERS);
     const maxPlayers = count(body.max_players, 1, MAX_PLAYERS);
     const protocol = count(body.protocol, 0, 999_999);
@@ -437,16 +780,54 @@ export async function handleLive(request, env, cors, simId, deps) {
       if (!ok) return json({ error: 'admitted must list at most max_players ticket ids, 32 hex characters each', code: 'bad_admitted' }, 400, cors);
       connected = body.admitted;
     }
+    let serverId;
+    if (body.server_id !== undefined) {
+      if (typeof body.server_id !== 'string' || !SERVER_ID.test(body.server_id)) {
+        return json({ error: 'server_id must be 1 to 64 letters, digits, _ or -', code: 'bad_server_id' }, 400, cors);
+      }
+      serverId = body.server_id;
+    }
+    let regionName = null;
+    if (body.region !== undefined && body.region !== null && body.region !== '') {
+      if (typeof body.region !== 'string' || !SERVER_ID.test(body.region)) {
+        return json({ error: 'region must be a short name', code: 'bad_region' }, 400, cors);
+      }
+      regionName = body.region;
+    }
+    let latencyMs = null;
+    if (body.latency_ms !== undefined && body.latency_ms !== null && body.latency_ms !== 0) {
+      if (!Number.isSafeInteger(body.latency_ms) || body.latency_ms < 1 || body.latency_ms > 60_000) {
+        return json({ error: 'latency_ms must be a whole number of milliseconds from 1 to 60000', code: 'bad_latency' }, 400, cors);
+      }
+      latencyMs = body.latency_ms;
+    }
+    let hardware = null;
+    if (body.hardware !== undefined && body.hardware !== null) {
+      const h = body.hardware;
+      if (typeof h !== 'object' || Array.isArray(h)) {
+        return json({ error: 'hardware must be an object', code: 'bad_hardware' }, 400, cors);
+      }
+      const clip = (v) => (typeof v === 'string' ? v.slice(0, 160) : '');
+      const tier = ['unknown', 'low', 'mid', 'high'].includes(h.tier) ? h.tier : 'unknown';
+      hardware = { gpu: clip(h.gpu), cpu: clip(h.cpu), tier };
+    }
     const r = await liveCall(env, simId, 'beat', {
-      host_id: userId, link: body.link, players, max_players: maxPlayers, protocol, connected, now, ...regionOf(request),
+      host_id: userId, link: body.link, players, max_players: maxPlayers, protocol, connected, cert_sha256: certSha256, now,
+      server_id: serverId, region_name: regionName, latency_ms: latencyMs, hardware, ...regionOf(request),
     });
     if (r.ok === false) return json({ error: r.error }, r.status || 500, cors);
     // The live index learns of this beat only while the listing is listed: an author's unlisted listings never fill it. It is told no
-    // link, key or pin, only what the Gallery shows, and the players are what the host claims up to the players the Worker admitted
-    // (plus the host itself). An index that fails never fails a heartbeat.
+    // link, key or pin, only what the Gallery shows. The players are the Quick Join server: the busiest one that is not full.
+    // On the default server that is still the admission cap. An index that fails never fails a heartbeat.
     if (isListable(sim)) {
       await tellLiveIndex(env, 'beat', {
-        sim_id: simId, author: sim.author_id, players: cappedPlayers(players, r.admitted), max_players: maxPlayers, region: r.region ?? null, since: r.since, now,
+        sim_id: simId,
+        author: sim.author_id,
+        players: Number.isSafeInteger(r.shown_players) ? r.shown_players : cappedPlayers(players, r.admitted),
+        max_players: r.max_players || maxPlayers,
+        region: r.region ?? null,
+        since: r.since,
+        now,
       });
     }
     return json({ ok: true, expires_at: r.expires_at }, 200, cors);

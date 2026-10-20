@@ -563,3 +563,9 @@ PUBLIC_SITE_ORIGIN = "https://staging.eustress-cbb.pages.dev"
 # Browser origins admitted besides eustress.dev and localhost:3000: exact
 # origins, comma separated, no wildcards (src/cors.mjs). Production sets none.
 ALLOWED_ORIGINS = "https://staging.eustress-cbb.pages.dev"
+# Dedicated-server credentials (src/live.mjs handleServerCredential) are stored
+# in SOCIAL as srvcred:<sha256>, one current hash per listing at
+# srvcred-sim:<id>. No extra binding and no secret: the author mints the
+# token with a session, and the server presents it on /live. Do not deploy
+# this file from a change that only adds the credential; staging deploy is a
+# separate, explicit step.

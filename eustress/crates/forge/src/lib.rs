@@ -93,7 +93,11 @@
 pub mod config;
 pub mod error;
 pub mod jobs;
+/// One process per job on this computer. No Nomad.
+pub mod local_launch;
 pub mod routing;
+/// Studio's `/api/auth`, `/api/deployments`, and `/api/experiences/{id}/servers`.
+pub mod studio_compat;
 
 // Phase 2 (binding decision D2): the agents-in-sims scheduling code lives in a
 // NEW `sim` module INSIDE this crate (not a separate crate). It maps engine

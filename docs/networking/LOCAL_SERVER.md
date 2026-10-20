@@ -138,9 +138,10 @@ authority by construction.
 
 ## 6. A host with no window
 
-The headless engine (`eustress-headless`) registers the same hosting plugin.
-With `EUSTRESS_HOST_ON_PLAY=1` it hosts whenever Play starts, which makes it a
-dedicated host. The standalone `eustress-server` binary does not host.
+The headless engine (`eustress-engine --server`, and `eustress-headless`) registers the same hosting plugin.
+With `EUSTRESS_HOST_ON_PLAY=1` it hosts whenever Play starts. `eustress-forge` starts one process per job on this computer.
+The steps, the UDP forward, and the staging heartbeat are in [DEDICATED_SERVER.md](DEDICATED_SERVER.md).
+The standalone `eustress-server` binary does not host the Player protocol.
 
 ## 7. Troubleshooting
 
@@ -156,7 +157,6 @@ dedicated host. The standalone `eustress-server` binary does not host.
 
 ## 8. Browsers
 
-The transport is WebTransport so that a browser build of the Player can join
-the same hosts: a browser's `WebTransport` constructor takes the pin through
-`serverCertificateHashes`, and the session and wire code are free of tokio and
-of the operating system. The browser Player itself is not built yet.
+The transport is WebTransport. `player-web/js/net.js` passes the host pin to
+`serverCertificateHashes`. A browser join of a self-hosted server was not run
+for this branch.

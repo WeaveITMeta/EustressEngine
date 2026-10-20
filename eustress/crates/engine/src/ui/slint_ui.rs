@@ -8758,7 +8758,7 @@ fn drain_slint_actions(
             }
             SlintAction::AllocateForgeServer => {
                 if let Some(ref mut forge) = res.forge_state {
-                    // Get the simulation ID from publish manifest
+                    let staging_origin = eustress_common::api_base::origin_of(eustress_common::api_base::STAGING_API);
                     let sim_id = res.space_root.as_ref()
                         .and_then(|sr| {
                             let publish_path = crate::space::universe_root_for_path(&sr.0)
@@ -8766,17 +8766,28 @@ fn drain_slint_actions(
                                 .join(".eustress").join("sync.toml");
                             eustress_common::load_toml_file::<eustress_common::SyncManifest>(&publish_path).ok()
                         })
-                        .and_then(|sync| sync.remote.listing_id().map(str::to_string))
-                        .unwrap_or_else(|| "local".to_string());
-
+                        .and_then(|sync| sync.remote.listing_id_for(&staging_origin).map(str::to_string));
+                    let Some(sim_id) = sim_id else {
+                        if let Some(ref mut out) = res.output {
+                            out.error("This Universe has no listing on the staging API. Publish it to staging, then allocate again.".to_string());
+                        }
+                        continue;
+                    };
+                    let author_token = res.auth_state.as_ref().and_then(|auth| auth.get_token()).map(str::to_string);
+                    if author_token.is_none() {
+                        if let Some(ref mut out) = res.output {
+                            out.warn("Not signed in. The local server can start, and its heartbeat will fail until you sign in to staging.".to_string());
+                        }
+                    }
                     crate::forge::allocate_server(
                         forge,
                         &sim_id,
-                        100, // max_players
-                        eustress_forge_sdk::types::Region::UsEast, // default region
+                        100,
+                        eustress_forge_sdk::types::Region::UsEast,
+                        author_token,
                     );
                     if let Some(ref mut out) = res.output {
-                        out.info(format!("Allocating Forge server for {}...", sim_id));
+                        out.info(format!("Allocating a local Forge server for {sim_id}..."));
                     }
                 } else {
                     if let Some(ref mut out) = res.output {

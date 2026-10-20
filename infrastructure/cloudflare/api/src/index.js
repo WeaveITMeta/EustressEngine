@@ -59,7 +59,7 @@ import { isAdmin } from './admin_check.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { freshGate, verifyFreshAuth, payoutPinnedUntil } from './fresh_auth.mjs';
 import { handleGuest } from './guest.mjs';
-import { handleLive, livePlayInfo } from './live.mjs';
+import { handleLive, handleServerCredential, livePlayInfo } from './live.mjs';
 import { handleLiveNow } from './live_index.mjs';
 import { handleCoverRoute, coverFields } from './cover.mjs';
 import { handleChangelogRoute } from './changelogs.mjs';
@@ -1108,6 +1108,8 @@ export default {
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
       // Live hosts: Studio's heartbeat while it hosts a simulation, and the
       // listing's Live indicator and join link. See src/live.mjs.
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/server-credential$/) && ['POST', 'DELETE'].includes(request.method))
+        return handleServerCredential(request, env, cors, url.pathname.split('/')[3], { verifyAuth, json });
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live(\/admit)?$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
         return handleLive(request, env, cors, url.pathname.split('/')[3], {
           verifyAuth, requireAdmin, json, isListable,
@@ -5945,7 +5947,8 @@ async function handlePlaySimulation(request, simId, env, cors) {
   };
   if (host) {
     out.live = { players: host.players, max_players: host.max_players };
-    if (!host.link) out.link_hidden = true;
+    // A full listing has no join link and is not a prompt to sign in.
+    if (!host.link && !host.all_full) out.link_hidden = true;
   }
   return json(out, 200, { ...cors, 'Cache-Control': 'no-store' });
 }

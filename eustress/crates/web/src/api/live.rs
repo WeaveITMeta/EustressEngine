@@ -40,6 +40,91 @@ pub struct LiveHost {
     /// RFC 3339 time the host started answering at this link.
     #[serde(default)]
     pub since: Option<String>,
+    /// True when every reported server is full. The Worker then omits the join link.
+    #[serde(default)]
+    pub all_full: bool,
+    /// One row per process. Empty when the Worker has not started sending them.
+    #[serde(default)]
+    pub servers: Vec<LiveServer>,
+}
+
+/// One process on a listing, as `GET /live` reports it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct LiveServer {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub players: u32,
+    #[serde(default)]
+    pub max_players: u32,
+    #[serde(default)]
+    pub free: u32,
+    #[serde(default)]
+    pub full: bool,
+    /// The host's region name (`us-east-1`), not the visitor's country.
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    /// Round trip from that server to the API. Absent when it was not measured.
+    #[serde(default)]
+    pub latency_ms: Option<u32>,
+    #[serde(default)]
+    pub hardware: Option<LiveHardware>,
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct LiveHardware {
+    #[serde(default)]
+    pub gpu: String,
+    #[serde(default)]
+    pub cpu: String,
+    #[serde(default)]
+    pub tier: String,
+}
+
+impl LiveServer {
+    fn tier(&self) -> u8 {
+        match self.hardware.as_ref().map(|h| h.tier.as_str()).unwrap_or("unknown") {
+            "high" => 3,
+            "mid" => 2,
+            "low" => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// "N ms to the API", or "not measured". A missing value is not 0 ms.
+pub fn latency_label(latency_ms: Option<u32>) -> String {
+    match latency_ms {
+        Some(ms) if ms >= 1 => format!("{ms} ms to the API"),
+        _ => "not measured".to_string(),
+    }
+}
+
+fn ping_score(latency_ms: Option<u32>) -> f64 {
+    match latency_ms {
+        Some(ms) if ms >= 1 => 1.0 - (ms.min(300) as f64) / 300.0,
+        _ => 0.0,
+    }
+}
+
+fn rank_score(server: &LiveServer) -> f64 {
+    let max = server.max_players.max(1) as f64;
+    let players = (server.players as f64).min(max);
+    let fullness = (players / max).clamp(0.0, 1.0);
+    0.5 * fullness + 0.3 * (server.tier() as f64 / 3.0) + 0.2 * ping_score(server.latency_ms.filter(|ms| *ms >= 1))
+}
+
+/// Busiest non-full first, then more players. Full servers last.
+/// Same weights as the Worker: 0.5 fullness, 0.3 hardware, 0.2 ping.
+pub fn rank_servers(mut servers: Vec<LiveServer>) -> Vec<LiveServer> {
+    servers.sort_by(|a, b| {
+        a.full.cmp(&b.full).then_with(|| rank_score(b).partial_cmp(&rank_score(a)).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| b.players.cmp(&a.players))
+    });
+    servers
 }
 
 impl LiveHost {
