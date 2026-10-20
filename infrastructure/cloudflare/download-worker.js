@@ -443,6 +443,10 @@ function jsonResponse(data, status, headers) {
 const ALLOWED_ORIGINS = new Set([
   'https://eustress.dev',
   'https://www.eustress.dev',
+  // Pages branch `staging`. Without this, the Worker answers
+  // Access-Control-Allow-Origin: https://eustress.dev and the staging site
+  // cannot read either manifest.
+  'https://staging.eustress-cbb.pages.dev',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ]);

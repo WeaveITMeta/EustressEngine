@@ -227,3 +227,20 @@ test('a signed download still returns the file, including HEAD and a single rang
   assert.equal(range.text, 'abc');
   assert.equal(range.headers.get('content-range'), `bytes 0-2/${bytes.length}`);
 });
+
+test('the staging website origin is echoed, including on OPTIONS', async () => {
+  const origin = 'https://staging.eustress-cbb.pages.dev';
+  const headers = { Origin: origin };
+  for (const pathname of ['/latest.json', '/player/latest.json', '/staging/player/latest.json']) {
+    const got = await hit(pathname, { headers });
+    assert.equal(got.status, 200, pathname);
+    assert.equal(got.headers.get('access-control-allow-origin'), origin, pathname);
+  }
+  const preflight = await hit('/staging/player/latest.json', { method: 'OPTIONS', headers });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.text, '');
+  assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
+  // An origin that is not on the list still falls back to production.
+  const other = await hit('/player/latest.json', { headers: { Origin: 'https://evil.example' } });
+  assert.equal(other.headers.get('access-control-allow-origin'), 'https://eustress.dev');
+});
