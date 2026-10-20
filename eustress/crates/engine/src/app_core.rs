@@ -314,6 +314,9 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // played to Players over WebTransport. In this tier so the headless
         // engine can host too (`EUSTRESS_HOST_ON_PLAY=1`).
         .add_plugins(crate::multiplayer::MultiplayerPlugin)
+        // Stress test bots and the dialog's live counters. Headless has no
+        // dialog; the sync system no-ops until Slint is up.
+        .add_plugins(crate::network_benchmark::NetworkBenchmarkPlugin)
         // `eustress://edit/<id>` from the gallery's Edit button: download
         // the open-source listing's world and open a copy of it.
         .add_plugins(crate::space::gallery_edit::GalleryEditPlugin)

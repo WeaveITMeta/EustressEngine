@@ -617,10 +617,14 @@ export component StudioWindow inherits Window {
     in-out property <float> stress-up-kbps: 0; // per bot
     in-out property <string> stress-report: ""; // end-of-run summary
     in-out property <float> stress-bot-cores: 0; // CPU the bots kept busy, in cores
-    // The dialog's "Download the world" switch. Rust reads it when Start
-    // fires, so the Start callback keeps its signature.
+    in-out property <int> stress-connected: 0;
+    in-out property <float> stress-tick-hz: 0;
+    // Negative when this process is not the host.
+    in-out property <float> stress-server-cpu: -1;
+    in-out property <float> stress-server-mem-mb: -1;
     in-out property <bool> stress-download-world: true;
-    callback start-stress-test(int, int, int, bool, bool); // clients, rate, duration, movement, interactions
+    // clients, rate, duration, ramp, movement, interactions, download, join link
+    callback start-stress-test(int, int, int, int, bool, bool, bool, string);
     callback stop-stress-test();
     // ScreenGui elements — pushed from Rust, rendered by Slint overlay
     in property <[GuiElementData]> gui-elements: [];
@@ -5298,14 +5302,21 @@ export component StudioWindow inherits Window {
         up-kbps: root.stress-up-kbps;
         report: root.stress-report;
         bot-cores: root.stress-bot-cores;
+        connected: root.stress-connected;
+        tick-hz: root.stress-tick-hz;
+        server-cpu: root.stress-server-cpu;
+        server-mem-mb: root.stress-server-mem-mb;
         download-world <=> root.stress-download-world;
         on-start => {
             root.start-stress-test(
                 self.client-count,
                 self.message-rate,
                 self.duration-seconds,
+                self.ramp-seconds,
                 self.simulate-movement,
                 self.simulate-interactions,
+                self.download-world,
+                self.join-link,
             );
         }
         on-stop => { root.stop-stress-test(); }

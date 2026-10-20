@@ -204,8 +204,17 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_disconnect_all_clients(move || q.push(SlintAction::DisconnectAllClients));
 
     // Stress test
-    let q = queue.clone(); ui.on_start_stress_test(move |clients, rate, duration, movement, interactions| {
-        q.push(SlintAction::StartStressTest { clients, rate, duration, movement, interactions });
+    let q = queue.clone(); ui.on_start_stress_test(move |clients, rate, duration, ramp, movement, interactions, download, join_link| {
+        q.push(SlintAction::StartStressTest {
+            clients,
+            rate,
+            duration,
+            ramp,
+            movement,
+            interactions,
+            download,
+            join_link: join_link.to_string(),
+        });
     });
     let q = queue.clone(); ui.on_stop_stress_test(move || q.push(SlintAction::StopStressTest));
 

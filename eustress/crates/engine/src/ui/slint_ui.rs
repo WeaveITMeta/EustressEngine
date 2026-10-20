@@ -557,7 +557,16 @@ pub enum SlintAction {
     DisconnectAllClients,
     
     // Stress test
-    StartStressTest { clients: i32, rate: i32, duration: i32, movement: bool, interactions: bool },
+    StartStressTest {
+        clients: i32,
+        rate: i32,
+        duration: i32,
+        ramp: i32,
+        movement: bool,
+        interactions: bool,
+        download: bool,
+        join_link: String,
+    },
     StopStressTest,
 
     // Data
@@ -2897,8 +2906,17 @@ fn setup_slint_overlay(world: &mut World) {
 
     // Stress test dialog
     let q = queue.clone();
-    ui.on_start_stress_test(move |clients, rate, duration, movement, interactions| {
-        q.push(SlintAction::StartStressTest { clients, rate, duration, movement, interactions });
+    ui.on_start_stress_test(move |clients, rate, duration, ramp, movement, interactions, download, join_link| {
+        q.push(SlintAction::StartStressTest {
+            clients,
+            rate,
+            duration,
+            ramp,
+            movement,
+            interactions,
+            download,
+            join_link: join_link.to_string(),
+        });
     });
     let q = queue.clone();
     ui.on_stop_stress_test(move || q.push(SlintAction::StopStressTest));
@@ -4819,6 +4837,9 @@ struct DrainResources<'w> {
     soul_key_store: Option<ResMut<'w, crate::soul::key_store::SoulKeyStore>>,
     /// Stress test state
     stress_test: Option<ResMut<'w, crate::network_benchmark::StressTestState>>,
+    /// The local host, so a stress run can use its join link and raise the cap.
+    host_request: Option<ResMut<'w, crate::multiplayer::HostRequest>>,
+    host_session: Option<ResMut<'w, eustress_networking::HostSession>>,
     /// Action queue ref for background thread callbacks
     action_queue: Option<Res<'w, SlintActionQueue>>,
     /// Task 12: change queue — emit SceneDeltas on property write-back (streaming feature only).
@@ -8799,18 +8820,43 @@ fn drain_slint_actions(
                 }
             }
 
-            // Stress test
-            // The benchmark's clients speak the old play-server protocol,
-            // which no host serves, so the dialog answers with the notice.
-            SlintAction::StartStressTest { .. } => {
-                if let Some(note) = unbuilt_feature_notice("stress-test") {
-                    events.notification.write(note);
+            SlintAction::StartStressTest {
+                clients,
+                rate,
+                duration,
+                ramp,
+                movement,
+                interactions,
+                download,
+                join_link,
+            } => {
+                if let Some(stress) = res.stress_test.as_mut() {
+                    let status = crate::network_benchmark::begin(
+                        stress,
+                        res.host_session.as_deref_mut(),
+                        res.host_request.as_deref_mut(),
+                        crate::network_benchmark::StressLaunch {
+                            clients,
+                            avatar_hz: rate,
+                            duration_secs: duration,
+                            ramp_secs: ramp,
+                            movement,
+                            interactions,
+                            download,
+                            join_link,
+                        },
+                    );
+                    if let Some(out) = res.output.as_mut() {
+                        out.info(format!("Stress test: {status}"));
+                    }
                 }
             }
             SlintAction::StopStressTest => {
-                if let Some(ref stress) = res.stress_test {
-                    stress.counters.running.store(false, std::sync::atomic::Ordering::SeqCst);
-                    info!("⏹️ Stress test stop requested");
+                if let Some(stress) = res.stress_test.as_mut() {
+                    stress.request_stop();
+                    if let Some(out) = res.output.as_mut() {
+                        out.info("Stress test stop requested".to_string());
+                    }
                 }
             }
 
