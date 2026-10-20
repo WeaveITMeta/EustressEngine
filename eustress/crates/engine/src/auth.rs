@@ -852,7 +852,11 @@ fn restore_bliss_settings(
 }
 
 /// Start the Bliss node API server on engine startup.
-fn start_bliss_node(mut handle: ResMut<BlissNodeHandle>, bliss_state: Res<BlissNodeState>) {
+fn start_bliss_node(
+    mut handle: ResMut<BlissNodeHandle>,
+    bliss_state: Res<BlissNodeState>,
+    args: Option<Res<crate::startup::StartupArgs>>,
+) {
     if !bliss_state.enabled {
         info!("Bliss node disabled — skipping startup");
         return;
@@ -865,9 +869,19 @@ fn start_bliss_node(mut handle: ResMut<BlissNodeHandle>, bliss_state: Res<BlissN
         eustress_bliss::NodeMode::Light
     };
 
+    let cli = args.as_ref().and_then(|a| a.bliss_bind.clone());
+    let from_env = std::env::var("EUSTRESS_BLISS_BIND").ok();
+    let bind = match eustress_bliss::resolve_bind(cli.as_deref(), from_env.as_deref()) {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("🔴 {e}");
+            return;
+        }
+    };
+
     let port = 7777u16;
 
-    println!("🟣 Starting Bliss {} on port {}...", mode, port);
+    println!("🟣 Starting Bliss {} on {bind}:{port}...", mode);
     println!("🟣 Registration: {} (Cloudflare)", api_base());
     println!("🟣 This node: co-signing + identity verification");
 
@@ -882,12 +896,18 @@ fn start_bliss_node(mut handle: ResMut<BlissNodeHandle>, bliss_state: Res<BlissN
             let mut node = eustress_bliss::BlissNode::new(eustress_bliss::NodeConfig {
                 mode,
                 api_port: port,
+                bind_addr: bind.to_string(),
                 ..eustress_bliss::NodeConfig::default()
             });
 
             match node.start().await {
-                Ok(p) => {
-                    println!("🟣 Bliss node API running on http://127.0.0.1:{}", p);
+                Ok(addr) => {
+                    // `addr` is the socket's local address, so this line
+                    // cannot name a different interface than the one bound.
+                    println!(
+                        "🟣 Bliss node API running on {}",
+                        eustress_bliss::listener_log_line(addr)
+                    );
                     // Keep the runtime alive so the server keeps running
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;

@@ -113,6 +113,14 @@ pub struct NodeConfig {
     pub enabled: bool,
     /// API server port (default: 7777).
     pub api_port: u16,
+    /// Address the API listens on. Default [`crate::DEFAULT_BIND`]
+    /// (`127.0.0.1`). The log prints the address the socket actually bound.
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: String,
+}
+
+fn default_bind_addr() -> String {
+    crate::DEFAULT_BIND.to_string()
 }
 
 impl Default for NodeConfig {
@@ -124,6 +132,7 @@ impl Default for NodeConfig {
             identity_path: None,
             enabled: true,
             api_port: 7777,
+            bind_addr: default_bind_addr(),
         }
     }
 }
@@ -318,21 +327,22 @@ impl BlissNode {
     ///
     /// Registration happens on Cloudflare (api.eustress.dev). This node
     /// verifies identity.toml signatures locally and co-signs contributions.
-    pub async fn start(&mut self) -> Result<u16, BlissError> {
+    pub async fn start(&mut self) -> Result<std::net::SocketAddr, BlissError> {
         if !self.config.enabled {
             return Err(BlissError::Node("Node is disabled".to_string()));
         }
 
+        let bind = crate::resolve_bind(Some(&self.config.bind_addr), None).map_err(BlissError::Node)?;
         let port = self.config.api_port;
         let mode = self.config.mode;
         let fork_id = self.config.fork_id.clone();
         let witness_url = self.config.witness_url.clone();
 
-        let handle = crate::api::start_server(port, mode, fork_id, witness_url).await?;
+        let (handle, addr) = crate::api::start_server(bind, port, mode, fork_id, witness_url).await?;
         self.server_handle = Some(handle);
 
-        tracing::info!("Bliss {} started on port {}", mode, port);
-        Ok(port)
+        tracing::info!("Bliss {} started on {}", mode, crate::listener_log_line(addr));
+        Ok(addr)
     }
 
     /// Whether the API server is running.
